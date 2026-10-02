@@ -130,6 +130,12 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
     /// interval rather than a constant of its own (#2234, where perfmon wrote a literal 60).</summary>
     public int ReportedInterval { get; set; }
 
+    /// <summary>Per-group overrides of <see cref="ReportedInterval"/>, keyed by delta-group name (#3540). A
+    /// row's several delta groups normally report the SAME interval, and the four naked-family collectors
+    /// store the MINIMUM over their groups so a (0, 0) pair means "no delta in this row is knowable"; a test
+    /// proving that rule needs one group to report 0 while its siblings report the real interval.</summary>
+    public Dictionary<string, int> IntervalByGroup { get; } = new(StringComparer.Ordinal);
+
     public long CalculateDelta(int serverId, string collectorName, string key, long currentValue,
         DateTime? collectionTime = null, int maxGapSeconds = 0)
     {
@@ -141,7 +147,7 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
     public long CalculateDeltaWithInterval(int serverId, string collectorName, string key, long currentValue,
         out int intervalSeconds, DateTime? collectionTime = null, int maxGapSeconds = 0)
     {
-        intervalSeconds = ReportedInterval;
+        intervalSeconds = IntervalByGroup.TryGetValue(collectorName, out var perGroup) ? perGroup : ReportedInterval;
         return CalculateDelta(serverId, collectorName, key, currentValue, collectionTime, maxGapSeconds);
     }
 
@@ -161,5 +167,26 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
         SeriesAges.Add(seriesAgeSeconds);
         return CalculateDeltaWithInterval(serverId, collectorName, key, currentValue, out intervalSeconds,
             collectionTime, maxGapSeconds);
+    }
+
+    /// <summary>
+    /// Every forget a definition asked for (#3653 A5), in call order, each with the number of delta calls
+    /// that had ALREADY been recorded when it arrived. Overridden rather than left to the interface's no-op
+    /// default for the reason <see cref="SeriesAges"/> gives: the default would keep a carrier that forgot
+    /// AFTER its own subtraction — or stopped forgetting — green on every existing pin, and the property
+    /// worth pinning is precisely that the forget lands before the first delta call of the pass.
+    /// </summary>
+    public List<(string Kind, string? Discontinuity, string[] Groups, int DeltaCallsBefore)> Clears { get; } = new();
+
+    public void ClearServer(int serverId, string? discontinuity = null)
+    {
+        LastServerId = serverId;
+        Clears.Add(("server", discontinuity, Array.Empty<string>(), Calls.Count));
+    }
+
+    public void ClearGroups(int serverId, string? discontinuity, params string[] groups)
+    {
+        LastServerId = serverId;
+        Clears.Add(("groups", discontinuity, groups, Calls.Count));
     }
 }

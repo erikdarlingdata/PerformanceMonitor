@@ -183,7 +183,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LastSuccessfulRunLocal}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastSuccessfulRunLocal}" Width="150" SortMemberPath="LastSuccessfulRunUtc">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessfulRunLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -205,6 +205,14 @@
             <!-- Empty State -->
             <TextBlock x:Name="NoJobsMessage"
                        Text="No job runs recorded in the selected time range"
+                       FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Visibility="Collapsed"/>
+
+            <!-- Loading State (#4478): shown while a read is in flight, so an empty grid does not read as
+                 "no jobs in the last 24 hours" for the several seconds a fleet-wide read takes. -->
+            <TextBlock x:Name="LoadingMessage"
+                       Text="Loading job history…"
                        FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
                        HorizontalAlignment="Center" VerticalAlignment="Center"
                        Visibility="Collapsed"/>

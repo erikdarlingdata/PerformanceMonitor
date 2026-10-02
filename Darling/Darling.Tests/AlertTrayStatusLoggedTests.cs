@@ -59,6 +59,8 @@ public class AlertTrayStatusLoggedTests
         [AlertDelivery.ChannelThrottled] = AlertDeliveryStatus.Throttled,
         [AlertDelivery.ChannelFolded] = AlertDeliveryStatus.ReportedElsewhere,
         [AlertDelivery.ChannelFailed] = AlertDeliveryStatus.Failed,
+        /* #3712: the corroboration gate's digest route — the web dashboard restates it in util.js. */
+        [AlertDelivery.ChannelDigest] = AlertDeliveryStatus.Digest,
     };
 
     /// <summary>

@@ -250,6 +250,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         {
             RootFactKey = "PLAN_REGRESSION",
             StoryPath = "PLAN_REGRESSION",
+            /* #3859: the collector matches on PathKeys, not on a split of the rendered path. */
+            PathKeys = ["PLAN_REGRESSION"],
             /* Past the 0.5 display gate in EnrichFindingsAsync — below it the expensive drill-downs are
                skipped wholesale and this collector never runs at all. */
             Severity = 1.0,

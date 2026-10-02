@@ -52,6 +52,23 @@ namespace Darling.Tests;
 /// nullable columns, where a coalesce anywhere in the read path would turn SQL NULL into a measured 0 and
 /// claim headroom nobody measured. Neither is visible to an in-memory fixture, which is the whole reason
 /// this file exists beside the shape pins.</para>
+///
+/// <para><b>And #3539's deadlock arm, on the same fixture.</b> The Aurora target carries a
+/// <c>pg_database_stats</c> counter series shaped to defeat every wrong read at once: two databases, one
+/// of which steps its lifetime counter 40 → 42 → 42 → 45 (five new deadlocks across one flat interval) and
+/// the other of which is RESET mid-window (7 → 7 → 0 → 1: one new deadlock after the reset, and a −7 a
+/// naive difference would subtract), plus an out-of-window row far below the series and a second server's
+/// series under the same database name. <c>SUM(deadlocks)</c> over the window would answer 184;
+/// last-minus-first per database would answer 5 − 6 = −1; an unbounded read would add 37; a read that lost
+/// its server partition would fold the other server's 50 in. The right answer is 6, and the card must band
+/// it Warning (6/hr is past the shipped 5/hr bar) with the rate published and <c>deadlock_source</c>
+/// reading the counter arm because the <c>pg_database_stats</c> collector has a HEALTHY row in the health
+/// window. The self-hosted target has the same collector row and a FLAT series (two samples, one
+/// difference of zero), so its card is the measured, earned Healthy zero; the silent Aurora target has
+/// stats rows and no collector row, so its count is read (50) and its source is <c>CollectorSilent</c> — the
+/// engine no longer answers on its own. A PostgreSQL target with NO rows in the window would band Unknown:
+/// a difference of nothing is not a zero, which is what keeps #3539 A6's never-collected card measuring
+/// nothing, and the unit matrix pins that arm.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class FleetCardPostgresCpuLivePostgresTests
@@ -148,6 +165,33 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
             /* The SQL Server arm, so "additive only" is asserted against a live read rather than argued. */
             await InsertSqlServerCpuAsync(connection, SqlServerServerId, SqlServerName, now.AddMinutes(-1), 30, 4, ct);
 
+            /* #3539: the PostgreSQL deadlock arm. The pg_database_stats collector's health row makes the
+               two targets COVERED; the counter series below is what the count is differenced from. */
+            await InsertCollectionLogAsync(connection, AuroraServerId, AuroraName, now.AddSeconds(-30), ct, PgDatabaseStatsCollector.Instance.Name);
+            await InsertCollectionLogAsync(connection, SelfHostedServerId, SelfHostedName, now.AddSeconds(-30), ct, PgDatabaseStatsCollector.Instance.Name);
+            /* Database "orders": 40 -> 42 -> 42 -> 45 = 2 + 0 + 3 = 5 new deadlocks. */
+            await InsertPgDatabaseStatsAsync(connection, AuroraServerId, AuroraName, "orders", now.AddMinutes(-40), 40, ct);
+            await InsertPgDatabaseStatsAsync(connection, AuroraServerId, AuroraName, "orders", now.AddMinutes(-30), 42, ct);
+            await InsertPgDatabaseStatsAsync(connection, AuroraServerId, AuroraName, "orders", now.AddMinutes(-20), 42, ct);
+            await InsertPgDatabaseStatsAsync(connection, AuroraServerId, AuroraName, "orders", now.AddMinutes(-10), 45, ct);
+            /* Database "billing": 7 -> 7 -> 0 (reset) -> 1 = 0 + clamp(-7) + 1 = 1 new deadlock. */
+            await InsertPgDatabaseStatsAsync(connection, AuroraServerId, AuroraName, "billing", now.AddMinutes(-40), 7, ct);
+            await InsertPgDatabaseStatsAsync(connection, AuroraServerId, AuroraName, "billing", now.AddMinutes(-30), 7, ct);
+            await InsertPgDatabaseStatsAsync(connection, AuroraServerId, AuroraName, "billing", now.AddMinutes(-20), 0, ct);
+            await InsertPgDatabaseStatsAsync(connection, AuroraServerId, AuroraName, "billing", now.AddMinutes(-10), 1, ct);
+            /* The covered, MEASURED zero: two samples, one flat difference. Without the second sample the
+               card would honestly read Unknown - a difference needs two samples - so the fixture supplies
+               it, and asserts Healthy is EARNED rather than defaulted. */
+            await InsertPgDatabaseStatsAsync(connection, SelfHostedServerId, SelfHostedName, "app", now.AddMinutes(-20), 12, ct);
+            await InsertPgDatabaseStatsAsync(connection, SelfHostedServerId, SelfHostedName, "app", now.AddMinutes(-10), 12, ct);
+            /* Trap: a row OUTSIDE the window with a much lower counter. A read that did not bound its
+               window on the start would see 3 -> 40 and add 37. */
+            await InsertPgDatabaseStatsAsync(connection, AuroraServerId, AuroraName, "orders", now.AddMinutes(-90), 3, ct);
+            /* Trap: a series on ANOTHER server, so a read that lost its per-server partition would fold
+               these into the Aurora card. */
+            await InsertPgDatabaseStatsAsync(connection, AuroraSilentServerId, AuroraSilentName, "orders", now.AddMinutes(-30), 100, ct);
+            await InsertPgDatabaseStatsAsync(connection, AuroraSilentServerId, AuroraSilentName, "orders", now.AddMinutes(-20), 150, ct);
+
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
                 postgres, now.AddHours(-1), now, now, cancellationToken: ct);
 
@@ -181,24 +225,42 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
             Assert.Null(aurora.TotalThreads);
             Assert.Equal(HealthSeverity.Unknown, aurora.ThreadsSeverity);
 
-            /* #3272, end to end: the three DMV-sourced bands claim nothing for this engine. Worth a live
+            /* #3272, end to end: the two DMV-sourced bands claim nothing for this engine. Worth a live
                arm and not only the unit matrix, because the engine gate reads `servers.engine_kind` out of
                the store — a column this test wrote and the reader round-tripped, which is the one part of
                the decision no in-memory fixture exercises. */
             Assert.Equal(HealthSeverity.Unknown, aurora.MemorySeverity);
             Assert.Equal(HealthSeverity.Unknown, aurora.BlockingSeverity);
-            Assert.Equal(HealthSeverity.Unknown, aurora.DeadlockSeverity);
-            /* The counts and #3017's disclosure are deliberately untouched, so the fleet total and its
-               coverage denominator still reconcile. */
             Assert.Equal(0, aurora.BlockingCount);
-            Assert.Equal(0, aurora.DeadlockCount);
+
+            /* #3539, end to end: the deadlock count is the per-database counter DIFFERENCE, clamped across
+               the reset, summed - 5 + 1 = 6 - and not the 184 a SUM(deadlocks) gives, the -1 a per-database
+               last-minus-first gives, the 43 an unbounded read gives, or the extra 50 a read that lost its
+               server partition folds in. Banded through the shared tiers over the one-hour window: 6/hr is
+               past the shipped 5/hr Warning bar. */
+            Assert.Equal(6, aurora.DeadlockCount);
+            Assert.True(aurora.DeadlockMeasured);
+            Assert.Equal(6.0, aurora.DeadlockRatePerHour);
+            Assert.Equal(HealthSeverity.Warning, aurora.DeadlockSeverity);
+            /* The sample that first showed the newest step - both series stepped at -10 min. */
+            Assert.Equal(DateTime.SpecifyKind(now.AddMinutes(-10), DateTimeKind.Unspecified).Ticks / TimeSpan.TicksPerSecond,
+                aurora.DeadlockLastSeen!.Value.Ticks / TimeSpan.TicksPerSecond);
+            /* Covered through the counter arm, because pg_database_stats has a health row. */
             Assert.Equal(FleetDeadlockSource.PostgresTarget, aurora.DeadlockSource);
+            Assert.Equal(CollectorHealthClassifier.Healthy, aurora.DeadlockCollectorBand);
 
             // ── a PostgreSQL target this build collects no instance CPU for ─────────────────────────
             var selfHosted = seeded.Single(c => c.ServerId == SelfHostedServerId);
             Assert.Null(selfHosted.TotalCpuPercent);
             Assert.Equal(HealthSeverity.Unknown, selfHosted.CpuSeverity);
             Assert.Equal(FleetCpuSource.NoSourceForEngine, selfHosted.CpuSource);
+            /* #3539: the covered zero - a running pg_database_stats collector and a flat counter across the
+               window is a measured Healthy, exactly as a quiet SQL Server's is. */
+            Assert.Equal(0, selfHosted.DeadlockCount);
+            Assert.True(selfHosted.DeadlockMeasured);
+            Assert.Equal(0.0, selfHosted.DeadlockRatePerHour);
+            Assert.Equal(HealthSeverity.Healthy, selfHosted.DeadlockSeverity);
+            Assert.Equal(FleetDeadlockSource.PostgresTarget, selfHosted.DeadlockSource);
 
             // ── an Aurora target whose ingest has produced nothing CURRENT ──────────────────────────
             /* Its only row is 90 minutes old, so the bound excludes it. The arm has to be NotCollected and
@@ -207,6 +269,14 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
             Assert.Null(silent.TotalCpuPercent);
             Assert.Equal(HealthSeverity.Unknown, silent.CpuSeverity);
             Assert.Equal(FleetCpuSource.NotCollected, silent.CpuSource);
+            /* #3539: this target has stats rows (the partition trap, 100 -> 150) but NO pg_database_stats
+               health row, so the count is read - 50 - and the coverage says its collector is silent
+               rather than the pre-#3539 "PostgreSQL, cannot count". Both facts on one card: the count
+               is what the store holds, the source is what the health window knows. */
+            Assert.Equal(50, silent.DeadlockCount);
+            Assert.True(silent.DeadlockMeasured);
+            Assert.Equal(HealthSeverity.Critical, silent.DeadlockSeverity);
+            Assert.Equal(FleetDeadlockSource.CollectorSilent, silent.DeadlockSource);
 
             // ── an Aurora target with a CURRENT reading and no capacity sample (#3281) ──────────────
             /* Unknown, never Healthy, and never the Critical the raw reading alone would earn. The source
@@ -270,15 +340,36 @@ VALUES ($1, $2, $2, TRUE, 0, $3)", connection);
     }
 
     private static async Task InsertCollectionLogAsync(
-        NpgsqlConnection connection, int serverId, string name, DateTime collectionTime, CancellationToken ct)
+        NpgsqlConnection connection, int serverId, string name, DateTime collectionTime, CancellationToken ct,
+        string collectorName = "pg_cpu_utilization")
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
-VALUES ($1, $2, $3, 'pg_cpu_utilization', $4, 'SUCCESS')", connection);
+VALUES ($1, $2, $3, $5, $4, 'SUCCESS')", connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(name);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(collectorName);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Seeds one <c>collect.pg_database_stats</c> row carrying only the deadlock counter (#3539) —
+    /// the other counters are left NULL, which the read must tolerate (it differences one column).</summary>
+    private static async Task InsertPgDatabaseStatsAsync(
+        NpgsqlConnection connection, int serverId, string name, string databaseName,
+        DateTime collectionTime, long deadlocks, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name, deadlocks)
+VALUES ($1, $2, $3, $4, $5, $6)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(name);
+        command.Parameters.AddWithValue(databaseName);
+        command.Parameters.AddWithValue(deadlocks);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -332,7 +423,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
     {
         var ids = string.Join(", ", SentinelIds.Select(i => i.ToString(CultureInfo.InvariantCulture)));
 
-        foreach (var table in new[] { "pg_cpu_utilization", "cpu_utilization_stats", "collection_log", "servers" })
+        foreach (var table in new[] { "pg_database_stats", "pg_cpu_utilization", "cpu_utilization_stats", "collection_log", "servers" })
         {
             using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id IN ({ids});", connection);
             await cleanup.ExecuteNonQueryAsync(ct);

@@ -116,6 +116,37 @@ public sealed class DarlingManagedPostgres
     public const string McpRoleName = "mcp";
 
     /// <summary>
+    /// The <c>ApplicationName</c> the web dashboard's and MCP server's own STORE connections present
+    /// (#4442 scope 2) — <see cref="MonitoredServerConnection.RemediationApplicationName"/>'s pattern applied
+    /// to the two network surfaces' pools instead of a monitored-target connection. Visible in the store's
+    /// own <c>pg_stat_activity</c> at once, so "which surface opened this backend" is a column, not a guess
+    /// from the role name alone (a bring-your-own store's <c>viewer</c>/<c>mcp</c> role names are the
+    /// operator's own choice, not necessarily these). The service's own collection connections to a monitored
+    /// server are untouched — this only names the STORE side of the web and MCP pools.
+    /// </summary>
+    public const string WebApplicationName = "PerformanceMonitorDarling-Web";
+    public const string McpApplicationName = "PerformanceMonitorDarling-Mcp";
+
+    /// <summary>
+    /// The <c>ApplicationName</c> the SERVICE's own collection-loop store connection presents (#4479, the
+    /// rest of #4442's pattern): the worker's data source, set through
+    /// <see cref="Storage.DarlingStoreConnection.WithApplicationName"/> when the resolved connection string
+    /// does not already carry one. Distinguishes the collection loop's own backends from the web/MCP pools'
+    /// in the store's own <c>pg_stat_activity</c> — all four surfaces open store connections independently,
+    /// and only the role name told them apart before this.
+    /// </summary>
+    public const string ServiceApplicationName = "PerformanceMonitorDarling-Service";
+
+    /// <summary>The CLI verbs' store connections (#4479) — <c>darling.exe --add-server</c> and friends,
+    /// each a one-shot process distinct from the running service.</summary>
+    public const string CliApplicationName = "PerformanceMonitorDarling-Cli";
+
+    /// <summary>The managed-runtime bootstrap/upgrade's own store connections (#4479) — the migration
+    /// snapshot read, the TimescaleDB bridge/update, and the pg_upgrade identity read, all of which open a
+    /// connection before the collection loop's own data source exists.</summary>
+    public const string UpgradeApplicationName = "PerformanceMonitorDarling-Upgrade";
+
+    /// <summary>
     /// The search path (schemas in resolution order) the managed connection strings carry, so pooled
     /// connections resolve the bare table names to collect/config even if the database default was
     /// not (or could not be) set. Same schemas, same order as the SQL-side
@@ -343,6 +374,273 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV11 = "# Managed by PerformanceMonitor Darling (v11 job execution logging) -- do not remove this block";
 
     /// <summary>
+    /// Marker for the v12 WAL-sizing block (#3802): derive <c>max_wal_size</c> (and <c>min_wal_size</c> beside
+    /// it) from the headroom on the volume that holds the data directory, and re-derive it on every
+    /// service-owned start. A TWELFTH independently versioned block, and after v8 the second one keyed on
+    /// something other than its own marker's absence — see <see cref="ConfWalSizingStampPrefix"/>.
+    ///
+    /// <para><b>What was in force before this, stated precisely, because the issue's own title gets it
+    /// wrong.</b> #3802 says every managed store "runs PostgreSQL's default 1 GB". It does not: the v4 block
+    /// (<see cref="BuildWriteThroughputConfAppend"/>) has written <c>max_wal_size = 4GB</c> as a fixed
+    /// constant since the 24-server bootstrap incident, so a healed managed store sat at 4 GB, not 1 GB. The
+    /// defect is real all the same — 4 GB is a constant chosen for a bootstrap burst and sized to no property
+    /// of the box it runs on — and the mechanism the issue measured is exactly the one a constant cannot
+    /// answer. This block SUPERSEDES v4's line by last-occurrence-wins, the way v5 supersedes v3's
+    /// <c>shared_buffers</c>; v4 is not edited and keeps its <c>max_connections</c>.</para>
+    ///
+    /// <para><b>The measured mechanism (a production store, 2026-09-20 15:20–15:40Z, the #3745 exhibit).</b>
+    /// One continuous-aggregate refresh wrote 8.3 M rows in a single transaction, ran through
+    /// <c>max_wal_size</c> mid-checkpoint, forced a second WAL-triggered checkpoint (199 s), and for four
+    /// minutes every heavy read on the store starved behind it — the fleet overview cancelled twice, four
+    /// alert reads cancelled, a parallel worker failed to spawn (<c>could not reserve shared memory
+    /// region</c>). The maintainer set <c>max_wal_size = 16GB</c> out of band on all three production stores
+    /// (reload-only, verified) and ruled that the product should author it — <i>"as long as the box can
+    /// afford it. so dynamic i guess."</i> — which is the whole brief: a derivation, not a constant.</para>
+    ///
+    /// <para><b>The formula.</b> <c>max_wal_size = clamp(free / 8, 1 GB, 16 GB)</c>, floored to the
+    /// power-of-two ladder 1, 2, 4, 8, 16 GB, where <c>free</c> is the space available on the data volume at
+    /// ensure time; <c>min_wal_size = max(80 MB, max_wal_size / 4)</c>. Both written in whole megabytes in
+    /// PostgreSQL's unit grammar. The pieces:
+    /// <list type="bullet">
+    /// <item><b>/ 8</b> — the WAL directory must never be the thing that fills the data volume.
+    ///   <c>max_wal_size</c> is a SOFT limit (PostgreSQL's documentation: <i>"WAL size can exceed max_wal_size
+    ///   under special circumstances, such as heavy load"</i>), and the load that makes it matter here — a
+    ///   compression-heavy TimescaleDB store whose materializations write millions of rows per transaction —
+    ///   is precisely the heavy load that overshoots it. Checkpoints on that store are the write amplifier,
+    ///   and the WAL ceiling is what spaces them. An eighth of what is free leaves seven eighths for the
+    ///   overshoot, for the store's own growth between retention sweeps, and for the disk-pressure self-alert
+    ///   to fire before anything is actually full.</item>
+    /// <item><b>16 GB ceiling</b> — the maintainer's chosen ceiling from #3802, not a measured optimum: it is
+    ///   the figure applied out of band to the store that exhibited the mechanism, and the point past which
+    ///   checkpoint spacing was judged to stop buying anything for this write shape. A larger
+    ///   <c>max_wal_size</c> also lengthens crash recovery on the bundled store — more WAL to replay — which
+    ///   is the price of fewer forced checkpoints, so the ceiling is also where that price stops being worth
+    ///   paying.</item>
+    /// <item><b>1 GB floor</b> — PostgreSQL's own default. A volume with under 16 GB free cannot afford more
+    ///   WAL than the server would have used anyway, and the log line says so rather than landing there
+    ///   silently. On a volume with under 32 GB free the floor and the 2 GB rung land BELOW v4's fixed 4 GB;
+    ///   that is deliberate. v4 sized for a burst on a box it never measured, and the block that does measure
+    ///   the box heals it down.</item>
+    /// <item><b>min_wal_size at a quarter</b> — the size below which PostgreSQL recycles old segments rather
+    ///   than removing them, so recycling keeps pace with a raised ceiling instead of paying segment creation
+    ///   on every burst. Floored at PostgreSQL's 80 MB default; on the ladder that floor is never the binding
+    ///   term (the smallest rung yields 256 MB), and it is coded anyway so the formula is true of itself and
+    ///   not merely of the ladder.</item>
+    /// </list></para>
+    ///
+    /// <para><b>Why a power-of-two ladder and not the raw quotient.</b> This block heals on a change in the
+    /// box, like v8, and v8's lesson applies with more force: a check that runs on every start and compares
+    /// an exact figure turns every wobble in that figure into a fresh block appended to the file, forever.
+    /// Free disk is not a wobble — it moves by gigabytes between any two starts on a store that compresses
+    /// and drops chunks — so the raw quotient would re-author on essentially every start, and whole-GB steps
+    /// would still flip on an 8 GB swing. The ladder makes a re-author need the free space to HALVE or
+    /// DOUBLE, which is the scale at which the checkpoint spacing it governs actually changes; within a rung
+    /// nothing is written, and the start's log line says so. The stamp line under the marker records the
+    /// derived rung and the PostgreSQL major, and <see cref="ConfHasCurrentWalSizingStamp"/> compares the
+    /// LAST stamp in the file — the v8 rule, for the v8 reason: postgresql.conf takes the last occurrence, so
+    /// the question has to be asked of the block that is actually in force.</para>
+    ///
+    /// <para><b><c>checkpoint_completion_target</c> is pinned at 0.9 only where the default is not already
+    /// 0.9.</b> The PostgreSQL 14 release notes (E.25.3.1.9): <i>"Change checkpoint_completion_target default
+    /// to 0.9 (Stephen Frost). The previous default was 0.5."</i> On 14 and later the line is omitted —
+    /// re-stating a default buys nothing and would read as a decision this block did not make; on 13 and
+    /// earlier it is emitted, because a checkpoint that finishes in half its interval is the write spike this
+    /// block exists to spread. The bundled runtime is PostgreSQL 18, so in the shipped product the line can
+    /// only ever appear on a data directory this build's initdb did not create. An unreadable
+    /// <c>PG_VERSION</c> is treated as pre-14: the pin is a no-op where the default is already 0.9 and the
+    /// fix where it is not, so emitting it is the answer that cannot be wrong.</para>
+    ///
+    /// <para><b>What it does not reach.</b> <c>postgresql.auto.conf</c> is read after <c>postgresql.conf</c>,
+    /// so an <c>ALTER SYSTEM SET max_wal_size</c> still wins — the precedence the v10 <c>lc_messages</c> and
+    /// v11 job-logging notes document (v11 measured it), and the one the maintainer's own out-of-band 16 GB
+    /// may be sitting under. This block does not fight it: <see cref="LogWalSizingAutoConfOverrides"/> reads
+    /// the auto.conf, logs one WARNING per WAL key it assigns — naming the key, its value and the precedence —
+    /// and the block is authored regardless, so the file records what the product derived even while an
+    /// operator's override is what runs. Nothing here edits or deletes <c>postgresql.auto.conf</c>;
+    /// <c>ALTER SYSTEM RESET</c> is the operator's move. And it reaches MANAGED stores only — a
+    /// bring-your-own store's WAL is its owner's to size, consistent with the BYO posture everywhere else in
+    /// this class.</para>
+    ///
+    /// <para><b>What it does when the disk cannot be read.</b> Nothing — the v8 rule. An unreadable data
+    /// volume is not evidence the headroom is unchanged, it is the absence of evidence either way,
+    /// and re-deriving the WAL ceiling from a figure this service could not read is worse than leaving the
+    /// last good block (or v4's 4 GB, on a store that has never healed) in force. The skip is logged as a
+    /// warning naming what stays in force.</para>
+    ///
+    /// <para><b>Reload semantics.</b> All three settings are SIGHUP-context (the documentation's <i>"can only
+    /// be set in the postgresql.conf file or on the server command line"</i>), and this append runs before
+    /// <c>pg_ctl start</c>, so on a service-owned start the block is live on the very start that writes it —
+    /// the v9 through v11 story. The adopted-listener path in <see cref="EnsureRunningAsync"/> is the same
+    /// exception it is for them: a postmaster this service did not start is neither stopped nor signalled, so
+    /// there the heal waits for the next service-owned start.</para>
+    /// </summary>
+    public const string ConfMarkerV12 = "# Managed by PerformanceMonitor Darling (v12 wal sizing) -- do not remove this block";
+
+    /// <summary>
+    /// The v13 marker (#3899): preload <c>pg_stat_statements</c>, so the store keeps per-statement timings and
+    /// "the web viewer / MCP tools are slow" can be answered with a ranked list by role instead of a guess.
+    /// Before this the store loaded only <c>timescaledb</c> and had <c>log_min_duration_statement = -1</c>, so
+    /// nothing in the product could say which query was slow; attributing one took the owner's credential and
+    /// a hand-set per-role GUC. The module ships in the bundled runtime (1.12 on PostgreSQL 18.4) and was
+    /// simply never loaded. <see cref="StoreStatementStats"/> creates the extension and the reader function
+    /// on each start once the preload is live.
+    ///
+    /// <para><b>A MERGE, never a literal.</b> <c>shared_preload_libraries</c> is list-valued and the last
+    /// occurrence REPLACES the list (measured, and documented on <see cref="ConfMarkerV11"/>), so a block
+    /// that wrote <c>'timescaledb,pg_stat_statements'</c> verbatim would drop anything an operator had added.
+    /// The block re-states the EFFECTIVE list read from the file at append time plus
+    /// <see cref="StatementStatisticsLibrary"/>; see <see cref="MergePreloadLibraries"/>.</para>
+    ///
+    /// <para><b><c>track_utility = off</c> is a security setting, not tuning.</b> pg_stat_statements records a
+    /// utility statement's text without normalizing its literals, so any <c>ALTER ROLE ... PASSWORD '...'</c>
+    /// run against the store (an operator's, or a bring-your-own provisioning script's) would be kept verbatim.
+    /// The service's own provisioning sends SCRAM-SHA-256 verifiers, never a password, and only when one
+    /// changes (#3910), so it no longer depends on this; the setting keeps every other utility statement out
+    /// of the view too, and the reader function shows the text of normalized DML only, as a second
+    /// guard.</para>
+    ///
+    /// <para><b>Restart semantics.</b> <c>shared_preload_libraries</c> is postmaster-context. This append runs
+    /// before <c>pg_ctl start</c>, so a service-owned start loads the library on the very start that writes the
+    /// block; the adopted-listener path in <see cref="EnsureRunningAsync"/> waits for the next service-owned
+    /// start, as v2-v5 and v7 do. An <c>ALTER SYSTEM</c> override of the list in <c>postgresql.auto.conf</c>
+    /// wins over this block and is logged with the exact statement that fixes it, never edited; so is an
+    /// assignment added after the block, and a library named only on an earlier line the block replaces
+    /// (<see cref="LogStatementStatisticsPreloadCoverage"/>).</para>
+    /// </summary>
+    public const string ConfMarkerV13 = "# Managed by PerformanceMonitor Darling (v13 statement statistics) -- do not remove this block";
+
+    /// <summary>
+    /// The v14 marker (#3909): a <c>maintenance_work_mem</c> line PostgreSQL 17 will accept, appended to a data
+    /// directory still on 17 whose effective value is over 17's Windows limit of 2097151 kB. The v3/v7/v8
+    /// blocks derived 2048 MB on large hosts, which 18 accepts and 17 refuses at startup (FATAL), so a 17 store
+    /// that got those blocks, typically after a reverted upgrade, could no longer start.
+    ///
+    /// <para>Keyed on the VALUE, not on the marker: it is appended whenever the assignment in force is over the
+    /// limit, so it heals once and then finds its own line in force. Written from two places.
+    /// <see cref="HealLegacyMaintenanceWorkMem"/> runs before anything can start the cluster, the store
+    /// upgrade's old-cluster start included, which <see cref="EnsureConfAppended"/> runs too late for.
+    /// <see cref="EnsureConfAppended"/> covers every other start, the restart after a reverted upgrade
+    /// included. Carries no fingerprint or stamp line, so the v8 and v12 checks never see it.</para>
+    /// </summary>
+    public const string ConfMarkerV14 = "# Managed by PerformanceMonitor Darling (v14 PostgreSQL 17 maintenance_work_mem limit) -- do not remove this block";
+
+    /// <summary>
+    /// The v15 marker (#4246): <c>wal_compression = lz4</c> only. Across two production stores, <c>pg_waldump
+    /// --stats=record</c> over live WAL showed 66-90% of bytes were full-page images (FPI) — mostly
+    /// <c>FPI_FOR_HINT</c>, the image data checksums force on a page's first hint-bit change, plus random-key
+    /// btree leaf inserts. <c>wal_compression</c> shrinks every one of those images, <c>FPI_FOR_HINT</c>
+    /// included, no matter how often checkpoints run.
+    ///
+    /// <para><b><c>lz4</c>, not <c>zstd</c> or <c>pglz</c>.</b> <c>default_toast_compression = lz4</c> (v1)
+    /// already proves lz4 ships in the bundled runtime; it costs less CPU than zstd for a few GB/hour of
+    /// image data, the same trade the TOAST setting already made.</para>
+    ///
+    /// <para><b>The checkpoint interval ships separately, in v16.</b> A longer <c>checkpoint_timeout</c> would
+    /// cut WAL further by re-imaging each hot page less often — #4246 found roughly two-thirds of one
+    /// 5-minute cycle's images repeated the previous cycle's — but it risks the store's own checkpointer
+    /// self-alert: <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a
+    /// checkpoint's sync phase averages more than 10 seconds, a bar that exists because sync phases of 14.0s
+    /// and 25.2s killed reads on a production store. #3892 found that a longer interval puts more files into
+    /// each checkpoint, which makes each sync phase longer, so a 15-minute interval risks trading WAL volume
+    /// for killed reads and for alerts firing on a healthy store. One production store measured the interval
+    /// first, through <c>ALTER SYSTEM</c> and a reload rather than this block; it now ships as
+    /// <see cref="ConfMarkerV16"/>, its own marker, gated on that measurement staying under the sync bar.</para>
+    ///
+    /// <para><b>Does not touch <c>max_wal_size</c>.</b> <see cref="ConfMarkerV12"/> (#3802) already bounds it
+    /// by free disk, and this block leaves that bound alone.</para>
+    ///
+    /// <para><b>Field note.</b> The heaviest measured sample followed a restart: most of its images were
+    /// <c>FPI_FOR_HINT</c> from the first cycle's reads setting hint bits on pages nothing had touched since
+    /// the previous shutdown. <c>wal_compression</c> compresses those images too, so the heaviest hour a
+    /// store sees after a restart is also where it pays off most.</para>
+    ///
+    /// <para><c>wal_compression</c> is <c>superuser</c>-context, not <c>sighup</c> (confirmed live) — but like
+    /// a <c>sighup</c> setting it still takes effect from <c>postgresql.conf</c> on a reload, and this append
+    /// runs before <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes the
+    /// block, the v9-v11 story. Managed stores only; a bring-your-own store keeps whatever
+    /// <c>wal_compression</c> its owner set. A later change to this value needs a NEW marker (the v11/v14
+    /// precedent): this block heals by its marker's absence, so an edited value in an already-marked file
+    /// would never be seen.</para>
+    /// </summary>
+    public const string ConfMarkerV15 = "# Managed by PerformanceMonitor Darling (v15 WAL compression) -- do not remove this block";
+
+    /// <summary>
+    /// The v16 marker (#4246): <c>checkpoint_timeout = 15min</c> only, up from PostgreSQL's 5-minute default.
+    /// The interval was held back from v15 (see <see cref="ConfMarkerV15"/>) pending a 24-hour trial on one
+    /// production store, applied there through <c>ALTER SYSTEM</c> and a reload rather than this block. That
+    /// trial's reading at +3 hours: WAL volume fell from 14.0 to 4.6 GB/h, the
+    /// full-page-image share from 8.6% to 4.2%, and the average checkpoint sync
+    /// phase from 1.66 s to 0.24 s.
+    ///
+    /// <para><b>The risk this carries.</b> A longer interval puts more dirty pages, and so more files, into
+    /// each checkpoint's sync phase, which is what makes the phase take longer.
+    /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a checkpoint's sync
+    /// phase averages more than 10 seconds — the bar #3892 traced to sync phases of 14.0s and 25.2s that
+    /// killed reads on a production store. This block ships only because the trial's measurement stayed
+    /// under that bar; a store that regresses past it needs a shorter interval, not a self-alert override.</para>
+    ///
+    /// <para><b>Does not touch <c>max_wal_size</c>.</b> <see cref="ConfMarkerV12"/> (#3802) already bounds it
+    /// by free disk, and this block leaves that bound alone.</para>
+    ///
+    /// <para><c>checkpoint_timeout</c> is <c>sighup</c>-context in PostgreSQL, so a running store could take it
+    /// from a reload alone — but like the other <c>sighup</c> settings this service manages, this append runs
+    /// before <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes the
+    /// block, the v9-v11 story. Managed stores only; a bring-your-own store keeps whatever
+    /// <c>checkpoint_timeout</c> its owner set. A later change to this value needs a NEW marker (the
+    /// v11/v14/v15 precedent): this block heals by its marker's absence, so an edited value in an
+    /// already-marked file would never be seen.</para>
+    /// </summary>
+    public const string ConfMarkerV16 = "# Managed by PerformanceMonitor Darling (v16 checkpoint interval) -- do not remove this block";
+
+    /// <summary>
+    /// The v17 marker: <c>log_line_prefix = '%m [%p] %a '</c>, adding the session's <c>application_name</c>
+    /// after the existing <c>%m [%p] </c> pair. Since #4486, every store session sets its own
+    /// <c>application_name</c> (<c>PerformanceMonitorDarling-Service</c>, <c>-Viewer</c>, and the rest), so a
+    /// prefix that renders it lets the store's own log say WHICH of this service's connections wrote each
+    /// line — the checkpoint and stall work this store's log already carries needs that to tell one session's
+    /// lines from another's.
+    ///
+    ///
+    /// <para><b>PostgreSQL's own default is <c>'%m [%p] '</c></b> — no <c>%a</c>. Darling has never set
+    /// <c>log_line_prefix</c> itself before this block, so a store this reaches gains the setting for the
+    /// first time. Two boxes already carry <c>'%m [%p] %a '</c> through <c>ALTER SYSTEM</c>
+    /// (<c>postgresql.auto.conf</c> wins over <c>postgresql.conf</c>), so this block changes nothing there.</para>
+    ///
+    /// <para><b>The risk this carries.</b> <c>application_name</c> is client-set, free text: empty, containing
+    /// spaces, brackets, colons, or text that LOOKS like a log field (<c>LOG:</c>) or another session's name.
+    /// Every reader of the store's OWN log — <see cref="StoreLogClassifier"/>, the store-log tail this class's
+    /// own start-up log reads, the <c>get_store_log</c> MCP read, and the self-hosted-target collectors that
+    /// read a store's own stderr log (<c>PgLogEntryAssembler</c>, <c>PgPlanCaptureCollector</c>) — has to keep
+    /// working with an application name sitting between the pid and the severity, including the empty one this
+    /// prefix itself renders as two spaces (<c>'%m [%p]  LOG:'</c>). Each of those readers carries its own pin
+    /// or a written argument for why the new field cannot reach it.</para>
+    ///
+    /// <para><c>log_line_prefix</c> is <c>sighup</c>-context, so a running store could take it from a reload
+    /// alone — but like the other <c>sighup</c> settings this service manages, this append runs before
+    /// <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes the block, the
+    /// v9-v11 story. Managed stores only; a bring-your-own store keeps whatever <c>log_line_prefix</c> its
+    /// owner set. A later change to this value needs a NEW marker (the v11/v14/v15/v16 precedent): this block
+    /// heals by its marker's absence, so an edited value in an already-marked file would never be seen.</para>
+    /// </summary>
+    public const string ConfMarkerV17 = "# Managed by PerformanceMonitor Darling (v17 log line prefix) -- do not remove this block";
+
+    /// <summary>
+    /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
+    /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
+    /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
+    /// what <see cref="BuildMemorySizingConfAppend"/>/<see cref="BuildHardwareSizingConfAppend"/>/etc. decide,
+    /// and a second list keyed the other way (setting -> marker) would be one more place those two could drift.
+    /// v1 (<see cref="ConfMarker"/>) is included even though it never carries one of the seven checked
+    /// settings — harmless, since a scan for a setting v1 never sets simply never lands inside its span.
+    /// </summary>
+    internal static readonly string[] AllManagedConfMarkers =
+    [
+        ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
+        ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
+        ConfMarkerV15, ConfMarkerV16, ConfMarkerV17,
+    ];
+
+    /// <summary>
     /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
     /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
     /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
@@ -351,6 +649,22 @@ public sealed class DarlingManagedPostgres
     /// host's block still winning by last-occurrence-wins.
     /// </summary>
     public const string ConfHardwareFingerprintPrefix = "# darling-hardware-fingerprint: ";
+
+    /// <summary>
+    /// Prefix of the v12 stamp line (#3802) — the record of what the WAL sizing beneath it was derived TO: the
+    /// <c>max_wal_size</c> rung, the <c>min_wal_size</c> that follows from it, and the PostgreSQL major that
+    /// decided whether <c>checkpoint_completion_target</c> was pinned. The same mechanism as
+    /// <see cref="ConfHardwareFingerprintPrefix"/>, compared the same way against the LAST occurrence
+    /// (<see cref="ConfHasCurrentWalSizingStamp"/>), under a DIFFERENT prefix on purpose: the v8 check keys on
+    /// the last line carrying its own prefix in the text read at the top of <see cref="EnsureConfAppended"/>,
+    /// and a v12 line that shared that prefix would be the line v8 read on the next start. Neither prefix is a
+    /// substring of the other, and a pin holds it so.
+    ///
+    /// <para>Records OUTPUTS where v8 records inputs, for the reason the v12 marker's doc gives: the raw
+    /// free-disk figure moves on every start and the rung does not. Recording the input would make every
+    /// start a change; recording the rung makes only a real change one.</para>
+    /// </summary>
+    public const string ConfWalSizingStampPrefix = "# darling-wal-sizing: ";
 
     /// <summary>
     /// Markers delimiting the Darling-managed network access block in pg_hba.conf
@@ -382,6 +696,10 @@ public sealed class DarlingManagedPostgres
     private static readonly TimeSpan s_versionProbeTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan s_pgCtlTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan s_statusTimeout = TimeSpan.FromSeconds(30);
+
+    /* #4215: `postgres -C <key> -D <data>` parses every configuration file and exits — the same shape of
+       probe as s_versionProbeTimeout, so it gets the same short budget. */
+    private static readonly TimeSpan s_confValidateTimeout = TimeSpan.FromSeconds(15);
     private const int PgCtlWaitSeconds = 60;
 
     private readonly PostgresConfig _config;
@@ -398,6 +716,12 @@ public sealed class DarlingManagedPostgres
     /// <summary>What the runtime probe did with the shipped zip this start (#1706) — non-null only when a
     /// newer runtime was extracted, and its PreviousBinDirectory is pg_upgrade's --old-bindir.</summary>
     private DarlingStoreUpgrade.RuntimeAdvance? _runtimeAdvance;
+
+    /// <summary>Whether this instance has run the retained-copy sweep. A service start is one instance, and the
+    /// worker re-enters <see cref="EnsureRunningAsync"/> on the same instance when a retryable failure sends it
+    /// round again, so the sweep runs once per instance or a retried start would count as two of the starts a
+    /// rollback copy is kept for.</summary>
+    private bool _retainedSweepDone;
 
     /// <summary>The bundled runtime's identity, read once the runtime is settled and used by the post-start
     /// verification and the same-major TimescaleDB update.</summary>
@@ -438,7 +762,39 @@ public sealed class DarlingManagedPostgres
     internal DarlingStoreUpgrade.StoreUpgradeOutcome LastUpgradeOutcome { get; private set; }
         = DarlingStoreUpgrade.StoreUpgradeOutcome.None;
 
+    /// <summary>
+    /// What this start did to the store's TimescaleDB extension (#3908), carried out of the bootstrap beside
+    /// <see cref="LastUpgradeOutcome"/> and alerted on separately.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal DarlingStoreUpgrade.TimescaleUpdateOutcome LastTimescaleOutcome { get; private set; }
+        = DarlingStoreUpgrade.TimescaleUpdateOutcome.None;
+
     public string DataDirectory => _dataDirectory;
+
+    /// <summary>What <see cref="WriteManagedConfFile"/> did with <c>darling-managed.conf</c> on this start
+    /// (#4215) — carried out of the bootstrap the same way
+    /// <see cref="LastUpgradeOutcome"/> is, so <c>DarlingWorker</c> can fold a hand edit's changed keys into
+    /// the stored verdict rows without re-reading the file itself. Null when the service-owned conf-write path
+    /// never ran this start (the adopted-listener branch of <see cref="EnsureRunningAsync"/>).</summary>
+    [SupportedOSPlatform("windows")]
+    internal ManagedConfWriteResult? LastManagedConfWriteResult { get; private set; }
+
+    /// <summary>Whether THIS start ran PostgreSQL on <see cref="ManagedConfFile.LastGoodFileName"/> rather than
+    /// the file <see cref="WriteManagedConfFile"/> just rendered (#4215) — set only in the recovery
+    /// branch of <see cref="EnsureManagedConfReadyAsync"/>, the one place that copies the last-good file back
+    /// over the rejected one. Reset to false at the top of every <see cref="EnsureManagedConfReadyAsync"/> call
+    /// so a later, clean start clears it without a process restart — carried out to the store-settings self-alert
+    /// the same way <see cref="LastManagedConfWriteResult"/> already is.</summary>
+    [SupportedOSPlatform("windows")]
+    internal bool LastStartUsedLastGoodManagedConf { get; private set; }
+
+    /// <summary>The #4215/#4336 migration's outcome for THIS start — null when
+    /// <see cref="MigrateManagedConfAsync"/> never ran this start (the adopted-listener branch; a Verified
+    /// conf runs Step B instead). Carried out of the bootstrap the same way
+    /// <see cref="LastManagedConfWriteResult"/> already is.</summary>
+    [SupportedOSPlatform("windows")]
+    internal ManagedConfMigrationOutcome? LastManagedConfVerification { get; private set; }
 
     /// <summary>null/empty dataDirectory means %ProgramData%\PerformanceMonitorDarling\pg (created with inherited ACLs).</summary>
     public static string ResolveDataDirectory(PostgresConfig config)
@@ -452,7 +808,11 @@ public sealed class DarlingManagedPostgres
             ? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 "PerformanceMonitorDarling", "pg")
-            : Path.GetFullPath(config.DataDirectory);
+            /* Trimmed (round-1 security review, #4280 Low 3): Path.GetFullPath keeps a trailing separator, and
+               every caller that builds a "-D" argument from this value quotes it as `"{path}"` — a trailing
+               backslash then escapes that closing quote. Hardening only: every one of those callers already
+               fails its own first use of the broken value long before anything downstream reads it. */
+            : Path.TrimEndingDirectorySeparator(Path.GetFullPath(config.DataDirectory));
     }
 
     public static string CredentialPathFor(string dataDirectory)
@@ -574,10 +934,19 @@ public sealed class DarlingManagedPostgres
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV4).Append('\n');
-        builder.Append("max_connections = 200\n");
+        builder.Append("max_connections = ").Append(TargetMaxConnections).Append('\n');
         builder.Append("max_wal_size = 4GB\n");
         return builder.ToString();
     }
+
+    /// <summary>
+    /// The fixed <c>max_connections</c> the v4 block writes (#4214): a single named constant instead of the
+    /// literal <c>200</c> living in two places (this append, and the host-profile check's "value derived for
+    /// this host" for the same setting), which is not RAM/hypertable-derived like the settings in
+    /// <see cref="DeriveMemorySettings"/> — it is a fixed headroom figure, so there is no <c>Derive*</c>
+    /// function to share; this constant is the shared source instead.
+    /// </summary>
+    internal const int TargetMaxConnections = 200;
 
     /// <summary>
     /// The v5 co-located-sizing override block (#1559): re-states <c>shared_buffers</c> at the CAPPED
@@ -696,7 +1065,13 @@ public sealed class DarlingManagedPostgres
         var effectiveCache = ram / 4 * 3;                          /* 75% RAM — planner hint, not an allocation */
         /* #1777: 5% RAM with a MEASURED 1.5 GB floor (compression throughput rose ~70% reaching it and
            plateaued there), guarded by 25% of RAM so the floor cannot overcommit a small host, and capped
-           at 2 GB where the field data showed nothing further to gain.
+           just under 2 GB, where the field data showed nothing further to gain.
+
+           The cap is 2047 MB, not 2048 (#3909). PostgreSQL 17 on Windows accepts at most 2097151 kB here,
+           one kB under 2 GB, and a conf line above that is FATAL at startup, not a warning. PostgreSQL 18
+           accepts 2048 MB, but a store can still be on 17 (it predates the 18 bundle, or its upgrade
+           reverted), so the one cap has to hold for both. 1 MB is noise against a benefit that plateaued
+           by 1.5 GB. A 17 conf that already carries 2048 MB is healed by the v14 block (ConfMarkerV14).
 
            THE CONSTRAINT THE SMALL-HOST LANDINGS REST ON: both of today's consumers allocate
            INCREMENTALLY — a tuplesort grows to fit its input and SPILLS past the ceiling rather than
@@ -706,7 +1081,7 @@ public sealed class DarlingManagedPostgres
            maintenance_work_mem, that reasoning breaks and the small-host landings need revisiting here. */
         var maintenanceWorkMem = Math.Min(
             Math.Min(Math.Max(ram / 20, 1536 * oneMb), ram / 4),
-            2048 * oneMb);
+            MaintenanceWorkMemCapMb * oneMb);
         var workMem = Math.Clamp(ram / 512, 16 * oneMb, 64 * oneMb);
 
         return new MemorySettings(
@@ -757,6 +1132,159 @@ public sealed class DarlingManagedPostgres
         builder.Append(ConfMarkerV7).Append('\n');
         builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
         return builder.ToString();
+    }
+
+    /// <summary>The derived <c>maintenance_work_mem</c> cap in MB (#1777's 2 GB, less 1 MB for #3909).</summary>
+    internal const int MaintenanceWorkMemCapMb = 2047;
+
+    /// <summary>
+    /// The largest <c>maintenance_work_mem</c> PostgreSQL 17 accepts on Windows, in kB (#3909): 2097151,
+    /// one kB under 2 GB. Measured on 17.10, where <c>2048MB</c> is FATAL ("2097152 kB is outside the valid
+    /// range ... (64 kB .. 2097151 kB)"). PostgreSQL 18 accepts 2048 MB.
+    /// </summary>
+    internal const long LegacyMaintenanceWorkMemMaxKb = 2097151;
+
+    /// <summary>The setting the v14 block (#3909) caps.</summary>
+    internal const string MaintenanceWorkMemSetting = "maintenance_work_mem";
+
+    /// <summary>
+    /// A <c>maintenance_work_mem</c> value as <see cref="ReadConfAssignments"/> returns it (quotes and comment
+    /// already stripped), in kB: <c>2048MB</c>, <c>2GB</c>, <c>65536</c> (no unit means kB, the parameter's
+    /// base unit), with or without a space before the unit. Null for anything else, which the caller leaves
+    /// alone rather than guessing at. Pure.
+    /// </summary>
+    internal static long? ParseMaintenanceWorkMemKb(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var text = value.Trim();
+        var digits = 0;
+        while (digits < text.Length && char.IsAsciiDigit(text[digits]))
+        {
+            digits++;
+        }
+
+        if (digits == 0 || !long.TryParse(text[..digits], NumberStyles.None, CultureInfo.InvariantCulture, out var number))
+        {
+            return null;
+        }
+
+        return text[digits..].Trim().ToUpperInvariant() switch
+        {
+            "" or "KB" => number,
+            "B" => number / 1024,
+            "MB" => number * 1024,
+            "GB" => number * 1024 * 1024,
+            "TB" => number * 1024 * 1024 * 1024,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Whether the value in force would stop PostgreSQL 17 or earlier from starting (#3909): the major is known
+    /// and at most 17, and the value is over <see cref="LegacyMaintenanceWorkMemMaxKb"/>. An unknown major or an
+    /// unparsable value is left alone. Pure.
+    /// </summary>
+    internal static bool NeedsLegacyMaintenanceWorkMemCap(int? dataMajor, string? effectiveValue)
+    {
+        if (dataMajor is not (> 0 and <= 17))
+        {
+            return false;
+        }
+
+        /* A null (unparsable) value compares false, so it is left alone. */
+        return ParseMaintenanceWorkMemKb(effectiveValue) > LegacyMaintenanceWorkMemMaxKb;
+    }
+
+    /// <summary>
+    /// The <c>maintenance_work_mem</c> assignment a v14 block has to follow in this data directory, or null
+    /// when none is needed (#3909). It is the assignment in force, read the way PostgreSQL reads it:
+    /// postgresql.conf with its includes, then postgresql.auto.conf. An over-limit value set by
+    /// <c>ALTER SYSTEM</c> is in postgresql.auto.conf, which the server reads after postgresql.conf, so no
+    /// appended block can override it. That case is logged at Critical with the fix, and returns null.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private ConfAssignment? FindLegacyMaintenanceWorkMemOverLimit(string dataDirectory)
+    {
+        var major = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory);
+        if (major is not (> 0 and <= 17))
+        {
+            return null;
+        }
+
+        var autoConfPath = Path.GetFullPath(Path.Combine(dataDirectory, "postgresql.auto.conf"));
+        var chain = ReadConfAssignments(Path.Combine(dataDirectory, "postgresql.conf"), MaintenanceWorkMemSetting);
+        chain.AddRange(ReadConfAssignments(autoConfPath, MaintenanceWorkMemSetting));
+        if (chain.Count == 0 || !NeedsLegacyMaintenanceWorkMemCap(major, chain[^1].Value))
+        {
+            return null;
+        }
+
+        var inForce = chain[^1];
+        if (string.Equals(inForce.File, autoConfPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogCritical(
+                "maintenance_work_mem = {Value} in {File} (line {Line}) is over PostgreSQL {Major}'s limit of {LimitKb} kB, so the server will not start. It was set by ALTER SYSTEM, which is read after postgresql.conf, so the service cannot override it: delete that line (the server is not running to take ALTER SYSTEM RESET) and restart the service.",
+                inForce.Value, inForce.File, inForce.Line, major, LegacyMaintenanceWorkMemMaxKb);
+            return null;
+        }
+
+        return inForce;
+    }
+
+    private void LogLegacyMaintenanceWorkMemCap(ConfAssignment overLimit)
+        => _logger.LogWarning(
+            "maintenance_work_mem = {Value} ({File}, line {Line}) is over PostgreSQL 17's limit of {LimitKb} kB, which stops the server from starting. Appended maintenance_work_mem = {CapMb}MB after it (#3909).",
+            overLimit.Value, overLimit.File, overLimit.Line, LegacyMaintenanceWorkMemMaxKb, MaintenanceWorkMemCapMb);
+
+    /// <summary>
+    /// The v14 block (#3909): one <c>maintenance_work_mem</c> line at the cap, appended after whatever
+    /// assignment is over PostgreSQL 17's limit so it becomes the last occurrence. See
+    /// <see cref="ConfMarkerV14"/> for when it is written.
+    /// </summary>
+    internal static string BuildLegacyMaintenanceWorkMemCapConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV14).Append('\n');
+        builder.Append("maintenance_work_mem = ").Append(MaintenanceWorkMemCapMb).Append("MB\n");
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// Makes a PostgreSQL 17 (or earlier) data directory's conf one its server will open (#3909), before
+    /// anything starts that server: the store upgrade's old-cluster start, a reverted upgrade's restart, or a
+    /// plain start of a store still on 17. A 17 conf reaches an over-limit value because the v3/v7/v8 blocks
+    /// derived 2048 MB on hosts with 40 GB of RAM or more until this change, and they are written to whatever
+    /// data directory the service is running. Once that happened after a reverted upgrade, every start failed,
+    /// and a later release could not upgrade the store either, because its first step starts the old cluster.
+    ///
+    /// <para>The fix has to be in the file. A <c>-c maintenance_work_mem=...</c> on the command line does not
+    /// help: measured on 17.10, the server still validates the file's value and refuses to start. Appending a
+    /// later assignment does help, because PostgreSQL uses only the last occurrence. Never throws: the files
+    /// are only read and appended to, and an I/O failure leaves the store failing the way it already would
+    /// have, with a warning explaining why.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal void HealLegacyMaintenanceWorkMem(string dataDirectory)
+    {
+        try
+        {
+            if (FindLegacyMaintenanceWorkMemOverLimit(dataDirectory) is { } overLimit)
+            {
+                File.AppendAllText(Path.Combine(dataDirectory, "postgresql.conf"), BuildLegacyMaintenanceWorkMemCapConfAppend());
+                LogLegacyMaintenanceWorkMemCap(overLimit);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not check or fix maintenance_work_mem in {DataDirectory} ({Message}). On PostgreSQL 17, a value over {LimitKb} kB stops the server from starting.",
+                dataDirectory, ex.Message, LegacyMaintenanceWorkMemMaxKb);
+        }
     }
 
     /// <summary>
@@ -813,8 +1341,17 @@ public sealed class DarlingManagedPostgres
     /// own semantics, and is what lets this converge instead of latching.</para>
     /// </summary>
     internal static bool ConfHasCurrentHardwareFingerprint(string conf, string expectedFingerprint)
+        => LastLineWithPrefixEquals(conf, ConfHardwareFingerprintPrefix, expectedFingerprint);
+
+    /// <summary>
+    /// Whether the LAST line in <paramref name="conf"/> that starts with <paramref name="prefix"/> is exactly
+    /// <paramref name="expectedLine"/> — the one comparison both every-start heals share (v8's fingerprint,
+    /// v12's stamp; #3802 extracted it so the two cannot drift in what "current" means). Last, not any: see
+    /// <see cref="ConfHasCurrentHardwareFingerprint"/> for why a Contains test latches on a stale block.
+    /// </summary>
+    private static bool LastLineWithPrefixEquals(string conf, string prefix, string expectedLine)
     {
-        var lastIndex = conf.LastIndexOf(ConfHardwareFingerprintPrefix, StringComparison.Ordinal);
+        var lastIndex = conf.LastIndexOf(prefix, StringComparison.Ordinal);
         if (lastIndex < 0)
         {
             return false;
@@ -822,23 +1359,84 @@ public sealed class DarlingManagedPostgres
 
         var lineEnd = conf.IndexOf('\n', lastIndex);
         var line = lineEnd < 0 ? conf[lastIndex..] : conf[lastIndex..lineEnd];
-        return string.Equals(line.TrimEnd('\r'), expectedFingerprint, StringComparison.Ordinal);
+        return string.Equals(line.TrimEnd('\r'), expectedLine, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// Whether the v8 block should be appended on this start (#2845) — the whole decision as one pure
-    /// function so the property can be pinned without a data directory.
+    /// Whether the v8 block should be appended on this start (#2845; the second and third conditions are
+    /// #4207's heal for a store resized BEFORE that fix shipped) — the whole decision as one pure function
+    /// so the property can be pinned without a data directory.
     ///
-    /// <para>Two conditions, and the FIRST is the one that is easy to get wrong: the RAM reading must be
-    /// authoritative. A non-authoritative reading is not evidence that the hardware is unchanged, it is the
-    /// absence of evidence either way — and re-deriving production sizing from a number we could not read is
-    /// worse than leaving the last good block in force. It also stops a flapping Win32 call from minting a
-    /// novel fingerprint on every blip and appending a block each time, which a value-only guard cannot do
-    /// because the fallback it would guard against is a live, varying quantity rather than a fixed
-    /// sentinel.</para>
+    /// <para>The RAM reading must be authoritative for ANY of the three conditions below to act — checked
+    /// first, and short-circuiting the rest. A non-authoritative reading is not evidence that the hardware
+    /// is unchanged, it is the absence of evidence either way — and re-deriving production sizing from a
+    /// number we could not read is worse than leaving the last good block in force. It also stops a
+    /// flapping Win32 call from minting a novel fingerprint on every blip and appending a block each time,
+    /// which a value-only guard cannot do because the fallback it would guard against is a live, varying
+    /// quantity rather than a fixed sentinel.</para>
+    ///
+    /// <para><b>Given an authoritative reading, any of three conditions triggers a heal:</b></para>
+    /// <list type="bullet">
+    /// <item>the newest fingerprint in the conf does not match today's inputs (#2845's original condition —
+    /// a genuine hardware or hypertable-count change).</item>
+    /// <item>the conf holds MORE THAN ONE v8 block (<see cref="FindHardwareSizingBlockSpans"/>). #4225 made
+    /// a fingerprint change collapse to a single rewritten block, but a store that had already accumulated
+    /// duplicates before that fix shipped has no fingerprint change left to trigger on — its newest
+    /// fingerprint already matches, so the first condition alone would leave the duplicates in place
+    /// forever.</item>
+    /// <item>the newest block's content does not match what THIS BUILD would write for those same inputs
+    /// (<see cref="NewestHardwareSizingBlockIsCurrent"/>), even though its fingerprint line matches. A block
+    /// written by an older build — before <c>work_mem</c> rejoined this list in #4207 — fingerprints as
+    /// "current" for its RAM and hypertable count, because the fingerprint encodes only those two inputs,
+    /// never the formula version that turned them into settings. Without this condition, that store would
+    /// never re-derive: nothing about its hardware ever changes again, so the first condition never fires
+    /// either.</item>
+    /// </list>
     /// </summary>
-    internal static bool ShouldAppendHardwareSizing(string conf, bool ramReadingIsAuthoritative, string expectedFingerprint)
-        => ramReadingIsAuthoritative && !ConfHasCurrentHardwareFingerprint(conf, expectedFingerprint);
+    internal static bool ShouldAppendHardwareSizing(
+        string conf, bool ramReadingIsAuthoritative, string expectedFingerprint, string expectedBlockAppend)
+        => ramReadingIsAuthoritative
+            && (!ConfHasCurrentHardwareFingerprint(conf, expectedFingerprint)
+                || FindHardwareSizingBlockSpans(conf).Count > 1
+                || !NewestHardwareSizingBlockIsCurrent(conf, expectedBlockAppend));
+
+    /// <summary>
+    /// True when the LAST v8 block in <paramref name="conf"/> is, line for line, the text
+    /// <see cref="BuildHardwareSizingConfAppend"/> would write for the current inputs (#4207) — the
+    /// stale-CONTENT half of <see cref="ShouldAppendHardwareSizing"/>'s decision, checked even when the
+    /// fingerprint line itself already matches (see that method's remarks for why fingerprint-only misses a
+    /// block written by an older formula).
+    ///
+    /// <para>False when there is no v8 block at all: that reads as "not current" and defers to
+    /// <see cref="ReplaceOrAppendHardwareSizingBlock"/>'s plain-append fallback, the same v2-v7 shape as
+    /// before.</para>
+    ///
+    /// <para>Line endings are normalised before comparing. <paramref name="conf"/> can be CRLF — this file
+    /// is written and hand-edited on Windows — while every <c>Build*ConfAppend</c> in this class emits LF
+    /// only, so a byte comparison would read every CRLF conf as permanently stale and rewrite it on every
+    /// single start.</para>
+    /// </summary>
+    internal static bool NewestHardwareSizingBlockIsCurrent(string conf, string expectedBlockAppend)
+    {
+        var spans = FindHardwareSizingBlockSpans(conf);
+        if (spans.Count == 0)
+        {
+            return false;
+        }
+
+        var (start, end) = spans[^1];
+        var actual = conf[start..end];
+
+        /* expectedBlockAppend carries the same leading blank-line separator BuildHardwareSizingConfAppend
+           always does; a block SPAN never includes that separator (see FindHardwareSizingBlockEnd), so it
+           is stripped here to compare like with like. */
+        var expected = expectedBlockAppend.StartsWith('\n') ? expectedBlockAppend[1..] : expectedBlockAppend;
+
+        return string.Equals(
+            actual.Replace("\r\n", "\n", StringComparison.Ordinal),
+            expected.Replace("\r\n", "\n", StringComparison.Ordinal),
+            StringComparison.Ordinal);
+    }
 
     /// <summary>
     /// The v8 hardware-sizing block (#2845): re-states the settings that are a pure function of the
@@ -849,9 +1447,30 @@ public sealed class DarlingManagedPostgres
     /// was raised for — a planner hint with no allocation, found at 11.86 GB (75% of 16 GB) on hosts that
     /// now have 31.5 GB, which biases the planner toward sequential scans on a store serving ~670k small
     /// index lookups a day. <c>maintenance_work_mem</c> is a per-operation CEILING that PostgreSQL grows
-    /// into rather than reserves, so re-deriving it cannot overcommit. The two worker settings are
-    /// restart-only counts of background slots that only ever grow as collectors are added, and re-stating
-    /// them is what finally makes the v2 block's "never goes stale" claim true.</para>
+    /// into rather than reserves, so re-deriving it cannot overcommit. <c>work_mem</c> re-joined this list in
+    /// #4207: see the bullet below for why v3's original exclusion in #2845 does not hold up. The two worker
+    /// settings are restart-only counts of background slots that only ever grow as collectors are added, and
+    /// re-stating them is what finally makes the v2 block's "never goes stale" claim true.</para>
+    ///
+    /// <para><b>work_mem WAS excluded (#2845); #4207 measured why that was wrong.</b> The original argument
+    /// was that the formula would take it 31 MB -> ~63 MB at 31.5 GB and the only measurements above 31 MB on
+    /// the heaviest read were WORSE: PlanRegressionSql at default 26,565 ms, at 31 MB 25,617 ms, and at
+    /// <b>512 MB</b> 59,323 ms. That comparison never tested the value this formula actually derives — 512 MB
+    /// is 8x <see cref="DeriveMemorySettings"/>'s own 64 MB ceiling, a value nothing in this codebase would
+    /// ever write, so the regression it found says nothing about the ~63 MB case. What #2845 left unmeasured,
+    /// #4207 measured directly: three field stores stuck at the v3 block's 31 MB (16 GB-derived) after a
+    /// resize spilled <b>33 TB and 7 TB</b> of <c>pg_stat_database.temp_bytes</c> to disk since creation, on
+    /// hosts reporting 33,788,809,216 bytes — nominally "31.5 GiB", actually 31.47 GiB, which
+    /// <see cref="QuantizeRam"/> rounds DOWN to 31 GB (the 31.5 GB midpoint rounds up; this reading is half a
+    /// GB short of it) and <see cref="DeriveMemorySettings"/> turns into <b>62 MB</b>, not the round "63 MB"
+    /// the issue's own back-of-envelope RAM/512 gave for a bare 31.5 GiB. Either figure is what nothing
+    /// re-applied — the exact staleness this whole block exists to heal, just for the one setting it skipped.
+    /// The claim that
+    /// <c>work_mem</c> is "not a property of the machine" is also narrower than it reads: the formula's own
+    /// ceiling (RAM/512, clamped 16-64 MB) is deliberately modest specifically BECAUSE it is a per-connection,
+    /// per-sort cost against a machine with a fixed amount of RAM (see <see cref="DeriveMemorySettings"/>),
+    /// and a spill that costs disk I/O and wall-clock time is worse than the same query having had the RAM
+    /// its own host was sized to offer.</para>
     ///
     /// <para><b>What it deliberately does NOT emit, and why the omissions are the load-bearing part.</b></para>
     /// <list type="bullet">
@@ -864,14 +1483,8 @@ public sealed class DarlingManagedPostgres
     ///   any host above 4 GB, so a hardware change cannot move it and emitting it would buy nothing. The
     ///   reason to leave it out is the FUTURE one: if the cap is ever raised deliberately, that is a formula
     ///   change and belongs to a version-keyed block where it gets reviewed, not something a resize should
-    ///   silently propagate to production.</item>
-    /// <item><b>work_mem</b> — EXCLUDED. The formula would take it 31 MB -> 63 MB at 31.5 GB, and the only
-    ///   measurements above 31 MB on this store's heaviest read are WORSE: PlanRegressionSql at default
-    ///   26,565 ms, at 31 MB 25,617 ms, at 512 MB 59,323 ms (#2845). 63 MB is not 512 MB and no one has
-    ///   measured it, which is the point — the evidence that exists points the wrong way, so a resize is
-    ///   not the moment to move it. The deeper reason is that it does not belong to this block at all:
-    ///   everything here is a property of the MACHINE, while work_mem is a per-sort, per-connection ceiling
-    ///   whose right value follows from the QUERY MIX. The hardware changed; the sort behaviour did not.</item>
+    ///   silently propagate to production. work_mem has no such structural reason: nothing caps its formula
+    ///   to a value a hardware change cannot move, which is exactly why letting it go stale had a cost.</item>
     /// <item><b>max_parallel_workers</b> — not emitted because this class has never set it; it sits at the
     ///   PostgreSQL default of 8 regardless of core count. Deriving it from cores is a plausible want on a
     ///   16-core host, but it is a behaviour change rather than a staleness fix, and it multiplies the
@@ -882,10 +1495,10 @@ public sealed class DarlingManagedPostgres
     ///   to do, and fingerprinting it would append a block of identical values on every resize.</item>
     /// </list>
     ///
-    /// <para><b>Reload semantics.</b> <c>effective_cache_size</c> and <c>maintenance_work_mem</c> are
-    /// SIGHUP-reloadable; the two worker settings are restart-only. The append runs before
-    /// <c>pg_ctl start</c> on a service-owned start, so in practice the whole block takes effect on that
-    /// very start — the same story as v3 and v7.</para>
+    /// <para><b>Reload semantics.</b> <c>effective_cache_size</c>, <c>maintenance_work_mem</c> and
+    /// <c>work_mem</c> are all SIGHUP-reloadable; the two worker settings are restart-only. The append runs
+    /// before <c>pg_ctl start</c> on a service-owned start, so in practice the whole block takes effect on
+    /// that very start — the same story as v3 and v7.</para>
     /// </summary>
     internal static string BuildHardwareSizingConfAppend(long totalPhysicalMemoryBytes, int hypertableCount)
     {
@@ -898,8 +1511,155 @@ public sealed class DarlingManagedPostgres
         builder.Append(BuildHardwareFingerprint(totalPhysicalMemoryBytes, hypertableCount)).Append('\n');
         builder.Append("effective_cache_size = ").Append(settings.EffectiveCacheSizeMb).Append("MB\n");
         builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
+        builder.Append("work_mem = ").Append(settings.WorkMemMb).Append("MB\n");
         builder.Append("timescaledb.max_background_workers = ").Append(workers.MaxBackgroundWorkers).Append('\n');
         builder.Append("max_worker_processes = ").Append(workers.MaxWorkerProcesses).Append('\n');
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The [start, end) span of the v8 block whose marker begins at <paramref name="markerStart"/>: from the
+    /// marker line through the last content line before the next blank line, or end of file (#4207).
+    ///
+    /// <para><b>Why this is the rule, when the marker carries no end sentinel of its own</b> (unlike the
+    /// begin/end pair <see cref="ReconcilePgHba"/> replaces between). <see cref="BuildHardwareSizingConfAppend"/>,
+    /// like every <c>Build*ConfAppend</c> in this file, writes its block as ONE leading blank line — the
+    /// separator from whatever came before, itself OUTSIDE the block — followed by the marker and then
+    /// content lines with NO blank line between them. So the first blank line found after the marker is
+    /// always the start of what follows: either the next block's own leading separator, or trailing
+    /// whitespace at end of file. That holds for a v8 block written by ANY version of the builder, past or
+    /// future, not only today's line count — a setting added to or removed from the block moves where the
+    /// next blank line falls without this rule having to change.</para>
+    ///
+    /// <para><b>Known edge case.</b> An operator line spliced in directly after a v8 block's last setting
+    /// line, with NO blank line of its own before it, reads as more content of that block rather than as
+    /// something outside it — every block this codebase writes is blank-line-separated from what follows
+    /// (each <c>Build*ConfAppend</c> begins with its own leading blank line), so this only bites a hand edit
+    /// that does not follow that convention. <c>ALTER SYSTEM</c> (postgresql.auto.conf) is unaffected either
+    /// way, since this function never reads that file.</para>
+    /// </summary>
+    /// <remarks>Internal, not private (#4214): the body never mentions v8 specifically — it walks from a
+    /// marker line to the next blank line or EOF, which is the same shape every <c>Build*ConfAppend</c> in
+    /// this class writes. The host-profile check's generic managed-block scan reuses this exact walk for
+    /// EVERY marker rather than re-implementing it, so the two cannot drift on what "a block's span" means.</remarks>
+    internal static int FindHardwareSizingBlockEnd(string conf, int markerStart)
+    {
+        var cursor = conf.IndexOf('\n', markerStart);
+        if (cursor < 0)
+        {
+            return conf.Length;
+        }
+
+        cursor++;
+        while (cursor < conf.Length)
+        {
+            var lineEnd = conf.IndexOf('\n', cursor);
+            var line = lineEnd < 0 ? conf[cursor..] : conf[cursor..lineEnd];
+            if (line.TrimEnd('\r').Length == 0)
+            {
+                return cursor;
+            }
+
+            if (lineEnd < 0)
+            {
+                return conf.Length;
+            }
+
+            cursor = lineEnd + 1;
+        }
+
+        return cursor;
+    }
+
+    /// <summary>
+    /// Every v8 block's [start, end) span in <paramref name="conf"/>, in file order — file order being
+    /// append order, so the first span is also the chronologically first block (#4207). On each of the three
+    /// field stores this returns three spans, one per fingerprint change since the store's creation, because
+    /// the prior code appended a fresh block on every change instead of replacing the one it superseded.
+    /// <see cref="ReplaceOrAppendHardwareSizingBlock"/> is what collapses them.
+    /// </summary>
+    internal static List<(int Start, int End)> FindHardwareSizingBlockSpans(string conf)
+    {
+        var spans = new List<(int Start, int End)>();
+        var searchFrom = 0;
+        while (true)
+        {
+            var markerStart = conf.IndexOf(ConfMarkerV8, searchFrom, StringComparison.Ordinal);
+            if (markerStart < 0)
+            {
+                break;
+            }
+
+            /* Defensive: the marker only means "a v8 block starts here" at the start of a line — it is
+               never written any other way — so a match that is not line-initial (impossible today, but
+               cheap to rule out) is skipped rather than treated as a block. */
+            if (markerStart > 0 && conf[markerStart - 1] != '\n')
+            {
+                searchFrom = markerStart + ConfMarkerV8.Length;
+                continue;
+            }
+
+            var end = FindHardwareSizingBlockEnd(conf, markerStart);
+            spans.Add((markerStart, end));
+            searchFrom = end;
+        }
+
+        return spans;
+    }
+
+    /// <summary>
+    /// Collapses however many v8 blocks <paramref name="conf"/> carries into exactly one, at the position of
+    /// the FIRST (#4207). Every block after the first is a leftover from the append-not-replace bug — a
+    /// stale copy the code once left behind on every fingerprint change — and is removed outright; the first
+    /// is rewritten in place with <paramref name="newBlockAppend"/>'s content (the same string
+    /// <see cref="BuildHardwareSizingConfAppend"/> returns for a plain append, leading blank line included).
+    /// No v8 block at all falls back to a plain append — the v2-v7 shape — so a cluster's first v8 write is
+    /// unchanged.
+    ///
+    /// <para>Nothing outside a v8 span is touched, INCLUDING the blank line that separates one block from the
+    /// next: that separator is not part of either block under <see cref="FindHardwareSizingBlockEnd"/>'s
+    /// rule, so removing a duplicate can leave a doubled blank line where three blocks once stood. That is
+    /// cosmetic — PostgreSQL ignores blank lines — and the alternative (also consuming the separator) would
+    /// touch a byte that is provably not part of any v8 block, which the pin on this function
+    /// (<c>ReplaceOrAppendHardwareSizingBlock_LinesOutsideBlocks_AreByteIdenticalAfterRewrite</c>) forbids.</para>
+    ///
+    /// <para><b>Why rewriting the FIRST block's position, not the last, keeps manual overrides winning
+    /// exactly as before.</b> postgresql.conf takes the LAST occurrence of a setting, so what decides a
+    /// manual edit's fate is only ITS position relative to wherever the v8 lines end up — and collapsing can
+    /// only move that position EARLIER in the file (to the first block) or leave it unchanged (already one
+    /// block), never later. An edit that already sat after every v8 block still sits after the single
+    /// survivor; an edit that already lost to a later v8 block was losing before this function ever ran, for
+    /// the same reason. <c>ALTER SYSTEM</c> values in <c>postgresql.auto.conf</c> are unaffected either way —
+    /// that file is read after postgresql.conf in its entirety and outranks anything this function does.</para>
+    /// </summary>
+    internal static string ReplaceOrAppendHardwareSizingBlock(string conf, string newBlockAppend)
+    {
+        var spans = FindHardwareSizingBlockSpans(conf);
+        if (spans.Count == 0)
+        {
+            return conf + newBlockAppend;
+        }
+
+        /* newBlockAppend carries the same leading blank line every Build*ConfAppend does; splicing it in at
+           an existing marker's position would double that separator, since the blank line already there
+           (untouched, being outside the span by definition) still precedes it. */
+        var content = newBlockAppend.StartsWith('\n') ? newBlockAppend[1..] : newBlockAppend;
+
+        var builder = new StringBuilder(conf.Length + content.Length);
+        var cursor = 0;
+        for (var i = 0; i < spans.Count; i++)
+        {
+            var (start, end) = spans[i];
+            builder.Append(conf, cursor, start - cursor);
+            if (i == 0)
+            {
+                builder.Append(content);
+            }
+
+            cursor = end;
+        }
+
+        builder.Append(conf, cursor, conf.Length - cursor);
         return builder.ToString();
     }
 
@@ -956,6 +1716,922 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
+    /* ===================== v13 statement statistics (#3899) ===================== */
+
+    /// <summary>The library the v13 block adds to <c>shared_preload_libraries</c>.</summary>
+    public const string StatementStatisticsLibrary = "pg_stat_statements";
+
+    /// <summary>The library v1 preloads, and the base the v13 merge falls back to when the conf carries no
+    /// active assignment. A managed conf always carries one by then, because v1 is appended first.</summary>
+    internal const string TimescaleLibrary = "timescaledb";
+
+    /// <summary>The list-valued setting the v13 block restates.</summary>
+    internal const string PreloadSetting = "shared_preload_libraries";
+
+    /// <summary>PostgreSQL's own cap on configuration-file nesting (<c>CONF_FILE_MAX_DEPTH</c>), so an include
+    /// cycle ends where the server's own read of it would.</summary>
+    internal const int MaxConfIncludeDepth = 10;
+
+    /// <summary>
+    /// The v13 block (#3899): <c>shared_preload_libraries</c> re-stated as the effective list plus
+    /// <see cref="StatementStatisticsLibrary"/>, and <c>pg_stat_statements.track_utility = off</c>. See
+    /// <see cref="ConfMarkerV13"/> for why the list is merged rather than written, and why utility tracking
+    /// must be off. Carries no fingerprint or stamp line, so neither every-start check reads it.
+    /// </summary>
+    public static string BuildStatementStatisticsConfAppend(string? effectivePreloadList)
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV13).Append('\n');
+        builder.Append(PreloadSetting).Append(" = '")
+            .Append(EscapeConfValue(MergePreloadLibraries(effectivePreloadList)))
+            .Append("'\n");
+        builder.Append(StatementStatisticsLibrary).Append(".track_utility = off\n");
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The effective preload list plus <see cref="StatementStatisticsLibrary"/>, order and spelling preserved,
+    /// duplicates dropped, in the conf-file form (<see cref="FormatPreloadList"/>). An absent or empty list
+    /// merges from <see cref="TimescaleLibrary"/> rather than from nothing: on a fresh cluster the only active
+    /// assignment is v1's, and a merge that lost it would stop the store loading TimescaleDB.
+    /// </summary>
+    internal static string MergePreloadLibraries(string? effectivePreloadList) =>
+        FormatPreloadList(MergePreloadLibraryNames(effectivePreloadList));
+
+    /// <summary><see cref="MergePreloadLibraries"/>'s names, before they are written in either form.</summary>
+    internal static List<string> MergePreloadLibraryNames(string? effectivePreloadList)
+    {
+        var libraries = ParsePreloadList(effectivePreloadList);
+        if (libraries.Count == 0)
+        {
+            libraries.Add(TimescaleLibrary);
+        }
+
+        if (!libraries.Contains(StatementStatisticsLibrary, StringComparer.OrdinalIgnoreCase))
+        {
+            libraries.Add(StatementStatisticsLibrary);
+        }
+
+        return libraries;
+    }
+
+    /// <summary>
+    /// A <c>shared_preload_libraries</c> value as its library names, read the way PostgreSQL's own
+    /// <c>SplitDirectoriesString</c> reads it: comma-separated, an unquoted name trimmed, a double-quoted name
+    /// taken whole (commas included, <c>""</c> an escaped quote), no case folding. Blanks and case-insensitive
+    /// duplicates are dropped. The quoted form matters because it is how <c>ALTER SYSTEM</c> stores a name it
+    /// had to quote, including the one-literal mistake (<c>'"timescaledb,pg_stat_statements"'</c> is ONE
+    /// library name, which PostgreSQL cannot load); splitting it on its commas, as the first version did, hid
+    /// exactly that mistake.
+    /// </summary>
+    internal static List<string> ParsePreloadList(string? preloadList)
+    {
+        var libraries = new List<string>();
+        if (string.IsNullOrWhiteSpace(preloadList))
+        {
+            return libraries;
+        }
+
+        var i = 0;
+        while (i < preloadList.Length)
+        {
+            while (i < preloadList.Length && char.IsWhiteSpace(preloadList[i]))
+            {
+                i++;
+            }
+
+            if (i >= preloadList.Length)
+            {
+                break;
+            }
+
+            string name;
+            if (preloadList[i] == '"')
+            {
+                var quoted = new StringBuilder();
+                i++;
+                while (i < preloadList.Length)
+                {
+                    if (preloadList[i] == '"')
+                    {
+                        if (i + 1 < preloadList.Length && preloadList[i + 1] == '"')
+                        {
+                            quoted.Append('"');
+                            i += 2;
+                            continue;
+                        }
+
+                        i++;
+                        break;
+                    }
+
+                    quoted.Append(preloadList[i]);
+                    i++;
+                }
+
+                name = quoted.ToString();
+                while (i < preloadList.Length && preloadList[i] != ',')
+                {
+                    i++;
+                }
+            }
+            else
+            {
+                var start = i;
+                while (i < preloadList.Length && preloadList[i] != ',')
+                {
+                    i++;
+                }
+
+                name = preloadList[start..i].Trim();
+            }
+
+            i++;
+            if (name.Length > 0 && !libraries.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                libraries.Add(name);
+            }
+        }
+
+        return libraries;
+    }
+
+    /// <summary>
+    /// A value as the inside of a postgresql.conf single-quoted string: a backslash and a quote each escaped,
+    /// the two characters the conf file's own string syntax treats specially (<c>DeescapeQuotedString</c>
+    /// reads <c>\\</c> as one backslash). A library path such as <c>C:\libs\x</c> would otherwise come back as
+    /// <c>C:libsx</c> (#3915's review).
+    /// </summary>
+    internal static string EscapeConfValue(string value) =>
+        value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "''", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Whether PostgreSQL itself accepts <paramref name="preloadList"/> as a list, by <c>SplitDirectoriesString</c>'s
+    /// rules: empty is a valid list of nothing; otherwise every element is a non-empty unquoted name or a
+    /// closed double-quoted one, separated by commas, with nothing else between. PostgreSQL loads NOTHING from
+    /// a list it rejects (it logs "invalid list syntax" at LOG and carries on), TimescaleDB included, which is
+    /// why the coverage check reports it (#3915's review: a trailing comma read as fine here).
+    /// </summary>
+    internal static bool IsValidPreloadList(string? preloadList)
+    {
+        if (string.IsNullOrWhiteSpace(preloadList))
+        {
+            return true;
+        }
+
+        var i = 0;
+        while (i < preloadList.Length && char.IsWhiteSpace(preloadList[i]))
+        {
+            i++;
+        }
+
+        while (true)
+        {
+            if (i < preloadList.Length && preloadList[i] == '"')
+            {
+                i++;
+                while (true)
+                {
+                    var close = preloadList.IndexOf('"', i);
+                    if (close < 0)
+                    {
+                        return false;
+                    }
+
+                    if (close + 1 < preloadList.Length && preloadList[close + 1] == '"')
+                    {
+                        i = close + 2;
+                        continue;
+                    }
+
+                    i = close + 1;
+                    break;
+                }
+            }
+            else
+            {
+                var start = i;
+                var nameEnd = i;
+                while (i < preloadList.Length && preloadList[i] != ',')
+                {
+                    if (!char.IsWhiteSpace(preloadList[i]))
+                    {
+                        nameEnd = i + 1;
+                    }
+
+                    i++;
+                }
+
+                if (nameEnd == start)
+                {
+                    return false;
+                }
+            }
+
+            while (i < preloadList.Length && char.IsWhiteSpace(preloadList[i]))
+            {
+                i++;
+            }
+
+            if (i >= preloadList.Length)
+            {
+                return true;
+            }
+
+            if (preloadList[i] != ',')
+            {
+                return false;
+            }
+
+            i++;
+            while (i < preloadList.Length && char.IsWhiteSpace(preloadList[i]))
+            {
+                i++;
+            }
+        }
+    }
+
+    /// <summary>Library names as a conf-file list value: comma-joined, a name double-quoted only when it has to
+    /// be (a comma, a double quote, or edge whitespace in it), which <see cref="ParsePreloadList"/> reads back
+    /// whole.</summary>
+    internal static string FormatPreloadList(IEnumerable<string> libraries) =>
+        string.Join(",", libraries.Select(library =>
+            library.IndexOfAny([',', '"']) >= 0 || library.Trim().Length != library.Length
+                ? "\"" + library.Replace("\"", "\"\"", StringComparison.Ordinal) + "\""
+                : library));
+
+    /// <summary>
+    /// Library names as the right-hand side of <c>ALTER SYSTEM SET shared_preload_libraries = ...</c>: ONE
+    /// single-quoted literal per library, comma-separated. The setting is <c>GUC_LIST_QUOTE</c>, so a single
+    /// literal holding the whole list is stored as one library name and the store will not start again
+    /// (reproduced on 18.4 by #3904's review, which caught the first version's warning advising exactly that).
+    /// </summary>
+    internal static string FormatAlterSystemPreloadList(IEnumerable<string> libraries) =>
+        string.Join(", ", libraries.Select(library => "'" + library.Replace("'", "''", StringComparison.Ordinal) + "'"));
+
+    /// <summary>
+    /// Every assignment line in postgresql.conf-format text, in order, as PostgreSQL reads it: its 1-based line,
+    /// its name and its value. Commented and blank lines are skipped, the <c>=</c> is optional (PostgreSQL
+    /// accepts <c>name value</c>), a quoted value is de-escaped the server's way (<see cref="ParseConfValue"/>)
+    /// and an unquoted one ends at whitespace or a trailing comment. Include directives come back as ordinary
+    /// assignments; <see cref="ReadConfAssignments"/> is what follows them.
+    /// </summary>
+    internal static IEnumerable<(int Line, string Name, string Value)> ParseConfText(string? confText)
+    {
+        if (string.IsNullOrEmpty(confText))
+        {
+            yield break;
+        }
+
+        var lineNumber = 0;
+        foreach (var raw in confText.Split('\n'))
+        {
+            lineNumber++;
+            if (TryParseConfLine(raw, out var key, out var value))
+            {
+                yield return (lineNumber, key, value);
+            }
+        }
+    }
+
+    /// <summary>One active assignment of a setting: the file it is in (a full path), its 1-based line, and its
+    /// value as PostgreSQL reads it.</summary>
+    internal readonly record struct ConfAssignment(string File, int Line, string Value);
+
+    /// <summary>
+    /// Every active assignment of <paramref name="name"/> reachable from <paramref name="confPath"/>, in the order
+    /// PostgreSQL processes them, so the LAST is the one in force (before <c>postgresql.auto.conf</c>, which is
+    /// read after all of it). Follows <c>include</c>, <c>include_if_exists</c> and <c>include_dir</c> the way
+    /// the server does: a relative path resolves against the including file's directory, a directory
+    /// contributes its <c>*.conf</c> files not starting with a dot in name order, and nesting stops at
+    /// <see cref="MaxConfIncludeDepth"/>. A file that cannot be read contributes nothing (a missing
+    /// <c>include</c> stops the server itself, which is not this reader's to report).
+    ///
+    /// <para>Why includes are followed (#3904's review): the v13 block is appended at the END of
+    /// postgresql.conf, after every include above it, so a preload list an operator set in an included file is
+    /// one the block replaces. Merging from postgresql.conf's own text alone would drop that operator's
+    /// libraries without a word.</para>
+    /// </summary>
+    internal static List<ConfAssignment> ReadConfAssignments(string confPath, string name)
+    {
+        var found = new List<ConfAssignment>();
+        var filesRead = 0;
+        CollectConfAssignments(Path.GetFullPath(confPath), name, found, depth: 0, ref filesRead);
+        return found;
+    }
+
+    /// <summary>The most files one read of the conf chain opens. PostgreSQL refuses an include cycle once it
+    /// nests past <see cref="MaxConfIncludeDepth"/>, but a cycle that fans out (a directory including itself
+    /// twice) would be re-read exponentially before that depth; this runs on the start path, so it stops at a
+    /// budget no real configuration comes near (#3915's review).</summary>
+    internal const int MaxConfFilesRead = 64;
+
+    private static void CollectConfAssignments(string path, string name, List<ConfAssignment> found, int depth, ref int filesRead)
+    {
+        if (depth > MaxConfIncludeDepth || filesRead >= MaxConfFilesRead)
+        {
+            return;
+        }
+
+        filesRead++;
+        string text;
+        try
+        {
+            text = File.ReadAllText(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        var directory = Path.GetDirectoryName(path) ?? string.Empty;
+        foreach (var (lineNumber, key, value) in ParseConfText(text))
+        {
+            if (key.Equals("include", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("include_if_exists", StringComparison.OrdinalIgnoreCase))
+            {
+                if (TryResolveConfPath(directory, value, out var included))
+                {
+                    CollectConfAssignments(included, name, found, depth + 1, ref filesRead);
+                }
+            }
+            else if (key.Equals("include_dir", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryResolveConfPath(directory, value, out var includeDirectory))
+                {
+                    continue;
+                }
+
+                string[] files;
+                try
+                {
+                    files = Directory.Exists(includeDirectory) ? Directory.GetFiles(includeDirectory) : [];
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    files = [];
+                }
+
+                foreach (var file in files
+                    .Where(f => Path.GetFileName(f) is { } n && n.EndsWith(".conf", StringComparison.Ordinal) && !n.StartsWith('.'))
+                    .OrderBy(f => Path.GetFileName(f), StringComparer.Ordinal))
+                {
+                    CollectConfAssignments(file, name, found, depth + 1, ref filesRead);
+                }
+            }
+            else if (key.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                found.Add(new ConfAssignment(path, lineNumber, value));
+            }
+        }
+    }
+
+    /// <summary>An include directive's path, resolved against the including file's directory the way the
+    /// server resolves it; false for an empty value, one that is not a path this platform can resolve, or a UNC
+    /// path (the service would reach out to a network share as its own identity on the start path), each of
+    /// which contributes nothing rather than throwing or leaving the machine.</summary>
+    private static bool TryResolveConfPath(string directory, string value, out string fullPath)
+    {
+        fullPath = string.Empty;
+        if (value.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            fullPath = Path.GetFullPath(Path.Combine(directory, value));
+            return !fullPath.StartsWith(@"\\", StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>One postgresql.conf line as <c>name [=] value</c>, or false for a blank, a comment, or a line
+    /// that is not an assignment. The name is PostgreSQL's identifier shape, dots included for a module's own
+    /// settings.</summary>
+    private static bool TryParseConfLine(string raw, out string key, out string value)
+    {
+        key = string.Empty;
+        value = string.Empty;
+
+        var line = raw.Trim();
+        if (line.Length == 0 || line[0] == '#')
+        {
+            return false;
+        }
+
+        var end = 0;
+        while (end < line.Length && (char.IsLetterOrDigit(line[end]) || line[end] is '_' or '.' || line[end] >= '\u0080'))
+        {
+            end++;
+        }
+
+        if (end == 0 || (end < line.Length && line[end] != '=' && !char.IsWhiteSpace(line[end])))
+        {
+            return false;
+        }
+
+        key = line[..end];
+        var rest = line[end..].TrimStart();
+        if (rest.StartsWith('='))
+        {
+            rest = rest[1..].TrimStart();
+        }
+
+        value = ParseConfValue(rest);
+        return true;
+    }
+
+    /// <summary>
+    /// One value as the conf file's lexer and <c>DeescapeQuotedString</c> read it: an unquoted value ends at
+    /// whitespace or a comment; a quoted one ends at its closing quote, with <c>''</c> a quote and a backslash
+    /// escaping the next character (<c>\b \f \n \r \t</c>, up to three octal digits, and anything else, a
+    /// backslash and a quote included, as itself). The first version read <c>\\'</c> as an escaped quote and ran
+    /// a value ending in a backslash, such as an include directory, on to the end of the line (#3915's review).
+    /// </summary>
+    private static string ParseConfValue(string text)
+    {
+        if (!text.StartsWith('\''))
+        {
+            var end = 0;
+            while (end < text.Length && !char.IsWhiteSpace(text[end]) && text[end] != '#')
+            {
+                end++;
+            }
+
+            return text[..end];
+        }
+
+        var builder = new StringBuilder();
+        for (var i = 1; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c == '\\' && i + 1 < text.Length)
+            {
+                var escaped = text[++i];
+                switch (escaped)
+                {
+                    case 'b':
+                        builder.Append('\b');
+                        break;
+                    case 'f':
+                        builder.Append('\f');
+                        break;
+                    case 'n':
+                        builder.Append('\n');
+                        break;
+                    case 'r':
+                        builder.Append('\r');
+                        break;
+                    case 't':
+                        builder.Append('\t');
+                        break;
+                    case >= '0' and <= '7':
+                        var octal = escaped - '0';
+                        for (var digits = 1; digits < 3 && i + 1 < text.Length && text[i + 1] is >= '0' and <= '7'; digits++)
+                        {
+                            octal = (octal * 8) + (text[++i] - '0');
+                        }
+
+                        builder.Append((char)(octal & 0xFF));
+                        break;
+                    default:
+                        builder.Append(escaped);
+                        break;
+                }
+            }
+            else if (c == '\'')
+            {
+                if (i + 1 < text.Length && text[i + 1] == '\'')
+                {
+                    builder.Append('\'');
+                    i++;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            else
+            {
+                builder.Append(c);
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The v13 every-start check (#3899): which <c>shared_preload_libraries</c> assignment is IN FORCE, across
+    /// postgresql.conf with its includes and then <c>postgresql.auto.conf</c> (read last, so an
+    /// <c>ALTER SYSTEM</c> override wins), and whether it still loads what it should. Changes nothing, the v12
+    /// precedent: neither file is edited here. Four outcomes are logged, each with its exact fix:
+    /// <list type="bullet">
+    /// <item><description>The list in force is not a list PostgreSQL accepts (<see cref="IsValidPreloadList"/>,
+    /// a trailing comma say): the server loads nothing from it, TimescaleDB included. An Error.</description></item>
+    /// <item><description>The list in force names a library holding a comma: the one-literal <c>ALTER SYSTEM</c>
+    /// mistake, stored as ONE name PostgreSQL cannot load, so the store will not start. An Error, and a remedy
+    /// that works on a store that is down.</description></item>
+    /// <item><description>The list in force lacks <see cref="StatementStatisticsLibrary"/>: an <c>ALTER SYSTEM</c>
+    /// override, or an assignment an operator put after the v13 block, and the store records no statement
+    /// statistics until it names the library.</description></item>
+    /// <item><description>A library named by an EARLIER assignment is missing from the one in force. The v13
+    /// block restated the list once, when it was appended, so an operator who later adds a library to an earlier
+    /// line (v1's, or their own above the block) has an edit PostgreSQL ignores, because the later assignment
+    /// replaces the whole list. #3904's review found nothing said so.</description></item>
+    /// </list>
+    /// Never throws; a file that cannot be read contributes nothing.
+    /// </summary>
+    internal void LogStatementStatisticsPreloadCoverage(string dataDirectory)
+    {
+        var autoConfPath = Path.GetFullPath(Path.Combine(dataDirectory, "postgresql.auto.conf"));
+        var chain = ReadConfAssignments(Path.Combine(dataDirectory, "postgresql.conf"), PreloadSetting);
+        chain.AddRange(ReadConfAssignments(autoConfPath, PreloadSetting));
+        if (chain.Count == 0)
+        {
+            return;
+        }
+
+        var inForce = chain[^1];
+        var inForceLibraries = ParsePreloadList(inForce.Value);
+        var inAutoConf = string.Equals(inForce.File, autoConfPath, StringComparison.OrdinalIgnoreCase);
+
+        if (!IsValidPreloadList(inForce.Value))
+        {
+            var repaired = MergePreloadLibraryNames(inForce.Value);
+            _logger.LogError(
+                "{File} line {Line} sets shared_preload_libraries = '{Value}', which is not a list PostgreSQL accepts (an empty element, an unclosed double quote, or text after a closing one): the server logs 'invalid list syntax' and loads NO library from it, TimescaleDB included. {Fix}",
+                inForce.File, inForce.Line, inForce.Value,
+                inAutoConf
+                    ? $"Run ALTER SYSTEM SET shared_preload_libraries = {FormatAlterSystemPreloadList(repaired)} (one quoted literal per library) and restart the store."
+                    : $"Edit that line to shared_preload_libraries = '{EscapeConfValue(FormatPreloadList(repaired))}' and restart the store.");
+            return;
+        }
+
+        if (inForceLibraries.Any(library => library.Contains(',', StringComparison.Ordinal)))
+        {
+            var split = MergePreloadLibraryNames(string.Join(",", inForceLibraries));
+            _logger.LogError(
+                "{File} line {Line} sets shared_preload_libraries = '{Value}', which names ONE library holding commas: that is what ALTER SYSTEM stores when a whole list is passed as a single quoted literal. PostgreSQL cannot load it, so the store will not start (FATAL: could not access file). {Fix}",
+                inForce.File, inForce.Line, inForce.Value,
+                inAutoConf
+                    ? $"The store cannot start to run ALTER SYSTEM, so delete that line from postgresql.auto.conf by hand and start the store; then, to keep the list, run ALTER SYSTEM SET shared_preload_libraries = {FormatAlterSystemPreloadList(split)} (one quoted literal per library) and restart it again."
+                    : $"Edit that line to shared_preload_libraries = '{EscapeConfValue(FormatPreloadList(split))}' and start the store.");
+            return;
+        }
+
+        if (!inForceLibraries.Contains(StatementStatisticsLibrary, StringComparer.OrdinalIgnoreCase))
+        {
+            var suggested = MergePreloadLibraryNames(inForce.Value);
+            if (inAutoConf)
+            {
+                _logger.LogWarning(
+                    "postgresql.auto.conf sets shared_preload_libraries = '{Value}' (an ALTER SYSTEM override) without {Library}. PostgreSQL reads postgresql.auto.conf AFTER postgresql.conf, so the v13 block's preload is inert and the store records no statement statistics until the override includes it: ALTER SYSTEM SET shared_preload_libraries = {Suggested}, then restart the store. One quoted literal per library: a single literal holding the whole list is stored as one library name, and the store would not start. This service does not edit postgresql.auto.conf.",
+                    inForce.Value, StatementStatisticsLibrary, FormatAlterSystemPreloadList(suggested));
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "{File} line {Line} sets shared_preload_libraries = '{Value}' without {Library}, and it is the assignment in force: it is read after the v13 block, and a later assignment replaces the whole list, so the store records no statement statistics until it names the library. Change that line to shared_preload_libraries = '{Suggested}' and restart the store.",
+                    inForce.File, inForce.Line, inForce.Value, StatementStatisticsLibrary,
+                    EscapeConfValue(FormatPreloadList(suggested)));
+            }
+
+            return;
+        }
+
+        var overridden = new List<(string Library, ConfAssignment Where)>();
+        foreach (var earlier in chain.Take(chain.Count - 1))
+        {
+            foreach (var library in ParsePreloadList(earlier.Value))
+            {
+                if (!inForceLibraries.Contains(library, StringComparer.OrdinalIgnoreCase)
+                    && !overridden.Any(o => o.Library.Equals(library, StringComparison.OrdinalIgnoreCase)))
+                {
+                    overridden.Add((library, earlier));
+                }
+            }
+        }
+
+        foreach (var (library, where) in overridden)
+        {
+            _logger.LogWarning(
+                "{Library} is named by the shared_preload_libraries assignment at {File} line {Line}, but the assignment in force is {InForceFile} line {InForceLine} ('{InForceValue}'), which replaces the whole list, so it is not loaded. Add it to that line if it should load, or remove it from the earlier one if it should not.",
+                library, where.File, where.Line, inForce.File, inForce.Line, inForce.Value);
+        }
+    }
+
+    /* ===================== v15 WAL compression (#4246) ===================== */
+
+    /// <summary>
+    /// The v15 block: <c>wal_compression = lz4</c> only. See <see cref="ConfMarkerV15"/> for the measurement,
+    /// why lz4, why the checkpoint interval is held rather than shipped here, and why this deliberately does
+    /// not touch <c>max_wal_size</c>. Carries no fingerprint or stamp line, so the v8 and v12 staleness checks
+    /// are untouched by this block.
+    /// </summary>
+    public static string BuildWalVolumeConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV15).Append('\n');
+        builder.Append("wal_compression = lz4\n");
+        return builder.ToString();
+    }
+
+    /* ===================== v16 checkpoint interval (#4246) ===================== */
+
+    /// <summary>
+    /// The v16 block: <c>checkpoint_timeout = 15min</c> only. See <see cref="ConfMarkerV16"/> for the trial,
+    /// the sync-bar risk, and why this deliberately does not touch <c>max_wal_size</c>. Carries no fingerprint
+    /// or stamp line, so the v8 and v12 staleness checks are untouched by this block.
+    /// </summary>
+    public static string BuildCheckpointIntervalConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV16).Append('\n');
+        builder.Append("checkpoint_timeout = 15min\n");
+        return builder.ToString();
+    }
+
+    /* ===================== v17 log line prefix ===================== */
+
+    /// <summary>
+    /// The v17 block: <c>log_line_prefix = '%m [%p] %a '</c> only. See <see cref="ConfMarkerV17"/> for why
+    /// <c>%a</c>, PostgreSQL's own default, and the reader risk it carries. Carries no fingerprint or stamp
+    /// line, so the v8 and v12 staleness checks are untouched by this block.
+    /// </summary>
+    public static string BuildLogLinePrefixConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV17).Append('\n');
+        builder.Append("log_line_prefix = '%m [%p] %a '\n");
+        return builder.ToString();
+    }
+
+    /* ===================== planner page cost ===================== */
+
+    /// <summary>The setting <see cref="BuildPlannerPageCostConfAppend"/> writes.</summary>
+    internal const string RandomPageCostSetting = "random_page_cost";
+
+    /// <summary>The value <see cref="BuildPlannerPageCostConfAppend"/> writes: <c>1.1</c>.</summary>
+    internal const string RandomPageCostValue = "1.1";
+
+    /// <summary>
+    /// The planner page-cost block: <c>random_page_cost = 1.1</c> only. Rendered into
+    /// <c>darling-managed.conf</c> by <see cref="ManagedConfFile.RenderBody"/> and NOT appended to
+    /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker. A store whose conf still carries the
+    /// legacy blocks gets the line in <c>darling-managed.conf</c> when that conf migrates
+    /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), written at the same start as the rest of the file, so the
+    /// next start finds the file unchanged. That migration runs after the start and never reloads, so on such a
+    /// store the value is in force from the following start; every store already on the managed file has the line
+    /// written before <c>pg_ctl start</c>, so it is in force on the start that writes it.
+    ///
+    /// <para><b>Why.</b> The store lives on SSD-backed volumes (EBS gp3 at 3,000 to 6,000 provisioned IOPS in the
+    /// measured case). With PostgreSQL's default of 4 the planner prices a BRIN index's lossy heap pages as
+    /// random reads, and on a large production store it chose a sequential scan over the whole
+    /// <c>query_store_interval_wide</c> table for a 12-hour window (3.2 million blocks) even with a BRIN index
+    /// on <c>collection_time</c>. <c>SET LOCAL random_page_cost = 1.1</c> moved the 6-hour, 12-hour and 48-hour
+    /// windows onto the BRIN index: a 24-hour read took 4.3 s warm (about 37 s cold, at the volume's throughput cap) instead of 98.8 s cold on the full scan.</para>
+    ///
+    /// <para><b>Why 1.1 and not 1.0.</b> <c>seq_page_cost</c> stays at its default of 1.0. The PostgreSQL 18
+    /// documentation says the default of 4.0 assumes most random reads (indexed reads) are cached, that
+    /// network-attached storage latency shrinks the relative cost of random access, and that decreasing the
+    /// value is appropriate when data is largely cached or latency is high; it also says a value below
+    /// <c>seq_page_cost</c> is not physically sensible, and that setting the two equal only makes sense for a
+    /// database entirely in RAM. This store is on SSD-backed network volumes and is not entirely cached, so it
+    /// stays just above <c>seq_page_cost</c>. 1.1 is the measured figure, not a documented one.</para>
+    ///
+    /// <para><c>random_page_cost</c> is <c>user</c>-context, so a reload applies it. A value set
+    /// with <c>ALTER SYSTEM</c> lives in <c>postgresql.auto.conf</c> and wins over this file; nothing here reads
+    /// or writes that file.</para>
+    /// </summary>
+    public static string BuildPlannerPageCostConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(RandomPageCostSetting).Append(" = ").Append(RandomPageCostValue).Append('\n');
+        return builder.ToString();
+    }
+
+    /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
+
+    /// <summary>1 GB — the floor under the derived <c>max_wal_size</c>, and PostgreSQL's own default for it:
+    /// a volume that cannot afford more WAL than the server would have used anyway gets exactly that, and the
+    /// start's log line says so (see <see cref="ConfMarkerV12"/>).</summary>
+    internal const long WalSizingFloorBytes = 1L * 1024 * 1024 * 1024;
+
+    /// <summary>16 GB — the maintainer's chosen ceiling from #3802 (the figure applied out of band to the store
+    /// that exhibited the mechanism), NOT a measured optimum. Also where the crash-recovery price of a larger
+    /// WAL stops being worth paying for this write shape; see <see cref="ConfMarkerV12"/>.</summary>
+    internal const long WalSizingCeilingBytes = 16L * 1024 * 1024 * 1024;
+
+    /// <summary>80 MB — PostgreSQL's <c>min_wal_size</c> default, the floor under the quarter rule. Never the
+    /// binding term on the power-of-two ladder (the 1 GB rung yields 256 MB), coded so the formula is true of
+    /// itself rather than of the ladder.</summary>
+    internal const long MinWalSizeFloorBytes = 80L * 1024 * 1024;
+
+    /// <summary>The share of the data volume's free space the WAL ceiling may claim: one eighth, leaving seven
+    /// for the soft limit's overshoot, the store's own growth, and the disk-pressure self-alert.</summary>
+    internal const int WalSizingFreeDiskDivisor = 8;
+
+    /// <summary>
+    /// The PostgreSQL major whose release notes moved <c>checkpoint_completion_target</c>'s default from 0.5 to
+    /// 0.9 (PostgreSQL 14, E.25.3.1.9: <i>"Change checkpoint_completion_target default to 0.9 (Stephen Frost).
+    /// The previous default was 0.5."</i>). The v12 block pins 0.9 only on majors BELOW this one.
+    /// </summary>
+    internal const int CheckpointCompletionTargetDefaultChangedMajor = 14;
+
+    /// <summary>The value the v12 block pins on pre-14 majors — the default every later major ships with.</summary>
+    internal const string CheckpointCompletionTargetPin = "0.9";
+
+    /// <summary>
+    /// The three settings the v12 block may author, and therefore the keys
+    /// <see cref="FindWalSizingAutoConfOverrides"/> looks for in <c>postgresql.auto.conf</c>: an
+    /// <c>ALTER SYSTEM</c> on any of them outranks the block by PostgreSQL's precedence, and the start says so.
+    /// </summary>
+    internal static readonly string[] WalSizingSettingNames = { "max_wal_size", "min_wal_size", "checkpoint_completion_target" };
+
+    /// <summary>The two WAL sizes the v12 block derives from data-volume headroom, in whole MB.</summary>
+    internal readonly record struct WalSettings(int MaxWalSizeMb, int MinWalSizeMb);
+
+    /// <summary>
+    /// Derives the WAL sizing from the free space on the data volume — PURE and testable via an injected byte
+    /// count, the way <see cref="DeriveMemorySettings"/> derives from RAM (#3802).
+    ///
+    /// <para><c>max_wal_size</c> = <c>free / 8</c>, clamped to [1 GB, 16 GB], then FLOORED to the power-of-two
+    /// ladder 1, 2, 4, 8, 16 GB. The clamp is the formula; the ladder is what makes a check that runs on every
+    /// start converge instead of appending — a re-author needs the free space to halve or double, not to move
+    /// (see <see cref="ConfMarkerV12"/>). The rungs therefore sit at 16, 32, 64 and 128 GB free.
+    /// <c>min_wal_size</c> = <c>max(80 MB, max_wal_size / 4)</c>.</para>
+    ///
+    /// <para>A non-positive reading derives as ZERO free — the floor, PostgreSQL's own default — rather than
+    /// as some fallback volume, because "cannot afford it" is the only honest answer to "could not measure it".
+    /// The caller never passes one: <see cref="EnsureConfAppended"/> skips the whole v12 check without an
+    /// authoritative disk reading, exactly as v8 does without an authoritative RAM reading.</para>
+    /// </summary>
+    internal static WalSettings DeriveWalSettings(long freeDiskBytesOnDataVolume)
+    {
+        const long oneMb = 1024L * 1024L;
+
+        var free = Math.Max(0L, freeDiskBytesOnDataVolume);
+        var target = Math.Clamp(free / WalSizingFreeDiskDivisor, WalSizingFloorBytes, WalSizingCeilingBytes);
+
+        /* Floor to the ladder: the largest power-of-two multiple of the floor that does not exceed the clamped
+           target. Bounded by the ceiling, so this is at most four doublings. */
+        var maxWal = WalSizingFloorBytes;
+        while (maxWal * 2 <= target)
+        {
+            maxWal *= 2;
+        }
+
+        var minWal = Math.Max(MinWalSizeFloorBytes, maxWal / 4);
+
+        return new WalSettings((int)(maxWal / oneMb), (int)(minWal / oneMb));
+    }
+
+    /// <summary>
+    /// Whether the v12 block emits <c>checkpoint_completion_target = 0.9</c> for a store on this PostgreSQL
+    /// major: only BELOW 14, where the default was 0.5 (see
+    /// <see cref="CheckpointCompletionTargetDefaultChangedMajor"/>). An unknown major (0, from an unreadable
+    /// <c>PG_VERSION</c>) pins it — the pin is a no-op where the default is already 0.9 and the fix where it is
+    /// not, so emitting is the answer that cannot be wrong.
+    /// </summary>
+    internal static bool PinsCheckpointCompletionTarget(int postgresMajor)
+        => postgresMajor < CheckpointCompletionTargetDefaultChangedMajor;
+
+    /// <summary>
+    /// The <c>checkpoint_completion_target</c> clause of the v12 start line — what the block did about it and
+    /// why, for the major it saw. Three shapes: pinned on a known pre-14 major (naming the major and its old
+    /// 0.5 default), pinned on an unreadable major (saying so, and that the pin is harmless on 14+), or left at
+    /// the named major's own 0.9 default. Pure so the wording is pinned alongside the decision it reports.
+    /// </summary>
+    internal static string DescribeCheckpointCompletionTarget(int postgresMajor)
+    {
+        if (!PinsCheckpointCompletionTarget(postgresMajor))
+        {
+            return FormattableString.Invariant($"left at PostgreSQL {postgresMajor}'s default {CheckpointCompletionTargetPin}");
+        }
+
+        return postgresMajor > 0
+            ? FormattableString.Invariant($"pinned at {CheckpointCompletionTargetPin} (PostgreSQL {postgresMajor} defaulted to 0.5; 14 raised the default)")
+            : FormattableString.Invariant($"pinned at {CheckpointCompletionTargetPin} (PG_VERSION unreadable, so the pre-14 pin is emitted: a no-op on 14+, the fix before it)");
+    }
+
+    /// <summary>
+    /// The v12 stamp line for a derived sizing on a given major (#3802) — the outputs the block beneath it
+    /// carries, formatted invariantly so the comparison is a plain ordinal match on a machine with any locale.
+    /// Every input the block's CONTENT depends on is in here (both sizes and the major that decides the
+    /// checkpoint pin), so "the last stamp equals this one" means "the block in force is the block we would
+    /// write". The raw free-disk figure is deliberately NOT in it; see <see cref="ConfWalSizingStampPrefix"/>.
+    /// </summary>
+    internal static string BuildWalSizingStamp(WalSettings settings, int postgresMajor)
+        => FormattableString.Invariant(
+            $"{ConfWalSizingStampPrefix}max_wal_size_mb={settings.MaxWalSizeMb} min_wal_size_mb={settings.MinWalSizeMb} pg_major={postgresMajor}");
+
+    /// <summary>
+    /// True when the MOST RECENT v12 stamp in the conf equals <paramref name="expectedStamp"/> — the test that
+    /// decides whether <see cref="BuildWalSizingConfAppend"/> needs to run (#3802). Last, not any, for the v8
+    /// reason (<see cref="ConfHasCurrentHardwareFingerprint"/>): postgresql.conf takes the last occurrence, so a
+    /// volume that shrank and grew back would otherwise find its old stamp still present, skip, and leave the
+    /// shrunken block in force.
+    /// </summary>
+    internal static bool ConfHasCurrentWalSizingStamp(string conf, string expectedStamp)
+        => LastLineWithPrefixEquals(conf, ConfWalSizingStampPrefix, expectedStamp);
+
+    /// <summary>
+    /// The v12 block (#3802): the marker, the stamp, one comment line recording the headroom it was derived
+    /// from (so an operator reading postgresql.conf later can see WHY 8192MB without the service log), then
+    /// <c>max_wal_size</c> and <c>min_wal_size</c> in whole MB, and <c>checkpoint_completion_target = 0.9</c>
+    /// only on a pre-14 major. Pure: the same inputs write the same bytes, which is what lets the stamp stand
+    /// for the block. Takes the total-disk figure for the comment only — nothing is derived from it.
+    ///
+    /// <para>Carries no <see cref="ConfHardwareFingerprintPrefix"/> line, so the v8 staleness check's invariant
+    /// about what it reads is untouched; its own stamp sits under a different prefix for exactly that reason.
+    /// Supersedes v4's fixed <c>max_wal_size = 4GB</c> by last-occurrence-wins and restates nothing else — the
+    /// blocks compose, they do not compete.</para>
+    /// </summary>
+    internal static string BuildWalSizingConfAppend(long freeDiskBytesOnDataVolume, long totalDiskBytesOnDataVolume, int postgresMajor)
+    {
+        var settings = DeriveWalSettings(freeDiskBytesOnDataVolume);
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV12).Append('\n');
+        builder.Append(BuildWalSizingStamp(settings, postgresMajor)).Append('\n');
+        builder.Append("# derived from ").Append(FormatGb(freeDiskBytesOnDataVolume)).Append(" GB free of ")
+            .Append(FormatGb(totalDiskBytesOnDataVolume)).Append(" GB on the data volume: free / ")
+            .Append(WalSizingFreeDiskDivisor).Append(", floored to a power of two, clamped to ")
+            .Append(WalSizingFloorBytes / (1024L * 1024L)).Append("MB..").Append(WalSizingCeilingBytes / (1024L * 1024L)).Append("MB\n");
+        builder.Append("max_wal_size = ").Append(settings.MaxWalSizeMb).Append("MB\n");
+        builder.Append("min_wal_size = ").Append(settings.MinWalSizeMb).Append("MB\n");
+        if (PinsCheckpointCompletionTarget(postgresMajor))
+        {
+            builder.Append("checkpoint_completion_target = ").Append(CheckpointCompletionTargetPin).Append('\n');
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The WAL keys <c>postgresql.auto.conf</c> assigns, with the value each carries — the pure half of the
+    /// ALTER SYSTEM check (#3802). <c>ALTER SYSTEM</c> writes one <c>name = 'value'</c> line per setting and
+    /// rewrites the file on every change, so there is normally one assignment per key; the LAST one is taken
+    /// regardless, because that is what PostgreSQL honours. Comment lines (the file's own "Do not edit this
+    /// file manually!" header) and lines naming other settings are ignored. Null or empty text (no file, or an
+    /// empty one) yields no overrides. Values are returned as written, quotes included, so the log line shows
+    /// the operator exactly what the file says.
+    /// </summary>
+    internal static IReadOnlyList<(string Name, string Value)> FindWalSizingAutoConfOverrides(string? autoConfText)
+    {
+        var overrides = new List<(string Name, string Value)>();
+        if (string.IsNullOrWhiteSpace(autoConfText))
+        {
+            return overrides;
+        }
+
+        foreach (var raw in autoConfText.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=', StringComparison.Ordinal);
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            var name = line[..separator].Trim();
+            var matched = Array.Find(WalSizingSettingNames, n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
+            if (matched is null)
+            {
+                continue;
+            }
+
+            var assignment = line[(separator + 1)..];
+            var comment = assignment.IndexOf('#', StringComparison.Ordinal);
+            var value = (comment >= 0 ? assignment[..comment] : assignment).Trim();
+
+            /* Last assignment wins, so replace an earlier one for the same key rather than adding a second. */
+            overrides.RemoveAll(o => string.Equals(o.Name, matched, StringComparison.Ordinal));
+            overrides.Add((matched, value));
+        }
+
+        return overrides;
+    }
+
+    /// <summary>Bytes as whole-and-tenth gigabytes, invariant — the figure the v12 block's comment line and
+    /// the start's log line both carry, so they cannot disagree about what the block was derived from.</summary>
+    internal static string FormatGb(long bytes)
+        => (Math.Max(0L, bytes) / (1024d * 1024d * 1024d)).ToString("F1", CultureInfo.InvariantCulture);
+
     /// <summary>
     /// The derived managed-mode connection string: <c>127.0.0.1</c> + port + darling/darling + the
     /// generated password, carrying the collect/config <see cref="SearchPath"/> so every pooled connection
@@ -968,12 +2644,29 @@ public sealed class DarlingManagedPostgres
         => BuildRoleConnectionString(port, UserName, password);
 
     /// <summary>
+    /// Builds a non-pooled connection string for the #4215 migration's <c>pg_file_settings</c> snapshot. The
+    /// snapshot is a one-shot read that must land on the server this start just launched, never on a pooled
+    /// socket left over from an earlier server lifetime in the same process — the same stale-pool failure
+    /// fixed in <c>DarlingStoreUpgradeTests</c> (#4397).
+    /// </summary>
+    private static string MigrationSnapshotConnectionString(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        builder.Pooling = false;
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
     /// Builds a managed loopback connection string for a specific login role — shared by
     /// <see cref="BuildConnectionString"/> (the owner) and
     /// <see cref="TryBuildMcpConnectionStringFromStoredCredential"/> (the <c>mcp</c> role). Same
-    /// <c>127.0.0.1</c> + port + <see cref="SearchPath"/> shape; only the username/password differ.
+    /// <c>127.0.0.1</c> + port + <see cref="SearchPath"/> shape; only the username/password and
+    /// <paramref name="applicationName"/> differ. <paramref name="applicationName"/> is null for the
+    /// owner (whose <c>ApplicationName</c> stays Npgsql's default) and set for the <c>viewer</c>/<c>mcp</c>
+    /// roles (#4442 scope 2) so the connection names itself in <c>pg_stat_activity</c> without a store-side
+    /// change.
     /// </summary>
-    private static string BuildRoleConnectionString(int port, string username, string password)
+    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null)
     {
         var builder = new NpgsqlConnectionStringBuilder
         {
@@ -983,6 +2676,7 @@ public sealed class DarlingManagedPostgres
             Password = password,
             Database = DatabaseName,
             SearchPath = SearchPath,
+            ApplicationName = applicationName,
             /* #1559: bound the service's backend count. Every pooled Npgsql connection is a live
                postgres.exe PROCESS on Windows, and each spawn must re-reserve the shared memory
                region (the 487 surface) — a field box showed 43 backends during a 24-server sweep.
@@ -1046,7 +2740,7 @@ public sealed class DarlingManagedPostgres
             return null;
         }
 
-        return BuildRoleConnectionString(config.Port, McpRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()));
+        return BuildRoleConnectionString(config.Port, McpRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), McpApplicationName);
     }
 
     /// <summary>
@@ -1066,8 +2760,15 @@ public sealed class DarlingManagedPostgres
             return null;
         }
 
-        return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()));
+        return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
     }
+
+    /// <summary>#4280: the real-start fallback runs only for a "trial-passed" carry, and never for a requested
+    /// cancellation. A service stop during the first real start after an upgrade must not drop settings that passed
+    /// their trial.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static bool ShouldFallBackToHeaderOnly(DarlingStoreUpgrade.AutoConfCarryMarker? marker, CancellationToken cancellationToken) =>
+        marker is { State: DarlingStoreUpgrade.AutoConfCarryStateTrialPassed } && !cancellationToken.IsCancellationRequested;
 
     /// <summary>
     /// The whole first-run story, idempotent: locate/unpack the runtime, initdb if the data
@@ -1092,8 +2793,13 @@ public sealed class DarlingManagedPostgres
 
         /* Age out any pre-upgrade rollback copy BEFORE this start's own upgrade can create a new one.
            Running it afterwards would bump the brand-new copy's counter on the very start that produced
-           it, costing it one of the two starts it is supposed to survive. */
-        _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
+           it, costing it one of the two starts it is supposed to survive. Once per instance, for the same
+           reason: a re-entry after a retryable failure is the same start, not another one. */
+        if (!_retainedSweepDone)
+        {
+            _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
+            _retainedSweepDone = true;
+        }
 
         /* The install directory's own housekeeping report, beside the store's. Deliberately adjacent: the
            two answer the same operator question about two different parents, and a field instance proved
@@ -1101,9 +2807,35 @@ public sealed class DarlingManagedPostgres
            completely unmentioned. Never throws, never deletes. */
         DarlingInstallDirectoryReport.Report(AppContext.BaseDirectory, _logger);
 
-        if (!File.Exists(Path.Combine(_dataDirectory, "PG_VERSION")))
+        /* Declared before the upgrade branch (#4280 round-2 part 2, item 2), not called eagerly: cert
+           generation only needs to run once BuildServerRuntimeOptions or the auto.conf carry trial actually
+           needs the SSL options, and BuildNetworkPlan itself never throws, so deferring it costs nothing.
+           NetworkPlan/NetworkMode stay private to this class — every consumer outside it (UpgradeContext's own
+           delegate included) sees only the Func<string> built from networkPlan.Value below. */
+        var networkPlan = new Lazy<NetworkPlan>(BuildNetworkPlan);
+
+        /* #3908: whether this start found a cluster, captured before initdb can create one. A new cluster has no
+           extension for the quiesced update to move. */
+        var existingCluster = File.Exists(Path.Combine(_dataDirectory, "PG_VERSION"));
+        if (!existingCluster)
         {
+            /* No cluster at the data directory, but one beside it under a name the upgrade's directory swap
+               gives a moved-aside store: the store is that sibling, not a fresh install. Initializing here
+               would write a new superuser credential over the store's own, and the retention sweep would
+               later delete the store as an expired rollback copy. Refused for good, not retried: nothing
+               changes between attempts but an operator's hand. The credential file alone is not evidence
+               either way, because it is written before initdb (see InitializeClusterAsync). */
+            var displaced = DarlingStoreUpgrade.FindDisplacedStoreCopies(_dataDirectory);
+            if (displaced.Count > 0)
+            {
+                throw new InvalidOperationException(DarlingStoreUpgrade.DescribeDisplacedStore(_dataDirectory, displaced));
+            }
+
             await InitializeClusterAsync(binDirectory, cancellationToken);
+
+            /* Read here too, so this first start records the new store's TimescaleDB state under this runtime and
+               the second start has nothing to read (#3908). */
+            _bundledTimescaleVersion = ReadBundledTimescaleVersion(binDirectory);
         }
         else
         {
@@ -1111,12 +2843,99 @@ public sealed class DarlingManagedPostgres
                the package now ships. This is the only window in which an in-place major upgrade can run —
                nothing is connected, and both runtimes are on disk. It either upgrades, does nothing, or
                reverts and leaves the store exactly as it was. */
-            await EnsureDataDirectoryMajorAsync(binDirectory, cancellationToken);
+            /* #3909: before ANYTHING can start this cluster on PostgreSQL 17 binaries (the upgrade's old-cluster
+               start just below, a reverted upgrade's restart, or a plain start of a store still on 17), make
+               sure its conf is one 17 will open. Legacy conf only (#4215): once the conf has migrated,
+               maintenance_work_mem's value lives in darling-managed.conf, which this heal never touches — a
+               migrated store's cap is the render's own job, not this append. */
+            if (ManagedConfMigrationState.Classify(_dataDirectory) == ManagedConfMigrationState.Kind.Legacy)
+            {
+                HealLegacyMaintenanceWorkMem(_dataDirectory);
+            }
+
+            await EnsureDataDirectoryMajorAsync(binDirectory, networkPlan, cancellationToken);
         }
 
-        EnsureConfAppended(_dataDirectory);
+        /* #4280: a server CarryAutoConfAsync's auto.conf trial left on a private port (the confirmed stop in
+           its own try/finally failed) must be stopped before IsRunningAsync below, which cannot tell it apart
+           from the store's own postmaster — pg_ctl status answers "running" for a postmaster on ANY port.
+           Unconditional: an absent marker (the overwhelmingly common case — the trial confirms its own stop)
+           is a no-op read, same as the existing post-Timescale-update call further down. */
+        if (!await _storeUpgrade.StopQuiescedUpdateOrphanAsync(binDirectory, _dataDirectory))
+        {
+            throw new InvalidOperationException(QuiescedOrphanMessage(binDirectory));
+        }
+
+        /* #4280 item 4: a "carrying" marker here means a PREVIOUS start's carry never reached trial-passed —
+           crash, power loss, or an SCM kill between the marker write and the trial. Read once and kept for the
+           real-start fallback below too: nothing between here and there touches this marker, and a
+           "trial-passed" marker is this same call's own carry (or a previous one that got as far as a verified
+           trial), which item 4 leaves alone — only item 2's fallback, at the real start, consumes that one. */
+        var autoConfCarryMarker = _storeUpgrade.TryReadAutoConfCarryMarker(_dataDirectory);
+        if (autoConfCarryMarker is { State: DarlingStoreUpgrade.AutoConfCarryStateCarrying })
+        {
+            /* #4280 item 2: a failed reset (the header-only write itself threw) never blocks the start — the
+               unverified settings ride into the real start either way, same as before this recovery existed.
+               Only clear the marker when the reset actually ran, so a write failure leaves it for the next
+               start to retry rather than losing track of the stuck carry. */
+            if (await _storeUpgrade.ResetAutoConfCarryAsync(
+                _dataDirectory, autoConfCarryMarker.Value,
+                "a previous start's postgresql.auto.conf carry never finished"))
+            {
+                autoConfCarryMarker = null;
+            }
+        }
+
+        /* #4215: the classifier reads the conf's own state ONCE, before the
+           legacy appenders can run. Only a Legacy conf (a v-marker present, or the include missing) may
+           append — a PendingVerify/Verified/MigratedUnstamped conf already carries the migrated file, and
+           EnsureConfAppended appends at the END of postgresql.conf, which would override both the managed
+           file's values AND any operator line this migration moved below the include. */
+        var confState = ManagedConfMigrationState.Classify(_dataDirectory);
+        if (confState == ManagedConfMigrationState.Kind.Legacy)
+        {
+            EnsureConfAppended(_dataDirectory);
+        }
 
         var password = ReadStoredPassword();
+
+        /* #3908: move the store's TimescaleDB extension to this runtime's version BEFORE the store opens, on a
+           private port with TimescaleDB's background workers off, so the only sessions are the update's own. After
+           the conf append, so the cluster starts on the conf it will run with; before the network plan and the
+           start, so the configured port is unbound and no web, MCP or Viewer session can reach it. Gated on the
+           data directory's record (DarlingStoreUpgrade.NeedsQuiescedTimescaleUpdate): a store already on the
+           runtime's version costs nothing, and one not read yet (a new store's second start included) costs one
+           extra start and stop. Never on a server
+           this service did not start, which cannot be quiesced; the post-start read reports that one. It never
+           reverts the runtime: every store this service has shipped is on a TimescaleDB whose libraries the
+           runtime carries, so a store whose update failed opens on its own version, and the alert says so. */
+        var alreadyRunning = await IsRunningAsync(binDirectory, cancellationToken);
+
+        /* A re-entry (the worker's bootstrap retry) finds the server this process already started. The quiesced
+           step cannot run under it, and the attempt that did run it holds the outcome to report. */
+        if (!(alreadyRunning && _startedByThisProcess))
+        {
+            LastTimescaleOutcome = DarlingStoreUpgrade.TimescaleUpdateOutcome.None;
+        }
+
+        /* The data directory's major must be the runtime's: after an upgrade whose runtime revert could not run
+           (#3927), a start here would put the new binaries on the old cluster. */
+        if (existingCluster
+            && !alreadyRunning
+            && _bundledMajor > 0
+            && DarlingStoreUpgrade.TryReadDataDirectoryMajor(_dataDirectory) == _bundledMajor
+            && DarlingStoreUpgrade.NeedsQuiescedTimescaleUpdate(DarlingStoreUpgrade.ReadTimescaleRecord(_dataDirectory), _bundledTimescaleVersion))
+        {
+            LastTimescaleOutcome = await _storeUpgrade.UpdateTimescaleQuiescedAsync(
+                binDirectory, _dataDirectory, password, _bundledTimescaleVersion!, cancellationToken);
+
+            /* It confirms its own stop. When it could not, one more attempt, and then a refusal rather than
+               adopting the private-port server as the store. */
+            if (!await _storeUpgrade.StopQuiescedUpdateOrphanAsync(binDirectory, _dataDirectory))
+            {
+                throw new InvalidOperationException(QuiescedOrphanMessage(binDirectory));
+            }
+        }
 
         /* Resolve the opt-in network exposure (darling-network-endpoints) BEFORE start so listen_addresses
            and the ssl trio can ride the -o runtime override. Fail-closed: an invalid/incomplete exposure
@@ -1126,15 +2945,14 @@ public sealed class DarlingManagedPostgres
            network path is caught internally (BuildNetworkPlan swallows cert-gen failure into a degrade;
            ReconcileNetworkAsync never throws) because EnsureRunningAsync's contract is throw => service-exit,
            and a typo in an optional, default-off endpoint must NEVER take collection down (Round 4 #3). */
-        var networkPlan = BuildNetworkPlan();
-        if (networkPlan.DegradeReason is not null)
+        if (networkPlan.Value.DegradeReason is not null)
         {
             _logger.LogCritical(
                 "Store network exposure DISABLED (degraded to loopback-only): {Reason}. Fix postgres.network and restart to expose the store.",
-                networkPlan.DegradeReason);
+                networkPlan.Value.DegradeReason);
         }
 
-        if (await IsRunningAsync(binDirectory, cancellationToken))
+        if (alreadyRunning)
         {
             /* Already running — a previous service crash's surviving postmaster, or an operator
                started it by hand. Use it, never stop it (the flag stays false). */
@@ -1144,17 +2962,76 @@ public sealed class DarlingManagedPostgres
         }
         else
         {
-            await StartServerAsync(binDirectory, networkPlan, cancellationToken);
+            /* #4215: the one service-owned settings file, rendered and validated right before the start it
+               takes effect on — never for the adopted-listener branch above, which does not start anything
+               this file could take effect on until the next service-owned start anyway. Skipped
+               on Legacy (no managed file exists yet — the old blocks are still what's in force) and on
+               PendingVerify (a crash left the migrated files exactly where the last attempt wrote them; Step A
+               must not re-derive before the stamp exists, or ResumePending's before/after comparison below
+               would be comparing against a snapshot the render itself just changed). */
+            if (confState == ManagedConfMigrationState.Kind.Verified || confState == ManagedConfMigrationState.Kind.MigratedUnstamped)
+            {
+                await EnsureManagedConfReadyAsync(binDirectory, _dataDirectory, cancellationToken);
+            }
+
+            try
+            {
+                await StartServerAsync(binDirectory, networkPlan.Value, cancellationToken);
+            }
+            catch (Exception) when (ShouldFallBackToHeaderOnly(autoConfCarryMarker, cancellationToken))
+            {
+                /* #4280 item 2: the trial proved these names alone, on a private port with its own SSL
+                   options — the real start can still fail for a reason outside that scope (the configured
+                   port, the actual network exposure, timing). One retry on an empty postgresql.auto.conf,
+                   the same recovery the trial's own combined check uses; a second failure throws as-is,
+                   unwrapped, same as before this fallback existed. */
+                /* autoConfCarryMarker! — ShouldFallBackToHeaderOnly above already proved this non-null (its
+                   whole first clause is a null-checking pattern match on it); the compiler cannot see that
+                   through the opaque method call the way it narrows an inline `is {...}` pattern. If the
+                   reset itself could not write header-only, retrying against the same unwritable file cannot
+                   help — rethrow the original start failure rather than mask it behind a doomed retry. */
+                if (!await _storeUpgrade.ResetAutoConfCarryAsync(
+                    _dataDirectory, autoConfCarryMarker!.Value,
+                    "the real start failed even though these settings passed an isolated trial"))
+                {
+                    throw;
+                }
+
+                await StartServerAsync(binDirectory, networkPlan.Value, cancellationToken);
+            }
+
             _startedByThisProcess = true;
+
+            /* Guarded — Legacy and PendingVerify never ran EnsureManagedConfReadyAsync above, so
+               darling-managed.conf may not exist yet on this start. Copying a missing file would throw and take
+               the whole start down over what SaveLastGoodManagedConf's own doc comment already treats as a
+               no-op-worthy failure. On a Verified confState this start's server started on a FRESH render
+               that Step B (MigrateManagedConfAsync, below) has not verified yet (#4336) — saving here would
+               let a render Step B goes on to reject become the fallback a future rejected render restores
+               to. That save happens only once Step B verifies, further down. Every other confState (Legacy,
+               PendingVerify, MigratedUnstamped) has no Step B to wait on, so the save still belongs here. */
+            if (confState != ManagedConfMigrationState.Kind.Verified
+                && File.Exists(Path.Combine(_dataDirectory, ManagedConfFile.FileName)))
+            {
+                SaveLastGoodManagedConf(_dataDirectory);
+            }
+        }
+
+        /* Covers all three ways this point is reached with nothing left pending: already running (no start
+           attempted here), the real start succeeding outright, or the fallback's retry succeeding (which
+           already deleted the marker as part of ResetAutoConfCarryAsync above — a harmless no-op here). */
+        if (autoConfCarryMarker is not null)
+        {
+            DarlingStoreUpgrade.TryDeleteAutoConfCarryMarker(_dataDirectory);
         }
 
         var connectionString = BuildConnectionString(_config.Port, password);
         await EnsureDatabaseAsync(connectionString, cancellationToken);
 
-        /* #1706: everything that needs a LIVE server — verify the upgrade landed, apply a same-major
-           TimescaleDB extension update (the #1705 case, which needs no pg_upgrade at all), and run the
-           post-upgrade analyze staging. Deliberately AFTER the start above rather than inside the upgrade,
-           so the server this process started stays one this process will stop. */
+        /* #1706: everything a major upgrade needs from a LIVE server — verify it landed and run the post-upgrade
+           analyze staging. Deliberately AFTER the start above rather than inside the upgrade, so the server this
+           process started stays one this process will stop. The TimescaleDB update this used to include runs
+           before the start now (#3908). */
         if (_bundledMajor > 0)
         {
             LastUpgradeOutcome = await _storeUpgrade.CompleteAfterStartAsync(
@@ -1165,16 +3042,242 @@ public sealed class DarlingManagedPostgres
                 UserName,
                 password,
                 _bundledMajor,
-                _bundledTimescaleVersion ?? string.Empty,
                 cancellationToken);
+        }
+
+        /* #3908: read back where the store's TimescaleDB ended up, record it, and settle what this start reports. */
+        if (!string.IsNullOrEmpty(_bundledTimescaleVersion))
+        {
+            var (timescale, installed) = await _storeUpgrade.VerifyTimescaleAfterStartAsync(
+                connectionString, _dataDirectory, _bundledTimescaleVersion, LastTimescaleOutcome, cancellationToken);
+            LastTimescaleOutcome = timescale;
+
+            /* A major upgrade's own alert names the TimescaleDB versions too. pg_upgrade restored the store's
+               version and the quiesced update moved it, or did not: report where it ended up, and leave the
+               extension out of that alert when it did not move, so the two alerts cannot disagree. */
+            if (LastUpgradeOutcome.Status == DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded && installed is not null)
+            {
+                LastUpgradeOutcome = LastUpgradeOutcome with
+                {
+                    ToTimescale = string.Equals(installed, LastUpgradeOutcome.FromTimescale, StringComparison.Ordinal) ? null : installed,
+                };
+            }
         }
 
         /* Reconcile pg_hba + reload + verify, the adopted-listener guard, and the firewall against the LIVE
            server — symmetric (present when exposed, absent when loopback/degraded). Never throws (Round 4 #3):
            a network reconcile failure logs + degrades, it does not abort the bootstrap. */
-        await ReconcileNetworkAsync(binDirectory, networkPlan, connectionString, cancellationToken);
+        await ReconcileNetworkAsync(binDirectory, networkPlan.Value, connectionString, cancellationToken);
+
+        /* Only when THIS process started the server — an adopted listener's conf takes effect
+           on the next service-owned start, same rule EnsureManagedConfReadyAsync above already follows, and
+           the migration's own re-snapshot needs a server that is actually up on the files this start wrote. */
+        if (_startedByThisProcess)
+        {
+            var migrationOutcome = await MigrateManagedConfAsync(confState, connectionString, cancellationToken);
+
+            /* #4336: a bootstrap retry can land here on a Verified confState with no write result (Step B's
+               own null-return case, above) — nothing new to report, not a fact that the earlier attempt's
+               outcome is now unknown. Keep the prior non-null outcome rather than erasing it with null. */
+            if (migrationOutcome is not null || LastManagedConfVerification is null)
+            {
+                LastManagedConfVerification = migrationOutcome;
+            }
+        }
 
         return connectionString;
+    }
+
+    /// <summary>
+    /// Runs Step A, resumes a pending Step A, or re-verifies a hand-edited migrated conf — whichever
+    /// <paramref name="confState"/> calls for. <see
+    /// cref="ManagedConfMigrationState.Kind.Verified"/> does nothing here; Step B runs separately. Everything
+    /// is caught: a migration failure logs and reports, it never throws — the store this start already
+    /// brought up must not go down over a verification step.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private async Task<ManagedConfMigrationOutcome?> MigrateManagedConfAsync(
+        ManagedConfMigrationState.Kind confState, string connectionString, CancellationToken cancellationToken)
+    {
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = async ct =>
+        {
+            await using var connection = new NpgsqlConnection(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(MigrationSnapshotConnectionString(connectionString)));
+            await connection.OpenAsync(ct);
+            await using var command = new NpgsqlCommand(ManagedConfFileSettings.SnapshotSql, connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            var rows = new List<FileSettingRow>();
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add(new FileSettingRow(
+                    SourceFile: reader.IsDBNull(0) ? null : reader.GetString(0),
+                    SourceLine: reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                    Name: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    Setting: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Applied: !reader.IsDBNull(4) && reader.GetBoolean(4),
+                    Error: reader.IsDBNull(5) ? null : reader.GetString(5)));
+            }
+
+            return rows;
+        };
+
+        try
+        {
+            ManagedConfMigrationOutcome outcome;
+            switch (confState)
+            {
+                case ManagedConfMigrationState.Kind.Legacy:
+                {
+                    var postgresMajor = DarlingStoreUpgrade.TryReadDataDirectoryMajor(_dataDirectory) ?? 0;
+                    var inputs = GatherManagedConfRenderInputs(_dataDirectory, postgresMajor);
+                    var derived = new Dictionary<string, string>(StringComparer.Ordinal);
+                    foreach (var (_, name, value) in ParseConfText(ManagedConfFile.RenderBody(inputs)))
+                    {
+                        derived[name] = value;
+                    }
+
+                    outcome = await ManagedConfMigrationRunner.RunStepA(
+                        _dataDirectory, snapshot, derived, inputs, _config.Port, DateTime.UtcNow, _logger, cancellationToken);
+                    break;
+                }
+
+                case ManagedConfMigrationState.Kind.PendingVerify:
+                {
+                    var backupPath = Directory.GetFiles(_dataDirectory, "postgresql.conf.pre-4215.*.bak");
+                    if (backupPath.Length == 0)
+                    {
+                        /* #4336: a PendingVerify conf with no backup has nothing this method can restore
+                           to — the migrated files stay exactly where the last attempt left them, unverified.
+                           Reporting Failed (not Unknown) so the store-settings alert actually fires; Unknown
+                           never fires it alone, and a stuck PendingVerify must not go silent forever. */
+                        _logger.LogWarning(
+                            "{DataDirectory} has a pending #4215 migration but no backup file — cannot resume; reporting Failed.",
+                            _dataDirectory);
+                        return new ManagedConfMigrationOutcome(
+                            ManagedConfVerificationStatus.Failed, Array.Empty<string>(), null, ManagedConfMigrationStep.A,
+                            "resume: no backup file found for a PendingVerify conf");
+                    }
+
+                    /* The NEWEST backup. An attempt that finds postgresql.conf edited since the last
+                       snapshot takes another one (ManagedConfMigrationSteps.BackupOriginal), and a restore
+                       from an older backup would put the file back as it was before those edits. */
+                    Array.Sort(backupPath, StringComparer.Ordinal);
+                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[^1], cancellationToken, _logger);
+                    break;
+                }
+
+                case ManagedConfMigrationState.Kind.MigratedUnstamped:
+                {
+                    /* A hand edit of darling-managed.conf, or a crash inside Step B — those two cases look the
+                       same here: migrated, no pending file, stale stamp.
+                       Re-verify against what is on disk NOW: no new error row may come from darling-managed.conf
+                       relative to the file's own current bytes — the file itself is the ground truth once no
+                       pending snapshot survives to compare against. Except DarlingStoreHostProfile.CommandLineOnlyKeys
+                       (port, listen_addresses): an exposed store always starts PostgreSQL with both forced onto
+                       the pg_ctl command line, which outranks the file unconditionally, so the rendered
+                       (always loopback-only) listen_addresses line reports an error row here on every start of
+                       an exposed store even though nothing is actually wrong — same trap and same fix as
+                       ManagedConfMigrationRunner.VerifyStepB below. */
+                    var rows = await snapshot(cancellationToken);
+                    var managedConfPath = Path.Combine(_dataDirectory, ManagedConfFile.FileName);
+                    var (newErrorFromManagedFile, mismatchedKeys) = ManagedConfMigrationRunner.FindUnstampedManagedFileErrors(rows);
+
+                    if (newErrorFromManagedFile)
+                    {
+                        outcome = new ManagedConfMigrationOutcome(
+                            ManagedConfVerificationStatus.Failed, mismatchedKeys, null, ManagedConfMigrationStep.A);
+                        break;
+                    }
+
+                    var managedConfText = File.Exists(managedConfPath) ? File.ReadAllText(managedConfPath) : string.Empty;
+                    ManagedConfMigrationSteps.WriteVerifiedStamp(_dataDirectory, managedConfText);
+                    _logger.LogWarning(
+                        "{Path} was changed outside the service; operator settings belong below the include in postgresql.conf, or in ALTER SYSTEM; the service re-renders this file.",
+                        managedConfPath);
+                    outcome = new ManagedConfMigrationOutcome(
+                        ManagedConfVerificationStatus.Verified, Array.Empty<string>(), null, ManagedConfMigrationStep.A);
+                    break;
+                }
+
+                case ManagedConfMigrationState.Kind.Verified:
+                {
+                    /* Step B: only when this start's own WriteManagedConfFile call actually
+                       wrote a new darling-managed.conf does it have a previous text and the RenderInputs to
+                       verify against; a start that found the same bytes already in force has nothing to do. */
+                    if (LastManagedConfWriteResult is not { Written: true, PreviousText: var previousText, Inputs: { } inputs })
+                    {
+                        return null;
+                    }
+
+                    var renderedText = LastManagedConfWriteResult.Value.RenderedText;
+                    var rows = await snapshot(cancellationToken);
+                    outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDirectory, rows, renderedText, previousText);
+
+                    var changes = ManagedConfMigrationRunner.DiffStepBChanges(previousText, renderedText);
+                    var managedConfPathB = Path.Combine(_dataDirectory, ManagedConfFile.FileName);
+                    if (outcome.Status == ManagedConfVerificationStatus.Verified)
+                    {
+                        _logger.LogInformation(
+                            "{Path} verified against pg_file_settings:\n{Changes}",
+                            managedConfPathB, ManagedConfMigrationRunner.FormatStepBChangeLog(changes, inputs));
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "{Path} failed verification against pg_file_settings for {Keys}; the previous verified file was restored.",
+                            managedConfPathB, string.Join(", ", outcome.MismatchedKeys));
+                    }
+
+                    break;
+                }
+
+                default:
+                    return null;
+            }
+
+            LogMigrationOutcome(outcome);
+
+            if (outcome.Status == ManagedConfVerificationStatus.Verified)
+            {
+                if (File.Exists(Path.Combine(_dataDirectory, ManagedConfFile.FileName)))
+                {
+                    SaveLastGoodManagedConf(_dataDirectory);
+                }
+            }
+
+            return outcome;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            var detail = FormattableString.Invariant($"outer: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogWarning(ex, "The #4215 conf migration failed for {DataDirectory}; the store keeps running on its current conf. {Detail}", _dataDirectory, detail);
+            var failedStep = confState == ManagedConfMigrationState.Kind.Verified
+                ? ManagedConfMigrationStep.B
+                : ManagedConfMigrationStep.A;
+            return new ManagedConfMigrationOutcome(
+                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, failedStep, detail);
+        }
+    }
+
+    /// <summary>Logs a <see cref="MigrateManagedConfAsync"/> outcome once: Information for a
+    /// clean Verified, Warning for Failed or Unknown — naming the backup path and the mismatched keys so an
+    /// operator has somewhere to look.</summary>
+    [SupportedOSPlatform("windows")]
+    private void LogMigrationOutcome(ManagedConfMigrationOutcome outcome)
+    {
+        if (outcome.Status == ManagedConfVerificationStatus.Verified)
+        {
+            _logger.LogInformation(
+                "#4215 conf migration verified for {DataDirectory} (step {Step}).", _dataDirectory, outcome.Step);
+            return;
+        }
+
+        _logger.LogWarning(
+            "#4215 conf migration {Status} for {DataDirectory} (step {Step}); backup {BackupPath}; mismatched keys: {MismatchedKeys}; detail: {Detail}.",
+            outcome.Status, _dataDirectory, outcome.Step, outcome.BackupPath ?? "(none)", string.Join(", ", outcome.MismatchedKeys), outcome.Detail ?? "(none)");
     }
 
     /// <summary>
@@ -1232,23 +3335,49 @@ public sealed class DarlingManagedPostgres
         var pgsqlDirectory = Path.Combine(_runtimeRoot, "pgsql");
         var binDirectory = Path.Combine(pgsqlDirectory, "bin");
         var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
+
+        /* #4934: a runtime update that died between the rescue and a good extract leaves no pg_ctl.exe here
+           and the store's own runtime in pg-runtime-prev. Put it back first, so the branch below takes the
+           normal path (and retries the update) instead of the first-run extract. */
+        await _storeUpgrade.TryRestoreRescuedRuntimeAsync(_runtimeRoot, _runtimeZipPath, _dataDirectory, cancellationToken);
+
         if (File.Exists(pgCtl))
         {
             /* #1706: an extracted runtime is NOT refreshed by a deploy — this early return is exactly why a
                field store ran its original PostgreSQL and TimescaleDB forever. Compare the shipped zip
                against the stamp recorded at extraction time; a difference means the package carries a new
                runtime, and the rescued previous one becomes pg_upgrade's --old-bindir. */
+            /* #3908: a server the quiesced TimescaleDB update left on its private port is stopped first. Adopted,
+               it would defer the runtime update below and every one after it, and the normal start could not
+               reach it on the configured port. */
+            if (!await _storeUpgrade.StopQuiescedUpdateOrphanAsync(binDirectory, _dataDirectory))
+            {
+                throw new InvalidOperationException(QuiescedOrphanMessage(binDirectory));
+            }
+
             if (File.Exists(_runtimeZipPath))
             {
                 _runtimeAdvance = await _storeUpgrade.TryAdvanceRuntimeAsync(
                     _runtimeRoot, _runtimeZipPath, _dataDirectory, TryIsRunningAsync, cancellationToken);
             }
 
+            DarlingStoreUpgrade.PinLegacyRuntimeStamp(_runtimeRoot, _logger);
             return binDirectory;
         }
 
         if (File.Exists(_runtimeZipPath))
         {
+            /* #3908: an existing store whose runtime folder is gone (a clean reinstall of this release over a
+               later one) must not get a runtime that cannot open its TimescaleDB. The swap path already refuses
+               that; this is the same check for the path that extracts with nothing to swap. */
+            if (DarlingStoreUpgrade.MissingTimescaleLibraries(_dataDirectory, _runtimeZipPath) is { Count: > 0 } missing)
+            {
+                throw new InvalidOperationException(
+                    $"The store at {_dataDirectory} is on TimescaleDB {string.Join(" or ", missing)} (recorded in {Path.Combine(_dataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName)}), " +
+                    $"and {_runtimeZipPath} carries no libraries for it, so the runtime it would extract could not open the store. " +
+                    "Install a release whose runtime carries that TimescaleDB version, or restore the pg-runtime folder that last opened this store. Nothing has been extracted or changed.");
+            }
+
             _logger.LogInformation("Extracting the bundled Postgres runtime from {Zip} (first run)", _runtimeZipPath);
             await Task.Run(
                 () => ZipFile.ExtractToDirectory(_runtimeZipPath, _runtimeRoot, overwriteFiles: true),
@@ -1260,6 +3389,9 @@ public sealed class DarlingManagedPostgres
                 File.WriteAllText(
                     Path.Combine(_runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName),
                     DarlingStoreUpgrade.ComputeFileHash(_runtimeZipPath));
+                /* #3908: a fresh install needs the pin too. Its store is created on this runtime's TimescaleDB,
+                   which a rolled-back 3.3-3.8 runtime cannot load. */
+                DarlingStoreUpgrade.PinLegacyRuntimeStamp(_runtimeRoot, _logger);
                 return binDirectory;
             }
 
@@ -1397,8 +3529,14 @@ public sealed class DarlingManagedPostgres
     /// must apply the SAME blocks to the freshly-initdb'd cluster BEFORE pg_upgrade runs: pg_upgrade
     /// starts the new cluster internally to restore the dump, and restoring TimescaleDB into a server
     /// that has not preloaded its library fails outright. Healing it afterwards would be too late.</para>
+    ///
+    /// <para>Windows-attributed as of #3802 because the v12 heal reads the data directory's major through
+    /// <see cref="DarlingStoreUpgrade.TryReadDataDirectoryMajor"/>, whose class is Windows-only. Nothing about
+    /// the attribute is new in substance: the constructor already carries it, so every instance method here
+    /// has only ever been reachable on Windows.</para>
     /// </summary>
-    private void EnsureConfAppended(string dataDirectory)
+    [SupportedOSPlatform("windows")]
+    internal void EnsureConfAppended(string dataDirectory)
     {
         var confPath = Path.Combine(dataDirectory, "postgresql.conf");
         if (!File.Exists(confPath))
@@ -1478,7 +3616,7 @@ public sealed class DarlingManagedPostgres
             var v7RamBytes = GetTotalPhysicalMemoryBytes();
             File.AppendAllText(confPath, BuildCompressionMemoryConfAppend(v7RamBytes));
             _logger.LogInformation(
-                "Appended v7 compression memory to postgresql.conf (maintenance_work_mem = {Maintenance}MB from min(max(5% RAM, 1536MB), 25% RAM, 2048MB); TimescaleDB compression sorts on this setting)",
+                "Appended v7 compression memory to postgresql.conf (maintenance_work_mem = {Maintenance}MB from min(max(5% RAM, 1536MB), 25% RAM, 2047MB); TimescaleDB compression sorts on this setting)",
                 DeriveMemorySettings(v7RamBytes).MaintenanceWorkMemMb);
         }
 
@@ -1492,12 +3630,25 @@ public sealed class DarlingManagedPostgres
            fresh initdb has just written v3 with identical values. The redundant first block is the price of
            a simple invariant — after any start, the conf carries a fingerprint for the CURRENT host — and
            without recording one on the first start there would be nothing for the second start to compare
-           against. It converges immediately: the next start finds its own fingerprint and appends nothing. */
+           against. It converges immediately: the next start finds its own fingerprint and rewrites nothing.
+
+           REPLACES rather than appends (#4207). A fingerprint change used to append a fresh block, and
+           because the fingerprint includes the worker count, which moves with the hypertable count, each
+           field store had grown three copies by the time #4207 was filed. ReplaceOrAppendHardwareSizingBlock
+           rewrites the FIRST existing block in place and drops every other copy, so any fingerprint change —
+           a resize or a hypertable-count change alike — now costs one rewritten block, never a growing file.
+           That also removes the one remaining reason #2845 considered for splitting the worker count into
+           its own fingerprint (so a hypertable-count change would not re-trigger the memory lines): with an
+           in-place rewrite a worker-only change is exactly as cheap as a memory-only one, so the single
+           fingerprint stays single rather than gaining a second axis with nothing left to buy. */
         /* INVARIANT this check depends on: `conf` was read ONCE at the top of this method, before v1-v7
            may have appended. That is safe only because none of them emits a line carrying
            ConfHardwareFingerprintPrefix, so nothing appended above can change this answer. A future version
            block that DID write a fingerprint line would be silently invisible here and the staleness check
-           would quietly stop checking — re-read the file at that point rather than adding the block above. */
+           would quietly stop checking — re-read the file at that point rather than adding the block above.
+           v12 (#3802) is the second every-start heal and carries its OWN stamp under ConfWalSizingStampPrefix,
+           which is not a substring of this prefix (pinned), so it neither disturbs this read nor is disturbed
+           by it; it runs below and reads the same once-read `conf` under the same reasoning. */
         var hypertableCount = TimescaleSupport.HypertableCount;
         var v8Authoritative = TryGetAuthoritativePhysicalMemoryBytes(out var v8RamBytes);
         var v8Fingerprint = BuildHardwareFingerprint(v8RamBytes, hypertableCount);
@@ -1511,20 +3662,47 @@ public sealed class DarlingManagedPostgres
             _logger.LogWarning(
                 "Skipped the v8 hardware-sizing check: total physical memory could not be read authoritatively, so a hardware change cannot be distinguished from a failed reading. The existing sizing block stays in force.");
         }
-        else if (ShouldAppendHardwareSizing(conf, v8Authoritative, v8Fingerprint))
+        else
         {
             /* Quantize ONCE here and pass the result down, so the values logged are necessarily the values
                written. Deriving the log line separately from the raw reading made them disagree near a GB
                boundary — a 31.5 GB host writes effective_cache_size 24576MB but logged 24192MB, a number that
                appears nowhere in the file. QuantizeRam is idempotent, so the call below still quantizes and
-               still gets the same answer. */
+               still gets the same answer. Built unconditionally (not only once ShouldAppendHardwareSizing
+               says yes): #4207's stale-content condition needs the text THIS build would write to compare
+               against what is already there, so the decision itself depends on this value. */
             var v8QuantizedRam = QuantizeRam(v8RamBytes);
-            File.AppendAllText(confPath, BuildHardwareSizingConfAppend(v8QuantizedRam, hypertableCount));
-            var v8Settings = DeriveMemorySettings(v8QuantizedRam);
-            var v8Workers = DeriveWorkerSettings(hypertableCount);
-            _logger.LogInformation(
-                "Appended v8 hardware sizing to postgresql.conf (host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers and work_mem deliberately NOT re-derived, see #2845)",
-                v8QuantizedRam / (1024L * 1024L), hypertableCount, v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses);
+            var v8Append = BuildHardwareSizingConfAppend(v8QuantizedRam, hypertableCount);
+
+            if (ShouldAppendHardwareSizing(conf, v8Authoritative, v8Fingerprint, v8Append))
+            {
+                /* Which of #4207's three conditions fired, for the log line below. Classified against the
+                   same `conf` snapshot ShouldAppendHardwareSizing just decided on, in the same priority
+                   order that function checks them in — not against the re-read below, though the answer is
+                   identical either way (see the INVARIANT comment above: none of v1-v7 can introduce, remove
+                   or move a v8 span). */
+                var v8Reason =
+                    !ConfHasCurrentHardwareFingerprint(conf, v8Fingerprint) ? "hardware fingerprint changed"
+                    : FindHardwareSizingBlockSpans(conf).Count > 1 ? "duplicate v8 blocks found, #4207"
+                    : "existing block content is stale, #4207";
+
+                /* Re-read rather than reuse the `conf` snapshot from the top of this method: v1-v7 above may
+                   have just appended their own healing blocks straight to disk (File.AppendAllText, bypassing
+                   `conf` entirely), and rewriting the whole file from the stale snapshot would silently drop
+                   them. None of v1-v7 can itself contain a v8 span, so this re-read cannot move or hide one. */
+                var v8CurrentConf = File.ReadAllText(confPath);
+                var v8PriorCopies = FindHardwareSizingBlockSpans(v8CurrentConf).Count;
+                File.WriteAllText(confPath, ReplaceOrAppendHardwareSizingBlock(v8CurrentConf, v8Append));
+
+                var v8Settings = DeriveMemorySettings(v8QuantizedRam);
+                var v8Workers = DeriveWorkerSettings(hypertableCount);
+                _logger.LogInformation(
+                    "{Action} v8 hardware sizing in postgresql.conf ({Reason}; host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, work_mem {WorkMem}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers deliberately NOT re-derived, see #2845){CollapseNote}",
+                    v8PriorCopies == 0 ? "Appended" : "Rewrote", v8Reason, v8QuantizedRam / (1024L * 1024L), hypertableCount,
+                    v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Settings.WorkMemMb,
+                    v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses,
+                    v8PriorCopies > 1 ? $" (collapsed {v8PriorCopies} copies into 1, #4207)" : string.Empty);
+            }
         }
 
         /* Checked independently of v1-v8, and placed AFTER v8 on purpose: v8 keys on the last fingerprint
@@ -1568,6 +3746,463 @@ public sealed class DarlingManagedPostgres
                 "Appended v11 job execution logging to postgresql.conf ({Setting} = on): timescaledb_information.job_history records one row per background-job run, and without this it stays EMPTY — a maximum over it returns no rows, which reads as 'no run exceeded the line' rather than 'this instrument is off'. Logging starts from this start onward if the service owns it, otherwise from the next start it owns; runs before that point wrote nothing and CANNOT be recovered. job_stats remains the unconditional surface for a store that has not yet healed.",
                 StoreSelfMetrics.JobExecutionLoggingSetting);
         }
+
+        /* v12 (#3802): the second every-start heal, keyed like v8 on a stamp rather than on its marker's
+           absence, because what it derives from — the free space on the data volume — is a property of the box
+           that changes under a running store. It re-states max_wal_size (superseding v4's fixed 4GB by
+           last-occurrence-wins) and min_wal_size from that headroom, on a power-of-two ladder so ordinary
+           free-disk drift is not a change; and it pins checkpoint_completion_target only on a pre-14 major,
+           where the default was 0.5. Placed LAST, after v9-v11, for the reason those are placed after v8: it
+           carries a stamp line, and every block between v8 and here must not. Its stamp sits under its own
+           prefix, so the v8 read above is untouched (pinned: neither prefix is a substring of the other).
+
+           Two inputs, both read from the data directory handed in rather than from the field, so the store
+           upgrade's callback (#1706) sizes the freshly-initdb'd cluster from ITS volume and ITS major.
+           The major comes from PG_VERSION — readable without executing anything, the DarlingStoreUpgrade rule
+           — and an unreadable one derives as 0, which pins the checkpoint target (a no-op on 14+, the fix
+           on anything older). The disk figure is the gate: without an authoritative reading of the data volume this does NOTHING,
+           exactly as v8 does without an authoritative RAM reading, because re-deriving a production WAL ceiling
+           from a figure we could not read is worse than leaving the block in force. All three settings are
+           SIGHUP-context and this runs before pg_ctl start, so a service-owned start applies them at once. */
+        var v12Major = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
+        if (!TryReadDataVolumeSpace(dataDirectory, out var v12FreeBytes, out var v12TotalBytes))
+        {
+            _logger.LogWarning(
+                "Skipped the v12 WAL-sizing check: the free space on the volume holding {DataDirectory} could not be read, so a change in headroom cannot be distinguished from a failed reading. The WAL settings currently in force (the last v12 block if one exists, otherwise v4's max_wal_size = 4GB) stay in force.",
+                dataDirectory);
+        }
+        else
+        {
+            var v12Settings = DeriveWalSettings(v12FreeBytes);
+            var v12Stamp = BuildWalSizingStamp(v12Settings, v12Major);
+            var v12CheckpointNote = DescribeCheckpointCompletionTarget(v12Major);
+
+            /* The ALTER SYSTEM check runs whether or not the block is re-authored: the override outranks the
+               block on every start, not only on the start that writes it, and an operator reading the log
+               for "why is the effective value not what the product derived" needs the answer on the start
+               they are looking at. */
+            LogWalSizingAutoConfOverrides(dataDirectory, v12Settings);
+
+            if (!ConfHasCurrentWalSizingStamp(conf, v12Stamp))
+            {
+                File.AppendAllText(confPath, BuildWalSizingConfAppend(v12FreeBytes, v12TotalBytes, v12Major));
+                _logger.LogInformation(
+                    "Appended v12 WAL sizing to postgresql.conf: max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume (free / {Divisor} on the 1 GB..16 GB power-of-two ladder; supersedes v4's fixed 4GB by last-occurrence-wins); checkpoint_completion_target {CheckpointNote}. SIGHUP-context, so effective on this start when the service owns it.",
+                    v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), WalSizingFreeDiskDivisor, v12CheckpointNote);
+            }
+            else
+            {
+                /* The self-proving shape (#3802): a re-derivation that changes nothing still says what it
+                   derived and from what, so a start with no append is distinguishable from a start that never
+                   checked. */
+                _logger.LogInformation(
+                    "Managed store WAL sizing (v12): max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume — unchanged, the block in force was derived to the same rung; checkpoint_completion_target {CheckpointNote}.",
+                    v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), v12CheckpointNote);
+            }
+        }
+
+        /* v13 (#3899): statement statistics. Keyed on its marker's absence like v9-v11, and placed after v12
+           because, like them, it carries no fingerprint or stamp line for either every-start check to misread.
+           The ONE block that re-reads the file instead of trusting `conf`: its preload value is MERGED from the
+           effective list, and on a fresh cluster that list was written by the v1 append above, after `conf`
+           was read. The once-read text would hold only initdb's commented default, and a merge from it would
+           write a list without timescaledb. The re-read follows include directives (ReadConfAssignments), so a
+           list set in an included file above the block is merged rather than replaced. Restart-only, and
+           appended before pg_ctl start, so a service-owned start loads the library on this start. The coverage
+           check after it runs on EVERY start, because the block restates the list once and an edit made after
+           that is the one it would otherwise silently override. */
+        if (!conf.Contains(ConfMarkerV13, StringComparison.Ordinal))
+        {
+            var preloadChain = ReadConfAssignments(confPath, PreloadSetting);
+            var effectivePreload = preloadChain.Count == 0 ? null : preloadChain[^1].Value;
+            if (!IsValidPreloadList(effectivePreload))
+            {
+                /* The list in force is one PostgreSQL rejects, so it has been loading nothing from it; the block
+                   below restates it as a valid list, which changes what loads at the next start. Said, not done
+                   silently. */
+                _logger.LogWarning(
+                    "{File} line {Line} set shared_preload_libraries = '{Value}', which is not a list PostgreSQL accepts, so the store has been loading no library from it. The v13 block below restates it as '{Corrected}', which loads from the next start.",
+                    preloadChain[^1].File, preloadChain[^1].Line, effectivePreload, MergePreloadLibraries(effectivePreload));
+            }
+
+            File.AppendAllText(confPath, BuildStatementStatisticsConfAppend(effectivePreload));
+            _logger.LogInformation(
+                "Appended v13 statement statistics to postgresql.conf (shared_preload_libraries = '{Libraries}', {Library}.track_utility = off): the store keeps per-statement timings, so a slow web-viewer or MCP read can be named by get_store_query_stats instead of guessed at. The preload is restart-only: it loads on this start when the service owns it, otherwise on the next start it owns.",
+                MergePreloadLibraries(effectivePreload), StatementStatisticsLibrary);
+        }
+
+        /* v14 (#3909): keyed on the effective VALUE, not on its marker, so it heals once and then finds its own line
+           in force. HealLegacyMaintenanceWorkMem runs the same check before the store upgrade's old-cluster start,
+           which this method runs too late for; here it covers every other start of a store still on 17, the
+           restart after a reverted upgrade included. Carries no fingerprint or stamp line for v8 or v12 to read. */
+        if (FindLegacyMaintenanceWorkMemOverLimit(dataDirectory) is { } v14OverLimit)
+        {
+            File.AppendAllText(confPath, BuildLegacyMaintenanceWorkMemCapConfAppend());
+            LogLegacyMaintenanceWorkMemCap(v14OverLimit);
+        }
+
+        /* v15 (#4246): keyed on its marker's absence like v9-v11 and v13, and placed last so it stays the
+           block this method appends LAST on any start that fires it, matching its place at the end of
+           AllManagedConfMarkers. Carries no fingerprint or stamp line, so v8 and v12 read exactly what they
+           did before this block existed. wal_compression is superuser-context (confirmed live, not sighup),
+           but still takes effect from postgresql.conf on a reload, and this is appended before pg_ctl start,
+           so a service-owned start applies it on the very start that writes the block. */
+        if (!conf.Contains(ConfMarkerV15, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildWalVolumeConfAppend());
+            _logger.LogInformation(
+                "Appended v15 WAL compression to postgresql.conf (wal_compression = lz4): most of this store's WAL is full-page images, and compression shrinks every one of them. Effective on this start when the service owns it.");
+        }
+
+        /* v16 (#4246): keyed on its marker's absence like v9-v11, v13 and v15, and placed last so it stays
+           the block this method appends LAST on any start that fires it, matching its place at the end of
+           AllManagedConfMarkers. Carries no fingerprint or stamp line, so v8 and v12 read exactly what they
+           did before this block existed. checkpoint_timeout is sighup-context, but like the other sighup
+           settings this service manages, this is appended before pg_ctl start, so a service-owned start
+           applies it on the very start that writes the block. */
+        if (!conf.Contains(ConfMarkerV16, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildCheckpointIntervalConfAppend());
+            _logger.LogInformation(
+                "Appended v16 checkpoint interval to postgresql.conf (checkpoint_timeout = 15min): a longer interval re-images each hot page less often, cutting write-ahead log volume. Effective on this start when the service owns it.");
+        }
+
+        /* v17: keyed on its marker's absence like v9-v11, v13, v15 and v16, and placed last so it stays the
+           block this method appends LAST on any start that fires it, matching its place at the end of
+           AllManagedConfMarkers. Carries no fingerprint or stamp line, so v8 and v12 read exactly what they
+           did before this block existed. log_line_prefix is sighup-context, but like the other sighup
+           settings this service manages, this is appended before pg_ctl start, so a service-owned start
+           applies it on the very start that writes the block. */
+        if (!conf.Contains(ConfMarkerV17, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildLogLinePrefixConfAppend());
+            _logger.LogInformation(
+                "Appended v17 log line prefix to postgresql.conf (log_line_prefix = '%m [%p] %a '): the store's own log now names the application behind each line. Effective on this start when the service owns it.");
+        }
+
+        LogStatementStatisticsPreloadCoverage(dataDirectory);
+    }
+
+    /* ===================== darling-managed.conf (#4215): the one service-owned settings file =====================
+       EnsureConfAppended above and its v1-v15 blocks run ONLY on a Legacy conf (ManagedConfMigrationState.Classify):
+       the blocks are appended when a postgresql.conf still carries them, or is missing the managed include.
+       ManagedConfMigrationRunner.Rewrite (#4336) then migrates that conf, post-start, dropping every block's own
+       line and adding the managed include — from the NEXT start on, darling-managed.conf is the only file that
+       carries these settings. */
+
+    /// <summary>
+    /// Gathers this host's current values for <see cref="ManagedConfFile.RenderInputs"/> — the SAME readers
+    /// v3/v5/v7/v8/v12/v13 already use above (<see cref="GetTotalPhysicalMemoryBytes"/>,
+    /// <see cref="TryGetAuthoritativePhysicalMemoryBytes"/>, <see cref="TryReadDataVolumeSpace"/>,
+    /// <see cref="TimescaleSupport.HypertableCount"/>, <see cref="ReadConfAssignments"/> for the preload list in
+    /// force), so a fresh render never disagrees with what those readers would have told the old blocks.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private ManagedConfFile.RenderInputs GatherManagedConfRenderInputs(string dataDirectory, int postgresMajor)
+    {
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        var ramBytes = GetTotalPhysicalMemoryBytes();
+        var ramAuthoritative = TryGetAuthoritativePhysicalMemoryBytes(out _);
+        var diskAuthoritative = TryReadDataVolumeSpace(dataDirectory, out var freeBytes, out var totalBytes);
+        var preloadChain = ReadConfAssignments(confPath, PreloadSetting);
+        var effectivePreload = preloadChain.Count == 0 ? null : preloadChain[^1].Value;
+
+        return new ManagedConfFile.RenderInputs(
+            ManagedConfFile.CurrentFormulaVersion,
+            "Windows",
+            ramBytes,
+            ramAuthoritative,
+            Environment.ProcessorCount,
+            TimescaleSupport.HypertableCount,
+            postgresMajor,
+            freeBytes,
+            totalBytes,
+            diskAuthoritative,
+            _config.Port,
+            effectivePreload);
+    }
+
+    /// <summary>
+    /// Test-only seam (#4215): when the CURRENT async flow sets this, <see
+    /// cref="WriteManagedConfFile"/> applies it to the freshly rendered text before hand-edit detection or
+    /// writing — so a live test can prove the rejected-value / last-good fallback path without depending on a
+    /// real bug to produce a bad render. <c>AsyncLocal</c>, not a plain static field: its value flows only with
+    /// the call stack that sets it (through every <c>await</c>), so a value one test's flow sets is invisible to
+    /// any other test's flow running concurrently on a different one — xunit parallelizes test classes by
+    /// default, and this class's own gated tests start real managed servers too. Internal, so only
+    /// <c>Darling.Tests</c> can reach it (<c>InternalsVisibleTo</c>) — nothing a config file sets ever touches
+    /// this; it is a delegate reference a unit test installs directly.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<string, string>?> TestOnlyRenderOverride = new();
+
+    /// <summary>
+    /// Renders and, unless the file on disk is a hand edit (<see cref="ManagedConfFile.IsHandEdited"/>) or its
+    /// BODY already matches the fresh render's body, replaces <c>darling-managed.conf</c> (<see
+    /// cref="ManagedConfFile.ShouldReplaceManagedConf"/> — #4215's flake fix: a header-only difference, such as
+    /// <c>data-volume-free-gib</c> crossing a rounding boundary between two starts with nothing else changed,
+    /// never triggers a rewrite, since the header describes the inputs as of the last body change and a
+    /// display field can legitimately lag). Always ensures the <c>include</c> line is present in
+    /// <c>postgresql.conf</c> — there is no opt-out — whichever branch it takes. Never throws: an I/O failure is
+    /// reported in the result and the file already in force stays in force, exactly like a failed <see
+    /// cref="EnsureConfAppended"/> append would today.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal ManagedConfWriteResult WriteManagedConfFile(string dataDirectory, int postgresMajor)
+    {
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var inputs = GatherManagedConfRenderInputs(dataDirectory, postgresMajor);
+        var rendered = ManagedConfFile.Render(inputs);
+        var renderOverride = TestOnlyRenderOverride.Value;
+        if (renderOverride is not null)
+        {
+            rendered = renderOverride(rendered);
+        }
+
+        string? existingText = null;
+        try
+        {
+            if (File.Exists(managedPath))
+            {
+                existingText = File.ReadAllText(managedPath);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning("Could not read {Path} ({Message}); writing a fresh one.", managedPath, ex.Message);
+        }
+
+        if (existingText is not null && ManagedConfFile.IsHandEdited(existingText))
+        {
+            var existingBody = ManagedConfFile.ParseExisting(existingText).Body;
+            var renderedBody = ManagedConfFile.ParseExisting(rendered).Body;
+            var diffs = ManagedConfFile.DiffBodyKeys(existingBody, renderedBody);
+            foreach (var diff in diffs)
+            {
+                _logger.LogWarning(
+                    "{Path} was hand-edited: {Key} = {FileValue} stays in force (a fresh render would write {RenderedValue}).",
+                    managedPath, diff.Key, diff.FileValue ?? "(absent)", diff.RenderedValue ?? "(absent)");
+            }
+
+            EnsureManagedIncludeLine(dataDirectory);
+            return new ManagedConfWriteResult(Written: false, HandEdited: true, WriteFailed: false, rendered, diffs);
+        }
+
+        if (!ManagedConfFile.ShouldReplaceManagedConf(existingText, rendered))
+        {
+            EnsureManagedIncludeLine(dataDirectory);
+            return new ManagedConfWriteResult(Written: false, HandEdited: false, WriteFailed: false, rendered, []);
+        }
+
+        if (!ManagedConfFile.TryReplaceAtomic(
+                managedPath, rendered, ManagedConfFile.DefaultMaxReplaceAttempts, ManagedConfFile.DefaultReplaceRetryDelay, out var writeError))
+        {
+            _logger.LogError(
+                writeError,
+                "Could not update {Path}; the file already in force stays in force.",
+                managedPath);
+            EnsureManagedIncludeLine(dataDirectory);
+            return new ManagedConfWriteResult(Written: false, HandEdited: false, WriteFailed: true, rendered, []);
+        }
+
+        _logger.LogInformation(
+            existingText is null ? "Wrote {Path}" : "Updated {Path}",
+            managedPath);
+        EnsureManagedIncludeLine(dataDirectory);
+        return new ManagedConfWriteResult(Written: true, HandEdited: false, WriteFailed: false, rendered, [], PreviousText: existingText, Inputs: inputs);
+    }
+
+    /// <summary>
+    /// Appends <see cref="ManagedConfFile.IncludeLine"/> to <c>postgresql.conf</c> when it is missing.
+    /// There is no opt-out, so an operator who removes it gets it back, with a warning, on the next start.
+    /// A present include in any form PostgreSQL itself would parse the same way
+    /// (<see cref="ManagedConfFile.HasManagedInclude"/>) is left exactly where it is — never moved, never
+    /// duplicated.
+    /// </summary>
+    internal void EnsureManagedIncludeLine(string dataDirectory)
+    {
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        var conf = File.ReadAllText(confPath);
+        if (ManagedConfFile.HasManagedInclude(conf))
+        {
+            return;
+        }
+
+        File.AppendAllText(confPath, "\n" + ManagedConfFile.IncludeLine + "\n");
+        _logger.LogWarning(
+            "{ConfPath} had no include of {ManagedFile} — appended it back. There is no way to opt out of the managed settings file.",
+            confPath, ManagedConfFile.FileName);
+    }
+
+    /// <summary>
+    /// The <c>postgres -C</c> validation: parses every
+    /// configuration file this data directory's postgresql.conf reaches, <c>darling-managed.conf</c> included,
+    /// and exits without starting a postmaster. <c>-C</c> FIRST is load-bearing: PostgreSQL only skips its
+    /// "refuses to run as an administrator" check when <c>-C</c> is the very first argument, and this service
+    /// can run under LocalSystem or an admin domain account.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static async Task<(bool Valid, string Output)> ValidateManagedConfAsync(
+        string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var postgresExe = Path.Combine(binDirectory, "postgres.exe");
+        var (exitCode, output) = await RunToolAsync(
+            postgresExe, $"-C shared_buffers -D \"{dataDirectory}\"", s_confValidateTimeout, cancellationToken);
+        return (exitCode == 0, output);
+    }
+
+    /// <summary>
+    /// The recovery message for a rejected <c>darling-managed.conf</c>: names
+    /// the two ways an operator can fix a value the product's own formula got wrong for this host — a line
+    /// after the include in <c>postgresql.conf</c>, or <c>ALTER SYSTEM</c> once a store is running on it.
+    /// </summary>
+    internal static string BuildManagedConfValidationFailureMessage(string dataDirectory, string postgresOutput)
+        => $"{ManagedConfFile.FileName} in {dataDirectory} was rejected by postgres -C: {postgresOutput}\n" +
+           "Fix the rejected setting with a line after 'include ''darling-managed.conf''' in " +
+           $"{Path.Combine(dataDirectory, "postgresql.conf")}, or with ALTER SYSTEM once the store is running.";
+
+    /// <summary>
+    /// Everything <see cref="EnsureRunningAsync"/> needs before it can start a server on this data directory
+    /// (#4215): render/write the managed file, validate it, and fall back to the last file that started
+    /// cleanly rather than repeat a start failure forever. Runs
+    /// only on the service-owned start path — see the caller; the adopted-listener path never calls this.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal async Task EnsureManagedConfReadyAsync(string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var postgresMajor = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
+        LastManagedConfWriteResult = WriteManagedConfFile(dataDirectory, postgresMajor);
+        LastStartUsedLastGoodManagedConf = false;
+
+        var (valid, output) = await ValidateManagedConfAsync(binDirectory, dataDirectory, cancellationToken);
+        if (valid)
+        {
+            return;
+        }
+
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var lastGoodPath = Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName);
+        if (File.Exists(lastGoodPath))
+        {
+            File.Copy(lastGoodPath, managedPath, overwrite: true);
+            var (validAfterRestore, outputAfterRestore) = await ValidateManagedConfAsync(binDirectory, dataDirectory, cancellationToken);
+            if (validAfterRestore)
+            {
+                LastStartUsedLastGoodManagedConf = true;
+                _logger.LogError(
+                    "{Message} Restored {LastGood}, which still starts.",
+                    BuildManagedConfValidationFailureMessage(dataDirectory, output), lastGoodPath);
+                return;
+            }
+
+            throw new InvalidOperationException(BuildManagedConfValidationFailureMessage(dataDirectory, outputAfterRestore));
+        }
+
+        throw new InvalidOperationException(BuildManagedConfValidationFailureMessage(dataDirectory, output));
+    }
+
+    /// <summary>
+    /// Copies the file this start just proved PostgreSQL accepts to <see cref="ManagedConfFile.LastGoodFileName"/>
+    /// (design step 2), so the NEXT start has something to fall back to if a formula or a constant later
+    /// produces a value this runtime refuses. Never throws: a failed copy leaves the previous last-good file
+    /// (if any) exactly as it was, which is strictly better than crashing a start that just succeeded.
+    /// </summary>
+    internal void SaveLastGoodManagedConf(string dataDirectory)
+    {
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var lastGoodPath = Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName);
+        try
+        {
+            File.Copy(managedPath, lastGoodPath, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not update {LastGood} after a successful start ({Message}). A future rejected render would have nothing to fall back to.",
+                lastGoodPath, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The v12 ALTER SYSTEM check (#3802): reads <c>postgresql.auto.conf</c> in the data directory and logs ONE
+    /// warning per WAL key it assigns, naming the key, the value as written, the figure the product derived
+    /// instead, and the precedence that makes the file's value the one that runs. It changes nothing — the
+    /// block is authored regardless and the auto.conf is never edited or deleted; the v10 <c>lc_messages</c>
+    /// note is the precedent for stating the precedence rather than fighting it, and <c>ALTER SYSTEM RESET</c>
+    /// is the operator's move. Split from <see cref="EnsureConfAppended"/> so the log line can be pinned with a
+    /// fake auto.conf and a capturing logger, without a data directory that can start.
+    ///
+    /// <para>Never throws: an unreadable auto.conf is logged at Debug and treated as "no overrides" — the block
+    /// is still authored, and this is a diagnostic, not a gate. WARNING rather than INFORMATION because the
+    /// block is INERT for that key while the override stands, and an operator reading the log for "why is the
+    /// effective value not what the product derived" needs the answer to stand out from the v12 line above
+    /// it that reports the derivation as if it applied.</para>
+    /// </summary>
+    internal void LogWalSizingAutoConfOverrides(string dataDirectory, WalSettings derived)
+    {
+        var autoConfPath = Path.Combine(dataDirectory, "postgresql.auto.conf");
+        string? autoConf;
+        try
+        {
+            autoConf = File.Exists(autoConfPath) ? File.ReadAllText(autoConfPath) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogDebug("v12 WAL sizing: could not read {AutoConf} to check for ALTER SYSTEM overrides ({Message}); the block is authored regardless.", autoConfPath, ex.Message);
+            return;
+        }
+
+        foreach (var (name, value) in FindWalSizingAutoConfOverrides(autoConf))
+        {
+            var derivedText = name switch
+            {
+                "max_wal_size" => FormattableString.Invariant($"{derived.MaxWalSizeMb}MB"),
+                "min_wal_size" => FormattableString.Invariant($"{derived.MinWalSizeMb}MB"),
+                _ => CheckpointCompletionTargetPin + " (or PostgreSQL's default on 14+)",
+            };
+            _logger.LogWarning(
+                "postgresql.auto.conf sets {Setting} = {Value} (an ALTER SYSTEM override). PostgreSQL reads postgresql.auto.conf AFTER postgresql.conf, so that value wins over the v12 WAL-sizing block's derived {Derived} and the block is inert for this setting until the override is removed (ALTER SYSTEM RESET {Setting}, then reload). This service does not edit postgresql.auto.conf; the block is authored regardless so the file records what the product derived.",
+                name, value, derivedText, name);
+        }
+    }
+
+    /// <summary>
+    /// The AUTHORITATIVE free/total read of the volume holding <paramref name="dataDirectory"/> (#3802), made
+    /// for the directory's own volume through <see cref="DarlingStoreUpgrade.ReadVolumeSpace"/>, the call the
+    /// store upgrade's headroom check makes. A data directory on a volume mounted at a folder is sized from that
+    /// volume, not from the one behind its drive letter. The free figure is the one available to the caller
+    /// rather than the volume's total free space: it honours a quota on the service account, and the WAL is
+    /// written by the postmaster running AS that account, so it is the figure that bounds what the server can
+    /// actually write — the upgrade's headroom decision makes the same choice.
+    ///
+    /// <para>False, with both figures zero, when the directory cannot be asked, the volume reports no size, or
+    /// the read throws — and false is the v8 discipline's "do nothing" signal, not a value to size from. Logged
+    /// at Warning here so the skip in <see cref="EnsureConfAppended"/> has its cause beside it.
+    /// <paramref name="readVolumeSpace"/> replaces the read, so a test can say what the volume holds and what
+    /// a failed read looks like.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal bool TryReadDataVolumeSpace(
+        string dataDirectory, out long freeBytes, out long totalBytes,
+        Func<string, (long AvailableFreeBytes, long TotalBytes)>? readVolumeSpace = null)
+    {
+        try
+        {
+            (freeBytes, totalBytes) = (readVolumeSpace ?? DarlingStoreUpgrade.ReadVolumeSpace)(dataDirectory);
+            if (freeBytes >= 0 && totalBytes > 0)
+            {
+                return true;
+            }
+
+            _logger.LogWarning("Could not read the free space on the volume holding {DataDirectory} (the volume reported no size).", dataDirectory);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            _logger.LogWarning("Could not read the free space on the volume holding {DataDirectory} ({Message}).", dataDirectory, ex.Message);
+        }
+
+        freeBytes = 0;
+        totalBytes = 0;
+        return false;
     }
 
     /// <summary>
@@ -1603,24 +4238,57 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     private bool TryGetAuthoritativePhysicalMemoryBytes(out long totalPhysicalMemoryBytes)
     {
+        if (TryReadWindowsPhysicalMemoryBytes(out totalPhysicalMemoryBytes, out var win32Error, out var thrown))
+        {
+            return true;
+        }
+
+        if (thrown is not null)
+        {
+            _logger.LogWarning("Could not query total physical memory ({Message}); sizing Postgres memory from a fallback.", thrown.Message);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "GlobalMemoryStatusEx did not return total physical memory (Win32 error {Error}); sizing Postgres memory from a fallback.",
+                win32Error);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The RAW <c>GlobalMemoryStatusEx</c> read, with no logger dependency (#4214) — split out of
+    /// <see cref="TryGetAuthoritativePhysicalMemoryBytes"/> so the host-profile check's RAM fact can call the
+    /// SAME authoritative read this class sizes Postgres from, rather than a second P/Invoke of the same API
+    /// (the "RAM: reuse the authoritative read on Windows" ruling). <paramref name="thrown"/> carries the
+    /// exception on the rare throw path so each caller can log its own wording without this method taking a
+    /// logger; <paramref name="win32Error"/> is <see cref="Marshal.GetLastWin32Error"/> on a clean false.
+    /// </summary>
+    internal static bool TryReadWindowsPhysicalMemoryBytes(out long totalPhysicalMemoryBytes, out int win32Error, out Exception? thrown)
+    {
         try
         {
             var status = new MemoryStatusEx();
             if (GlobalMemoryStatusEx(status) && status.ullTotalPhys > 0)
             {
                 totalPhysicalMemoryBytes = (long)status.ullTotalPhys;
+                win32Error = 0;
+                thrown = null;
                 return true;
             }
 
-            _logger.LogWarning(
-                "GlobalMemoryStatusEx did not return total physical memory (Win32 error {Error}); sizing Postgres memory from a fallback.",
-                Marshal.GetLastWin32Error());
+            win32Error = Marshal.GetLastWin32Error();
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Could not query total physical memory ({Message}); sizing Postgres memory from a fallback.", ex.Message);
+            thrown = ex;
+            totalPhysicalMemoryBytes = 0;
+            win32Error = 0;
+            return false;
         }
 
+        thrown = null;
         totalPhysicalMemoryBytes = 0;
         return false;
     }
@@ -1685,7 +4353,7 @@ public sealed class DarlingManagedPostgres
     /// </list>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private async Task EnsureDataDirectoryMajorAsync(string binDirectory, CancellationToken cancellationToken)
+    private async Task EnsureDataDirectoryMajorAsync(string binDirectory, Lazy<NetworkPlan> networkPlan, CancellationToken cancellationToken)
     {
         var dataMajor = DarlingStoreUpgrade.ParseDataDirectoryMajor(
             await File.ReadAllTextAsync(Path.Combine(_dataDirectory, "PG_VERSION"), cancellationToken));
@@ -1736,15 +4404,22 @@ public sealed class DarlingManagedPostgres
                 "Install the newer package again, or restore the store from a backup taken with a matching runtime.");
         }
 
-        var previousBin = _runtimeAdvance?.PreviousBinDirectory;
+        /* The runtime advance reports a previous runtime only on the start that swapped. After an interrupted
+           upgrade (the process died between the stamp write and the commit, or the revert was refused), the
+           next start's stamp matches the package and nothing is reported, although the store's binaries are
+           still in the rescued copy. Ask for them there before declaring them gone; a runtime restored by
+           hand at that path is found the same way, which is what the refusal below tells the operator to do. */
+        var previousBin = _runtimeAdvance?.PreviousBinDirectory
+            ?? await _storeUpgrade.FindRescuedRuntimeBinAsync(_runtimeRoot, _dataDirectory, cancellationToken);
         if (previousBin is null || !File.Exists(Path.Combine(previousBin, "pg_ctl.exe")))
         {
             throw new InvalidOperationException(
                 $"The store data directory {_dataDirectory} was created by PostgreSQL {dataMajor} and this package bundles PostgreSQL {bundledMajor}, " +
                 $"but the PostgreSQL {dataMajor} binaries are not on this host, so an in-place upgrade is impossible " +
                 "(pg_upgrade needs both runtimes). This happens when the pg-runtime directory was deleted before the upgrade ran. " +
-                $"Restore a PostgreSQL {dataMajor} runtime at {PreviousRuntimeHint()}, then restart the service to upgrade; " +
-                "or restore the store from backup.");
+                $"Put a PostgreSQL {dataMajor} runtime at {PreviousRuntimeHint()}, so that {Path.Combine(PreviousRuntimeHint(), "bin", "pg_ctl.exe")} runs; " +
+                "every start looks there for the store's own binaries when the live runtime is newer than the store, and the next one upgrades from them. " +
+                "Or restore the store from backup.");
         }
 
         var outcome = await _storeUpgrade.UpgradeDataDirectoryAsync(
@@ -1760,10 +4435,28 @@ public sealed class DarlingManagedPostgres
                 dataMajor.Value,
                 bundledMajor.Value,
                 _bundledTimescaleVersion ?? string.Empty,
-                EnsureConfAppended),
+                EnsureConfAppended,
+                /* Func<string>, never the NetworkPlan/NetworkMode types themselves — both are private to this
+                   class, and UpgradeContext is read by DarlingStoreUpgrade (#4280 round-2 part 2, item 2). The
+                   auto.conf carry trial appends this to its own start so a carried setting that only fails
+                   under SSL (the round-1 review's ssl_ca_file example) is caught before the real start ever
+                   sees it, not just before an SSL-less trial would have. */
+                () => networkPlan.Value.Mode == NetworkMode.Exposed
+                    ? BuildSslServerOptions(networkPlan.Value.CertPath, networkPlan.Value.KeyPath)
+                    : string.Empty),
             cancellationToken);
 
         LastUpgradeOutcome = outcome;
+
+        /* A failure that could not put the data directory back, or could not revert the runtime, leaves no
+           store this start can run: going on would reach the first-run initdb with the store sitting beside
+           an empty data directory, or start the new binaries on the old cluster. Stop here, and for good: a
+           retry in the same process would reach the same two places. The worker does not retry an
+           InvalidOperationException, and the message names the hand step. */
+        if (DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(outcome, _dataDirectory, _runtimeRoot) is { } unrecovered)
+        {
+            throw new InvalidOperationException(unrecovered);
+        }
 
         if (outcome.Status == DarlingStoreUpgrade.StoreUpgradeStatus.Failed)
         {
@@ -1774,6 +4467,12 @@ public sealed class DarlingManagedPostgres
             _bundledTimescaleVersion = ReadBundledTimescaleVersion(binDirectory);
         }
     }
+
+    /// <summary>The refusal when a server a quiesced start (TimescaleDB update or auto.conf trial) left running
+    /// on its private port will not stop (#3908, #4280).</summary>
+    private string QuiescedOrphanMessage(string binDirectory)
+        => $"The store at {_dataDirectory} is running on a private port, left there by a quiesced start (a TimescaleDB update or an auto.conf carry-forward trial) this service started, and it would not stop. " +
+           $"Stop it with \"{Path.Combine(binDirectory, "pg_ctl.exe")}\" stop -D \"{_dataDirectory}\" -m immediate, then restart the service. The store's data is not affected.";
 
     [SupportedOSPlatform("windows")]
     private string PreviousRuntimeHint()
@@ -1890,11 +4589,39 @@ public sealed class DarlingManagedPostgres
 
         if (exitCode != 0)
         {
-            throw new InvalidOperationException(
-                BuildStartFailureMessage(exitCode, pgCtl, _dataDirectory, ReadServerLogTail()));
+            var message = BuildStartFailureMessage(exitCode, pgCtl, _dataDirectory, ReadServerLogTail());
+            var interrupted = InterruptedRuntimeUpdateHint(_runtimeRoot);
+            if (interrupted is not null)
+            {
+                _logger.LogError("pg_ctl start failed while a runtime update is unfinished.{Hint}", interrupted);
+                message += interrupted;
+            }
+
+            throw new InvalidOperationException(message);
         }
 
         _logger.LogInformation("Managed Postgres started");
+    }
+
+    /// <summary>
+    /// When the rescue marker exists, a previous runtime update never finished, and a failed start is most
+    /// likely its consequence. Names the marker to delete and the runtime that last opened the store.
+    /// Read-only: it changes no state. Null when there is no marker.
+    /// </summary>
+    internal static string? InterruptedRuntimeUpdateHint(string runtimeRoot)
+    {
+        /* The two path helpers are pure string math; their class carries the platform attribute for its other members. */
+#pragma warning disable CA1416
+        var marker = DarlingStoreUpgrade.RescueMarkerPath(runtimeRoot);
+        if (!File.Exists(marker))
+        {
+            return null;
+        }
+
+        var previous = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+#pragma warning restore CA1416
+        return $"\nAn earlier runtime update did not finish; the runtime that last opened the store is at {previous}. "
+            + $"Delete {marker} to let the next start clear it and re-extract.";
     }
 
     /// <summary>
@@ -2017,52 +4744,69 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     private async Task EnsureDatabaseAsync(string connectionString, CancellationToken cancellationToken)
     {
-        /* The whole unit retries, not just the connect. A backend that loses the post-start race dies
+        await using var connection = await OpenProbedMaintenanceConnectionAsync(connectionString, cancellationToken);
+        if (connection is null)
+        {
+            return;
+        }
+
+        _logger.LogInformation("Creating the '{Database}' database", DatabaseName);
+
+        /* Once, on the connection whose backend just answered the probe, and outside the retry (#4352).
+           The retry is for the post-start race, and that race kills a backend on its FIRST query, which is
+           the probe; this backend has already survived it. A CREATE DATABASE timeout means the template
+           copy is slow, and retrying cannot help: the timeout cancels the statement, the server rolls the
+           partial copy back, and a new attempt copies template1 from the start under the same deadline, so
+           a copy slower than the deadline never finishes. Un-retried, it takes the bootstrap group's
+           deadline; if that fires too, the bootstrap throws and the worker's startup triage retries the
+           whole start.
+           Identifier from the class constant, never from input — same interpolation reasoning
+           as TimescaleSupport/DarlingRetention. CREATE DATABASE cannot run in a transaction;
+           plain ExecuteNonQuery is the correct shape. */
+        using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+        await create.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Opens the maintenance database and asks whether the store's database exists. Returns null when it
+    /// does, and otherwise the open connection, whose backend has answered its first query.
+    /// </summary>
+    private async Task<NpgsqlConnection?> OpenProbedMaintenanceConnectionAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        /* The connect and the first query retry as one unit. A backend that loses the post-start race dies
            AFTER authenticating, so the Open succeeds and the first QUERY is what fails — retrying only the
            Open would never have helped. Each attempt gets a fresh connection because the old one's
            connector is dead. */
+        var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
         for (var attempt = 1; ; attempt++)
         {
+            var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
             try
             {
-                await EnsureDatabaseOnceAsync(connectionString, cancellationToken);
-                return;
+                await connection.OpenAsync(cancellationToken);
+                using var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds };
+                if (await exists.ExecuteScalarAsync(cancellationToken) is not null)
+                {
+                    await connection.DisposeAsync();
+                    return null;
+                }
+
+                return connection;
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException && attempt < FirstConnectionAttempts && IsTransientConnectionFault(ex))
             {
-                throw;
-            }
-            catch (Exception ex) when (attempt < FirstConnectionAttempts && IsTransientConnectionFault(ex))
-            {
+                await connection.DisposeAsync();
                 _logger.LogWarning(
                     "The store dropped the first connection after start ({Message}) — attempt {Attempt} of {Total}. A backend that loses the shared-memory reservation race just after start does this; retrying.",
                     ex.Message, attempt, FirstConnectionAttempts);
                 await Task.Delay(s_firstConnectionRetryDelay, cancellationToken);
             }
-        }
-    }
-
-    private async Task EnsureDatabaseOnceAsync(string connectionString, CancellationToken cancellationToken)
-    {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
-        await using var connection = new NpgsqlConnection(builder.ConnectionString);
-        await connection.OpenAsync(cancellationToken);
-
-        using (var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds })
-        {
-            if (await exists.ExecuteScalarAsync(cancellationToken) is not null)
+            catch
             {
-                return;
+                await connection.DisposeAsync();
+                throw;
             }
         }
-
-        _logger.LogInformation("Creating the '{Database}' database", DatabaseName);
-
-        /* Identifier from the class constant, never from input — same interpolation reasoning
-           as TimescaleSupport/DarlingRetention. CREATE DATABASE cannot run in a transaction;
-           plain ExecuteNonQuery is the correct shape. */
-        using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds };
-        await create.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>
@@ -2480,14 +5224,29 @@ public sealed class DarlingManagedPostgres
         var builder = new StringBuilder();
         builder.Append("-p ").Append(port);
         builder.Append(" -c listen_addresses=").Append(BuildListenAddresses(networkListenIp));
+        builder.Append(BuildSslServerOptions(sslCertFile, sslKeyFile));
+        return builder.ToString();
+    }
 
-        if (!string.IsNullOrWhiteSpace(sslCertFile) && !string.IsNullOrWhiteSpace(sslKeyFile))
+    /// <summary>
+    /// The SSL trio ("-c ssl=on -c ssl_cert_file=... -c ssl_key_file=..."), leading space and all — the same
+    /// shape as <see cref="DarlingStoreUpgrade"/>'s own extraServerOptions constants, so it drops straight
+    /// into StartClusterAsync's extraServerOptions parameter. Factored out of
+    /// <see cref="BuildServerRuntimeOptions"/> (no behavior change there) so the auto.conf carry trial (#4280
+    /// round-2 part 2, item 2) can append the SAME option string to its own start, rather than restate the
+    /// "-c" names a second time. Empty when either path is missing.
+    /// </summary>
+    internal static string BuildSslServerOptions(string? sslCertFile, string? sslKeyFile)
+    {
+        if (string.IsNullOrWhiteSpace(sslCertFile) || string.IsNullOrWhiteSpace(sslKeyFile))
         {
-            builder.Append(" -c ssl=on");
-            builder.Append(" -c ssl_cert_file=").Append(ToForwardSlashes(sslCertFile));
-            builder.Append(" -c ssl_key_file=").Append(ToForwardSlashes(sslKeyFile));
+            return string.Empty;
         }
 
+        var builder = new StringBuilder();
+        builder.Append(" -c ssl=on");
+        builder.Append(" -c ssl_cert_file=").Append(ToForwardSlashes(sslCertFile));
+        builder.Append(" -c ssl_key_file=").Append(ToForwardSlashes(sslKeyFile));
         return builder.ToString();
     }
 
@@ -2718,7 +5477,7 @@ public sealed class DarlingManagedPostgres
         var exposed = plan.Mode == NetworkMode.Exposed;
         try
         {
-            await using var connection = new NpgsqlConnection(ownerConnectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(ownerConnectionString));
             await connection.OpenAsync(cancellationToken);
 
             await using (var errors = new NpgsqlCommand(
@@ -2810,7 +5569,7 @@ public sealed class DarlingManagedPostgres
     {
         try
         {
-            await using var connection = new NpgsqlConnection(ownerConnectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(ownerConnectionString));
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand("SHOW listen_addresses", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var liveListen = await command.ExecuteScalarAsync(cancellationToken) as string ?? string.Empty;
@@ -2961,10 +5720,17 @@ public sealed class DarlingManagedPostgres
     /// <paramref name="timeout"/> is optional and defaults to the shared status timeout
     /// (<see cref="s_statusTimeout"/>); the <c>--configure-network</c> wizard passes a longer one for a
     /// service restart, which routinely exceeds the status budget. Existing callers are unaffected.
+    /// A token that is already cancelled when the call is made throws before powershell.exe starts (see
+    /// <see cref="RunToolAsync"/>).
     /// </summary>
     internal static async Task<(int ExitCode, string Output)> RunPowerShellAsync(
         string command, CancellationToken cancellationToken, TimeSpan? timeout = null)
     {
+        /* WaitForExitAsync does not check its token for a child that has already exited, so a cancellation
+           that came before this call is checked here, before anything starts. A cancelled caller now fails
+           the same way whether its child is instant or slow. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         /* Full path (not the bare name) — avoid a PATH/CWD hijack of "powershell.exe", matching the house
            style of full-pathing every PG tool. */
         var powershellPath = Path.Combine(
@@ -3059,6 +5825,12 @@ public sealed class DarlingManagedPostgres
     /// without a password prompt. <c>internal</c> for the same reason: <see cref="DarlingStoreUpgrade"/>
     /// runs the same class of tool and must not grow a second process runner with its own timeout,
     /// cancellation and capture semantics.</para>
+    ///
+    /// <para>A token that is already cancelled when the call is made throws
+    /// <see cref="OperationCanceledException"/> before anything starts, whether the child would have been
+    /// instant or slow: the wait on a child that has already exited does not look at its token, so the check
+    /// is made here first. A stop, put-back or other cleanup that runs while a cancellation unwinds therefore
+    /// passes <c>CancellationToken.None</c> or a fresh timeout token, never its method's own.</para>
     /// </summary>
     internal static async Task<(int ExitCode, string Output)> RunToolAsync(
         string exePath,
@@ -3068,6 +5840,11 @@ public sealed class DarlingManagedPostgres
         IReadOnlyDictionary<string, string>? environment = null,
         string? workingDirectory = null)
     {
+        /* WaitForExitAsync does not check its token for a child that has already exited, so a cancellation
+           that came before this call is checked here, before anything starts. A cancelled caller now fails
+           the same way whether its child is instant or slow. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!File.Exists(exePath))
         {
             throw new InvalidOperationException(
@@ -3162,6 +5939,9 @@ public sealed class DarlingManagedPostgres
     /// cluster's postmaster through pg_ctl, so redirecting its output inherits the handles into servers that
     /// hold them open for their lifetime. Its diagnostics come from the log files it writes under the new
     /// data directory, which is why they are read on failure instead of captured here.</para>
+    ///
+    /// <para>The same early check as <see cref="RunToolAsync"/>: a token that is already cancelled when the
+    /// call is made throws before the process starts.</para>
     /// </summary>
     internal static async Task<int> RunDetachingToolAsync(
         string exePath,
@@ -3171,6 +5951,11 @@ public sealed class DarlingManagedPostgres
         IReadOnlyDictionary<string, string>? environment = null,
         string? workingDirectory = null)
     {
+        /* WaitForExitAsync does not check its token for a child that has already exited, so a cancellation
+           that came before this call is checked here, before anything starts. A cancelled caller now fails
+           the same way whether its child is instant or slow. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!File.Exists(exePath))
         {
             throw new InvalidOperationException(

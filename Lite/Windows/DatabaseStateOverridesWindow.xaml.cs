@@ -12,7 +12,10 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Windows;
@@ -86,6 +89,19 @@ public partial class DatabaseStateOverridesWindow : Window
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await LoadAsync();
 
+    /// <summary>Which collectors have ever run for the server. A failed read gives the empty history, which makes no claim.</summary>
+    private async System.Threading.Tasks.Task<CollectorRunHistory> ReadCollectorRunsAsync(int serverId)
+    {
+        try
+        {
+            return await _dataService.GetCollectorRunHistoryAsync(serverId);
+        }
+        catch (Exception)
+        {
+            return CollectorRunHistory.Empty;
+        }
+    }
+
     /// <summary>
     /// Loads the selected server's database states into the grid.
     ///
@@ -124,6 +140,11 @@ public partial class DatabaseStateOverridesWindow : Window
         try
         {
             var rows = await _dataService.GetDatabaseStateExpectationsAsync(serverId);
+
+            /* Read with the rows, ahead of the two checks below, so those checks still guard every paint. An unknown
+               edition (no stored row, or a failed read) makes no claim. */
+            var engineEdition = await McpEngineCapability.EngineEditionAsync(_dataService, serverId);
+            var runs = await ReadCollectorRunsAsync(serverId);
 
             /* A newer load for this grid has started, so this answer is not the one the operator is
                waiting for even if the combo came back to the same server. */
@@ -166,7 +187,14 @@ public partial class DatabaseStateOverridesWindow : Window
             StatesGrid.ItemsSource = _rows;
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
-            StatusText.Text = $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
+            var serverName = ServerCombo.Items.OfType<ServerPick>().FirstOrDefault(p => p.ServerId == serverId)?.DisplayName ?? "";
+            /* With no rows the line says why when the collector does not collect for this server. On an Azure SQL Database that is
+               the sentence the MCP tools return as not_collected. Elsewhere it is the tabs' sentence for a collector with no run:
+               not run yet inside its first-run grace, never ran after it. An unknown edition (no stored row) and a failed history
+               read make no claim, so the count shows as it always did. */
+            StatusText.Text = ServerTab.EngineGapStateFromRuns(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, "database_states", _rows.Count, skipped: null, runs) is { Visibility: Visibility.Visible } gap
+                ? gap.Text
+                : $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
         }
         catch (Exception ex)
         {

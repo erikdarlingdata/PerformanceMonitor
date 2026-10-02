@@ -6,8 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+// Window contract tests for get_query_store_top.
 using System;
 using System.IO;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -91,6 +93,12 @@ public class QueryStoreTopWindowTests
         */
         Assert.Contains("GetQueryStoreWindowFloorAsync", method, StringComparison.Ordinal);
         Assert.Contains("effective_start", method, StringComparison.Ordinal);
+
+        /* The raw floor probe runs only on the raw route: when the interval table served, its own plan says how
+           far back the answer reaches. */
+        var probeAt = method.IndexOf("GetQueryStoreWindowFloorAsync", StringComparison.Ordinal);
+        var tableAt = method.IndexOf("tablePlan is { } plan", StringComparison.Ordinal);
+        Assert.True(tableAt >= 0 && tableAt < probeAt, "the raw floor probe must come after the interval-table branch");
         Assert.DoesNotContain("oldest_returned_collection_time", method, StringComparison.Ordinal);
     }
 
@@ -102,7 +110,10 @@ public class QueryStoreTopWindowTests
     {
         var source = ToolSource;
 
-        var start = source.IndexOf("public static async Task<string> GetQueryStoreTop(", StringComparison.Ordinal);
+        /* #4198 split the MCP-facing method into a one-line wrapper (full_text default, no <c>async</c>) and
+           this internal previewLength overload, the same shape #3897's trend tools use for TrendBudget.Chart
+           — the wrapper has no body of its own, so the window-floor logic this file pins lives here. */
+        var start = source.IndexOf("internal static async Task<string> GetQueryStoreTop(", StringComparison.Ordinal);
         Assert.True(start > 0, "get_query_store_top's declaration moved — this pin needs re-anchoring");
 
         /* Bounded at the NEXT tool attribute, so the slice is one tool's body and cannot absorb a sibling's.
@@ -114,16 +125,28 @@ public class QueryStoreTopWindowTests
         return source[start..end];
     }
 
-    /// <summary>The payload describes the data, not just the request.</summary>
+    /// <summary>The payload describes the data, not just the request — and the flag that says the served window
+    /// fell short is spelled as the WINDOW floor it is (#3653 item 17): <c>window_truncated</c>, beside the
+    /// reach keys, never the page dialect's bare <c>truncated</c> that every neighbour in the file uses for a
+    /// <c>limit</c> biting. The whole-file <c>Contains</c> the old pin used would have passed on any of those
+    /// neighbours; this one reads the tool's own body.</summary>
     [Fact]
     public void ThePayload_CarriesTheServedWindow()
     {
-        Assert.Contains("effective_start", ToolSource, StringComparison.Ordinal);
-        Assert.Contains("effective_hours_back", ToolSource, StringComparison.Ordinal);
-        Assert.Contains("truncated", ToolSource, StringComparison.Ordinal);
+        var method = QueryStoreTopMethod();
+        Assert.Contains("effective_start = ", method, StringComparison.Ordinal);
+        Assert.Contains("effective_hours_back = ", method, StringComparison.Ordinal);
+        Assert.Contains("window_truncated = truncated,", method, StringComparison.Ordinal);
+        Assert.DoesNotMatch(new Regex(@"\n\s+truncated,"), method);
+
+        /* The attribute sits above the declaration the slice starts at, so it is read off the file, anchored to
+           the tool's own marker: the description names the key and the wire change through the shared clause. */
+        Assert.Matches(
+            new Regex(@"\[McpServerTool\(Name = ""get_query_store_top""\), Description\([^\n]*McpHelpers\.WindowTruncatedDescription\)\]"),
+            ToolSource);
 
         /* hours_back is still echoed — the caller needs to see what it asked for beside what it got. */
-        Assert.Contains("hours_back,", ToolSource, StringComparison.Ordinal);
+        Assert.Contains("hours_back,", method, StringComparison.Ordinal);
     }
 
     /// <summary>

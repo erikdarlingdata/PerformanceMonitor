@@ -8,10 +8,12 @@
 
 using System;
 using System.ComponentModel;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -43,61 +45,81 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPlanTools
 {
     [McpServerTool(Name = "analyze_query_plan"), Description(
-        "Analyzes a stored execution plan captured from query stats by query_hash. " +
-        "Use after get_top_queries_by_cpu to understand why a query is expensive. " +
-        "Returns warnings, missing indexes, parameters, memory grants, and top operators.")]
+        "Analyzes query_hash's latest plan. No plan: not_collected if the engine can't collect query_stats, else unavailable. " +
+        "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
+        "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
+        "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
+        "actual_* are null, not 0, without runtime stats. " +
+        "<<GUIDE>> " +
+        "Analyzes a stored execution plan captured from query stats by query_hash. Use after get_top_queries_by_cpu to understand why a query is expensive. Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static async Task<string> AnalyzeQueryPlan(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu.")] string query_hash,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Optional database name to disambiguate the same query_hash across databases. Omit for the most recently captured plan.")] string? database_name = null)
+        [Description("Optional database name to disambiguate the same query_hash across databases. Omit for the most recently captured plan.")] string? database_name = null,
+        AnalyzerConfig? analyzerConfig = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
             var xml = await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
-                postgres, resolved.ServerId, query_hash, database_name);
+                postgres, resolved.ServerId, query_hash, database_name, cancellationToken);
             if (string.IsNullOrEmpty(xml))
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No stored plan found for query_hash '{query_hash}'{DbSuffix(database_name)}. The plan collector may not have captured a plan for this query, or the row has aged out of the store.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash);
+            // #4530/#4597: one store read per call so rule 38 can see the server's edition/MAXDOP, and the
+            // Server Context card can see cost threshold/max memory/database. Non-fatal (null on a miss or a
+            // read failure) — the analyzer then falls back to its Info branch.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, database_name, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, analyzerConfig, metadata, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("analyze_query_plan", ex);
         }
     }
 
     [McpServerTool(Name = "analyze_procedure_plan"), Description(
+        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). No plan: not_collected if the engine can't collect procedure_stats, else unavailable. " +
+        "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
+        "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
+        "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
+        "<<GUIDE>> " +
         "Analyzes a stored execution plan captured from procedure stats by sql_handle. " +
         "Use after get_top_procedures_by_cpu to understand why a procedure is expensive. " +
-        "Returns warnings, missing indexes, parameters, memory grants, and top operators.")]
+        "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static async Task<string> AnalyzeProcedurePlan(
         NpgsqlDataSource postgres,
         [Description("The sql_handle value from get_top_procedures_by_cpu.")] string sql_handle,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        AnalyzerConfig? analyzerConfig = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
             var xml = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
-                postgres, resolved.ServerId, sql_handle);
+                postgres, resolved.ServerId, sql_handle, cancellationToken);
             if (string.IsNullOrEmpty(xml))
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No stored plan found for sql_handle '{sql_handle}'. The plan collector may not have captured a plan for this procedure, or the row has aged out of the store.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle);
+            // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP. No database
+            // name is available for a procedure looked up by sql_handle alone, so Database stays null (#4597).
+            var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, cancellationToken: cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle, analyzerConfig, metadata, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("analyze_procedure_plan", ex);
         }
@@ -106,51 +128,65 @@ public sealed class DarlingMcpPlanTools
     [McpServerTool(Name = "analyze_query_store_plan"), Description(
         "Analyzes a stored Query Store execution plan by database name and query ID. " +
         "Use after get_query_store_top to understand why a query is expensive. " +
-        "Returns warnings, missing indexes, parameters, memory grants, and top operators.")]
+        "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static async Task<string> AnalyzeQueryStorePlan(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
         [Description("The query_id from get_query_store_top.")] long query_id,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Optional plan_id to pin one specific compiled plan. Omit for the most recently captured plan for the query.")] long? plan_id = null)
+        [Description("Optional plan_id to pin one specific compiled plan. Omit for the most recently captured plan for the query.")] long? plan_id = null,
+        AnalyzerConfig? analyzerConfig = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
             var xml = await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
-                postgres, resolved.ServerId, database_name, query_id, plan_id);
+                postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken);
             if (string.IsNullOrEmpty(xml))
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}. Query Store plan capture may be disabled for this database, or the plan has been purged.");
+                        $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}. The plan may not have been collected yet, the database's Query Store may be off or its capture mode may exclude this query, or the plan has been purged.");
 
             var identifier = plan_id is null ? $"{database_name}:{query_id}" : $"{database_name}:{query_id}:{plan_id}";
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", identifier);
+            // #4530/#4597: one store read per call so rule 38 can see the server's edition/MAXDOP, and the
+            // Server Context card can see cost threshold/max memory/database.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, database_name, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", identifier, analyzerConfig, metadata, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("analyze_query_store_plan", ex);
         }
     }
 
     [McpServerTool(Name = "analyze_plan_xml"), Description(
+        "Analyzes raw showplan XML you provide (not a stored plan). Per statement: warnings; missing_indexes " +
+        "labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
+        "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat: " +
+        "regression risk for other plans and write cost, so test it; parameters; memory_grant; top_operators, ranked " +
+        "by operators_ranked_by, with operators_returned / total_operators / truncated. Malformed or non-plan XML " +
+        "doesn't error: statement_count 0. Blank plan_xml is refused. " +
+        "<<GUIDE>> " +
         "Analyzes raw showplan XML directly. Use when you have plan XML from any source " +
-        "(clipboard, file, another tool). Returns warnings, missing indexes, parameters, " +
-        "memory grants, and top operators.")]
+        "(clipboard, file, another tool). " +
+        "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static string AnalyzePlanXml(
-        [Description("Raw showplan XML content.")] string plan_xml)
+        [Description("Raw showplan XML content.")] string plan_xml,
+        AnalyzerConfig? analyzerConfig = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(plan_xml))
-            return "No plan XML provided.";
+            return McpHelpers.Refusal("plan_xml", "No plan XML provided.");
 
         try
         {
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, analyzerConfig, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("analyze_plan_xml", ex);
         }
@@ -164,22 +200,23 @@ public sealed class DarlingMcpPlanTools
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu.")] string query_hash,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Optional database name to disambiguate the same query_hash across databases. Omit for the most recently captured plan.")] string? database_name = null)
+        [Description("Optional database name to disambiguate the same query_hash across databases. Omit for the most recently captured plan.")] string? database_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
             var xml = await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
-                postgres, resolved.ServerId, query_hash, database_name);
+                postgres, resolved.ServerId, query_hash, database_name, cancellationToken);
             if (string.IsNullOrEmpty(xml))
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", $"No stored plan found for query_hash '{query_hash}'{DbSuffix(database_name)}.");
 
             return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_plan_xml", ex);
         }

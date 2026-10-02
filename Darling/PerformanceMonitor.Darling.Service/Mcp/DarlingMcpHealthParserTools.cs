@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -42,6 +43,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// parsed-table architecture) have no analog in the parse-on-read record and are omitted. Severe-error
 /// <c>database_name</c> is resolved from the collected size-stats mapping (the DB-free shred left it null).
 /// </para>
+///
+/// <para>
+/// Every one of the nine publishes its SOURCE WITNESS (#3541 A12): <c>source_observed</c> — whether the
+/// collector has ever stored a system_health event of any type for this server, i.e. whether the ring buffer
+/// has ever been read into the store — and <c>last_captured_at</c>, the collector's newest capture. A zero-row
+/// window is then one of four nothings (<see cref="EmptyAsync"/>) and says which; a server whose session has
+/// never been read answers <c>unavailable</c>, never <c>empty</c>. Before this, eight of the nine answered a
+/// dead session with the same word a healthy quiet hour earns.
+/// </para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpHealthParserTools
@@ -54,13 +64,14 @@ public sealed class DarlingMcpHealthParserTools
     /// </summary>
     private const string SystemHealthCollectorName = "system_health_events";
 
-    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health extended event data: overall health indicators captured by sp_HealthParser.")]
+    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health health indicators (the sp_server_diagnostics component results) over an event_time window ending at as_of, newest first. Ungated: every parsed event is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSystemHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -69,16 +80,18 @@ public sealed class DarlingMcpHealthParserTools
             var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SpServerDiagnosticsEvent,
                 xml => One(SystemHealthParser.ParseSystemHealth(xml)),
-                r => r.EventTime.HasValue);
+                r => r.EventTime.HasValue, cancellationToken);
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName)
-                    ?? McpHelpers.Status("empty", "No system health data found in the requested time range.");
+                return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
+                    "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                source_observed = true,
+                last_captured_at = Stamp(c.LastCapturedAt),
                 total_entries = c.Rows.Count,
                 shown = Math.Min(c.Rows.Count, limit),
                 entries = c.Rows.Take(limit).Select(r => new
@@ -102,18 +115,19 @@ public sealed class DarlingMcpHealthParserTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_system_health", ex); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_system_health", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_severe_errors"), Description("Gets severe errors from system_health: stack dumps, non-yielding schedulers, and other critical SQL Server events.")]
+    [McpServerTool(Name = "get_health_parser_severe_errors"), Description("Gets severe errors from system_health over an event_time window ending at as_of, newest first. Gated: severity 19 or higher only, benign connection-reset error numbers excluded, so a lower-severity error is never listed. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets severe errors from system_health (severity >= 19, benign connection-reset numbers excluded): error number, severity, state, database, and message. These are critical SQL Server events (stack dumps, fatal errors). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSevereErrors(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
@@ -123,10 +137,11 @@ public sealed class DarlingMcpHealthParserTools
         {
             var now = windowEnd;
             /* database_id → name resolution needs the collected size-stats mapping (the shred left it null). */
-            var mapTask = DarlingSystemHealthReader.GetDatabaseNameMapAsync(postgres, resolved.ServerId);
+            var mapTask = DarlingSystemHealthReader.GetDatabaseNameMapAsync(postgres, resolved.ServerId, cancellationToken);
             var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.ErrorReportedEvent);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.ErrorReportedEvent, cancellationToken);
             var map = await mapTask;
+            var lastCapturedAt = await DarlingSystemHealthReader.GetLastCaptureAsync(postgres, resolved.ServerId, cancellationToken);
 
             var rows = xmls
                 .Select(SystemHealthParser.ParseSevereError)
@@ -134,13 +149,17 @@ public sealed class DarlingMcpHealthParserTools
                 .Select(r => r!)
                 .ToList();
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
-                    ?? McpHelpers.Status("empty", "No severe errors found in the requested time range.");
+                return await EmptyAsync(
+                    postgres, new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt),
+                    hours_back, SystemHealthParser.ErrorReportedEvent,
+                    $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)", cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                source_observed = true,
+                last_captured_at = Stamp(lastCapturedAt),
                 error_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
                 errors = rows.Take(limit).Select(r => new
@@ -155,16 +174,17 @@ public sealed class DarlingMcpHealthParserTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_severe_errors", ex); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_severe_errors", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_io_issues"), Description("Gets I/O-related issues from system_health: 15-second I/O warnings, long I/O requests, and stalled I/O subsystems.")]
+    [McpServerTool(Name = "get_health_parser_io_issues"), Description("Gets I/O issues from system_health (IO_SUBSYSTEM component results) over an event_time window ending at as_of, newest first. Gated: WARNING-state results only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets I/O-related issues from system_health (IO_SUBSYSTEM component): 15-second I/O warnings, long I/O request counts, and the longest pending request duration with its file path. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetIOIssues(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -172,16 +192,18 @@ public sealed class DarlingMcpHealthParserTools
             var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SpServerDiagnosticsEvent,
                 SystemHealthParser.ParseIoIssues,
-                SystemHealthSignificance.IsSignificant);
+                SystemHealthSignificance.IsSignificant, cancellationToken);
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName)
-                    ?? McpHelpers.Status("empty", "No I/O issues found in the requested time range.");
+                return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
+                    "none was an IO_SUBSYSTEM component result in the WARNING state", cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                source_observed = true,
+                last_captured_at = Stamp(c.LastCapturedAt),
                 issue_count = c.Rows.Count,
                 shown = Math.Min(c.Rows.Count, limit),
                 issues = c.Rows.Take(limit).Select(r => new
@@ -196,74 +218,78 @@ public sealed class DarlingMcpHealthParserTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_io_issues", ex); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_io_issues", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_scheduler_issues"), Description("Gets scheduler issues from system_health: non-yielding schedulers, deadlocked schedulers, and scheduler monitor events.")]
+    [McpServerTool(Name = "get_health_parser_scheduler_issues"), Description("Gets scheduler-monitor utilization samples from system_health over an event_time window ending at as_of, newest first. Gated: only samples where SQL Server's own CPU is pinned, other processes are using half the box or more, or memory utilization has dropped to half or below. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets scheduler-monitor utilization samples from system_health: SQL Server CPU percent, other-process CPU percent, idle CPU percent, memory utilization percent, page faults, and working-set change in MB. Significant when SQL CPU is pinned (>= 90), other-process CPU is high (>= 50), or memory utilization is low (<= 50). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSchedulerIssues(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SchedulerMonitorEvent,
                 xml => One(SystemHealthParser.ParseSchedulerIssue(xml)),
-                SystemHealthSignificance.IsSignificant);
+                SystemHealthSignificance.IsSignificant, cancellationToken);
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName)
-                    ?? McpHelpers.Status("empty", "No scheduler issues found in the requested time range.");
+                return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SchedulerMonitorEvent,
+                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                source_observed = true,
+                last_captured_at = Stamp(c.LastCapturedAt),
                 issue_count = c.Rows.Count,
                 shown = Math.Min(c.Rows.Count, limit),
                 issues = c.Rows.Take(limit).Select(r => new
                 {
                     event_time = r.EventTime?.ToString("o"),
-                    scheduler_id = r.SchedulerId,
-                    cpu_id = r.CpuId,
-                    status = r.Status,
-                    is_online = r.IsOnline,
-                    is_runnable = r.IsRunnable,
-                    is_running = r.IsRunning,
-                    non_yielding_time_ms = r.NonYieldingTimeMs,
-                    thread_quantum_ms = r.ThreadQuantumMs
+                    sql_cpu_utilization = r.SqlCpuUtilization,
+                    other_process_cpu = r.OtherProcessCpu,
+                    system_idle = r.SystemIdle,
+                    memory_utilization = r.MemoryUtilization,
+                    page_faults = r.PageFaults,
+                    working_set_delta_mb = r.WorkingSetDeltaMb
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_scheduler_issues", ex); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_scheduler_issues", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_conditions"), Description("Gets memory condition events from system_health: low memory notifications, memory broker adjustments, and memory pressure indicators.")]
+    [McpServerTool(Name = "get_health_parser_memory_conditions"), Description("Gets memory-condition snapshots from system_health over an event_time window ending at as_of, newest first. Gated: only snapshots whose last notification is RESOURCE_MEMPHYSICAL_LOW. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory condition snapshots from system_health (RESOURCE_MEMPHYSICAL_LOW): low-memory notifications, out-of-memory exceptions, and the memory-manager report (available physical/virtual/paging memory, working set, VM reserved/committed, pages, and the physical/virtual memory-low flags). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryConditions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SpServerDiagnosticsEvent,
                 xml => One(SystemHealthParser.ParseMemoryConditions(xml)),
-                SystemHealthSignificance.IsSignificant);
+                SystemHealthSignificance.IsSignificant, cancellationToken);
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName)
-                    ?? McpHelpers.Status("empty", "No memory condition events found in the requested time range.");
+                return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
+                    "none was a RESOURCE component result carrying a low-memory (RESOURCE_MEMPHYSICAL_LOW) notification", cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                source_observed = true,
+                last_captured_at = Stamp(c.LastCapturedAt),
                 event_count = c.Rows.Count,
                 shown = Math.Min(c.Rows.Count, limit),
                 events = c.Rows.Take(limit).Select(r => new
@@ -303,32 +329,35 @@ public sealed class DarlingMcpHealthParserTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_conditions", ex); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_memory_conditions", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_cpu_tasks"), Description("Gets CPU task events from system_health: long-running CPU-bound tasks, high CPU worker threads, and process utilization snapshots.")]
+    [McpServerTool(Name = "get_health_parser_cpu_tasks"), Description("Gets CPU task results from system_health (QUERY_PROCESSING component) over an event_time window ending at as_of, newest first. Gated: WARNING-state results with at least 10 pending tasks only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets CPU task events from system_health (QUERY_PROCESSING component): worker thread counts (max/created/idle), tasks completed within the interval, pending tasks and oldest pending task wait time, plus deadlock/blocking flags. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetCPUTasks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SpServerDiagnosticsEvent,
                 xml => One(SystemHealthParser.ParseCpuTasks(xml)),
-                SystemHealthSignificance.IsSignificant);
+                SystemHealthSignificance.IsSignificant, cancellationToken);
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName)
-                    ?? McpHelpers.Status("empty", "No CPU task events found in the requested time range.");
+                return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
+                    $"none was a QUERY_PROCESSING component result in the WARNING state with at least {SystemHealthSignificance.CpuTaskMinPendingTasks} pending tasks", cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                source_observed = true,
+                last_captured_at = Stamp(c.LastCapturedAt),
                 event_count = c.Rows.Count,
                 shown = Math.Min(c.Rows.Count, limit),
                 events = c.Rows.Take(limit).Select(r => new
@@ -347,32 +376,35 @@ public sealed class DarlingMcpHealthParserTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_cpu_tasks", ex); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_cpu_tasks", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker events from system_health: cache shrink/grow notifications, memory clerk adjustments, and broker-mediated memory redistribution.")]
+    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker notifications from system_health over an event_time window ending at as_of, newest first. Gated: RESOURCE_MEMPHYSICAL_LOW notifications only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory broker events from system_health: broker ratio changes and target adjustments (currently predicated / allocated / previously allocated), the broker name, and the notification (RESOURCE_MEMPHYSICAL_LOW; the gate returns no other). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryBroker(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.MemoryBrokerEvent,
                 xml => One(SystemHealthParser.ParseMemoryBroker(xml)),
-                SystemHealthSignificance.IsSignificant);
+                SystemHealthSignificance.IsSignificant, cancellationToken);
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName)
-                    ?? McpHelpers.Status("empty", "No memory broker events found in the requested time range.");
+                return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.MemoryBrokerEvent,
+                    "none carried a low-memory notification (broker adjustments that are not a shrink under pressure are routine)", cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                source_observed = true,
+                last_captured_at = Stamp(c.LastCapturedAt),
                 event_count = c.Rows.Count,
                 shown = Math.Min(c.Rows.Count, limit),
                 events = c.Rows.Take(limit).Select(r => new
@@ -393,16 +425,17 @@ public sealed class DarlingMcpHealthParserTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_broker", ex); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_memory_broker", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_node_oom"), Description("Gets memory node OOM events from system_health: out-of-memory conditions on specific NUMA nodes.")]
+    [McpServerTool(Name = "get_health_parser_memory_node_oom"), Description("Gets memory-node out-of-memory events from system_health over an event_time window ending at as_of, newest first. Ungated: every recorded OOM is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory node OOM events from system_health: out-of-memory conditions on specific NUMA nodes, with the node's physical/virtual/page-file memory, target/reserved/committed KB, the failure type, and the memory-low flags. Never gated — every recorded OOM is returned. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryNodeOOM(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -411,16 +444,18 @@ public sealed class DarlingMcpHealthParserTools
             var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.MemoryNodeOomEvent,
                 xml => One(SystemHealthParser.ParseMemoryNodeOom(xml)),
-                SystemHealthSignificance.IsSignificant);
+                SystemHealthSignificance.IsSignificant, cancellationToken);
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName)
-                    ?? McpHelpers.Status("empty", "No memory node OOM events found in the requested time range.");
+                return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.MemoryNodeOomEvent,
+                    "none shredded to a memory-node OOM record (this category is ungated, so a captured OOM event that parsed would be here)", cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                source_observed = true,
+                last_captured_at = Stamp(c.LastCapturedAt),
                 event_count = c.Rows.Count,
                 shown = Math.Min(c.Rows.Count, limit),
                 events = c.Rows.Take(limit).Select(r => new
@@ -456,18 +491,19 @@ public sealed class DarlingMcpHealthParserTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_node_oom", ex); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_memory_node_oom", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background — the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text.")]
+    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets individual waits from system_health, one row per wait_info event with the waiting statement's SQL text, over an event_time window ending at as_of, newest first. Floors: a real session, a non-BACKUP statement, at least 500 ms, and a wait type off the idle/background list; shorter waits are never listed. get_wait_stats has the instance-wide totals. An empty answer with status empty is a real result: nothing in this window passed the floors, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background — the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSignificantWaits(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
@@ -483,7 +519,8 @@ public sealed class DarlingMcpHealthParserTools
             */
             var now = windowEnd;
             var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.WaitInfoEvent);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.WaitInfoEvent, cancellationToken);
+            var lastCapturedAt = await DarlingSystemHealthReader.GetLastCaptureAsync(postgres, resolved.ServerId, cancellationToken);
 
             var rows = xmls
                 .Select(SystemHealthParser.ParseSignificantWait)
@@ -494,46 +531,26 @@ public sealed class DarlingMcpHealthParserTools
             if (rows.Count == 0)
             {
                 /*
-                    Three different nothings, and only one of them is good news. Events captured but none
-                    significant is the healthy state and costs no extra query -- we already counted them.
-                    Nothing captured in the window needs the probe to tell a quiet window from a server
+                    The read this family's empty ladder was modelled on (#2484): events captured but none
+                    significant is the healthy state and costs no extra query -- we already counted them;
+                    nothing captured in the window needs the probe to tell a quiet window from a server
                     whose wait_info has never been collected, because "no significant waits" is exactly
-                    what an operator wants to hear and a caller who believes it stops looking.
+                    what an operator wants to hear and a caller who believes it stops looking. Since #3541
+                    A12 the ladder lives in EmptyAsync and all nine reads climb it; only the gate's own
+                    description (the four conditions) is this tool's to word.
                 */
-                if (xmls.Count > 0)
-                {
-                    return McpHelpers.Status(
-                        "empty",
-                        $"{xmls.Count} wait_info event(s) were captured for {resolved.ServerName} in the last {hours_back} hour(s) and none was significant (needs a real session, a non-BACKUP statement, at least {SystemHealthSignificance.SignificantWaitMinDurationMs} ms, and a wait type off the idle list). Events ARE being captured, so this is the healthy answer for this read rather than missing data.");
-                }
-
-                var everCaptured = await DarlingSystemHealthReader.HasAnyEventOfTypeAsync(
-                    postgres, resolved.ServerId, SystemHealthParser.WaitInfoEvent);
-                if (everCaptured)
-                {
-                    return McpHelpers.Status(
-                        "empty",
-                        $"No wait_info events were captured for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS captured them before, so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.");
-                }
-
-                /*
-                    #2511 adds a FOURTH nothing, and it is the one that was being mis-explained. On an engine
-                    whose system_health collector is gated off there is no session to start and no collection
-                    to check, so the advice below is advice about something that cannot exist. The engine
-                    answer goes first because it is the stronger claim; the text after it stays exactly right
-                    for every engine that DOES collect this.
-                */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
-                    ?? McpHelpers.Status(
-                        "unavailable",
-                        $"No wait_info events have EVER been captured for {resolved.ServerName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing was waiting.");
+                return await EmptyAsync(
+                    postgres, new Collected<SignificantWaitRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt),
+                    hours_back, SystemHealthParser.WaitInfoEvent,
+                    $"none was significant (needs a real session, a non-BACKUP statement, at least {SystemHealthSignificance.SignificantWaitMinDurationMs} ms, and a wait type off the idle list)", cancellationToken);
             }
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                source_observed = true,
+                last_captured_at = Stamp(lastCapturedAt),
                 wait_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
                 waits = rows.Take(limit).Select(r => new
@@ -550,7 +567,7 @@ public sealed class DarlingMcpHealthParserTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_significant_waits", ex); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_significant_waits", ex); }
     }
 
     /* ─────────────────────────── shared read + parse + filter ─────────────────────────── */
@@ -559,9 +576,9 @@ public sealed class DarlingMcpHealthParserTools
     /// <see cref="EarlyReturn"/> string (a resolution error or #1224 validation) the tool returns verbatim,
     /// or the resolved <see cref="ServerId"/>/<see cref="ServerName"/> + the SIGNIFICANT parsed
     /// <see cref="Rows"/>. The id rides along for the #2511 engine-capability probe on the zero-row path —
-    /// re-resolving the name there would be a second chance to match a DIFFERENT server, since resolution is
-    /// first-wins over a partial.</summary>
-    private readonly record struct Collected<T>(string? EarlyReturn, int ServerId, string ServerName, List<T> Rows);
+    /// re-resolving the name there would be a second registry read, which could answer for a different server.</summary>
+    private readonly record struct Collected<T>(
+        string? EarlyReturn, int ServerId, string ServerName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt);
 
     /// <summary>
     /// Resolves the server, validates hours_back + as_of + limit, reads the raw event_xml for
@@ -570,20 +587,26 @@ public sealed class DarlingMcpHealthParserTools
     /// <paramref name="significant"/> accepts. The seven gated categories pass their
     /// <see cref="SystemHealthSignificance"/> predicate; System Health passes an EventTime-present
     /// predicate (ungated, matching the viewer's chart read).
+    /// <para>Also carries the two facts the payload owes under contract rule 5 (#3541 A12): how many raw
+    /// events of the type the window held BEFORE the gate (so zero survivors out of a hundred captured
+    /// reads as healthy, and zero out of zero does not), and the collector's newest capture of any type
+    /// (so a caller can see whether the source was ever observed at all). The witness is one index-walk
+    /// per call — see <see cref="DarlingSystemHealthReader.LastCaptureSql"/>.</para>
     /// </summary>
     private static async Task<Collected<T>> CollectAsync<T>(
         NpgsqlDataSource postgres, string? serverName, int hoursBack, int limit, string? asOf, string eventType,
-        Func<string, IEnumerable<T>> shred, Func<T, bool> significant) where T : class
+        Func<string, IEnumerable<T>> shred, Func<T, bool> significant, CancellationToken cancellationToken = default) where T : class
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName);
-        if (error != null) return new Collected<T>(error, 0, "", new List<T>());
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, cancellationToken);
+        if (error != null) return new Collected<T>(error, 0, "", new List<T>(), 0, null);
 
         var validation = McpHelpers.ValidateWindow(hoursBack, asOf, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
-        if (validation != null) return new Collected<T>(validation, 0, "", new List<T>());
+        if (validation != null) return new Collected<T>(validation, 0, "", new List<T>(), 0, null);
 
         var now = windowEnd;
         var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
-            postgres, resolved.ServerId, now.AddHours(-hoursBack), now, eventType);
+            postgres, resolved.ServerId, now.AddHours(-hoursBack), now, eventType, cancellationToken);
+        var lastCapturedAt = await DarlingSystemHealthReader.GetLastCaptureAsync(postgres, resolved.ServerId, cancellationToken);
 
         var rows = new List<T>();
         foreach (var xml in xmls)
@@ -595,8 +618,96 @@ public sealed class DarlingMcpHealthParserTools
             }
         }
 
-        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, rows);
+        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt);
     }
+
+    /* ─────────────────────────── the four nothings (#3541 A12) ─────────────────────────── */
+
+    /// <summary>
+    /// What zero rows means for one system_health category, which is four different things — and only the
+    /// first two are good news. Modelled on get_health_parser_significant_waits' three-way ladder (#2484),
+    /// which was the ONE read of the nine that refused to call a never-read session a clean bill; the other
+    /// eight answered <c>empty</c> to everything, so a dead <c>system_health</c> session, a collector that
+    /// never ran, and a healthy quiet hour all read as "no severe errors". Contract rule 5: zero is a
+    /// measurement, and an absence must say what it is an absence OF.
+    ///
+    /// <para><b>Rung 1 — captured and gated out.</b> Events of the type WERE stored in the window; the
+    /// shred + significance gate kept none. Healthy, and free: the raw count was taken on the data read.
+    /// <b>Rung 2 — captured before, not in this window.</b> Quiet window; widening reaches the most recent
+    /// events, and the message says when the last one was stored so the caller knows how far.
+    /// <b>Rung 3 — this type never, but the session IS being read.</b> Other categories have been stored, so
+    /// the ring buffer is reachable and the engine has simply never recorded one of these — for a
+    /// memory-node OOM or a severe error that is the healthy measurement, not a blind spot, and it must not
+    /// be called unavailable. <b>Rung 4 — nothing of any type, ever.</b> A dead session or a collector that
+    /// never ran: <c>unavailable</c>, the #3524 shape, never <c>empty</c>. The #2511 engine-capability probe
+    /// goes first on this rung because it is the stronger claim (an Azure SQL Database has no session to
+    /// start), and its text stays exactly right for every engine that does collect this.</para>
+    ///
+    /// <para>Every rung carries the same two witness keys the data envelope carries
+    /// (<c>source_observed</c>, <c>last_captured_at</c>) plus the rung's own evidence, at the top level
+    /// beside <c>status</c> — the trend family's precedent (#3541 A2): a caller reads the witness without
+    /// first checking which branch answered. The type-scoped probe runs only on the empty path, so
+    /// the healthy data path costs one witness query, not two.</para>
+    /// </summary>
+    private static async Task<string> EmptyAsync<T>(
+        NpgsqlDataSource postgres, Collected<T> c, int hoursBack, string eventType, string noneQualifiedBecause,
+        CancellationToken cancellationToken = default)
+    {
+        /* The type-scoped probe runs on every rung: on rung 1 the type exists in the window so the backward
+           index walk stops at its first row, and the stamp it returns is THIS type's newest capture rather
+           than the server-level witness standing in for it. */
+        var lastOfType = await DarlingSystemHealthReader.GetLastCaptureOfTypeAsync(postgres, c.ServerId, eventType, cancellationToken);
+        if (c.RawEventCount > 0)
+        {
+            return WitnessStatus(
+                "empty",
+                $"{c.RawEventCount} {eventType} event(s) were captured for {c.ServerName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}. Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
+                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount);
+        }
+
+        if (lastOfType is DateTime seen)
+        {
+            return WitnessStatus(
+                "empty",
+                $"No {eventType} events were captured for {c.ServerName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)}), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
+                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0);
+        }
+
+        if (c.LastCapturedAt is DateTime alive)
+        {
+            return WitnessStatus(
+                "empty",
+                $"No {eventType} events have been captured for {c.ServerName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
+                sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0);
+        }
+
+        return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName, cancellationToken)
+            ?? WitnessStatus(
+                "unavailable",
+                $"No system_health events of ANY type have EVER been captured for {c.ServerName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
+                sourceObserved: false, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0);
+    }
+
+    /// <summary>
+    /// <see cref="McpHelpers.Status"/> with the source witness beside <c>status</c> and <c>message</c>: the
+    /// same <c>source_observed</c> / <c>last_captured_at</c> pair the data envelope carries, plus what this
+    /// rung measured (<c>last_captured_of_type_at</c>, <c>events_in_window</c>). Top-level rather than under
+    /// <c>hints</c> so the keys sit in one place whichever branch answered.
+    /// </summary>
+    private static string WitnessStatus(
+        string status, string message, bool sourceObserved, DateTime? lastCapturedAt, DateTime? lastCapturedOfTypeAt, int eventsInWindow)
+        => JsonSerializer.Serialize(new
+        {
+            status,
+            message,
+            source_observed = sourceObserved,
+            last_captured_at = Stamp(lastCapturedAt),
+            last_captured_of_type_at = Stamp(lastCapturedOfTypeAt),
+            events_in_window = eventsInWindow,
+        }, McpHelpers.JsonOptions);
+
+    /// <summary>The store's naive-UTC stamp in the same ISO shape the rows' <c>event_time</c> uses; null stays null.</summary>
+    private static string? Stamp(DateTime? stamp) => stamp?.ToString("o");
 
     /// <summary>Wraps a single-record shred (0-or-1) as the 0..n sequence <see cref="CollectAsync"/> expects.</summary>
     private static IEnumerable<T> One<T>(T? record) where T : class =>

@@ -72,6 +72,10 @@ public static class CollectorCatalog
         PgWraparoundStatsCollector.Instance,
         PgServerConfigCollector.Instance,
         PgDeadlocksCollector.Instance,
+        /* #3601: the classified log-event pipeline, third reader of the same server log and the first to
+           carry more than one family. Its table is generated from PgLogEventsCollector.PayloadColumns like
+           every other, and V129 is pinned to be identical to that generation. */
+        PgLogEventsCollector.Instance,
         PgXminHorizonCollector.Instance,
         PgReplicationSlotsCollector.Instance,
         PgAutovacuumStatsCollector.Instance,
@@ -94,6 +98,11 @@ public static class CollectorCatalog
         PgBufferUsageCollector.Instance,
         PgIndexBloatCollector.Instance,
         PgCpuUtilizationCollector.Instance,
+        /* #3691 (V136): the per-database size series — a plain hourly read of the shared catalog. Its table
+           is generated from PayloadColumns like every other, and V136 is pinned to be identical to that
+           generation. (V136's other series, host memory, is six columns on pg_cpu_utilization's row rather
+           than a table of its own — see that collector's doc for why.) */
+        PgDatabaseSizeStatsCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>

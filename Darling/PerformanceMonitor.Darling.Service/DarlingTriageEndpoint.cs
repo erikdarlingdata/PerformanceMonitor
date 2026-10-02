@@ -8,15 +8,21 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -113,8 +119,46 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.DiskPressureResolvedMetric, DarlingSelfAlertEvaluator.DiskPressureMetric),
         ("Store Job Cadence Recovered", DarlingSelfAlertEvaluator.JobCadenceMetric),
         ("Compression Job Recovered", DarlingSelfAlertEvaluator.CompressionJobMetric),
+        /* #3816: the other two policy families' recovery edges. The total_failures arm has none — it reports
+           an EVENT ("N more failures since the previous sample"), not a condition that clears. */
+        (DarlingSelfAlertEvaluator.RefreshJobRecoveredMetric, DarlingSelfAlertEvaluator.RefreshJobStuckMetric),
+        (DarlingSelfAlertEvaluator.RetentionJobRecoveredMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
         (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
+        /* #4732: the fleet-gate self-alert's resolution. */
+        (DarlingSelfAlertEvaluator.FleetGateClearedMetric, DarlingSelfAlertEvaluator.FleetGateMetric),
+        /* The store families that landed AFTER #2768 (#3833). Their resolution titles are triage entry
+           points exactly like the five edges above — the history row records resolution.Title into
+           metric_name — and each was falling to the per-server fallback because nothing folded it onto its
+           firing. Their canonicals have no SectionsByMetric entry ON PURPOSE: the fleet-level arm of
+           SectionsFor answers them through this same fold, which is what keeps this the last list that has
+           to grow (a NEW store family needs its alias here, but no section mapping). */
+        (DarlingSelfAlertEvaluator.RetentionHoldClearedMetric, DarlingSelfAlertEvaluator.RetentionHoldMetric),
+        (DarlingSelfAlertEvaluator.CustomRuleHealthResolvedMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric),
+        (DarlingSelfAlertEvaluator.ToastSlackClearedMetric, DarlingSelfAlertEvaluator.ToastSlackMetric),
+        (DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric),
+        (DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, DarlingSelfAlertEvaluator.StoreSettingsMetric),
+        (DarlingSelfAlertEvaluator.RawPurgeOverHorizonClearedMetric, DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric),
+        (DarlingSelfAlertEvaluator.NotificationChannelRecoveredMetric, DarlingSelfAlertEvaluator.NotificationChannelFailingMetric),
+    };
+
+    /// <summary>
+    /// The store self-alerts that fire under a MONITORED SERVER's name rather than the store's label — the
+    /// self-monitor family's per-server members. The condition is about the monitor (a collector that stopped,
+    /// a capture session that is gone, a collector whose own cost regressed) but it is scoped to ONE server,
+    /// the alert carries that server's real name, and the per-server reads are exactly the drill-down an
+    /// operator wants. They are named here because they are the EXCEPTION to the family rule in
+    /// <see cref="IsFleetLevelStoreMetric"/>, and the exception list is the half that does not grow: the
+    /// population that keeps growing is the fleet-level one (#3833), and nothing has to be added here when it
+    /// does. Declared ABOVE <see cref="SectionsByMetric"/> because the map's alias loop calls
+    /// <see cref="IsFleetLevelStoreMetric"/> during type initialization, and static fields initialize in
+    /// declaration order.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> PerServerSelfMonitorMetrics = new[]
+    {
+        "Collection Stopped",
+        "Capture Down",
+        "Collector Cost Regression",
     };
 
     /// <summary>
@@ -247,6 +291,14 @@ internal static class DarlingTriageEndpoint
             [DarlingSelfAlertEvaluator.StoreUpgradeMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
+            /* #3816: the same shape for the two families the self-heal now covers and for the failure arm —
+               get_store_metrics answers all three (the objects[] background_job rows carry each job's
+               last_run_duration_ms, schedule_interval_ms, total_runs and total_failures, which is the series
+               the failure alert's own detail text points at), and collector cost is what drives the volume
+               they are all downstream of. */
+            [DarlingSelfAlertEvaluator.RefreshJobStuckMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.RetentionJobStuckMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.PolicyJobFailingMetric] = StoreSections(),
 
             /* #3306: the stale-mute alert is the one store-family member whose subject is the CONFIGURATION
                rather than the store's volume, so get_store_metrics answers nothing about it. The rule list is
@@ -263,11 +315,12 @@ internal static class DarlingTriageEndpoint
 
             /* #3514: the web-dashboard TLS certificate expiry alert is config/host-shaped like the stale-mute
                one — get_store_metrics answers nothing about it, and renewing the certificate is an out-of-band
-               step on the service host. The actionable facts (subject, thumbprint, expiry) are in the alert
-               detail; the history is the firing trail, so the operator can see when the warning began. */
+               step on the service host. The actionable facts (subject, thumbprint, expiry — or, for the #3517
+               not-yet-valid arm of the same metric, the date the window opens) are in the alert detail; the
+               history is the firing trail, so the operator can see when the warning began. */
             [DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric] = new[]
             {
-                F("Recent alerts (the certificate's subject, thumbprint and expiry are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+                F("Recent alerts (the certificate's subject, thumbprint and validity dates are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
             },
 
             /* PostgreSQL alert family (PostgresAlertEvaluator). */
@@ -288,12 +341,24 @@ internal static class DarlingTriageEndpoint
             },
         };
 
-        /* Alias AFTER the literals so each resolution title shares its firing metric's exact list — a
-           canonical named here but absent above is a construction error, and failing the process at type
-           initialization is louder than any test. */
+        /* Alias AFTER the literals so each resolution title shares its firing metric's exact list. A
+           canonical with no entry above is legitimate exactly when the fleet-level arm answers it (#3833) —
+           SectionsFor folds the alias through IsFleetLevelStoreMetric and lands on the store sections, so
+           copying nothing here still renders the pair identically. A canonical that is NEITHER mapped nor
+           fleet-level is a construction error — a typo, or a per-server alias nobody wired — and failing the
+           process at type initialization is louder than any test. */
         foreach (var (alias, canonical) in ResolutionAliases)
         {
-            map[alias] = map[canonical];
+            if (map.TryGetValue(canonical, out var sections))
+            {
+                map[alias] = sections;
+            }
+            else if (!IsFleetLevelStoreMetric(canonical))
+            {
+                throw new InvalidOperationException(
+                    $"ResolutionAliases: '{alias}' folds to '{canonical}', which has no section mapping and " +
+                    "is not a fleet-level store metric. Map it, fix the name, or add its family exception.");
+            }
         }
 
         return map;
@@ -305,12 +370,16 @@ internal static class DarlingTriageEndpoint
         S("Server summary", "get_server_summary"),
     };
 
-    /// <summary>The store self-alert family's sections (#2768) — both FLEET-LEVEL, so neither binds a server.
-    /// <c>get_store_metrics</c> is the store's own size/compression/growth series plus a row per TimescaleDB
-    /// background job; <c>get_collector_cost</c> is what drives the ingest volume those numbers move with.</summary>
+    /// <summary>The store self-alert family's sections (#2768), all FLEET-LEVEL, so none binds a server.
+    /// <c>get_store_metrics</c> twice: its summary (the store's size and growth, its largest objects first),
+    /// and its background jobs as a list of their own, because since #3903 the summary carries the jobs in a
+    /// nested list the card's table does not render, and the job-family alerts are about exactly those rows.
+    /// <c>get_collector_cost</c> is what drives the ingest volume those numbers move with.</summary>
     private static TriageSection[] StoreSections() => new[]
     {
-        F("Store size, growth and background jobs", "get_store_metrics", ("days_back", "30")),
+        F("Store size and growth", "get_store_metrics", ("days_back", "30")),
+        F("Background jobs (failing first, then closest to their cadence)", "get_store_metrics",
+            ("days_back", "30"), ("object_kind", StoreSelfMetrics.BackgroundJobObjectKind), ("limit", "25")),
         F("Collector cost (what drives store volume)", "get_collector_cost", ("days_back", "7")),
     };
 
@@ -328,12 +397,92 @@ internal static class DarlingTriageEndpoint
     internal static readonly TriageSection CollectionLogSection =
         S("Recent collection log", "get_collection_log", ("hours", "2"), ("limit", "100"));
 
-    /// <summary>The sections for one metric: the exact-name mapping, else <see cref="DefaultSections"/>.
-    /// Null/blank (a hand-built URL) also falls back rather than erroring.</summary>
-    internal static IReadOnlyList<TriageSection> SectionsFor(string? metricName) =>
-        !string.IsNullOrWhiteSpace(metricName) && SectionsByMetric.TryGetValue(metricName.Trim(), out var sections)
-            ? sections
-            : DefaultSections;
+    /// <summary>
+    /// Does this metric NAME say the alert is fleet-level — about the monitoring store itself rather than a
+    /// monitored server (#3833)?
+    ///
+    /// <para><b>Why the name and not the request's server.</b> #2768 fixed this page for the store family by
+    /// adding four names to <see cref="SectionsByMetric"/>, and every self-alert family that landed after it
+    /// — the retention hold, the collector-cost digest, the fleet sweep rollup, the custom-rule health check,
+    /// TOAST slack, checkpointer pressure, the analysis singles digest — arrived without an entry and
+    /// silently reopened the original defect for its own metric: the page emitted the fleet-level note and
+    /// then rendered two per-server sections under it, each reading "Could not resolve server". A list that
+    /// has to be maintained in step with a growing taxonomy keeps falling behind; a rule does not. So the
+    /// decision is derived from the <see cref="AlertFamily"/> census — the taxonomy a new alert cannot ship
+    /// without being added to, because <c>NotificationRoutingTests</c> reds when it is not — and the four-name
+    /// list is no longer what makes a store alert render correctly.</para>
+    ///
+    /// <para><b>Both store-fired families count.</b> <see cref="AlertFamily.SelfMonitor"/> is the monitor's own
+    /// health and <see cref="AlertFamily.Reports"/> is the three daily documents the store composes about
+    /// ITSELF and the fleet (the collector-cost digest, the fleet sweep rollup, the analysis singles digest) —
+    /// all fired under the store's label, and the digest is the metric the #3833 report was filed against.
+    /// <see cref="AlertFamily.Canonical"/> folds a delivered recovery name onto its firing, and
+    /// <see cref="ResolutionAliases"/> covers the resolution TITLES the store writes to history, so an
+    /// all-clear row ("Retention Hold Cleared", "Store TOAST Slack Cleared") is fleet-level exactly like the
+    /// firing it clears — the #2768 lesson that "Store Disk Pressure" was mapped while its own resolution was
+    /// not.</para>
+    ///
+    /// <para>PURE, and keyed on the metric alone: the arm is testable without a request, which a predicate
+    /// reading the request-scoped server label would not be.</para>
+    /// </summary>
+    internal static bool IsFleetLevelStoreMetric(string? metricName)
+    {
+        if (string.IsNullOrWhiteSpace(metricName))
+        {
+            return false;
+        }
+
+        var trimmed = metricName.Trim();
+
+        /* A resolution TITLE is not a delivered metric name, so the census does not know it; the alias table
+           already states which firing each one clears, and that firing is what the family is read for. */
+        foreach (var (alias, canonical) in ResolutionAliases)
+        {
+            if (string.Equals(alias, trimmed, StringComparison.OrdinalIgnoreCase))
+            {
+                trimmed = canonical;
+                break;
+            }
+        }
+
+        foreach (var perServer in PerServerSelfMonitorMetrics)
+        {
+            if (string.Equals(perServer, trimmed, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        var family = AlertFamily.Of(trimmed);
+        return string.Equals(family, AlertFamily.SelfMonitor, StringComparison.Ordinal)
+            || string.Equals(family, AlertFamily.Reports, StringComparison.Ordinal);
+    }
+
+    /// <summary>The sections for one metric: the exact-name mapping, else the store's own reads when the
+    /// metric NAME says the alert is fleet-level (<see cref="IsFleetLevelStoreMetric"/> — #3833), else
+    /// <see cref="DefaultSections"/>. The mapping stays an OVERRIDE layer rather than the gate: the six
+    /// entries with tailored reads (disk pressure's store metrics, stale-mute's rule list, the TLS
+    /// certificate's history) keep them, and every other store metric gets correct sections instead of the
+    /// per-server fallback's two resolver errors. Null/blank (a hand-built URL) still falls back rather than
+    /// erroring.</summary>
+    internal static IReadOnlyList<TriageSection> SectionsFor(string? metricName)
+    {
+        if (string.IsNullOrWhiteSpace(metricName))
+        {
+            return DefaultSections;
+        }
+
+        if (SectionsByMetric.TryGetValue(metricName.Trim(), out var sections))
+        {
+            return sections;
+        }
+
+        return IsFleetLevelStoreMetric(metricName) ? s_fleetLevelStoreSections : DefaultSections;
+    }
+
+    /// <summary>The fleet-level fallback, held as ONE instance so a caller can compare identity the way the
+    /// pins compare against <see cref="DefaultSections"/>.</summary>
+    private static readonly IReadOnlyList<TriageSection> s_fleetLevelStoreSections = StoreSections();
 
     /// <summary>
     /// Is this link's <c>server</c> the label the fleet-level store self-alerts fire under (#2768)? Those
@@ -372,11 +521,13 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>How far past the firing instant each section's window END sits, so the firing itself — and
     /// its immediate aftermath — is inside the window rather than being its exclusive upper bound.</summary>
-    private static readonly TimeSpan AnchorSlack = TimeSpan.FromMinutes(15);
+    internal static readonly TimeSpan AnchorSlack = TimeSpan.FromMinutes(15);
 
     /// <summary>How far back from the anchor the alert-history match looks. Generous, because the link's
-    /// timestamp is the DELIVERY instant and per-event splits can deliver a batch minutes after the sweep.</summary>
-    private static readonly TimeSpan AlertMatchLookback = TimeSpan.FromHours(24);
+    /// timestamp is the DELIVERY instant and per-event splits can deliver a batch minutes after the sweep.
+    /// Widened to <c>internal</c> so <see cref="AlertNotebookEndpoint"/> (#4222) reuses the SAME family
+    /// lookback for its window math rather than copying the constant.</summary>
+    internal static readonly TimeSpan AlertMatchLookback = TimeSpan.FromHours(24);
 
     /// <summary>
     /// PURE: resolves the link's <c>at</c> instant into (the anchor the page is ABOUT, the <c>as_of</c> value
@@ -417,7 +568,7 @@ internal static class DarlingTriageEndpoint
     /// middleware like every sibling route; <paramref name="analysis"/> is the same shared instance the read
     /// dispatch receives (none of the mapped sections currently need it, but the dispatch signature does).
     /// </summary>
-    public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis)
+    public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis, ILogger logger)
     {
         var dispatch = DarlingWebEndpoints.BuildReadDispatch();
 
@@ -434,8 +585,12 @@ internal static class DarlingTriageEndpoint
             /* #2768: a store self-alert's server is the store's label — the synthetic StoreServerLabel, or
                #3500's opted-in peers.storeName — which cannot resolve by design either way. Recognise it up
                front and skip resolution rather than reporting a failure the operator can do nothing about —
-               the sections this page then runs are fleet-level and take no server. */
-            var fleetLevelStore = IsFleetLevelStoreServer(serverQuery);
+               the sections this page then runs are fleet-level and take no server.
+               Since #3833 the metric NAME is the second, equal arm: it is what decides the sections below, so
+               reading it here too keeps the note, the skipped collection log and the section choice on ONE
+               answer — and a store alert whose server param was lost or rewritten in transit through a
+               channel still renders as the fleet-level alert it is. */
+            var fleetLevelStore = IsFleetLevelStoreServer(serverQuery) || IsFleetLevelStoreMetric(metric);
 
             /* Server resolution — a failure is a NOTE, not a 500: the page still renders the alert-history
                match (fleet-wide) and whatever sections can answer without a resolvable server. */
@@ -443,6 +598,7 @@ internal static class DarlingTriageEndpoint
             string? serverName = serverQuery;
             if (!fleetLevelStore && !string.IsNullOrWhiteSpace(serverQuery))
             {
+                var resolveStopwatch = Stopwatch.StartNew();
                 try
                 {
                     var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery);
@@ -451,14 +607,34 @@ internal static class DarlingTriageEndpoint
                         serverId = resolved.ServerId;
                         serverName = resolved.ServerName;
                     }
+                    else if (error.StartsWith(DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal))
+                    {
+                        /* #4283 H2: the resolver's OWN store-fault sentence, not the caller's refusal — this is
+                           the ONE branch below that can carry ex.Message (via LoadEnabledOrFaultAsync's catch), so
+                           it is logged once and answered with the fixed generic/timeout note, never shown raw. */
+                        DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, error);
+                        notes.Add((JsonNode)(DarlingWebFailureLog.IsStatementTimeoutSentence(error)
+                            ? DarlingWebFailureLog.TimeoutMessage
+                            : DarlingWebFailureLog.GenericMessage));
+                    }
                     else
                     {
-                        notes.Add((JsonNode)error);
+                        /* The resolver's miss is the `invalid` envelope since #3739; a note on this page is TEXT,
+                           so the sentence is read back out of it rather than the JSON being shown as prose. This
+                           is a client-correctable refusal, not a caught exception, so it is NOT #4283's target —
+                           the resolver's own validator sentence, never ex.Message. (The resolver's OWN
+                           store-fault sentence — the one that DOES carry ex.Message — is handled by the branch
+                           above: logged once, never shown raw.) */
+                        notes.Add((JsonNode)McpHelpers.ErrorMessageOf(error));
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    notes.Add((JsonNode)$"Server resolution failed: {ex.Message}");
+                    /* #4283: a fixed note, never ex.Message — the real text still reaches the service log. This
+                       page answers 200 regardless (a degraded note, not a failed response), so only the TEXT
+                       changes, not the status. */
+                    DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex);
+                    notes.Add((JsonNode)"Server resolution failed. The service log names what failed.");
                 }
             }
 
@@ -466,6 +642,7 @@ internal static class DarlingTriageEndpoint
                the delivery instant, so the nearest row at the top IS this firing whenever the row survived. */
             JsonNode? alert = null;
             var related = new JsonArray();
+            var alertHistoryStopwatch = Stopwatch.StartNew();
             try
             {
                 var until = anchor + AnchorSlack;
@@ -513,7 +690,9 @@ internal static class DarlingTriageEndpoint
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                notes.Add((JsonNode)$"Alert-history lookup failed: {ex.Message}");
+                /* #4283: fixed note, real text to the service log — same reasoning as the resolver catch above. */
+                DarlingWebFailureLog.Report(logger, "/api/triage:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex);
+                notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
             }
 
             /* The alert-type-relevant sections + the standing collection log, each through the SAME
@@ -521,7 +700,7 @@ internal static class DarlingTriageEndpoint
             var sections = new JsonArray();
             foreach (var section in SectionsFor(metric))
             {
-                sections.Add(await RunSectionAsync(section, dispatch, context, postgres, analysis, serverName, asOf));
+                sections.Add(await RunSectionAsync(section, dispatch, context, postgres, analysis, serverName, asOf, logger));
             }
 
             /* The standing per-server collection log rides along on every per-server page. It is SKIPPED for a
@@ -529,7 +708,7 @@ internal static class DarlingTriageEndpoint
                label it could only ever answer with the resolver error this fix exists to remove. */
             if (!fleetLevelStore)
             {
-                sections.Add(await RunSectionAsync(CollectionLogSection, dispatch, context, postgres, analysis, serverName, asOf));
+                sections.Add(await RunSectionAsync(CollectionLogSection, dispatch, context, postgres, analysis, serverName, asOf, logger));
             }
             else
             {
@@ -560,8 +739,13 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>Runs one section through its <c>/api/read</c> dispatch handler (a synthetic query string over
     /// the REAL binding + tool code), returning <c>{title, read, data}</c> on success — <c>data</c> is the
-    /// tool's own JSON, envelope included — or <c>{title, read, error}</c> when the tool answered with a bare
-    /// message or threw. Never throws: a broken section is one card on the page, not a dead page.</summary>
+    /// tool's own JSON, miss envelope included — or <c>{title, read, error}</c> when the tool refused the
+    /// request (its <c>{"status":"invalid", ...}</c> envelope since #3739) or answered with a bare message,
+    /// each reduced to its OWN sentence here because <c>error</c> on this page is TEXT the card renders. A tool
+    /// that caught an exception (its <c>{"status":"error", ...}</c> envelope since #3653 Q11) or a
+    /// binding-layer throw instead gets a fixed sentence (#4283: never <c>ex.Message</c>), and the real text
+    /// goes to the service log once through <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string)"/>.
+    /// Never throws: a broken section is one card on the page, not a dead page.</summary>
     private static async Task<JsonObject> RunSectionAsync(
         TriageSection section,
         IReadOnlyDictionary<string, DarlingWebEndpoints.ReadToolHandler> dispatch,
@@ -569,7 +753,8 @@ internal static class DarlingTriageEndpoint
         NpgsqlDataSource postgres,
         DarlingAnalysisService analysis,
         string? serverName,
-        string? asOf)
+        string? asOf,
+        ILogger logger)
     {
         var result = new JsonObject { ["title"] = section.Title, ["read"] = section.Read };
 
@@ -580,6 +765,8 @@ internal static class DarlingTriageEndpoint
             return result;
         }
 
+        var stopwatch = Stopwatch.StartNew();
+        var route = "/api/triage:" + section.Read;
         try
         {
             var toolContext = new DefaultHttpContext
@@ -594,14 +781,37 @@ internal static class DarlingTriageEndpoint
                 case DarlingWebEndpoints.ToolResponseKind.JsonPassthrough:
                     result["data"] = JsonNode.Parse(raw);
                     break;
+                case DarlingWebEndpoints.ToolResponseKind.ServerError:
+                    /* #4283: the tool caught its own exception; the envelope's sentence carries ex.Message and
+                       is never shown on this card — logged once instead, same fixed wording ToHttpResult's
+                       ServerError arm answers with (this page still answers 200 overall; only the card's text
+                       degrades). */
+                    var sentence = McpHelpers.ErrorMessageOf(raw);
+                    DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, sentence);
+                    result["error"] = DarlingWebFailureLog.IsStatementTimeoutSentence(sentence)
+                        ? DarlingWebFailureLog.TimeoutMessage
+                        : DarlingWebFailureLog.GenericMessage;
+                    break;
                 default:
-                    result["error"] = raw;
+                    /* Refusal / ClientError: a validator's or resolver's own sentence, client-correctable and
+                       never ex.Message — shown as-is, same as the read surface's 400 body. True now specifically
+                       because #4283 H2's ClassifyToolResponse reclassifies the resolver's OWN registry-read-fault
+                       sentence as ServerError before this arm ever sees it; only a genuine refusal/miss sentence
+                       reaches here. */
+                    result["error"] = McpHelpers.ErrorMessageOf(raw);
                     break;
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            result["error"] = $"Error during {section.Read}: {ex.Message}";
+            /* #4283: the binding-layer backstop (a throw, not a tool's own catch) — the real Exception is
+               still here, so reported and answered from it directly rather than through the sentence
+               classifier, exactly as the /api/read/* loop's own binding-layer catch does. */
+            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex);
+            result["error"] = DarlingWebFailureLog.IsStatementTimeout(ex)
+                ? DarlingWebFailureLog.TimeoutMessage
+                : DarlingWebFailureLog.GenericMessage;
+            return result;
         }
 
         return result;

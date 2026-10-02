@@ -91,18 +91,37 @@ ORDER BY SUM(wait_time_ms_delta) DESC";
             await connection.OpenAsync();
 
             using var command = connection.CreateCommand();
+            /* #3871: the busiest 4-hour sub-window rides out beside the whole-window aggregates, the
+               shared scorer's grading grain. Buckets originate at @startTime (the window start), the
+               T-SQL spelling of the other collectors' date_bin/time_bucket origin: integer-divide the
+               hours since the window opened. An epoch origin would split a scheduled 4-hour pass
+               across two buckets and read its peak below its own average. */
             command.CommandText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+WITH reports AS (
+    SELECT
+        wait_time_ms,
+        spid,
+        status,
+        DATEADD(HOUR, (DATEDIFF(HOUR, @startTime, collection_time) / 4) * 4, @startTime) AS bucket_start
+    FROM collect.blocking_BlockedProcessReport
+    WHERE collection_time >= @startTime
+    AND   collection_time <= @endTime
+),
+buckets AS (
+    SELECT COUNT(*) AS bucket_event_count
+    FROM reports
+    GROUP BY bucket_start
+)
 SELECT
     COUNT(*) AS event_count,
     AVG(CAST(wait_time_ms AS FLOAT)) AS avg_wait_time_ms,
     MAX(wait_time_ms) AS max_wait_time_ms,
     COUNT(DISTINCT spid) AS distinct_head_blockers,
-    COUNT(CASE WHEN status = 'sleeping' THEN 1 END) AS sleeping_blocker_count
-FROM collect.blocking_BlockedProcessReport
-WHERE collection_time >= @startTime
-AND   collection_time <= @endTime";
+    COUNT(CASE WHEN status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
+    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
+FROM reports";
 
             command.Parameters.Add(new SqlParameter("@startTime", context.TimeRangeStart));
             command.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
@@ -117,20 +136,29 @@ AND   collection_time <= @endTime";
             var maxWaitTimeMs = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
             var distinctHeadBlockers = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3));
             var sleepingBlockerCount = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4));
+            var peakEventCount = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5));
 
             var periodHours = context.PeriodDurationMs / 3_600_000.0;
             var eventsPerHour = periodHours > 0 ? eventCount / periodHours : 0;
+            /* This tier has no observed-hours concept (no coverage read on the Dashboard), so the peak
+               divisor is the nominal min(4, periodHours) — the honest local equivalent of the other
+               collectors' min(4, observed hours). */
+            var peakEventsPerHour = periodHours > 0
+                ? peakEventCount / Math.Min(4.0, periodHours)
+                : 0;
 
             facts.Add(new Fact
             {
                 Source = "blocking",
                 Key = "BLOCKING_EVENTS",
-                Value = eventsPerHour,
+                Value = peakEventsPerHour,
                 ServerId = context.ServerId,
                 Metadata = new Dictionary<string, double>
                 {
                     ["event_count"] = eventCount,
                     ["events_per_hour"] = eventsPerHour,
+                    ["events_per_hour_peak_4h"] = peakEventsPerHour,
+                    ["peak_4h_event_count"] = peakEventCount,
                     ["avg_wait_time_ms"] = avgWaitTimeMs,
                     ["max_wait_time_ms"] = maxWaitTimeMs,
                     ["distinct_head_blockers"] = distinctHeadBlockers,

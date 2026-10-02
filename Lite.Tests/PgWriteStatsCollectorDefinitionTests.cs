@@ -166,7 +166,8 @@ public class PgWriteStatsCollectorDefinitionTests
     {
         var columns = PgWriteStatsCollector.Instance.PayloadColumns;
 
-        Assert.Equal(26, columns.Count);
+        /* 26 counters and stamps, plus the postmaster start time #3955 appended last. */
+        Assert.Equal(27, columns.Count);
         Assert.Equal(columns.Count, columns.Select(c => c.Name).Distinct(StringComparer.Ordinal).Count());
 
         /* One row per SELECT column, in order — a mismatch here is a silently shifted binary COPY, which
@@ -232,15 +233,43 @@ public class PgWriteStatsCollectorDefinitionTests
     /// <summary>
     /// Timestamps come back as naive UTC via <c>AT TIME ZONE 'UTC'</c>, never a bare <c>::timestamp</c> cast
     /// — the cast renders in the SESSION's TimeZone, so a store session east of UTC would record a stamp
-    /// hours away from the one the server meant. Same rule <c>pg_stat_io</c> follows.
+    /// hours away from the one the server meant. Same rule <c>pg_stat_io</c> follows. Four on the stock path:
+    /// the three <c>stats_reset</c> stamps and the postmaster start time (#3955).
     /// </summary>
     [Fact]
     public void StatsResetStamps_AreConvertedToUtc_NotBareCast()
     {
         var sql = Sql(17);
 
-        Assert.Equal(3, Regex.Matches(sql, @"AT TIME ZONE 'UTC'").Count);
+        Assert.Equal(4, Regex.Matches(sql, @"AT TIME ZONE 'UTC'").Count);
         Assert.DoesNotMatch(new Regex(@"stats_reset\s*::\s*timestamp"), sql);
+        Assert.DoesNotMatch(new Regex(@"pg_postmaster_start_time\(\)\s*::\s*timestamp"), sql);
+    }
+
+    /// <summary>
+    /// #3955: which postmaster produced the snapshot, as the LAST column on every major and on Aurora. A clean
+    /// restart keeps the counters (so no <c>stats_reset</c> stamp moves) and PostgreSQL counts its shutdown
+    /// checkpoint as requested, so the reads compare this value across consecutive rows to find the intervals
+    /// that span a restart. Ungated, because the function is core and readable by any login; converted to naive
+    /// UTC like the stamps; schema-qualified like every catalog read; appended last so the positional COPY and an
+    /// upgraded store's V139 ALTER agree on where it sits.
+    /// </summary>
+    [Theory]
+    [InlineData(14, false)]
+    [InlineData(16, false)]
+    [InlineData(17, false)]
+    [InlineData(18, false)]
+    [InlineData(16, true)]
+    [InlineData(18, true)]
+    public void ThePostmasterStartTime_IsReadOnEveryMajorAndFlavour_AsTheLastColumn_InUtc(int major, bool isAurora)
+    {
+        var sql = isAurora ? AuroraSql(major) : Sql(major);
+
+        Assert.Contains("(pg_catalog.pg_postmaster_start_time() AT TIME ZONE 'UTC') AS postmaster_start_time\n", sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+
+        var last = PgWriteStatsCollector.Instance.PayloadColumns[^1];
+        Assert.Equal("postmaster_start_time", last.Name);
+        Assert.Equal(CollectorColumnType.Timestamp, last.Type);
     }
 
     /// <summary>
@@ -317,7 +346,7 @@ public class PgWriteStatsCollectorDefinitionTests
     }
 
     /// <summary>
-    /// The stored shape is the UNION and does not vary by FLAVOUR either - same 26 aliases, same order as
+    /// The stored shape is the UNION and does not vary by FLAVOUR either - same 27 aliases, same order as
     /// the stock path of the same major. <see cref="ThePayloadShape_DoesNotVaryByVersion"/> pins this
     /// against the version axis; without the flavour twin, an Aurora branch could omit a column instead of
     /// NULLing it and shift every ordinal after it, which is the failure that class of change makes.
@@ -349,18 +378,20 @@ public class PgWriteStatsCollectorDefinitionTests
     }
 
     /// <summary>
-    /// Two UTC conversions on Aurora, not three: <c>wal_stats_reset</c> has no source to convert, so it is
-    /// a typed NULL. The stock path keeps all three, which
+    /// Two reset-stamp conversions on Aurora, not three: <c>wal_stats_reset</c> has no source to convert, so it
+    /// is a typed NULL. The stock path keeps all three, which
     /// <see cref="StatsResetStamps_AreConvertedToUtc_NotBareCast"/> already holds. A NULL rather than a
     /// bare cast matters for the same reason it does across majors: a read that differences a counter must
-    /// not be able to mistake an unavailable reset point for a known one.
+    /// not be able to mistake an unavailable reset point for a known one. The third conversion here is the
+    /// postmaster start time (#3955), which Aurora does supply.
     /// </summary>
     [Fact]
     public void Aurora_ConvertsOnlyTheTwoResetStampsItCanRead()
     {
         var sql = AuroraSql(17);
 
-        Assert.Equal(2, Regex.Matches(sql, @"AT TIME ZONE 'UTC'").Count);
+        Assert.Equal(3, Regex.Matches(sql, @"AT TIME ZONE 'UTC'").Count);
+        Assert.Equal(2, Regex.Matches(sql, @"stats_reset AT TIME ZONE 'UTC'").Count);
         Assert.Contains("NULL::timestamp", sql, StringComparison.Ordinal);
     }
 

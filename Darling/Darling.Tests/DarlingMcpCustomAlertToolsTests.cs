@@ -64,6 +64,20 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
         .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
         .ToArray();
 
+    /// <summary>
+    /// create_custom_alert_rule refuses an enabled create at the store's enabled-rule cap. Its description names the
+    /// cap from the same constant the store enforces, so a caller who hits the refusal has already read why.
+    /// </summary>
+    [Fact]
+    public void CreateDescription_NamesTheEnabledRuleCap()
+    {
+        var create = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "create_custom_alert_rule");
+        var description = create.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
+
+        Assert.Contains($"With {PerformanceMonitor.Darling.Service.CustomAlertRuleStore.EnabledRuleCap} rules already enabled fleet-wide, an enabled create is refused", description, StringComparison.Ordinal);
+        Assert.Contains("paused rules do not count", description, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ToolSurface_IsExactlyTheEightCustomAlertTools()
     {
@@ -313,12 +327,30 @@ public sealed class DarlingMcpCustomAlertToolsLivePostgresTests
                 Assert.Equal(name, paused.RootElement.GetProperty("name").GetString());
             }
 
-            /* PARTIAL update at version 2 - swap the definition only. enabled (false) must be preserved, version 3. */
+            /* PARTIAL update at version 2 - swap the definition only. enabled (false) must be preserved, version 3.
+               #3541 A14: so must the OMITTED description - the half of the shared vocabulary this tool always had. */
             using (var redefined = JsonDocument.Parse(
                 await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(postgres, id, 2, definition: GoodRuleV2)))
             {
                 Assert.Equal(3, redefined.RootElement.GetProperty("version").GetInt32());
                 Assert.False(redefined.RootElement.GetProperty("enabled").GetBoolean());
+                Assert.Equal("made over MCP", redefined.RootElement.GetProperty("description").GetString());
+            }
+
+            /* #3541 A14: the half it lacked - an EMPTY string clears the description (version 4), the same
+               explicit clear update_custom_view now takes; and the next omission keeps the cleared null (5). */
+            using (var cleared = JsonDocument.Parse(
+                await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(postgres, id, 3, description: "")))
+            {
+                Assert.Equal(4, cleared.RootElement.GetProperty("version").GetInt32());
+                Assert.Equal(JsonValueKind.Null, cleared.RootElement.GetProperty("description").ValueKind);
+            }
+
+            using (var stillCleared = JsonDocument.Parse(
+                await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(postgres, id, 4, enabled: false)))
+            {
+                Assert.Equal(5, stillCleared.RootElement.GetProperty("version").GetInt32());
+                Assert.Equal(JsonValueKind.Null, stillCleared.RootElement.GetProperty("description").ValueKind);
             }
 
             /* stale update (still presenting version 1) - conflict, not a silent clobber. */
@@ -331,7 +363,7 @@ public sealed class DarlingMcpCustomAlertToolsLivePostgresTests
 
             /* update with an INVALID definition on a live row - invalid, and the row is untouched. */
             Assert.Equal("invalid", DarlingMcpTestData.StatusOf(
-                await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(postgres, id, 3, definition: BadMeasureRule)));
+                await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(postgres, id, 5, definition: BadMeasureRule)));
 
             /* delete - deleted; then get + delete-again - not_found. */
             Assert.Equal("deleted", DarlingMcpTestData.StatusOf(await DarlingMcpCustomAlertTools.DeleteCustomAlertRule(postgres, id)));

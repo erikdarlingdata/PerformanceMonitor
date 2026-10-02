@@ -87,7 +87,10 @@ public sealed class QueryStoreHealthStoreTests
     /// The enumeration list's load-bearing filters, each of which cost real rounds elsewhere:
     /// HAS_DBACCESS self-skip (#1823 — a least-privilege login without per-db access raised 916 per db
     /// per cycle), the AG filter (a readable-secondary's databases answer for the primary's identity),
-    /// ONLINE only (a RESTORING database's catalog views are unreachable), and the house RECOMPILE.
+    /// ONLINE only (a RESTORING database's catalog views are unreachable), and the house RECOMPILE. And
+    /// since #3764 the target that does NOT enumerate: Azure SQL DB, where the three-part reference the
+    /// per-item query nests is rejected for every database but the connection's own, so the host connects
+    /// per database there and the definition says so with a null enumeration.
     /// </summary>
     [Fact]
     public void TheEnumerationCarriesTheLoadBearingFilters()
@@ -101,11 +104,16 @@ public sealed class QueryStoreHealthStoreTests
         Assert.Contains("OPTION(RECOMPILE)", query.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("/*EXCLUSION_FILTER*/", query.Text, StringComparison.Ordinal);
 
-        /* Azure lists all online databases — from master, HAS_DBACCESS returns 0 for every user database
-           and there is no AG catalog, so the on-prem filters would enumerate NOTHING there. */
-        var azure = QueryStoreHealthCollector.Instance.BuildEnumerationQuery(TestContext(isAzure: true))!;
-        Assert.DoesNotContain("HAS_DBACCESS", azure.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("dm_hadr_database_replica_states", azure.Text, StringComparison.Ordinal);
+        /* #3764: Azure SQL DB does not enumerate at all. The master-side Azure list this arm used to pin fed
+           EXECUTE [db].sys.sp_executesql, which Azure rejects for every database that is not the
+           connection's own — so on a logical-server registration every item failed and the collector stored
+           nothing while reading HEALTHY. The host now connects per database there (RunsPerDatabase, the
+           database_scoped_config #3755 shape), the definition returns null from its side, and the dead
+           Azure list query is deleted rather than left reachable. The definition-level pins live in
+           Lite.Tests/QueryStoreHealthCollectorDefinitionTests. */
+        var azureTarget = TestContext(isAzure: true);
+        Assert.True(QueryStoreHealthCollector.Instance.RunsPerDatabase(azureTarget.Target));
+        Assert.Null(QueryStoreHealthCollector.Instance.BuildEnumerationQuery(azureTarget));
     }
 
     /// <summary>A database named with a closing bracket must not escape its identifier — the same
@@ -169,10 +177,16 @@ public sealed class QueryStoreHealthStoreTests
         Assert.True(QueryStoreHealthCollector.Instance.AppliesTo(new CollectorTargetInfo { SqlMajorVersion = 11, IsAzureManagedInstance = true }));
     }
 
-    /// <summary>WITHIN the view, every selected column exists from 2016 on — no per-column gates;
-    /// pinned so a gated column cannot be added without revisiting this claim.</summary>
+    /// <summary>The claim this pin used to make — "every selected column exists from 2016 on, no per-column
+    /// gates" — was revisited by V137 (#3796), exactly as it asked: the payload is now twelve columns, the
+    /// original ten ungated and the two capture modes appended last, and ONE of them
+    /// (<c>wait_stats_capture_mode</c>, 2017+) is gated by <c>QueryStoreHealthCollector.HasWaitStatsCaptureMode</c>
+    /// in the <c>DatabaseConfigCollector</c> idiom. The gate itself is pinned in
+    /// <c>Lite.Tests/QueryStoreHealthCollectorDefinitionTests</c> and the rung in
+    /// <c>QsCaptureModeRouteKnobToastRungTests</c>; what stays here is the order, so a reorder cannot slip past
+    /// the positional COPY writer.</summary>
     [Fact]
-    public void ThePayloadIsUngatedAndOrdered()
+    public void ThePayloadIsOrdered_WithTheOneGatedColumnLast()
     {
         var columns = QueryStoreHealthCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
 
@@ -181,7 +195,13 @@ public sealed class QueryStoreHealthStoreTests
             "database_name", "actual_state", "desired_state", "readonly_reason",
             "current_storage_size_mb", "max_storage_size_mb", "size_based_cleanup_mode",
             "stale_query_threshold_days", "max_plans_per_query", "interval_length_minutes",
+            "query_capture_mode", "wait_stats_capture_mode",
         }, columns);
+
+        /* The gated column is the LAST one, so a 2016 target's ten-ordinal reader and a 2017+ target's eleven
+           differ only at the tail and every earlier ordinal reads the same on both. */
+        Assert.False(QueryStoreHealthCollector.HasWaitStatsCaptureMode(new CollectorTargetInfo { SqlMajorVersion = 13 }));
+        Assert.True(QueryStoreHealthCollector.HasWaitStatsCaptureMode(new CollectorTargetInfo { SqlMajorVersion = 14 }));
     }
 
     /* ---------------- helpers ---------------- */

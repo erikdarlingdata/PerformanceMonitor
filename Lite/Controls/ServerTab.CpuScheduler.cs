@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
@@ -35,7 +36,7 @@ public partial class ServerTab : UserControl
 
     private CpuSchedulerChartRenderer? _cpuSchedRendererField;
     private CpuSchedulerChartRenderer CpuSchedRenderer =>
-        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, t => t.AddMinutes(UtcOffsetMinutes));
+        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, t => t, GetPickerZone);
 
     /// <summary>Applies the shared chrome + hover to the scheduler chart up front (constructor), so it
     /// doesn't flash white before the tab's first load — matching the CPU/Memory charts.</summary>
@@ -43,7 +44,7 @@ public partial class ServerTab : UserControl
     {
         ApplyTheme(CpuSchedulerChart);
         CpuSchedulerChart.Refresh();
-        _cpuSchedulerHover = new ChartHoverHelper(CpuSchedulerChart, "tasks");
+        _cpuSchedulerHover = new ChartHoverHelper(CpuSchedulerChart, "tasks", displayZone: GetPickerZone);
     }
 
     /// <summary>
@@ -62,6 +63,10 @@ public partial class ServerTab : UserControl
 
             UpdateCpuSchedulerChart(trendTask.Result, hoursBack, fromDate, toDate);
             CpuSchedulerGrid.ItemsSource = CpuSchedulerMetrics.BuildMetrics(snapshotTask.Result);
+
+            var gap = CpuSchedulerGapNote(_server.DisplayName, _isAzureSqlDatabase);
+            CpuSchedulerNoDataMessage.Text = gap ?? "";
+            CpuSchedulerNoDataMessage.Visibility = gap is null ? Visibility.Collapsed : Visibility.Visible;
         }
         catch (Exception ex)
         {
@@ -82,12 +87,16 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         CpuSchedRenderer.Render(CpuSchedulerChart, _cpuSchedulerHover, data, rangeStart.ToOADate(), rangeEnd.ToOADate());
     }
+
+    /// <summary>The CPU Scheduler tab's note on an Azure SQL Database, where the cpu_scheduler_stats collector does not
+    /// run; null anywhere else, where the tab shows no note.</summary>
+    internal static string? CpuSchedulerGapNote(string serverName, bool isAzureSqlDatabase) =>
+        EngineGapNote(serverName, isAzureSqlDatabase, "cpu_scheduler_stats");
 
     /// <summary>Tears down the scheduler hover helper (mirrors the other tabs' dispose) so its tooltip
     /// popup + chart event handlers don't outlive a closed server tab.</summary>

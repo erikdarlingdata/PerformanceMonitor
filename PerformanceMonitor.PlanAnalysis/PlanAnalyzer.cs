@@ -2,8 +2,35 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace PerformanceMonitor.PlanAnalysis;
+
+/// <summary>
+/// Identity of the object a scan or seek predicate belongs to — enough to tell its own columns
+/// apart from a column on another table, or an outer reference a Nested Loops join passed it one
+/// row at a time. Built once in <see cref="PlanAnalyzer"/>'s <c>DetectNonSargablePredicate</c> and
+/// threaded down through <c>DetectNonSargablePattern</c>. Internal, not private, so string-level
+/// tests can build one directly instead of loading a fixture plan.
+/// </summary>
+/// <param name="Alias">The scan's alias, or null when it has none. The parser strips brackets.</param>
+/// <param name="Table">
+/// The last part of the scan's object name — a real table's bare name, a temp table cleaned to
+/// <c>#t</c>, or a table variable's own <c>@tv</c> (its ObjectName never carries a schema, so this
+/// is the whole name).
+/// </param>
+/// <param name="IsTableVariable">Mirrors <c>PlanAnalyzer.IsTableVariable(node)</c>.</param>
+/// <param name="BareOuterReferences">
+/// Bare column names — never a real table's or a temp table's, always another unaliased table
+/// variable's — that reach this scan as an outer reference rather than one of its own columns. Only
+/// populated by ancestor Nested Loops whose INNER input holds this scan; see
+/// <c>PlanAnalyzer.CollectBareOuterReferences</c>.
+/// </param>
+internal readonly record struct ScanIdentity(
+    string? Alias,
+    string? Table,
+    bool IsTableVariable,
+    IReadOnlySet<string> BareOuterReferences);
 
 /// <summary>
 /// Post-parse analysis pass that walks a parsed plan tree and adds warnings
@@ -17,30 +44,215 @@ public static partial class PlanAnalyzer
 
     private static readonly Regex CaseInPredicateRegex = CaseInPredicateRegExp();
 
-    // Matches CTE definitions: WITH name AS ( or , name AS (
-    private static readonly Regex CteDefinitionRegex = CteDefinitionRegExp();
 
-    public static void Analyze(ParsedPlan plan)
+    private static readonly Regex IsNullCoalesceRegex = IsNullCoalesceRegExp();
+
+    private static readonly Regex ConvertImplicitRegex = ConvertImplicitRegExp();
+
+    // A column reference in a ScalarString is multi-part bracket-qualified ([schema].[table]).
+    // A variable is a single bracket pair with an @ prefix ([@0]), so excluding @ from the first
+    // part is what separates the two.
+    private static readonly Regex ColumnReferenceRegex = ColumnReferenceRegExp();
+
+    // An optimizer-generated expression name in a ScalarString ([Expr1003]) — a computed value,
+    // never an actual column, even on a table variable scan where a bare name is otherwise read
+    // as a column.
+    private static readonly Regex ExpressionColumnRegex = ExpressionColumnRegExp();
+
+    // One bracket part of a name BracketedNameRegex already matched whole — [schema], [table],
+    // [col], each on its own — so IsColumnReference can split "[db].[schema].[table].[col]" or
+    // "[alias].[col]" into parts and read off the one right before the column, the owner.
+    private static readonly Regex NamePartRegex = NamePartRegExp();
+
+    // A name in a ScalarString: one bracketed part or a dotted chain of them ([@p1], [Expr1003],
+    // [db].[dbo].[T].[c]). A name followed by ( is a function call. String literals are matched
+    // first, so a bracket inside one ('[x]') is never read as a name. Only a match with the name
+    // group is a name.
+    private static readonly Regex BracketedNameRegex = BracketedNameRegExp();
+
+    // The operator a comparison turns on in a ScalarString: >=, <=, <>, !=, >, <, = or like.
+    // Without like, [col] like upper([@p]) had no operator at all, fell to the assume-the-worst
+    // default, and a function on the pattern was reported as a function on the column.
+    private static readonly Regex ComparisonOperatorRegex = ComparisonOperatorRegExp();
+
+    // What joins one comparison to the next in a compound predicate. String literals and
+    // bracketed identifiers are matched first, so an AND inside one of them (N'Tom AND Jerry',
+    // [Terms and Conditions]) is consumed whole and never reaches the capture group. Only a
+    // Groups[1] match is a real operator.
+    private static readonly Regex LogicalOperatorRegex = LogicalOperatorRegExp();
+
+    /// <summary>
+    /// #4512 follow-up: <c>ShowPlanParser.Parse</c> now returns trees up to <c>MaxParseDepth</c>
+    /// (1,000) levels deep, parsed on its own dedicated 32 MB thread. This walk runs on
+    /// whichever thread the CALLER is on instead — the Darling service's analysis pass
+    /// (thread-pool, ~1.5 MB), the plan viewer's WPF UI thread (1 MB), or the analyze_plan_xml
+    /// / analyze_query_plan / analyze_query_store_plan MCP tools and the web host that front
+    /// them (thread-pool). Measured directly against a depth-999 tree shaped like this walk's
+    /// own recursion (<see cref="AnalyzeNodeTree"/>/<see cref="CheckForTableVariables"/>): it
+    /// survives on a 1 MB caller thread down to roughly 130 KB of stack, and on a 1.5 MB caller
+    /// down to roughly 110 KB — both with well over 2x margin below the smallest real caller, so
+    /// unlike the parser, this walk needs no dedicated thread of its own.
+    /// </summary>
+    public static void Analyze(ParsedPlan plan, CancellationToken cancellationToken = default) =>
+        Analyze(plan, null, null, cancellationToken);
+
+    /// <summary>
+    /// #4535: the config/serverMetadata overload, mirroring erikdarlingdata/PerformanceStudio dev
+    /// (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalyzer.cs:93-102</c>. A null
+    /// <paramref name="config"/> means <see cref="AnalyzerConfig.Default"/>, as in PS. This step
+    /// threads both parameters down to <see cref="AnalyzeStatement"/>, <see cref="AnalyzeNodeTree"/>
+    /// and <see cref="AnalyzeNode"/> unused; no rule reads them yet.
+    /// </summary>
+    public static void Analyze(
+        ParsedPlan plan,
+        AnalyzerConfig? config,
+        ServerMetadata? serverMetadata,
+        CancellationToken cancellationToken)
     {
-        foreach (var batch in plan.Batches)
-        {
-            foreach (var stmt in batch.Statements)
-            {
-                AnalyzeStatement(stmt);
+        var cfg = config ?? AnalyzerConfig.Default;
 
-                if (stmt.RootNode != null)
-                    AnalyzeNodeTree(stmt.RootNode, stmt);
-            }
+        /* #4514: every statement, including the ones inside a stored procedure or UDF body.
+           This used to walk batch.Statements alone, so an EXEC <procedure> plan analyzed as a
+           single statement with nothing to say about the statements actually doing the work.
+           #4512: cancellationToken is checked per statement (the EnumerateAll loop below) and
+           down the node-tree walk, so a caller cancelling mid-analysis stops the walk instead of
+           running the analyzer to completion against a plan nobody is waiting for. */
+        foreach (var stmt in PlanStatements.EnumerateAll(plan))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AnalyzeStatement(stmt, cfg, serverMetadata);
+
+            if (stmt.RootNode != null)
+                AnalyzeNodeTree(stmt.RootNode, stmt, cfg, cancellationToken);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            MarkLegacyWarnings(stmt);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (cfg.Rules?.SeverityOverrides?.Count > 0)
+            ApplySeverityOverrides(plan, cfg);
+    }
+
+    /// <summary>
+    /// #4535, mirroring erikdarlingdata/PerformanceStudio dev (85492a1) commit dcc06db
+    /// <c>src/PlanViewer.Core/Services/PlanAnalyzer.Helpers.cs</c>: walks
+    /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> — proc and UDF bodies included, the
+    /// same walk <see cref="Analyze"/> just ran — so an override applies to a warning inside an
+    /// EXEC &lt;procedure&gt; body the same as one on the outer batch.
+    /// </summary>
+    private static void ApplySeverityOverrides(ParsedPlan plan, AnalyzerConfig cfg)
+    {
+        foreach (var stmt in PlanStatements.EnumerateAll(plan))
+        {
+            foreach (var w in stmt.PlanWarnings)
+                TryOverrideSeverity(w, cfg);
+
+            if (stmt.RootNode != null)
+                ApplyOverridesToTree(stmt.RootNode, cfg);
         }
     }
 
-    private static void AnalyzeStatement(PlanStatement stmt)
+    private static void ApplyOverridesToTree(PlanNode node, AnalyzerConfig cfg)
+    {
+        foreach (var w in node.Warnings)
+            TryOverrideSeverity(w, cfg);
+        foreach (var child in node.Children)
+            ApplyOverridesToTree(child, cfg);
+    }
+
+    /// <summary>
+    /// #4535: keyed on <see cref="PlanWarning.RuleNumber"/>, the rule that emitted the finding,
+    /// mirroring erikdarlingdata/PerformanceStudio dev (85492a1) commit dcc06db (PS#575). The
+    /// engine's own warnings (<see cref="PlanWarningSource.SqlServer"/>) carry no rule number
+    /// because no rule of ours produced them, and are never overridden.
+    /// </summary>
+    private static void TryOverrideSeverity(PlanWarning warning, AnalyzerConfig cfg)
+    {
+        if (warning.Source == PlanWarningSource.SqlServer)
+            return;
+
+        if (warning.RuleNumber is not int ruleNumber)
+            return;
+
+        var overrideSeverity = cfg.GetSeverityOverride(ruleNumber);
+        if (overrideSeverity == null)
+            return;
+
+        if (Enum.TryParse<PlanWarningSeverity>(overrideSeverity, ignoreCase: true, out var severity))
+            warning.Severity = severity;
+    }
+
+    /// <summary>
+    /// Rule types that predate the benefit-scoring framework and haven't been folded into A/B/C/D
+    /// categorization yet. Tagged so reviewers can hold new-framework items to a higher bar vs
+    /// known-legacy items that will be reworked later. Ported verbatim from
+    /// erikdarlingdata/PerformanceStudio dev (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalyzer.cs:132-153</c>.
+    /// Kept exactly as PS has it, including entries for rule types PM does not have removed here
+    /// (see #4566): none of the 21 entries are missing from PM's rule set.
+    /// </summary>
+    private static readonly HashSet<string> LegacyWarningTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Excessive Memory Grant",
+        "Large Memory Grant",
+        "Compile Memory Exceeded",
+        "Local Variables",
+        "Optimize For Unknown",
+        "Low Impact Index",
+        "Wide Index Suggestion",
+        "Duplicate Index Suggestions",
+        "Table Variable",
+        "Scalar UDF",
+        "Parallel Skew",
+        "Estimated Plan CE Guess",
+        "Data Type Mismatch",
+        "Lazy Spool Ineffective",
+        "Join OR Clause",
+        "Many-to-Many Merge Join",
+        "Table-Valued Function",
+        "Top Above Scan",
+        "Row Goal",
+        "NOT IN with Nullable Column",
+        "Implicit Conversion",
+    };
+
+    /* MarkLegacyWarnings matches on WarningType alone, and a type name is not unique to the analyzer:
+       "Implicit Conversion" is rule 29's legacy-listed type AND what the parser stamps on the
+       engine's own PlanAffectingConvert element (Source = SqlServer). Matching by name only would
+       therefore brand the ENGINE's record "[SQL Server] [legacy]" -- a badge that exists to flag
+       un-migrated analyzer rules on a warning that is not the analyzer's at all. Legacy status is a
+       fact about the analyzer's own rules, so anything the engine said is skipped. Ported from
+       erikdarlingdata/PerformanceStudio dev (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalyzer.Helpers.cs:11-40</c>. */
+    private static void MarkLegacyWarnings(PlanStatement stmt)
+    {
+        foreach (var w in stmt.PlanWarnings)
+        {
+            if (w.Source != PlanWarningSource.SqlServer && LegacyWarningTypes.Contains(w.WarningType))
+                w.IsLegacy = true;
+        }
+        if (stmt.RootNode != null)
+            MarkLegacyWarningsOnTree(stmt.RootNode);
+    }
+
+    private static void MarkLegacyWarningsOnTree(PlanNode node)
+    {
+        foreach (var w in node.Warnings)
+        {
+            if (w.Source != PlanWarningSource.SqlServer && LegacyWarningTypes.Contains(w.WarningType))
+                w.IsLegacy = true;
+        }
+        foreach (var child in node.Children)
+            MarkLegacyWarningsOnTree(child);
+    }
+
+    private static void AnalyzeStatement(PlanStatement stmt, AnalyzerConfig cfg, ServerMetadata? serverMetadata)
     {
         // Rule 3: Serial plan with reason
         // Skip: cost < 1 (CTFP is an integer so cost < 1 can never go parallel),
         // TRIVIAL optimization (can't go parallel anyway),
         // and 0ms actual elapsed time (not worth flagging).
-        if (!string.IsNullOrEmpty(stmt.NonParallelPlanReason)
+        if (!cfg.IsRuleDisabled(3)
+            && !string.IsNullOrEmpty(stmt.NonParallelPlanReason)
             && stmt.StatementSubTreeCost >= 1.0
             && stmt.StatementOptmLevel != "TRIVIAL"
             && !(stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs == 0))
@@ -110,14 +322,15 @@ public static partial class PlanAnalyzer
             // SQL Server truncates StatementText at ~4,000 characters in plan XML.
             if (stmt.NonParallelPlanReason == "MaxDOPSetToOne")
             {
-                var text = stmt.StatementText ?? "";
+                var text = MaskCommentsAndLiterals(stmt.StatementText); // #4524
                 var hasMaxdop1InText = Regex.IsMatch(text, @"MAXDOP\s+1\b", RegexOptions.IgnoreCase);
-                var isTruncated = text.Length >= 3990;
+                var isTruncated = stmt.IsTextTruncated;
 
                 if (hasMaxdop1InText)
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 3,
                         WarningType = "Serial Plan",
                         Message = $"Query running serially: {reason}.",
                         Severity = PlanWarningSeverity.Warning
@@ -127,6 +340,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 3,
                         WarningType = "Serial Plan",
                         Message = $"Query running serially: {reason}. MAXDOP 1 may be set at the server, database, resource governor, or query level (query text was truncated).",
                         Severity = PlanWarningSeverity.Info
@@ -138,6 +352,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 3,
                     WarningType = "Serial Plan",
                     Message = $"Query running serially: {reason}.",
                     Severity = isActionable ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info
@@ -146,22 +361,34 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 9: Memory grant issues (statement-level)
-        if (stmt.MemoryGrant != null)
+        if (!cfg.IsRuleDisabled(9) && stmt.MemoryGrant != null)
         {
             var grant = stmt.MemoryGrant;
 
-            // Excessive grant — granted far more than actually used
-            if (grant.GrantedMemoryKB > 0 && grant.MaxUsedMemoryKB > 0)
+            // Excessive grant — granted far more than actually used. A grant that used nothing is the
+            // worst case, so MaxUsedMemory="0" counts, but only when the plan reported it: a plan with
+            // no MaxUsedMemory attribute (estimated, or no runtime grant info) says nothing about use (#4686).
+            if (grant.GrantedMemoryKB >= 1048576 && grant.HasMaxUsedMemory)
             {
-                var wasteRatio = (double)grant.GrantedMemoryKB / grant.MaxUsedMemoryKB;
-                if (wasteRatio >= 10 && grant.GrantedMemoryKB >= 1048576)
+                var usedNothing = grant.MaxUsedMemoryKB <= 0;
+                var wasteRatio = usedNothing ? 0 : (double)grant.GrantedMemoryKB / grant.MaxUsedMemoryKB;
+                if (usedNothing || wasteRatio >= 10)
                 {
                     var grantMB = grant.GrantedMemoryKB / 1024.0;
-                    var usedMB = grant.MaxUsedMemoryKB / 1024.0;
+                    var message = usedNothing
+                        ? $"Granted {grantMB:N0} MB but the query used none of it. The unused memory is reserved and unavailable to other queries."
+                        : $"Granted {grantMB:N0} MB but only used {grant.MaxUsedMemoryKB / 1024.0:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.";
+
+                    // Note adaptive joins that chose Nested Loops at runtime — the grant
+                    // was sized for a hash join that never happened.
+                    if (stmt.RootNode != null && HasAdaptiveJoinChoseNestedLoop(stmt.RootNode))
+                        message += " An adaptive join in this plan executed as a Nested Loop at runtime — the memory grant was sized for the hash join alternative that wasn't used.";
+
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 9,
                         WarningType = "Excessive Memory Grant",
-                        Message = $"Granted {grantMB:N0} MB but only used {usedMB:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.",
+                        Message = message,
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -172,6 +399,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 9,
                     WarningType = "Memory Grant Wait",
                     Message = $"Query waited {grant.GrantWaitTimeMs:N0}ms for a memory grant before it could start running. Other queries were using all available workspace memory.",
                     Severity = grant.GrantWaitTimeMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -199,6 +427,7 @@ public static partial class PlanAnalyzer
 
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 9,
                     WarningType = "Large Memory Grant",
                     Message = $"Query granted {grantMB:F0} MB of memory.{guidance}",
                     Severity = grantMB >= 4096 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -207,10 +436,11 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 18: Compile memory exceeded (early abort)
-        if (stmt.StatementOptmEarlyAbortReason == "MemoryLimitExceeded")
+        if (!cfg.IsRuleDisabled(18) && stmt.StatementOptmEarlyAbortReason == "MemoryLimitExceeded")
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 18,
                 WarningType = "Compile Memory Exceeded",
                 Message = "Optimization was aborted early because the compile memory limit was exceeded. The plan is likely suboptimal. Simplify the query by breaking it into smaller steps using #temp tables.",
                 Severity = PlanWarningSeverity.Critical
@@ -218,10 +448,11 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 19: High compile CPU
-        if (stmt.CompileCPUMs >= 1000)
+        if (!cfg.IsRuleDisabled(19) && stmt.CompileCPUMs >= 1000)
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 19,
                 WarningType = "High Compile CPU",
                 Message = $"Query took {stmt.CompileCPUMs:N0}ms of CPU just to compile a plan (before any data was read). Simplify the query by breaking it into smaller steps using #temp tables.",
                 Severity = stmt.CompileCPUMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -230,10 +461,11 @@ public static partial class PlanAnalyzer
 
         // Rule 4 (statement-level): UDF execution timing from QueryTimeStats
         // Some plans report UDF timing only at the statement level, not per-node.
-        if (stmt.QueryUdfCpuTimeMs > 0 || stmt.QueryUdfElapsedTimeMs > 0)
+        if (!cfg.IsRuleDisabled(4) && (stmt.QueryUdfCpuTimeMs > 0 || stmt.QueryUdfElapsedTimeMs > 0))
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 4,
                 WarningType = "UDF Execution",
                 Message = $"Scalar UDF cost in this statement: {stmt.QueryUdfElapsedTimeMs:N0}ms elapsed, {stmt.QueryUdfCpuTimeMs:N0}ms CPU. Scalar UDFs run once per row and prevent parallelism. Options: rewrite as an inline table-valued function, assign the result to a variable if only one row is needed, dump results to a #temp table and apply the UDF to the final result set, or on SQL Server 2019+ check if the UDF is eligible for automatic scalar UDF inlining.",
                 Severity = stmt.QueryUdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -244,7 +476,7 @@ public static partial class PlanAnalyzer
         // Parameters with no CompiledValue are likely local variables — the optimizer
         // cannot sniff their values and uses density-based ("unknown") estimates.
         // Skip statements with cost < 1 (can't go parallel, estimate quality rarely matters).
-        if (stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
+        if (!cfg.IsRuleDisabled(20) && stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
         {
             var unsnifffedParams = stmt.Parameters
                 .Where(p => string.IsNullOrEmpty(p.CompiledValue))
@@ -252,12 +484,14 @@ public static partial class PlanAnalyzer
 
             if (unsnifffedParams.Count > 0)
             {
-                var hasRecompile = (stmt.StatementText ?? "").Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
+                var hasRecompile = MaskCommentsAndLiterals(stmt.StatementText) // #4524
+                    .Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
                 if (!hasRecompile)
                 {
                     var names = string.Join(", ", unsnifffedParams.Select(p => p.Name));
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 20,
                         WarningType = "Local Variables",
                         Message = $"Local variables detected: {names}. SQL Server cannot sniff local variable values at compile time, so it uses average density estimates instead of your actual values. Test with OPTION (RECOMPILE) to see if the plan improves. For a permanent fix, use dynamic SQL or a stored procedure to pass the values as parameters instead of local variables.",
                         Severity = PlanWarningSeverity.Warning
@@ -266,77 +500,33 @@ public static partial class PlanAnalyzer
             }
         }
 
-        // Rule 21: CTE referenced multiple times
-        if (!string.IsNullOrEmpty(stmt.StatementText))
-        {
-            DetectMultiReferenceCte(stmt);
-        }
+        // Rule 21 (CTE referenced multiple times) removed: for actual plans, SQL Server
+        // runtime stats show exactly where time was spent, so a statement-text-pattern
+        // warning about CTE reuse is guessing.
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
-        if (!string.IsNullOrEmpty(stmt.StatementText) &&
-            OptimizeForUnknownRegExp().IsMatch(stmt.StatementText))
+        if (!cfg.IsRuleDisabled(27) && !string.IsNullOrEmpty(stmt.StatementText) &&
+            OptimizeForUnknownRegExp().IsMatch(MaskCommentsAndLiterals(stmt.StatementText))) // #4524
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 27,
                 WarningType = "Optimize For Unknown",
                 Message = "OPTIMIZE FOR UNKNOWN uses average density estimates instead of sniffed parameter values. This can help when parameter sniffing causes plan instability, but may produce suboptimal plans for skewed data distributions.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
 
-        // Rule 25: Ineffective parallelism — DOP-aware efficiency scoring
-        // Efficiency = (speedup - 1) / (DOP - 1) * 100
-        // where speedup = CPU / Elapsed. At DOP 1 speedup=1 (0%), at DOP=speedup (100%).
-        // Rule 31: Parallel wait bottleneck — elapsed >> CPU means threads waiting, not working.
-        if (stmt.DegreeOfParallelism > 1 && stmt.QueryTimeStats != null)
-        {
-            var cpu = stmt.QueryTimeStats.CpuTimeMs;
-            var elapsed = stmt.QueryTimeStats.ElapsedTimeMs;
-            var dop = stmt.DegreeOfParallelism;
-
-            if (elapsed >= 1000 && cpu > 0)
-            {
-                var speedup = (double)cpu / elapsed;
-                var efficiency = Math.Max(0.0, Math.Min(100.0, (speedup - 1.0) / (dop - 1.0) * 100.0));
-
-                // Build targeted advice from wait stats if available
-                var waitAdvice = GetWaitStatsAdvice(stmt.WaitStats);
-
-                if (speedup < 0.5)
-                {
-                    // CPU well below Elapsed: threads are waiting, not doing CPU work
-                    var waitPct = (1.0 - speedup) * 100;
-                    var advice = waitAdvice ?? "Common causes include spills to tempdb, physical I/O reads, lock or latch contention, and memory grant waits.";
-                    stmt.PlanWarnings.Add(new PlanWarning
-                    {
-                        WarningType = "Parallel Wait Bottleneck",
-                        Message = $"Parallel plan (DOP {dop}, {efficiency:N0}% efficient) with elapsed time ({elapsed:N0}ms) exceeding CPU time ({cpu:N0}ms). " +
-                                  $"Approximately {waitPct:N0}% of elapsed time was spent waiting rather than on CPU. " +
-                                  advice,
-                        Severity = PlanWarningSeverity.Warning
-                    });
-                }
-                else if (efficiency < 40)
-                {
-                    // CPU >= Elapsed but well below DOP potential — parallelism is ineffective
-                    var advice = waitAdvice ?? "Look for parallel thread skew, blocking exchanges, or serial zones in the plan that prevent effective parallel execution.";
-                    stmt.PlanWarnings.Add(new PlanWarning
-                    {
-                        WarningType = "Ineffective Parallelism",
-                        Message = $"Parallel plan (DOP {dop}) is only {efficiency:N0}% efficient — CPU time ({cpu:N0}ms) vs elapsed time ({elapsed:N0}ms). " +
-                                  $"At DOP {dop}, ideal CPU time would be ~{elapsed * dop:N0}ms. " +
-                                  advice,
-                        Severity = efficiency < 20 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
-                    });
-                }
-            }
-        }
+        // Rules 25 (Ineffective Parallelism) and 31 (Parallel Wait Bottleneck) were removed.
+        // The CPU:Elapsed ratio is now shown in the runtime summary, and wait stats speak
+        // for themselves — no need for meta-warnings guessing at causes.
 
         // Rule 30: Missing index quality evaluation
+        if (!cfg.IsRuleDisabled(30))
         {
             // Detect duplicate suggestions for the same table
             var tableSuggestionCount = stmt.MissingIndexes
-                .GroupBy(mi => $"{mi.Schema}.{mi.Table}", StringComparer.OrdinalIgnoreCase)
+                .GroupBy(mi => $"{mi.Database}.{mi.Schema}.{mi.Table}", StringComparer.OrdinalIgnoreCase)
                 .Where(g => g.Count() > 1)
                 .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
 
@@ -344,13 +534,14 @@ public static partial class PlanAnalyzer
             {
                 var keyCount = mi.EqualityColumns.Count + mi.InequalityColumns.Count;
                 var includeCount = mi.IncludeColumns.Count;
-                var tableKey = $"{mi.Schema}.{mi.Table}";
+                var tableKey = $"{mi.Database}.{mi.Schema}.{mi.Table}";
 
                 // Low-impact suggestion (< 25% improvement)
                 if (mi.Impact < 25)
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Low Impact Index",
                         Message = $"Missing index suggestion for {mi.Table} has only {mi.Impact:F0}% estimated impact. Low-impact indexes add maintenance overhead (insert/update/delete cost) that may not justify the modest query improvement.",
                         Severity = PlanWarningSeverity.Info
@@ -362,6 +553,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Wide Index Suggestion",
                         Message = $"Missing index suggestion for {mi.Table} has {includeCount} INCLUDE columns. This is a \"kitchen sink\" index — SQL Server suggests covering every column the query touches, but the resulting index would be very wide and expensive to maintain. Evaluate which columns are actually needed, or consider a narrower index with fewer includes.",
                         Severity = PlanWarningSeverity.Warning
@@ -372,6 +564,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Wide Index Suggestion",
                         Message = $"Missing index suggestion for {mi.Table} has {keyCount} key columns ({mi.EqualityColumns.Count} equality + {mi.InequalityColumns.Count} inequality). Wide key columns increase index size and maintenance cost. Evaluate whether all key columns are needed for seek predicates.",
                         Severity = PlanWarningSeverity.Warning
@@ -383,6 +576,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Duplicate Index Suggestions",
                         Message = $"{count} missing index suggestions target {mi.Table}. Multiple suggestions for the same table often overlap — consolidate into fewer, broader indexes rather than creating all of them.",
                         Severity = PlanWarningSeverity.Warning
@@ -394,20 +588,25 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 22 (statement-level): Table variable warnings
-        if (stmt.RootNode != null)
+        if (!cfg.IsRuleDisabled(22) && stmt.RootNode != null)
         {
             var hasTableVar = false;
             var isModification = stmt.StatementType is "INSERT" or "UPDATE" or "DELETE" or "MERGE";
             var modifiesTableVar = false;
-            CheckForTableVariables(stmt.RootNode, isModification, ref hasTableVar, ref modifiesTableVar);
+            var referencingNodeIds = new List<int>();
+            var modifyingNodeIds = new List<int>();
+            CheckForTableVariables(stmt.RootNode, isModification, ref hasTableVar, ref modifiesTableVar,
+                referencingNodeIds, modifyingNodeIds);
 
             if (hasTableVar && !modifiesTableVar)
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 22,
                     WarningType = "Table Variable",
                     Message = "Table variable detected. Table variables lack column-level statistics, which causes bad row estimates, join choices, and memory grant decisions. Replace with a #temp table.",
-                    Severity = PlanWarningSeverity.Warning
+                    Severity = PlanWarningSeverity.Warning,
+                    OriginNodeIds = referencingNodeIds
                 });
             }
 
@@ -415,46 +614,168 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 22,
                     WarningType = "Table Variable",
                     Message = "This query modifies a table variable, which forces the entire plan to run single-threaded. SQL Server cannot use parallelism for modifications to table variables. Replace with a #temp table to allow parallel execution.",
-                    Severity = PlanWarningSeverity.Critical
+                    Severity = PlanWarningSeverity.Critical,
+                    OriginNodeIds = modifyingNodeIds
                 });
             }
         }
+
+        // Rule 36: Dynamic cursor. Dynamic cursors can prevent index usage
+        // because they must tolerate underlying data changes between fetches, forcing
+        // scans and extra work per fetch. Switching to FAST_FORWARD, STATIC, or KEYSET
+        // often delivers a dramatic improvement.
+        if (!cfg.IsRuleDisabled(36) && string.Equals(stmt.CursorActualType, "Dynamic", StringComparison.OrdinalIgnoreCase))
+        {
+            var cursorLabel = string.IsNullOrEmpty(stmt.CursorName) ? "Cursor" : $"Cursor \"{stmt.CursorName}\"";
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                RuleNumber = 36,
+                WarningType = "Dynamic Cursor",
+                Message = $"{cursorLabel} is a dynamic cursor. Dynamic cursors tolerate underlying data changes between fetches, which prevents many index uses and forces extra work per fetch. If you don't need that semantic, switching to FAST_FORWARD (or STATIC / KEYSET, depending on requirements) typically gives a large performance improvement.",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
+        // Rule 37: CURSOR declaration without LOCAL. Default cursor scope
+        // is GLOBAL in SQL Server, which puts cursors in a shared namespace and can
+        // bloat the plan cache (Erik's writeup:
+        // https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/).
+        if (!cfg.IsRuleDisabled(37) && !string.IsNullOrEmpty(stmt.StatementText))
+        {
+            var maskedText = MaskCommentsAndLiterals(stmt.StatementText); // #4524
+
+            // DECLARE <name> [INSENSITIVE|SCROLL] CURSOR [qualifier(s)] FOR ...
+            // In the T-SQL extended syntax, LOCAL/GLOBAL appear AFTER the CURSOR
+            // keyword (only INSENSITIVE/SCROLL are legal before it), so the LOCAL
+            // qualifier must be looked for between CURSOR and the FOR that introduces
+            // the SELECT. Capturing tokens *before* CURSOR never sees LOCAL and would
+            // fire on every cursor, including ones already declared LOCAL.
+            var cursorDeclMatch = Regex.Match(
+                maskedText,
+                @"\bDECLARE\s+\w+\s+(?:INSENSITIVE\s+|SCROLL\s+)*CURSOR\b(.*?)\bFOR\b",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            if (cursorDeclMatch.Success)
+            {
+                var qualifiers = cursorDeclMatch.Groups[1].Value;
+                if (!Regex.IsMatch(qualifiers, @"\bLOCAL\b", RegexOptions.IgnoreCase))
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        RuleNumber = 37,
+                        WarningType = "Cursor Missing LOCAL",
+                        Message = "CURSOR declaration is missing the LOCAL keyword. Default cursor scope is GLOBAL, which puts the cursor in a shared namespace and can bloat the plan cache (see https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/). Adding LOCAL is cheap and usually right.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+            }
+        }
+
+        // Rule 38: Standard Edition DOP 2 limitation with batch mode. SQL Server Standard Edition
+        // limits DOP to 2 when batch mode operators are present, ported from
+        // erikdarlingdata/PerformanceStudio dev (85492a1) src/PlanViewer.Core/Services/PlanAnalyzer.Statement.cs:411-445.
+        if (!cfg.IsRuleDisabled(38) && stmt.DegreeOfParallelism == 2 && stmt.RootNode != null
+            && HasBatchModeNode(stmt.RootNode))
+        {
+            // Suppress when the user explicitly set MAXDOP 2 as a query hint — the DOP
+            // cap is intentional, not the Standard Edition batch-mode limitation.
+            var hasMaxdop2Hint = !string.IsNullOrEmpty(stmt.StatementText)
+                && Regex.IsMatch(MaskCommentsAndLiterals(stmt.StatementText), @"MAXDOP\s+2\b", RegexOptions.IgnoreCase); // #4524
+
+            if (!hasMaxdop2Hint)
+            {
+                var editionKnown = !string.IsNullOrEmpty(serverMetadata?.Edition);
+                if (editionKnown
+                    && serverMetadata!.Edition!.Contains("Standard", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Server context confirms Standard Edition — check MAXDOP
+                    if (serverMetadata.MaxDop > 2)
+                    {
+                        stmt.PlanWarnings.Add(new PlanWarning
+                        {
+                            RuleNumber = 38,
+                            WarningType = "Standard Edition DOP Limitation",
+                            Message = $"DOP is limited to 2 because SQL Server Standard Edition caps parallelism at 2 when batch mode operators are present, even though MAXDOP is set to {serverMetadata.MaxDop}. Developer or Enterprise Edition would allow higher DOP in the same conditions.",
+                            Severity = PlanWarningSeverity.Warning
+                        });
+                    }
+                }
+                else if (!editionKnown)
+                {
+                    // No server context, or edition unknown (e.g. collection failure) — suspect the limitation
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        RuleNumber = 38,
+                        WarningType = "Standard Edition DOP Limitation",
+                        Message = "DOP is limited to 2 and the plan uses batch mode operators. This may be caused by the SQL Server Standard Edition limitation, which caps parallelism at 2 when batch mode is in use. If this server runs Standard Edition, Developer or Enterprise Edition would allow higher DOP.",
+                        Severity = PlanWarningSeverity.Info
+                    });
+                }
+            }
+        }
+
+        // Rule 39: the plan's copy of the query text hit SQL Server's showplan cap.
+        // Everything downstream that reads this text — advice, Copy Query Text, Open in Query
+        // Editor — is working from a query that stops mid-statement.
+        if (!cfg.IsRuleDisabled(39) && stmt.IsTextTruncated)
+        {
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                RuleNumber = 39,
+                WarningType = "Truncated Query Text",
+                Message =
+                    "SQL Server truncated this query's text at 4,000 characters when it wrote the plan, "
+                    + "so the query shown here stops early and is not valid T-SQL on its own. "
+                    + "Advice, copied text, and Open in Query Editor are all working from the shortened "
+                    + "version. Go back to the original query text to re-run or format it.",
+                Severity = PlanWarningSeverity.Info
+            });
+        }
     }
 
+    // #4534: collects the operators it found, because this walk already knows exactly which ones
+    // touched a table variable and used to throw that away. Two lists rather than one, since the
+    // two warnings this feeds are about different operators: every operator referencing a table
+    // variable, versus only the ones modifying it (which is what forces the plan serial).
     private static void CheckForTableVariables(PlanNode node, bool isModification,
-        ref bool hasTableVar, ref bool modifiesTableVar)
+        ref bool hasTableVar, ref bool modifiesTableVar,
+        List<int>? referencingNodeIds = null, List<int>? modifyingNodeIds = null)
     {
         if (!string.IsNullOrEmpty(node.ObjectName) && node.ObjectName.StartsWith("@", StringComparison.OrdinalIgnoreCase))
         {
             hasTableVar = true;
+            referencingNodeIds?.Add(node.NodeId);
             if (isModification && (node.PhysicalOp.Contains("Insert", StringComparison.OrdinalIgnoreCase)
                 || node.PhysicalOp.Contains("Update", StringComparison.OrdinalIgnoreCase)
                 || node.PhysicalOp.Contains("Delete", StringComparison.OrdinalIgnoreCase)
                 || node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase)))
             {
                 modifiesTableVar = true;
+                modifyingNodeIds?.Add(node.NodeId);
             }
         }
         foreach (var child in node.Children)
-            CheckForTableVariables(child, isModification, ref hasTableVar, ref modifiesTableVar);
+            CheckForTableVariables(child, isModification, ref hasTableVar, ref modifiesTableVar,
+                referencingNodeIds, modifyingNodeIds);
     }
 
-    private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt)
+    private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt, AnalyzerConfig cfg, CancellationToken cancellationToken)
     {
-        AnalyzeNode(node, stmt);
+        cancellationToken.ThrowIfCancellationRequested();
+        AnalyzeNode(node, stmt, cfg);
 
         foreach (var child in node.Children)
-            AnalyzeNodeTree(child, stmt);
+            AnalyzeNodeTree(child, stmt, cfg, cancellationToken);
     }
 
-    private static void AnalyzeNode(PlanNode node, PlanStatement stmt)
+    private static void AnalyzeNode(PlanNode node, PlanStatement stmt, AnalyzerConfig cfg)
     {
         // Rule 1: Filter operators — rows survived the tree just to be discarded
         // Quantify the impact by summing child subtree cost (reads, CPU, time).
         // Suppress when the filter's child subtree is trivial (low I/O, fast, cheap).
-        if (node.PhysicalOp == "Filter" && !string.IsNullOrEmpty(node.Predicate)
+        if (!cfg.IsRuleDisabled(1) && node.PhysicalOp == "Filter" && !string.IsNullOrEmpty(node.Predicate)
             && node.Children.Count > 0)
         {
             // Gate: skip trivial filters based on actual stats or estimated cost
@@ -484,6 +805,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 1,
                     WarningType = "Filter Operator",
                     Message = message,
                     Severity = PlanWarningSeverity.Warning
@@ -492,7 +814,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 2: Eager Index Spools — optimizer building temporary indexes on the fly
-        if (node.LogicalOp == "Eager Spool" &&
+        if (!cfg.IsRuleDisabled(2) && node.LogicalOp == "Eager Spool" &&
             node.PhysicalOp.Contains("Index", StringComparison.OrdinalIgnoreCase))
         {
             var message = "SQL Server is building a temporary index in TempDB at runtime because no suitable permanent index exists. This is expensive — it builds the index from scratch on every execution. Create a permanent index on the underlying table to eliminate this operator entirely.";
@@ -501,6 +823,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 2,
                 WarningType = "Eager Index Spool",
                 Message = message,
                 Severity = PlanWarningSeverity.Critical
@@ -508,10 +831,11 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 4: UDF timing — any node spending time in UDFs (actual plans)
-        if (node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0)
+        if (!cfg.IsRuleDisabled(4) && (node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0))
         {
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 4,
                 WarningType = "UDF Execution",
                 Message = $"Scalar UDF executing on this operator ({node.UdfElapsedTimeMs:N0}ms elapsed, {node.UdfCpuTimeMs:N0}ms CPU). Scalar UDFs run once per row and prevent parallelism. Options: rewrite as an inline table-valued function, assign the result to a variable if only one row is needed, dump results to a #temp table and apply the UDF to the final result set, or on SQL Server 2019+ check if the UDF is eligible for automatic scalar UDF inlining.",
                 Severity = node.UdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -524,7 +848,10 @@ public static partial class PlanAnalyzer
         // - A parent join may have chosen the wrong strategy
         // - Root nodes with no parent to harm are skipped
         // - Nodes whose only parents are Parallelism/Top/Sort (no spill) are skipped
-        if (node.HasActualStats && node.EstimateRows > 0
+        // An operator that never executed returned zero rows because it never ran, so its
+        // zero is no evidence that the estimate was wrong.
+        if (!cfg.IsRuleDisabled(5) && node.HasActualStats && node.EstimateRows > 0
+            && node.ActualExecutions > 0
             && !node.Lookup) // Key lookups are point lookups (1 row per execution) — per-execution estimate is misleading
         {
             if (node.ActualRows == 0)
@@ -537,6 +864,7 @@ public static partial class PlanAnalyzer
                 {
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 5,
                         WarningType = "Row Estimate Mismatch",
                         Message = $"Estimated {node.EstimateRows:N0} rows but actual 0 rows returned. SQL Server allocated resources for rows that never materialized.",
                         Severity = PlanWarningSeverity.Warning
@@ -545,10 +873,13 @@ public static partial class PlanAnalyzer
             }
             else
             {
-                // Compare per-execution actuals to estimates (SQL Server estimates are per-execution)
-                var executions = node.ActualExecutions > 0 ? node.ActualExecutions : 1;
-                var actualPerExec = (double)node.ActualRows / executions;
-                var ratio = actualPerExec / node.EstimateRows;
+                // #594 (PerformanceStudio): compare like with like. EstimateRows is per execution;
+                // ActualExecutions is a real per-execution count only on the inner side of a Nested Loops
+                // join — everywhere else (including a non-inner node in a parallel zone, where it is
+                // thread-summed) RowEstimateHelper leaves the estimate at one execution instead of
+                // inflating it by DOP (#4627).
+                var isInnerSide = RowEstimateHelper.IsInnerSideOfNestedLoops(node);
+                var ratio = RowEstimateHelper.GetRowAccuracyRatio(node);
                 if (ratio >= 10.0 || ratio <= 0.1)
                 {
                     var harm = AssessEstimateHarm(node, ratio);
@@ -556,11 +887,12 @@ public static partial class PlanAnalyzer
                     {
                         var direction = ratio >= 10.0 ? "underestimated" : "overestimated";
                         var factor = ratio >= 10.0 ? ratio : 1.0 / ratio;
-                        var actualDisplay = executions > 1
-                            ? $"Actual {node.ActualRows:N0} ({actualPerExec:N0} rows x {executions:N0} executions)"
+                        var actualDisplay = isInnerSide && node.ActualExecutions > 1
+                            ? $"Actual {node.ActualRows:N0} ({(double)node.ActualRows / node.ActualExecutions:N0} rows x {node.ActualExecutions:N0} executions)"
                             : $"Actual {node.ActualRows:N0}";
                         node.Warnings.Add(new PlanWarning
                         {
+                            RuleNumber = 5,
                             WarningType = "Row Estimate Mismatch",
                             Message = $"Estimated {node.EstimateRows:N0} vs {actualDisplay} — {factor:F0}x {direction}. {harm}",
                             Severity = factor >= 100 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -571,11 +903,21 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 6: Scalar UDF references (works on estimated plans too)
+        // Suppress when a Serial Plan finding is already on the statement for a UDF-related
+        // reason — that finding already explains the issue, so this would be redundant.
+        var serialPlanCoversUdf =
+            (stmt.NonParallelPlanReason is
+                "TSQLUserDefinedFunctionsNotParallelizable"
+                or "CLRUserDefinedFunctionRequiresDataAccess"
+                or "CouldNotGenerateValidParallelPlan")
+            && stmt.PlanWarnings.Any(w => w.WarningType == "Serial Plan");
+        if (!cfg.IsRuleDisabled(6) && !serialPlanCoversUdf)
         foreach (var udf in node.ScalarUdfs)
         {
             var type = udf.IsClrFunction ? "CLR" : "T-SQL";
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 6,
                 WarningType = "Scalar UDF",
                 Message = $"Scalar {type} UDF: {udf.FunctionName}. Scalar UDFs run once per row and prevent parallelism. Options: rewrite as an inline table-valued function, assign the result to a variable if only one row is needed, dump results to a #temp table and apply the UDF to the final result set, or on SQL Server 2019+ check if the UDF is eligible for automatic scalar UDF inlining.",
                 Severity = PlanWarningSeverity.Warning
@@ -586,6 +928,9 @@ public static partial class PlanAnalyzer
         // based on what percentage of statement elapsed time the spill accounts for.
         // Exchange spills on Parallelism operators get special handling since their
         // timing is unreliable but the write count tells the story.
+        // Guard only: this rule changes the severity of SQL Server's own spill warnings
+        // rather than adding a new PlanWarning, so it carries no RuleNumber stamp.
+        if (!cfg.IsRuleDisabled(7))
         foreach (var w in node.Warnings.ToList())
         {
             if (w.SpillDetails == null)
@@ -610,7 +955,7 @@ public static partial class PlanAnalyzer
                     if (stmtMs > 0 && operatorMs > 0)
                     {
                         var pct = (double)operatorMs / stmtMs;
-                        w.Message += $" Operator time: {operatorMs:N0}ms ({pct:P0} of statement).";
+                        w.Message += $" Operator time: {operatorMs:N0}ms ({pct * 100:N0}% of statement).";
                     }
                 }
             }
@@ -623,7 +968,7 @@ public static partial class PlanAnalyzer
                 if (stmtMs > 0)
                 {
                     var pct = (double)operatorMs / stmtMs;
-                    w.Message += $" Operator time: {operatorMs:N0}ms ({pct:P0} of statement).";
+                    w.Message += $" Operator time: {operatorMs:N0}ms ({pct * 100:N0}% of statement).";
 
                     if (pct >= 0.5)
                         w.Severity = PlanWarningSeverity.Critical;
@@ -636,7 +981,7 @@ public static partial class PlanAnalyzer
         // Rule 8: Parallel thread skew (actual plans with per-thread stats)
         // Only warn when there are enough rows to meaningfully distribute across threads
         // Filter out thread 0 (coordinator) which typically does 0 rows in parallel operators
-        if (node.PerThreadStats.Count > 1)
+        if (!cfg.IsRuleDisabled(8) && node.PerThreadStats.Count > 1)
         {
             var workerThreads = node.PerThreadStats.Where(t => t.ThreadId > 0).ToList();
             if (workerThreads.Count < 2) workerThreads = node.PerThreadStats; // fallback
@@ -650,7 +995,7 @@ public static partial class PlanAnalyzer
                 var skewThreshold = workerThreads.Count <= 2 ? 0.80 : 0.50;
                 if (skewRatio >= skewThreshold)
                 {
-                    var message = $"Thread {maxThread.ThreadId} processed {skewRatio:P0} of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). Work is heavily skewed to one thread, so parallelism isn't helping much.";
+                    var message = $"Thread {maxThread.ThreadId} processed {skewRatio * 100:N0}% of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). Work is heavily skewed to one thread, so parallelism isn't helping much.";
                     var severity = PlanWarningSeverity.Warning;
 
                     // Batch mode sorts produce all output on a single thread by design
@@ -670,6 +1015,7 @@ public static partial class PlanAnalyzer
 
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 8,
                         WarningType = "Parallel Skew",
                         Message = message,
                         Severity = severity
@@ -680,7 +1026,7 @@ public static partial class PlanAnalyzer
 
         // Rule 10: Key Lookup / RID Lookup with residual predicate
         // Check RID Lookup first — it's more specific (PhysicalOp) and also has Lookup=true
-        if (node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase))
+        if (!cfg.IsRuleDisabled(10) && node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase))
         {
             var message = "RID Lookup — this table is a heap (no clustered index). SQL Server found rows via a nonclustered index but had to follow row identifiers back to unordered heap pages. Heap lookups are more expensive than key lookups because pages are not sorted and may have forwarding pointers. Add a clustered index to the table.";
             if (!string.IsNullOrEmpty(node.Predicate))
@@ -688,12 +1034,13 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 10,
                 WarningType = "RID Lookup",
                 Message = message,
                 Severity = PlanWarningSeverity.Warning
             });
         }
-        else if (node.Lookup)
+        else if (!cfg.IsRuleDisabled(10) && node.Lookup)
         {
             var lookupMsg = "Key Lookup — SQL Server found rows via a nonclustered index but had to go back to the clustered index for additional columns.";
 
@@ -714,6 +1061,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 10,
                 WarningType = "Key Lookup",
                 Message = lookupMsg,
                 Severity = PlanWarningSeverity.Critical
@@ -722,8 +1070,7 @@ public static partial class PlanAnalyzer
 
         // Rule 12: Non-SARGable predicate on scan
         // Skip for 0-execution nodes — the operator never ran, so the warning is academic
-        var nonSargableReason = (node.HasActualStats && node.ActualExecutions == 0)
-            ? null : DetectNonSargablePredicate(node);
+        var nonSargableReason = GetNonSargableReason(node, cfg);
         if (nonSargableReason != null)
         {
             var nonSargableAdvice = nonSargableReason switch
@@ -744,6 +1091,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 12,
                 WarningType = "Non-SARGable Predicate",
                 Message = $"{nonSargableAdvice}\nPredicate: {Truncate(node.Predicate!, 200)}",
                 Severity = PlanWarningSeverity.Warning
@@ -753,7 +1101,7 @@ public static partial class PlanAnalyzer
         // Rule 11: Scan with residual predicate (skip if non-SARGable already flagged)
         // A PROBE() alone is just a bitmap filter — not a real residual predicate.
         // Skip for 0-execution nodes — the operator never ran
-        if (nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
+        if (!cfg.IsRuleDisabled(11) && nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
             !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0))
         {
             var displayPredicate = StripProbeExpressions(node.Predicate);
@@ -767,7 +1115,16 @@ public static partial class PlanAnalyzer
             var message = "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
             if (!string.IsNullOrEmpty(details.Summary))
                 message += $" {details.Summary}";
-            message += " Check that you have appropriate indexes.";
+
+            // If the statement is executing a dynamic cursor, that's usually
+            // the reason an index didn't get used. Call it out so the user looks there
+            // first rather than hunting for a missing index.
+            var isDynamicCursor = string.Equals(stmt.CursorActualType, "Dynamic",
+                StringComparison.OrdinalIgnoreCase);
+            if (isDynamicCursor)
+                message += " This query is running inside a dynamic cursor, which can prevent index usage; changing the cursor type (FAST_FORWARD / STATIC / KEYSET) often fixes scans like this without any indexing change.";
+            else
+                message += " Check that you have appropriate indexes.";
 
             // I/O waits specifically confirm the scan is hitting disk — elevate
             if (HasSignificantIoWaits(stmt.WaitStats) && details.CostPct >= 50
@@ -778,6 +1135,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 11,
                 WarningType = "Scan With Predicate",
                 Message = message,
                 Severity = severity
@@ -788,7 +1146,7 @@ public static partial class PlanAnalyzer
         // When a scan dominates the plan AND the estimate is vastly higher than actual rows,
         // the optimizer chose a scan because it thought it needed most of the table.
         // With accurate estimates, it would likely seek instead.
-        if (node.HasActualStats && IsRowstoreScan(node)
+        if (!cfg.IsRuleDisabled(32) && node.HasActualStats && IsRowstoreScan(node)
             && node.EstimateRows > 0 && node.ActualRows >= 0 && node.ActualRowsRead > 0)
         {
             var impact = BuildScanImpactDetails(node, stmt);
@@ -802,6 +1160,7 @@ public static partial class PlanAnalyzer
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 32,
                     WarningType = "Scan Cardinality Misestimate",
                     Message = $"Estimated {node.EstimateRows:N0} rows but only {node.ActualRows:N0} returned ({selectivity * 100:N3}% of {node.ActualRowsRead:N0} rows read). " +
                               $"The {overestimateRatio:N0}x overestimate likely caused the optimizer to choose a scan instead of a seek. " +
@@ -811,22 +1170,79 @@ public static partial class PlanAnalyzer
             }
         }
 
+        // Rule 34: Bare scan with no predicate — NC index or columnstore candidate.
+        // When a Clustered Index Scan or heap Table Scan reads the full table with no
+        // predicate but only outputs a few columns, a narrower nonclustered index could
+        // cover the query with far less I/O. For analytical workloads, columnstore may
+        // be a better fit regardless of column count.
+        var isBareScanCandidate = (node.PhysicalOp == "Clustered Index Scan" || node.PhysicalOp == "Table Scan")
+            && !node.Lookup
+            && string.IsNullOrEmpty(node.Predicate)
+            && !string.IsNullOrEmpty(node.OutputColumns);
+        if (!cfg.IsRuleDisabled(34) && isBareScanCandidate)
+        {
+            var colCount = node.OutputColumns!.Split(',').Length;
+            var isSignificant = node.HasActualStats
+                ? GetOperatorOwnElapsedMs(node) > 0
+                : node.CostPercent >= 20;
+
+            if (isSignificant)
+            {
+                var scanKind = node.PhysicalOp == "Clustered Index Scan"
+                    ? "Clustered index scan"
+                    : "Heap table scan";
+
+                if (colCount <= 3)
+                {
+                    // Narrow output: a nonclustered rowstore index can cover this cheaply.
+                    var indexAdvice = node.PhysicalOp == "Clustered Index Scan"
+                        ? "Consider a nonclustered index on the output columns (as key or INCLUDE) so SQL Server can read a narrower structure."
+                        : "Consider a clustered or nonclustered index on the output columns so SQL Server can read a narrower structure.";
+
+                    node.Warnings.Add(new PlanWarning
+                    {
+                        RuleNumber = 34,
+                        WarningType = "Bare Scan",
+                        Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} column(s): {Truncate(node.OutputColumns, 200)}. {indexAdvice} For analytical workloads, a columnstore index may be a better fit.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+                else
+                {
+                    // Wider output: rowstore NC index isn't a great fit (would have to
+                    // carry too many columns), but columnstore doesn't care about column
+                    // count. Suggest it for analytical / aggregate-style workloads.
+                    node.Warnings.Add(new PlanWarning
+                    {
+                        RuleNumber = 34,
+                        WarningType = "Bare Scan",
+                        Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} columns. A nonclustered rowstore index isn't a great fit for wide outputs, but if this is an analytical or aggregate-style query, a columnstore index (CCI or NCCI) can scan the same data far more cheaply — column count doesn't penalize columnstore the way it does rowstore indexes.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+            }
+        }
+
         // Rule 33: Estimated plan CE guess detection — scans with telltale default selectivity
-        // When the optimizer uses a local variable or can't sniff, it falls back to density-based
-        // guesses: 30% (equality), 10% (inequality), 9% (LIKE/between), ~16.43% (sqrt(30%)),
-        // 1% (multi-inequality). On large tables, these guesses can hide the need for an index.
-        if (!node.HasActualStats && IsRowstoreScan(node)
-            && node.TableCardinality >= 100_000 && node.EstimateRows > 0
+        // When the optimizer has no statistics to use (a local variable it can't sniff, a column with
+        // no statistics, an expression), it falls back on fixed guesses: 30% for an inequality, 9%
+        // for BETWEEN or LIKE, ~16.4% for two inequalities, 10% for comparing two columns, and an
+        // equality guess that grows with the table. DetectCeGuess has the measured details and
+        // which estimator (CE 70 or 120+) each one belongs to. On large tables, these guesses can
+        // hide the need for an index (#4687).
+        if (!cfg.IsRuleDisabled(33) && !node.HasActualStats && IsRowstoreScan(node)
+            && node.TableCardinality >= CeGuessMinTableRows && node.EstimateRows > 0
             && !string.IsNullOrEmpty(node.Predicate))
         {
             var impact = BuildScanImpactDetails(node, stmt);
             if (impact.CostPct >= 50)
             {
-                var guessDesc = DetectCeGuess(node.EstimateRows, node.TableCardinality);
+                var guessDesc = DetectCeGuess(node.EstimateRows, node.TableCardinality, stmt.CardinalityEstimationModelVersion);
                 if (guessDesc != null)
                 {
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 33,
                         WarningType = "Estimated Plan CE Guess",
                         Message = $"Estimated {node.EstimateRows:N0} rows from {node.TableCardinality:N0} row table — {guessDesc}. " +
                                   $"The optimizer may be using a default guess instead of accurate statistics. " +
@@ -838,7 +1254,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 13: Mismatched data types (GetRangeWithMismatchedTypes / GetRangeThroughConvert)
-        if (node.PhysicalOp == "Compute Scalar" && !string.IsNullOrEmpty(node.DefinedValues))
+        if (!cfg.IsRuleDisabled(13) && node.PhysicalOp == "Compute Scalar" && !string.IsNullOrEmpty(node.DefinedValues))
         {
             var hasMismatch = node.DefinedValues.Contains("GetRangeWithMismatchedTypes", StringComparison.OrdinalIgnoreCase);
             var hasConvert = node.DefinedValues.Contains("GetRangeThroughConvert", StringComparison.OrdinalIgnoreCase);
@@ -851,6 +1267,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 13,
                     WarningType = "Data Type Mismatch",
                     Message = reason,
                     Severity = PlanWarningSeverity.Warning
@@ -860,7 +1277,7 @@ public static partial class PlanAnalyzer
 
         // Rule 14: Lazy Table Spool unfavorable rebind/rewind ratio
         // Rebinds = cache misses (child re-executes), rewinds = cache hits (reuse cached result)
-        if (node.LogicalOp == "Lazy Spool"
+        if (!cfg.IsRuleDisabled(14) && node.LogicalOp == "Lazy Spool"
             && !node.PhysicalOp.Contains("Index", StringComparison.OrdinalIgnoreCase))
         {
             var rebinds = node.HasActualStats ? (double)node.ActualRebinds : node.EstimateRebinds;
@@ -879,6 +1296,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 14,
                     WarningType = "Lazy Spool Ineffective",
                     Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} rewinds (cache hits) — {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
                     Severity = severity
@@ -888,19 +1306,25 @@ public static partial class PlanAnalyzer
 
         // Rule 15: Join OR clause
         // Pattern: Nested Loops → Merge Interval → TopN Sort → [Compute Scalar] → Concatenation → [Compute Scalar] → 2+ Constant Scans
-        if (node.PhysicalOp == "Concatenation")
+        if (!cfg.IsRuleDisabled(15) && node.PhysicalOp == "Concatenation")
         {
             var constantScanBranches = node.Children
-                .Count(c => c.PhysicalOp == "Constant Scan" ||
+                .Where(c => c.PhysicalOp == "Constant Scan" ||
                             (c.PhysicalOp == "Compute Scalar" &&
-                             c.Children.Any(gc => gc.PhysicalOp == "Constant Scan")));
+                             c.Children.Any(gc => gc.PhysicalOp == "Constant Scan")))
+                .ToList();
 
-            if (constantScanBranches >= 2 && IsOrExpansionChain(node))
+            // #4521: WHERE t.A IN (@p1, @p2) builds the same operator chain, as a dynamic seek
+            // over the parameter values, and there is no join to rewrite. Only a lookup that
+            // takes its value from another input's row makes the OR a join OR.
+            if (constantScanBranches.Count >= 2 && IsOrExpansionChain(node) &&
+                constantScanBranches.Any(LookupReadsAnotherInput))
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 15,
                     WarningType = "Join OR Clause",
-                    Message = $"OR in a join predicate. SQL Server rewrote the OR as {constantScanBranches} separate lookups, each evaluated independently — this multiplies the work on the inner side. Rewrite as separate queries joined with UNION ALL. For example, change \"FROM a JOIN b ON a.x = b.x OR a.y = b.y\" to \"FROM a JOIN b ON a.x = b.x UNION ALL FROM a JOIN b ON a.y = b.y\".",
+                    Message = $"OR in a join predicate. SQL Server rewrote the OR as {constantScanBranches.Count} separate lookups, each evaluated independently — this multiplies the work on the inner side. Rewrite as separate queries joined with UNION ALL. For example, change \"FROM a JOIN b ON a.x = b.x OR a.y = b.y\" to \"FROM a JOIN b ON a.x = b.x UNION ALL FROM a JOIN b ON a.y = b.y\".",
                     Severity = PlanWarningSeverity.Warning
                 });
             }
@@ -908,7 +1332,7 @@ public static partial class PlanAnalyzer
 
         // Rule 16: Nested Loops high inner-side execution count
         // Deep analysis: combine execution count + outer estimate mismatch + inner cost
-        if (node.PhysicalOp == "Nested Loops" &&
+        if (!cfg.IsRuleDisabled(16) && node.PhysicalOp == "Nested Loops" &&
             node.LogicalOp.Contains("Join", StringComparison.OrdinalIgnoreCase) &&
             !node.IsAdaptive &&
             node.Children.Count >= 2)
@@ -924,15 +1348,21 @@ public static partial class PlanAnalyzer
                 // Core fact
                 details.Add($"Nested Loops inner side executed {innerChild.ActualExecutions:N0} times (DOP {dop}).");
 
-                // Outer side estimate mismatch — explains WHY the optimizer chose NL
+                // Outer side estimate mismatch — explains WHY the optimizer chose NL.
+                // #594 (PerformanceStudio): outerChild is this join's OUTER input, but if this Nested Loops is
+                // itself nested inside an ancestor join's inner side, outerChild inherits that — walk the whole
+                // ancestor chain (RowEstimateHelper) rather than assuming one execution. In a parallel zone its
+                // ActualExecutions is a thread count, so dividing the actual by it understated the actual by DOP (#4627).
                 if (outerChild.HasActualStats && outerChild.EstimateRows > 0)
                 {
-                    var outerExecs = outerChild.ActualExecutions > 0 ? outerChild.ActualExecutions : 1;
-                    var outerActualPerExec = (double)outerChild.ActualRows / outerExecs;
-                    var outerRatio = outerActualPerExec / outerChild.EstimateRows;
+                    var outerIsInnerSide = RowEstimateHelper.IsInnerSideOfNestedLoops(outerChild);
+                    var outerRatio = RowEstimateHelper.GetRowAccuracyRatio(outerChild);
                     if (outerRatio >= 10.0)
                     {
-                        details.Add($"Outer side: estimated {outerChild.EstimateRows:N0} rows, actual {outerActualPerExec:N0} ({outerRatio:F0}x underestimate). The optimizer chose Nested Loops expecting far fewer iterations.");
+                        var outerActualDisplay = outerIsInnerSide && outerChild.ActualExecutions > 0
+                            ? (double)outerChild.ActualRows / outerChild.ActualExecutions
+                            : outerChild.ActualRows;
+                        details.Add($"Outer side: estimated {outerChild.EstimateRows:N0} rows, actual {outerActualDisplay:N0} ({outerRatio:F0}x underestimate). The optimizer chose Nested Loops expecting far fewer iterations.");
                     }
                 }
 
@@ -964,6 +1394,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 16,
                     WarningType = "Nested Loops High Executions",
                     Message = string.Join(" ", details),
                     Severity = innerChild.ActualExecutions > 1000000
@@ -978,11 +1409,12 @@ public static partial class PlanAnalyzer
         // Rule 17: Many-to-many Merge Join
         // In actual plans, the Merge Join operator reports logical reads when the worktable is used.
         // When ActualLogicalReads is 0, the worktable wasn't hit and the warning is noise.
-        if (node.ManyToMany && node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase) &&
+        if (!cfg.IsRuleDisabled(17) && node.ManyToMany && node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase) &&
             (!node.HasActualStats || node.ActualLogicalReads > 0))
         {
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 17,
                 WarningType = "Many-to-Many Merge Join",
                 Message = node.HasActualStats
                     ? $"Many-to-many Merge Join — SQL Server created a worktable in TempDB ({node.ActualLogicalReads:N0} logical reads) because both sides have duplicate values in the join columns."
@@ -992,7 +1424,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 22: Table variables (Object name starts with @)
-        if (!string.IsNullOrEmpty(node.ObjectName) &&
+        if (!cfg.IsRuleDisabled(22) && !string.IsNullOrEmpty(node.ObjectName) &&
             node.ObjectName.StartsWith('@'))
         {
             var isModificationOp = node.PhysicalOp.Contains("Insert", StringComparison.OrdinalIgnoreCase)
@@ -1001,6 +1433,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 22,
                 WarningType = "Table Variable",
                 Message = isModificationOp
                     ? "Modifying a table variable forces the entire plan to run single-threaded. Replace with a #temp table to allow parallel execution."
@@ -1010,11 +1443,17 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 23: Table-valued functions
-        if (node.LogicalOp == "Table-valued function")
+        // A function the engine supplies runs as the same operator: STRING_SPLIT, OPENJSON,
+        // GENERATE_SERIES, and every DMV and DMF. Its Object names no database and no schema,
+        // and a function a user wrote always has both. The advice below is about code the
+        // user can rewrite, so the engine's own functions are skipped.
+        var isEngineFunction = string.IsNullOrEmpty(node.DatabaseName) && string.IsNullOrEmpty(node.SchemaName);
+        if (!cfg.IsRuleDisabled(23) && node.LogicalOp == "Table-valued function" && !isEngineFunction)
         {
             var funcName = node.ObjectName ?? node.PhysicalOp;
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 23,
                 WarningType = "Table-Valued Function",
                 Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (pre-2017) or 100 rows (2017+) regardless of actual size. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
                 Severity = PlanWarningSeverity.Warning
@@ -1025,6 +1464,7 @@ public static partial class PlanAnalyzer
         // Detects Top or Top N Sort operators feeding from a scan. This often means the
         // query is scanning the entire table/index and sorting just to return a few rows,
         // when an appropriate index could satisfy the request directly.
+        if (!cfg.IsRuleDisabled(24))
         {
             var isTop = node.PhysicalOp == "Top";
             var isTopNSort = node.LogicalOp == "Top N Sort";
@@ -1050,6 +1490,7 @@ public static partial class PlanAnalyzer
                         : "";
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 24,
                         WarningType = "Top Above Scan",
                         Message = $"{topLabel} reads from {FormatNodeRef(scanCandidate)}.{innerNote}{predInfo} An index on the ORDER BY columns could eliminate the scan and sort entirely.",
                         Severity = onInner ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -1062,7 +1503,7 @@ public static partial class PlanAnalyzer
         // Only surface on data access operators (seeks/scans) where the row goal actually matters
         var isDataAccess = node.PhysicalOp != null &&
             (node.PhysicalOp.Contains("Scan") || node.PhysicalOp.Contains("Seek"));
-        if (isDataAccess && node.EstimateRowsWithoutRowGoal > 0 && node.EstimateRows > 0 &&
+        if (!cfg.IsRuleDisabled(26) && isDataAccess && node.EstimateRowsWithoutRowGoal > 0 && node.EstimateRows > 0 &&
             node.EstimateRowsWithoutRowGoal > node.EstimateRows)
         {
             var reduction = node.EstimateRowsWithoutRowGoal / node.EstimateRows;
@@ -1075,9 +1516,11 @@ public static partial class PlanAnalyzer
                 var rowGoalWorked = false;
                 if (node.HasActualStats)
                 {
-                    var executions = node.ActualExecutions > 0 ? node.ActualExecutions : 1;
-                    var actualPerExec = (double)node.ActualRows / executions;
-                    rowGoalWorked = actualPerExec <= node.EstimateRows;
+                    // #594 (PerformanceStudio): compare like with like — see RowEstimateHelper. A scan or seek is
+                    // routinely the inner side of a Nested Loops join (a key lookup, for one), where
+                    // ActualExecutions is a real per-execution count; everywhere else, in a parallel zone, it is a
+                    // thread count and dividing by it swallowed a row goal that did not hold (#4627).
+                    rowGoalWorked = RowEstimateHelper.GetRowAccuracyRatio(node) <= 1.0;
                 }
 
                 if (!rowGoalWorked)
@@ -1087,6 +1530,7 @@ public static partial class PlanAnalyzer
 
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 26,
                         WarningType = "Row Goal",
                         Message = $"Row goal active: estimate reduced from {node.EstimateRowsWithoutRowGoal:N0} to {node.EstimateRows:N0} ({reduction:N0}x reduction) due to {cause}. The optimizer chose this plan shape expecting to stop reading early. If the query reads all rows anyway, the plan choice may be suboptimal.",
                         Severity = PlanWarningSeverity.Info
@@ -1098,13 +1542,14 @@ public static partial class PlanAnalyzer
         // Rule 28: Row Count Spool — NOT IN with nullable column
         // Pattern: Row Count Spool with high rewinds, child scan has IS NULL predicate,
         // and statement text contains NOT IN
-        if ((node.PhysicalOp ?? "").Contains("Row Count Spool", StringComparison.Ordinal))
+        if (!cfg.IsRuleDisabled(28) && (node.PhysicalOp ?? "").Contains("Row Count Spool", StringComparison.Ordinal))
         {
             var rewinds = node.HasActualStats ? (double)node.ActualRewinds : node.EstimateRewinds;
             if (rewinds > 10000 && HasNotInPattern(node, stmt))
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 28,
                     WarningType = "NOT IN with Nullable Column",
                     Message = $"Row Count Spool with {rewinds:N0} rewinds. This pattern occurs when NOT IN is used with a nullable column — SQL Server cannot use an efficient Anti Semi Join because it must check for NULL values on every outer row. Rewrite as NOT EXISTS, or add WHERE column IS NOT NULL to the subquery.",
                     Severity = rewinds > 1_000_000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -1114,7 +1559,7 @@ public static partial class PlanAnalyzer
 
         // Rule 29: Enhance implicit conversion warnings — Seek Plan is more severe
         // Skip for 0-execution nodes — the operator never ran
-        if (!(node.HasActualStats && node.ActualExecutions == 0))
+        if (!cfg.IsRuleDisabled(29) && !(node.HasActualStats && node.ActualExecutions == 0))
         foreach (var w in node.Warnings.ToList())
         {
             if (w.WarningType == "Implicit Conversion" && w.Message.StartsWith("Seek Plan", StringComparison.Ordinal))
@@ -1123,7 +1568,59 @@ public static partial class PlanAnalyzer
                 w.Message = $"Implicit conversion prevented an index seek, forcing a scan instead. Fix the data type mismatch: ensure the parameter or variable type matches the column type exactly. {w.Message}";
             }
         }
+
+        // Rule 35: Expensive Operator — always show operators that take a significant
+        // share of statement time even when no other rule has something to say. Threshold:
+        // self-time >= 20% of statement elapsed. Only emits if no other warning is already
+        // on the node, to avoid doubling up, and only once the statement itself has run long
+        // enough (>= 1,000ms) that a 20% share means something — in a statement of a few ms,
+        // one or two operators always take most of the time just because there's almost
+        // nothing else to divide it among, so the share points at nothing. The benefit % is
+        // just the self-time share.
+        // Exchanges (Parallelism) are skipped: their self-time is mostly time spent waiting on the
+        // operators that feed them and drain them, not work of their own. On a live plan an exchange
+        // feeding a spilling sort showed 21 s of elapsed time on 2.4 s of CPU per thread, and was
+        // named as the expensive operator while the sort beside it was the real problem (#4690).
+        if (!cfg.IsRuleDisabled(35) && node.HasActualStats && node.Warnings.Count == 0
+            && !IsExchangeOperator(node)
+            && stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs >= 1000)
+        {
+            var selfMs = GetOperatorOwnElapsedMs(node);
+            var pct = (double)selfMs / stmt.QueryTimeStats.ElapsedTimeMs * 100;
+            if (pct >= 20.0)
+            {
+                node.Warnings.Add(new PlanWarning
+                {
+                    RuleNumber = 35,
+                    WarningType = "Expensive Operator",
+                    Message = $"{node.PhysicalOp} took {selfMs:N0}ms ({pct:N1}% of statement elapsed) but no specific rule identified a fix. Worth investigating: is the row volume necessary? Are upstream estimates driving this operator harder than it should be?",
+                    Severity = pct >= 50 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning,
+                    MaxBenefitPercent = Math.Round(Math.Min(100.0, pct), 1)
+                });
+            }
+        }
+
+        // #4534: an operator warning's origin is the operator it is hanging off, so it is stamped
+        // here rather than at each of the many sites above that add one. A rule you have to
+        // remember at every construction site eventually gets forgotten, and the UI would quietly
+        // lose a link that existed. This only fills what a rule left empty, so a rule that already
+        // knows the operator that CAUSED the problem (rather than the one reporting it) keeps its
+        // own answer.
+        foreach (var warning in node.Warnings)
+        {
+            if (warning.OriginNodeIds.Count == 0)
+                warning.OriginNodeIds.Add(node.NodeId);
+        }
     }
+
+    /// <summary>
+    /// True for parallelism exchange operators (Gather/Distribute/Repartition Streams), whose
+    /// timings reflect time spent waiting on the operators around them rather than the operator's
+    /// own work.
+    /// </summary>
+    private static bool IsExchangeOperator(PlanNode node) =>
+        node.PhysicalOp == "Parallelism"
+        || node.LogicalOp is "Gather Streams" or "Distribute Streams" or "Repartition Streams";
 
     /// <summary>
     /// Detects the NOT IN with nullable column pattern: statement has NOT IN,
@@ -1135,7 +1632,7 @@ public static partial class PlanAnalyzer
     {
         // Check statement text for NOT IN
         if (string.IsNullOrEmpty(stmt.StatementText) ||
-            !NotInRegExp().IsMatch(stmt.StatementText))
+            !NotInRegExp().IsMatch(MaskCommentsAndLiterals(stmt.StatementText))) // #4524
             return false;
 
         // Walk up the tree checking ancestors and their children
@@ -1223,6 +1720,41 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// True when a node, or any of its descendants, ran in batch execution mode. Ported from
+    /// erikdarlingdata/PerformanceStudio dev (85492a1) src/PlanViewer.Core/Services/PlanAnalyzer.Detection.cs:38-49,
+    /// for rule 38 (Standard Edition DOP 2 limitation).
+    /// </summary>
+    private static bool HasBatchModeNode(PlanNode node)
+    {
+        var mode = node.ActualExecutionMode ?? node.ExecutionMode;
+        if (string.Equals(mode, "Batch", StringComparison.OrdinalIgnoreCase))
+            return true;
+        foreach (var child in node.Children)
+        {
+            if (HasBatchModeNode(child))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// True when a node scans or modifies a table variable rather than a real table. The scan's
+    /// Object element renders a table variable's name as "[@tv]", where a real table always has a
+    /// schema: "[db].[dbo].[t]" — so the leading @ alone tells them apart.
+    /// </summary>
+    private static bool IsTableVariable(PlanNode node) =>
+        !string.IsNullOrEmpty(node.ObjectName) && node.ObjectName.StartsWith('@');
+
+    /// <summary>
+    /// Shared by Rule 12 (emits the warning) and Rule 11 (which suppresses its residual-
+    /// predicate warning when a non-SARGable predicate was already flagged). Pure function
+    /// of node + cfg, so both rules can compute it independently.
+    /// </summary>
+    private static string? GetNonSargableReason(PlanNode node, AnalyzerConfig cfg) =>
+        cfg.IsRuleDisabled(12) || (node.HasActualStats && node.ActualExecutions == 0)
+            ? null : DetectNonSargablePredicate(node);
+
+    /// <summary>
     /// Detects non-SARGable patterns in scan predicates.
     /// Returns a description of the issue, or null if the predicate is fine.
     /// </summary>
@@ -1235,29 +1767,115 @@ public static partial class PlanAnalyzer
         if (!IsRowstoreScan(node))
             return null;
 
-        var predicate = node.Predicate;
+        return DetectNonSargablePattern(node.Predicate, BuildScanIdentity(node));
+    }
 
+    /// <summary>
+    /// The <see cref="ScanIdentity"/> for a scan node, or null when it has no Object element at
+    /// all — DetectNonSargablePattern falls back to its old, coarser behavior in that case rather
+    /// than trying to match ownership against an identity with nothing in it.
+    /// </summary>
+    private static ScanIdentity? BuildScanIdentity(PlanNode node)
+    {
+        if (string.IsNullOrEmpty(node.ObjectName))
+            return null;
+
+        // ObjectName is "schema.table" (a table variable's has no schema, so it's just "@tv");
+        // the owner a predicate names is always the bare table, never schema-qualified.
+        var dot = node.ObjectName.LastIndexOf('.');
+        var table = dot >= 0 ? node.ObjectName[(dot + 1)..] : node.ObjectName;
+
+        return new ScanIdentity(node.ObjectAlias, table, IsTableVariable(node), CollectBareOuterReferences(node));
+    }
+
+    /// <summary>
+    /// Bare column names that reach <paramref name="node"/> as an outer reference from another
+    /// unaliased table variable, rather than one of node's own columns — the two look identical
+    /// once rendered bare, so a predicate can't tell them apart by text alone.
+    ///
+    /// <para>Walks up through every Nested Loops ancestor whose INNER input (second child) holds
+    /// node, the same as the plan diagram's own outer-vs-inner split, and keeps the OuterReferences
+    /// entries with no ".". A table-qualified outer reference is rendered as "Table.Column" — that
+    /// always names a different table than node's own bare columns, so only a dot-free entry can
+    /// ever collide with one. A Nested Loops whose OUTER input holds node contributes nothing: that
+    /// input is where the reference comes from, not where it is consumed, so node is not the one
+    /// reading it.</para>
+    /// </summary>
+    private static HashSet<string> CollectBareOuterReferences(PlanNode node)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var child = node;
+        var ancestor = node.Parent;
+
+        while (ancestor != null)
+        {
+            if (ancestor.PhysicalOp == "Nested Loops" &&
+                !string.IsNullOrEmpty(ancestor.OuterReferences) &&
+                ancestor.Children.Count > 1 &&
+                ancestor.Children[1] == child)
+            {
+                foreach (var reference in ancestor.OuterReferences.Split(", "))
+                {
+                    if (!reference.Contains('.'))
+                        names.Add(reference);
+                }
+            }
+
+            child = ancestor;
+            ancestor = ancestor.Parent;
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// The pattern half of <see cref="DetectNonSargablePredicate"/>: which non-SARGable shape, if
+    /// any, a predicate ScalarString has.
+    ///
+    /// <para>Internal so predicate shapes can be tested as raw strings. The shapes that matter
+    /// (compound AND/OR predicates, date ranges, parenthesized groups, an AND inside a literal or a
+    /// bracketed name) outnumber any sensible set of plan fixtures, and every one of them is decided
+    /// entirely in this method and the helpers it calls.</para>
+    ///
+    /// <para><paramref name="identity"/> is the scanned object the caller has confirmed the predicate
+    /// belongs to — null keeps today's coarser behavior unchanged for every existing caller: any
+    /// dotted name counts as a column, and no bare name does. A real table or an aliased table
+    /// variable always renders its own column dotted, at minimum [table].[col] or [alias].[col], but
+    /// an unaliased table variable's own column has no dotted qualifier at all — see
+    /// <see cref="ColumnReferenceRegex"/> and <see cref="IsColumnReference"/>.</para>
+    /// </summary>
+    internal static string? DetectNonSargablePattern(string predicate, ScanIdentity? identity = null)
+    {
         // CASE expression in predicate — check first because CASE bodies
         // often contain CONVERT_IMPLICIT that isn't the root cause
         if (CaseInPredicateRegex.IsMatch(predicate))
             return "CASE expression in predicate";
 
-        // CONVERT_IMPLICIT — most common non-SARGable pattern
-        if (predicate.Contains("CONVERT_IMPLICIT", StringComparison.OrdinalIgnoreCase))
+        // CONVERT_IMPLICIT — most common non-SARGable pattern, but only when it converts the
+        // COLUMN. Converting the parameter up to the column's type costs nothing.
+        if (ConvertImplicitWrapsColumn(predicate, identity))
             return "Implicit conversion (CONVERT_IMPLICIT)";
 
-        // ISNULL / COALESCE wrapping column
-        if (IsNullCoalesceRegExp().IsMatch(predicate))
-            return "ISNULL/COALESCE wrapping column";
+        // ISNULL / COALESCE wrapping column — on the column side only. ISNULL(@p, 0) on the
+        // parameter side is a runtime constant and seeks fine; flagging it contradicted this
+        // warning's own "wrapping a column" message. col = ISNULL(@p, col) is still caught,
+        // because the column sits inside the function, on its side of the comparison.
+        foreach (Match isnullMatch in IsNullCoalesceRegex.Matches(predicate))
+        {
+            if (IsFunctionOnColumnSide(predicate, isnullMatch, identity))
+                return "ISNULL/COALESCE wrapping column";
+        }
 
         // Common function calls on columns — but only if the function wraps a column,
         // not a parameter/variable. Split on comparison operators to check which side
         // the function is on. Predicate format: [db].[schema].[table].[col]>func(...)
-        var funcMatch = FunctionInPredicateRegex.Match(predicate);
-        if (funcMatch.Success)
+        // Every match, not just the first: a parameter-side CONVERT_IMPLICIT now falls through to
+        // here, and it is skipped below. Taking only the first match would let a benign conversion
+        // sitting to the left of a real function-on-column hide it.
+        foreach (Match funcMatch in FunctionInPredicateRegex.Matches(predicate))
         {
             var funcName = funcMatch.Groups[1].Value.ToUpperInvariant();
-            if (funcName != "CONVERT_IMPLICIT" && IsFunctionOnColumnSide(predicate, funcMatch))
+            if (funcName != "CONVERT_IMPLICIT" && IsFunctionOnColumnSide(predicate, funcMatch, identity))
                 return $"Function call ({funcName}) on column";
         }
 
@@ -1269,38 +1887,51 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
-    /// Detects CTEs that are referenced more than once in the statement text.
-    /// Each reference re-executes the CTE since SQL Server does not materialize them.
+    /// True when a lookup branch under an OR expansion's Concatenation builds its seek value from
+    /// another input. A join OR does: in ON u.Id = p.OwnerUserId OR u.Id = p.LastEditorUserId the
+    /// branches produce [Posts].[OwnerUserId] and [Posts].[LastEditorUserId], once per outer row.
+    /// The dynamic seek for an IN list of parameters has the same operator shape, but its
+    /// branches produce only parameters and literals ([@p1], (62)), which no outer row changes.
     /// </summary>
-    private static void DetectMultiReferenceCte(PlanStatement stmt)
+    private static bool LookupReadsAnotherInput(PlanNode branch)
     {
-        var text = stmt.StatementText;
-        var cteMatches = CteDefinitionRegex.Matches(text);
-        if (cteMatches.Count == 0)
-            return;
+        var values = branch.PhysicalOp == "Constant Scan"
+            ? branch.ConstantScanValues
+            : branch.DefinedValues;
 
-        foreach (Match match in cteMatches)
+        // Nothing to read, so nothing proves a parameter list: keep the warning.
+        if (string.IsNullOrEmpty(values))
+            return true;
+
+        return ReadsAnotherInput(values);
+    }
+
+    /// <summary>
+    /// True when a ScalarString names anything other than a parameter or a variable: a column
+    /// ([db].[dbo].[T].[c], or @tv.[c] as [v].[c] on a table variable) or an expression column
+    /// ([Expr1003]). Function names ([dbo].[fn](...)) and string literals are skipped. An
+    /// expression column counts too: an OR join on o.X + 1 renders its branches as [Expr1002],
+    /// computed on the outer input. The Constant Scan under a lookup branch is normally empty,
+    /// so the branch has no expression of its own to name, and a name that cannot be proved to
+    /// be a parameter keeps the warning, as the shape check alone did. Internal so the shapes
+    /// can be tested as raw strings.
+    /// </summary>
+    internal static bool ReadsAnotherInput(string scalarString)
+    {
+        foreach (Match match in BracketedNameRegex.Matches(scalarString))
         {
-            var cteName = match.Groups[1].Value;
-            if (string.IsNullOrEmpty(cteName))
-                continue;
+            if (!match.Groups["name"].Success || match.Groups["call"].Success)
+                continue; // a string literal, or the name of a function
 
-            // Count references as FROM/JOIN targets after the CTE definition
-            var refPattern = new Regex(
-                $@"\b(FROM|JOIN)\s+{Regex.Escape(cteName)}\b",
-                RegexOptions.IgnoreCase);
-            var refCount = refPattern.Count(text);
+            var name = match.Groups["name"].Value;
+            if (name.StartsWith("[@", StringComparison.Ordinal) &&
+                !name.Contains("].[", StringComparison.Ordinal))
+                continue; // a parameter or a variable: [@p1]
 
-            if (refCount > 1)
-            {
-                stmt.PlanWarnings.Add(new PlanWarning
-                {
-                    WarningType = "CTE Multiple References",
-                    Message = $"CTE \"{cteName}\" is referenced {refCount} times. SQL Server re-executes the entire CTE each time — it does not materialize the results. Materialize into a #temp table instead.",
-                    Severity = PlanWarningSeverity.Warning
-                });
-            }
+            return true;
         }
+
+        return false;
     }
 
     /// <summary>
@@ -1336,6 +1967,23 @@ public static partial class PlanAnalyzer
             return false;
 
         return true;
+    }
+
+    /// <summary>
+    /// Returns true if the plan contains an adaptive join that executed as a Nested Loop.
+    /// Indicates a memory grant was sized for the hash alternative but never needed.
+    /// </summary>
+    private static bool HasAdaptiveJoinChoseNestedLoop(PlanNode node)
+    {
+        if (node.IsAdaptive && node.ActualJoinType != null
+            && node.ActualJoinType.Contains("Nested", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        foreach (var child in node.Children)
+            if (HasAdaptiveJoinChoseNestedLoop(child))
+                return true;
+
+        return false;
     }
 
     /// <summary>
@@ -1398,35 +2046,39 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// Threads that actually did work. In a parallel plan thread 0 is the
+    /// coordinator: it carries no rows, and its ActualElapsedMs is the wall clock
+    /// of the whole parallel branch. Including it in a per-thread self-time
+    /// calculation hands the operator the branch's entire duration.
+    /// A serial plan has a single thread numbered 0, which IS a worker, so only
+    /// exclude thread 0 when other threads exist.
+    /// </summary>
+    private static List<PerThreadRuntimeInfo> WorkThreads(PlanNode node)
+    {
+        var workers = node.PerThreadStats.Where(t => t.ThreadId > 0).ToList();
+        return workers.Count > 0 ? workers : node.PerThreadStats;
+    }
+
+    /// <summary>
     /// Per-thread self-time calculation for parallel row mode operators.
-    /// For each thread: self = parent_elapsed[t] - sum(children_elapsed[t]).
-    /// Returns max across threads.
+    /// For each worker thread: self = parent[t] - sum(effective children[t]).
+    /// Returns max across worker threads. Thread 0 (the coordinator) is excluded
+    /// from the parent side by WorkThreads, and the child side looks through
+    /// batch subtrees and pass-throughs the same way the serial path does.
     /// </summary>
     private static long GetPerThreadOwnElapsed(PlanNode node)
     {
-        // Build lookup: threadId -> parent elapsed for this node
+        // Build lookup: threadId -> parent elapsed for this node (worker threads only)
         var parentByThread = new Dictionary<int, long>();
-        foreach (var ts in node.PerThreadStats)
+        foreach (var ts in WorkThreads(node))
             parentByThread[ts.ThreadId] = ts.ActualElapsedMs;
 
-        // Build lookup: threadId -> sum of all direct children's elapsed
+        // Build lookup: threadId -> sum of effective children's elapsed
         var childSumByThread = new Dictionary<int, long>();
         foreach (var child in node.Children)
-        {
-            var childNode = child;
+            AddEffectiveChildElapsedByThread(child, childSumByThread);
 
-            // Exchange operators have unreliable times — look through to their child
-            if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
-                childNode = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
-
-            foreach (var ts in childNode.PerThreadStats)
-            {
-                childSumByThread.TryGetValue(ts.ThreadId, out var existing);
-                childSumByThread[ts.ThreadId] = existing + ts.ActualElapsedMs;
-            }
-        }
-
-        // Self-time per thread = parent - children, take max across threads
+        // Self-time per thread = parent - children, take max across worker threads
         var maxSelf = 0L;
         foreach (var (threadId, parentMs) in parentByThread)
         {
@@ -1439,24 +2091,262 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
-    /// Serial row mode self-time: subtract all direct children's elapsed.
-    /// Exchange children are skipped through to their real child.
+    /// Max per-thread self-CPU for this operator.
+    /// Parallel: for each thread, self_cpu = thread_cpu - Σ same-thread child cpu; take max.
+    /// Serial / single-thread: operator_cpu - Σ effective child cpu.
+    /// Needed for external-wait benefit scoring (Joe's formula).
+    /// </summary>
+    internal static long GetOperatorMaxThreadOwnCpuMs(PlanNode node)
+    {
+        if (!node.HasActualStats || node.ActualCPUMs <= 0) return 0;
+
+        if (node.PerThreadStats.Count > 1)
+        {
+            var parentByThread = new Dictionary<int, long>();
+            foreach (var ts in WorkThreads(node))
+                parentByThread[ts.ThreadId] = ts.ActualCPUMs;
+
+            var childSumByThread = new Dictionary<int, long>();
+            foreach (var child in node.Children)
+                AddEffectiveChildCpuByThread(child, childSumByThread);
+
+            var maxSelf = 0L;
+            foreach (var (threadId, parentCpu) in parentByThread)
+            {
+                childSumByThread.TryGetValue(threadId, out var childCpu);
+                var self = Math.Max(0, parentCpu - childCpu);
+                if (self > maxSelf) maxSelf = self;
+            }
+            return maxSelf;
+        }
+
+        // Serial: operator_cpu - Σ effective child cpu
+        var totalChildCpu = 0L;
+        foreach (var child in node.Children)
+            totalChildCpu += GetEffectiveChildCpuMs(child);
+        return Math.Max(0, node.ActualCPUMs - totalChildCpu);
+    }
+
+    /// <summary>
+    /// Per-thread mirror of <see cref="GetEffectiveChildCpuMs"/>, following the
+    /// same look-through rules as <see cref="AddEffectiveChildElapsedByThread"/>
+    /// (batch-mode subtree, pass-through nodes) so a row-mode operator can't be
+    /// crowned above a batch subtree for CPU the same way it can't for elapsed.
+    /// </summary>
+    private static void AddEffectiveChildCpuByThread(PlanNode child, Dictionary<int, long> acc)
+    {
+        // Exchange operators have unreliable times — look through to their child
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+        {
+            var dominant = child.Children.OrderByDescending(c => c.ActualCPUMs).First();
+            AddEffectiveChildCpuByThread(dominant, acc);
+            return;
+        }
+
+        var mode = child.ActualExecutionMode ?? child.ExecutionMode;
+        if (mode == "Batch" && child.HasActualStats)
+        {
+            AddBatchSubtreeCpuByThread(child, acc);
+            return;
+        }
+
+        if (child.HasActualStats && child.ActualCPUMs > 0)
+        {
+            foreach (var ts in WorkThreads(child))
+            {
+                acc.TryGetValue(ts.ThreadId, out var existing);
+                acc[ts.ThreadId] = existing + ts.ActualCPUMs;
+            }
+            return;
+        }
+
+        // No runtime stats (e.g. a Compute Scalar pass-through): look through
+        // to the descendants that have them.
+        foreach (var grandchild in child.Children)
+            AddEffectiveChildCpuByThread(grandchild, acc);
+    }
+
+    /// <summary>
+    /// Per-thread CPU sum across a contiguous batch-mode zone, stopping at
+    /// exchanges. The CPU twin of <see cref="AddBatchSubtreeElapsedByThread"/>.
+    /// </summary>
+    private static void AddBatchSubtreeCpuByThread(PlanNode node, Dictionary<int, long> acc)
+    {
+        foreach (var ts in WorkThreads(node))
+        {
+            acc.TryGetValue(ts.ThreadId, out var existing);
+            acc[ts.ThreadId] = existing + ts.ActualCPUMs;
+        }
+
+        foreach (var child in node.Children)
+        {
+            if (child.PhysicalOp == "Parallelism") continue; // zone boundary
+
+            var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
+            if (childMode == "Batch" && child.HasActualStats)
+                AddBatchSubtreeCpuByThread(child, acc);
+            else
+                AddEffectiveChildCpuByThread(child, acc);
+        }
+    }
+
+    private static long GetEffectiveChildCpuMs(PlanNode child)
+    {
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+            return child.Children.Max(GetEffectiveChildCpuMs);
+        if (child.ActualCPUMs > 0)
+            return child.ActualCPUMs;
+        if (child.Children.Count == 0)
+            return 0;
+        var sum = 0L;
+        foreach (var grandchild in child.Children)
+            sum += GetEffectiveChildCpuMs(grandchild);
+        return sum;
+    }
+
+    /// <summary>
+    /// What a child contributes to its parent's per-thread elapsed total. The
+    /// per-thread mirror of the serial path's child look-through, and it must
+    /// look through the same two shapes or the parent absorbs the subtree
+    /// beneath them:
+    ///
+    ///   - A batch-mode child reports STANDALONE time, so only its own value
+    ///     would come off and the rest of the batch zone would stay in the
+    ///     parent.
+    ///   - A pass-through child (Compute Scalar) carries no runtime stats at
+    ///     all, so zero would come off.
+    ///
+    /// Together these can crown a row-mode operator above a batch subtree as
+    /// the hottest operator in its plan, with the subtree's time double-counted.
+    /// </summary>
+    private static void AddEffectiveChildElapsedByThread(PlanNode child, Dictionary<int, long> acc)
+    {
+        // Exchange operators have unreliable times — look through to their child
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+        {
+            var dominant = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
+            AddEffectiveChildElapsedByThread(dominant, acc);
+            return;
+        }
+
+        var mode = child.ActualExecutionMode ?? child.ExecutionMode;
+        if (mode == "Batch" && child.HasActualStats)
+        {
+            AddBatchSubtreeElapsedByThread(child, acc);
+            return;
+        }
+
+        if (child.HasActualStats && child.ActualElapsedMs > 0)
+        {
+            foreach (var ts in WorkThreads(child))
+            {
+                acc.TryGetValue(ts.ThreadId, out var existing);
+                acc[ts.ThreadId] = existing + ts.ActualElapsedMs;
+            }
+            return;
+        }
+
+        // No runtime stats (e.g. a Compute Scalar pass-through): look through
+        // to the descendants that have them.
+        foreach (var grandchild in child.Children)
+            AddEffectiveChildElapsedByThread(grandchild, acc);
+    }
+
+    /// <summary>
+    /// Per-thread sum across a contiguous batch-mode zone, stopping at exchanges.
+    /// Batch operators pipeline, so their times add rather than nest.
+    /// </summary>
+    private static void AddBatchSubtreeElapsedByThread(PlanNode node, Dictionary<int, long> acc)
+    {
+        foreach (var ts in WorkThreads(node))
+        {
+            acc.TryGetValue(ts.ThreadId, out var existing);
+            acc[ts.ThreadId] = existing + ts.ActualElapsedMs;
+        }
+
+        foreach (var child in node.Children)
+        {
+            if (child.PhysicalOp == "Parallelism") continue; // zone boundary
+
+            var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
+            if (childMode == "Batch" && child.HasActualStats)
+                AddBatchSubtreeElapsedByThread(child, acc);
+            else
+                AddEffectiveChildElapsedByThread(child, acc);
+        }
+    }
+
+    /// <summary>
+    /// Serial row mode self-time: subtract all direct children's effective
+    /// elapsed. The child side looks through the same two shapes as the
+    /// per-thread path above — a pass-through child (Compute Scalar) with no
+    /// runtime stats, and a batch-mode child's whole contiguous subtree —
+    /// or the parent absorbs the subtree beneath them as its own self-time.
     /// </summary>
     private static long GetSerialOwnElapsed(PlanNode node)
     {
         var totalChildElapsed = 0L;
         foreach (var child in node.Children)
-        {
-            var childElapsed = child.ActualElapsedMs;
-
-            // Exchange operators have unreliable times — skip to their child
-            if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
-                childElapsed = child.Children.Max(c => c.ActualElapsedMs);
-
-            totalChildElapsed += childElapsed;
-        }
+            totalChildElapsed += GetEffectiveChildElapsedMs(child);
 
         return Math.Max(0, node.ActualElapsedMs - totalChildElapsed);
+    }
+
+    /// <summary>
+    /// What a child contributes to its parent's serial self-time. Exchange
+    /// operators have unreliable times, so this looks through to their
+    /// dominant child. A batch-mode child reports STANDALONE time, so this
+    /// sums the whole contiguous batch zone rather than just the direct
+    /// child. A child with no runtime stats at all (a Compute Scalar
+    /// pass-through) contributes zero directly, so this looks through to the
+    /// descendants that do have stats.
+    /// </summary>
+    private static long GetEffectiveChildElapsedMs(PlanNode child)
+    {
+        // Exchange operators: unreliable times, use max child
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+            return child.Children.Max(GetEffectiveChildElapsedMs);
+
+        var mode = child.ActualExecutionMode ?? child.ExecutionMode;
+        if (mode == "Batch" && child.HasActualStats)
+            return SumBatchSubtreeElapsedMs(child);
+
+        if (child.ActualElapsedMs > 0)
+            return child.ActualElapsedMs;
+
+        // No runtime stats (e.g. a Compute Scalar pass-through): look through
+        // to the descendants that have them.
+        if (child.Children.Count == 0)
+            return 0;
+
+        var sum = 0L;
+        foreach (var grandchild in child.Children)
+            sum += GetEffectiveChildElapsedMs(grandchild);
+        return sum;
+    }
+
+    /// <summary>
+    /// Sums ActualElapsedMs across a contiguous batch-mode zone, stopping at
+    /// exchange boundaries. Batch operators pipeline — elapsed times are
+    /// standalone, not cumulative — so summing gives the total work the zone
+    /// did, which is what a row-mode parent above the zone should subtract
+    /// to get its own self-time.
+    /// </summary>
+    private static long SumBatchSubtreeElapsedMs(PlanNode node)
+    {
+        var sum = node.ActualElapsedMs;
+        foreach (var child in node.Children)
+        {
+            if (child.PhysicalOp == "Parallelism") continue; // zone boundary
+
+            var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
+            if (childMode == "Batch" && child.HasActualStats)
+                sum += SumBatchSubtreeElapsedMs(child);
+            else
+                sum += GetEffectiveChildElapsedMs(child);
+        }
+
+        return sum;
     }
 
     /// <summary>
@@ -1654,98 +2544,6 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
-    /// Returns targeted advice based on statement-level wait stats, or null if no waits.
-    /// When the dominant wait type is clear, gives specific guidance instead of generic advice.
-    /// </summary>
-    private static string? GetWaitStatsAdvice(List<WaitStatInfo> waits)
-    {
-        if (waits.Count == 0)
-            return null;
-
-        var totalMs = waits.Sum(w => w.WaitTimeMs);
-        if (totalMs == 0)
-            return null;
-
-        var top = waits.OrderByDescending(w => w.WaitTimeMs).First();
-        var topPct = (double)top.WaitTimeMs / totalMs * 100;
-
-        // Single dominant wait — give targeted advice
-        if (topPct >= 80)
-            return DescribeWaitType(top.WaitType, topPct);
-
-        // Multiple waits — summarize the top contributors instead of guessing
-        var topWaits = waits.OrderByDescending(w => w.WaitTimeMs).Take(3)
-            .Select(w => $"{w.WaitType} ({(double)w.WaitTimeMs / totalMs * 100:N0}%)")
-            .ToList();
-        return $"Top waits: {string.Join(", ", topWaits)}.";
-    }
-
-    /// <summary>
-    /// Maps a wait type to a human-readable description with percentage context.
-    /// Covers all wait types observed in real execution plan files.
-    /// </summary>
-    private static string DescribeWaitType(string rawWaitType, double topPct)
-    {
-        var waitType = rawWaitType.ToUpperInvariant();
-        return waitType switch
-        {
-            // I/O: reading/writing data pages from disk
-            _ when waitType.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) =>
-                $"I/O bound — {topPct:N0}% of wait time is {rawWaitType}. Data is being read from disk rather than memory. Consider adding indexes to reduce I/O, or investigate memory pressure.",
-            _ when waitType.Contains("IO_COMPLETION", StringComparison.Ordinal) =>
-                $"I/O bound — {topPct:N0}% of wait time is {rawWaitType}. Non-buffer I/O such as sort/hash spills to TempDB or eager writes.",
-
-            // CPU: thread yielding its scheduler quantum
-            _ when waitType == "SOS_SCHEDULER_YIELD" =>
-                $"CPU bound — {topPct:N0}% of wait time is {rawWaitType}. The query is consuming significant CPU. Look for expensive operators (scans, sorts, hash builds) that could be eliminated or reduced.",
-
-            // Parallelism: exchange and synchronization waits
-            _ when waitType.StartsWith("CXPACKET", StringComparison.Ordinal) || waitType.StartsWith("CXCONSUMER", StringComparison.Ordinal) =>
-                $"Parallel thread skew — {topPct:N0}% of wait time is {rawWaitType}. Work is unevenly distributed across parallel threads.",
-            _ when waitType.StartsWith("CXSYNC", StringComparison.Ordinal) =>
-                $"Parallel synchronization — {topPct:N0}% of wait time is {rawWaitType}. Threads are waiting at exchange operators to synchronize parallel execution.",
-
-            // Hash operations
-            _ when waitType.StartsWith("HT", StringComparison.Ordinal) =>
-                $"Hash operation — {topPct:N0}% of wait time is {rawWaitType}. Time spent building, repartitioning, or cleaning up hash tables. Large hash builds may indicate missing indexes or bad row estimates.",
-
-            // Sort/bitmap batch operations
-            _ when waitType == "BPSORT" =>
-                $"Batch sort — {topPct:N0}% of wait time is {rawWaitType}. Time spent in batch-mode sort operations.",
-            _ when waitType == "BMPBUILD" =>
-                $"Bitmap build — {topPct:N0}% of wait time is {rawWaitType}. Time spent building bitmap filters for hash joins.",
-
-            // Memory allocation
-            _ when waitType.Contains("MEMORY_ALLOCATION_EXT", StringComparison.Ordinal) =>
-                $"Memory allocation — {topPct:N0}% of wait time is {rawWaitType}. Frequent memory allocations during query execution.",
-
-            // Latch contention (non-I/O)
-            _ when waitType.StartsWith("PAGELATCH", StringComparison.Ordinal) =>
-                $"Page latch contention — {topPct:N0}% of wait time is {rawWaitType}. In-memory page contention, often on TempDB or hot pages.",
-            _ when waitType.StartsWith("LATCH_", StringComparison.Ordinal) =>
-                $"Latch contention — {topPct:N0}% of wait time is {rawWaitType}.",
-
-            // Lock contention
-            _ when waitType.StartsWith("LCK_", StringComparison.Ordinal) =>
-                $"Lock contention — {topPct:N0}% of wait time is {rawWaitType}. Other sessions are holding locks that this query needs.",
-
-            // Log writes
-            _ when waitType == "LOGBUFFER" =>
-                $"Log write — {topPct:N0}% of wait time is {rawWaitType}. Waiting for transaction log buffer flushes, typically from data modifications.",
-
-            // Network
-            _ when waitType == "ASYNC_NETWORK_IO" =>
-                $"Network bound — {topPct:N0}% of wait time is {rawWaitType}. The client application is not consuming results fast enough.",
-
-            // Physical page cache
-            _ when waitType == "SOS_PHYS_PAGE_CACHE" =>
-                $"Physical page cache — {topPct:N0}% of wait time is {rawWaitType}. Contention on the physical memory page allocator.",
-
-            _ => $"Dominant wait is {rawWaitType} ({topPct:N0}% of wait time)."
-        };
-    }
-
-    /// <summary>
     /// Returns true if the statement has significant I/O waits (PAGEIOLATCH_*, IO_COMPLETION).
     /// Used for severity elevation decisions where I/O specifically indicates disk access.
     /// Thresholds: I/O waits >= 20% of total wait time AND >= 100ms absolute.
@@ -1789,6 +2587,91 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// Blanks the contents of string literals and whole comments (<c>--</c> to end of line,
+    /// and <c>/* */</c>, which nest in T-SQL) with spaces, so a hint or keyword found inside
+    /// one of them does not count as code. Every other character stays where it was, so a
+    /// match in the result is a match at the same position in the original text. Delimited
+    /// identifiers (<c>[...]</c> and <c>"..."</c>) are stepped over unchanged, so a quote or
+    /// a dash inside one does not start a string or a comment.
+    /// </summary>
+    public static string MaskCommentsAndLiterals(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return "";
+
+        var chars = text.ToCharArray();
+        var i = 0;
+        while (i < chars.Length)
+        {
+            var c = chars[i];
+            if (c == '\'' || c == '"' || c == '[')
+            {
+                var close = c == '[' ? ']' : c;
+                var end = i + 1;
+                while (end < chars.Length)
+                {
+                    if (chars[end] == close)
+                    {
+                        if (end + 1 < chars.Length && chars[end + 1] == close)
+                        {
+                            end += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    end++;
+                }
+                if (c == '\'')
+                {
+                    for (var k = i + 1; k < end && k < chars.Length; k++)
+                        chars[k] = ' ';
+                }
+                i = end + 1;
+                continue;
+            }
+
+            if (c == '-' && i + 1 < chars.Length && chars[i + 1] == '-')
+            {
+                while (i < chars.Length && chars[i] != '\n' && chars[i] != '\r')
+                    chars[i++] = ' ';
+                continue;
+            }
+
+            if (c == '/' && i + 1 < chars.Length && chars[i + 1] == '*')
+            {
+                var depth = 0;
+                while (i < chars.Length)
+                {
+                    if (chars[i] == '/' && i + 1 < chars.Length && chars[i + 1] == '*')
+                    {
+                        depth++;
+                        chars[i++] = ' ';
+                        chars[i++] = ' ';
+                        continue;
+                    }
+                    if (chars[i] == '*' && i + 1 < chars.Length && chars[i + 1] == '/')
+                    {
+                        depth--;
+                        chars[i++] = ' ';
+                        chars[i++] = ' ';
+                        if (depth == 0)
+                            break;
+                        continue;
+                    }
+                    if (chars[i] != '\n' && chars[i] != '\r')
+                        chars[i] = ' ';
+                    i++;
+                }
+                continue;
+            }
+
+            i++;
+        }
+
+        return new string(chars);
+    }
+
+    /// <summary>
     /// Identifies the specific cause of a row goal from the statement text.
     /// Returns a specific cause when detectable, or a generic list as fallback.
     /// </summary>
@@ -1797,7 +2680,7 @@ public static partial class PlanAnalyzer
         if (string.IsNullOrEmpty(stmtText))
             return "TOP, EXISTS, IN, or FAST hint";
 
-        var text = stmtText.ToUpperInvariant();
+        var text = MaskCommentsAndLiterals(stmtText).ToUpperInvariant();
         var causes = new List<string>(4);
 
         if (Regex.IsMatch(text, @"\bTOP\b"))
@@ -1877,49 +2760,335 @@ public static partial class PlanAnalyzer
     /// Checks whether a function call in a predicate is on the column side of the comparison.
     /// Predicate ScalarStrings look like: [db].[schema].[table].[col]>dateadd(day,(0),[@var])
     /// If the function is only on the parameter/literal side, it's still SARGable.
+    ///
+    /// <para><b>Only the function's own comparison is read.</b> A compound predicate is several
+    /// comparisons joined by AND/OR, and the function belongs to exactly one of them. Splitting
+    /// the whole predicate at its FIRST operator instead put every later comparison, column and
+    /// all, on the function's side: in <c>[t].[A]=[@1] AND [t].[B]=CONVERT(tinyint,[@2],0)</c> the
+    /// CONVERT looked like it shared a side with [t].[B], and so did the dateadd in the everyday
+    /// range <c>[t].[d]&gt;=dateadd(day,(-7),getdate()) AND [t].[d]&lt;getdate()</c>.</para>
+    ///
+    /// <para><paramref name="identity"/> is passed straight to <see cref="IsColumnReference"/> to
+    /// cover the unaliased table-variable case, e.g. <c>abs([X])=(1)</c>, and to tell that scan's
+    /// own bare column apart from another unaliased table variable's outer reference in the same
+    /// shape, e.g. <c>abs([A])</c> where A is an outer reference and only X is this scan's own
+    /// column in <c>[X]=abs([A])</c>.</para>
     /// </summary>
-    private static bool IsFunctionOnColumnSide(string predicate, Match funcMatch)
+    private static bool IsFunctionOnColumnSide(string predicate, Match funcMatch, ScanIdentity? identity = null)
     {
-        // Find the comparison operator that splits the predicate into left/right sides.
-        // Operators in ScalarString: >=, <=, <>, >, <, =
-        var compMatch = Regex.Match(predicate, @"(?<![<>])([<>=!]{1,2})(?![<>=])");
+        var comparison = ComparisonContaining(predicate, funcMatch.Index, out var offset);
+
+        var compMatch = ComparisonOperatorRegex.Match(comparison);
         if (!compMatch.Success)
             return true; // No comparison found — can't determine side, assume worst case
 
         var compPos = compMatch.Index;
-        var funcPos = funcMatch.Index;
+        var funcPos = funcMatch.Index - offset;
 
-        // Determine which side the function is on
-        var funcSide = funcPos < compPos ? "left" : "right";
+        // The side of this comparison the function is on, and whether a column shares it
+        string side = funcPos < compPos
+            ? comparison[..compPos]
+            : comparison[(compPos + compMatch.Length)..];
 
-        // Check if that side also contains a column reference [...].[...].[...]
-        string side = funcSide == "left"
-            ? predicate[..compPos]
-            : predicate[(compPos + compMatch.Length)..];
-
-        // Column references are multi-part bracket-qualified: [schema].[table].[column]
-        // Variables are [@var] or [@var] — single bracket pair with @ prefix.
-        // Match [identifier].[identifier] (at least two dotted parts) to distinguish columns.
-        return Regex.IsMatch(side, @"\[[^\]@]+\]\.\[");
+        // Same column-vs-variable distinction ConvertImplicitWrapsColumn needs, so it shares the
+        // one helper rather than keeping a second copy of the logic in sync by hand.
+        return IsColumnReference(side, identity);
     }
+
+    /// <summary>
+    /// The single comparison around <paramref name="position"/>: the text between the nearest
+    /// AND/OR before it and the nearest after it. <paramref name="offset"/> is where that text
+    /// starts in <paramref name="predicate"/>, so positions can be translated into it.
+    ///
+    /// <para>Operators are split on at every depth, not just the top level: a parenthesized group
+    /// like <c>[t].[A]=(1) AND ([t].[B]=f([@p]) OR [t].[C]=(3))</c> has to come apart into its three
+    /// comparisons, or the group would be read as one. The leftover grouping parentheses cannot
+    /// move a comparison operator or add a column, so they are harmless. No function in a
+    /// ScalarString takes AND/OR inside its arguments; CASE does, and it is caught earlier.</para>
+    /// </summary>
+    private static string ComparisonContaining(string predicate, int position, out int offset)
+    {
+        var start = 0;
+        var end = predicate.Length;
+
+        foreach (Match match in LogicalOperatorRegex.Matches(predicate))
+        {
+            if (!match.Groups[1].Success)
+                continue; // a string literal or bracketed name, skipped whole
+
+            if (match.Index + match.Length <= position)
+            {
+                start = match.Index + match.Length;
+            }
+            else
+            {
+                end = match.Index;
+                break;
+            }
+        }
+
+        offset = start;
+        return predicate[start..end];
+    }
+
+    /// <summary>
+    /// Checks whether any CONVERT_IMPLICIT in a predicate converts a COLUMN, which is the only
+    /// version of it that costs a seek.
+    ///
+    /// <para><b>Why this is not just "contains CONVERT_IMPLICIT".</b> Data type precedence decides
+    /// which side SQL Server converts, and it converts the LOWER-precedence side. Comparing a
+    /// numeric(18,0) column to an int parameter converts the parameter UP:
+    /// <c>[db].[dbo].[t].[col]=CONVERT_IMPLICIT(numeric(18,0),[@0],0)</c>. The column is untouched
+    /// and still seekable — SQL Server will seek straight through that predicate given an index, and
+    /// it raises no PlanAffectingConvert warning of its own. The damaging shape is the mirror image,
+    /// <c>CONVERT_IMPLICIT(nvarchar(40),[db].[dbo].[t].[col],0)=[@d]</c>, where the conversion wraps
+    /// the column and every row has to be converted before it can be compared.</para>
+    ///
+    /// <para>So the question is not whether a conversion is present but what is inside it, which is
+    /// why this reads the CONVERT_IMPLICIT argument list rather than splitting on the comparison
+    /// operator the way <see cref="IsFunctionOnColumnSide"/> does. The first argument is the target
+    /// type and carries no brackets; a column reference in the remainder is the conversion input.</para>
+    ///
+    /// <para>Internal so the column-vs-variable line can be tested against raw predicate strings in
+    /// showplan shape. <paramref name="identity"/> covers the unaliased table-variable case — a bare
+    /// name with no dotted qualifier, e.g. <c>CONVERT_IMPLICIT(nvarchar(20),[S],0)=[@n]</c> — which
+    /// this method cannot tell from a parameter or an expression on its own, and tells that scan's
+    /// own bare columns apart from a bare outer reference off a different one; see
+    /// <see cref="IsColumnReference"/>.</para>
+    /// </summary>
+    internal static bool ConvertImplicitWrapsColumn(string predicate, ScanIdentity? identity = null)
+    {
+        foreach (Match match in ConvertImplicitRegex.Matches(predicate))
+        {
+            // The regex ends at the opening paren, so its last character is where the args start.
+            var arguments = ExtractBalancedArguments(predicate, match.Index + match.Length - 1);
+
+            // Unparseable means we cannot tell what is being converted. Assume the worst, matching
+            // IsFunctionOnColumnSide, rather than silently dropping a real conversion.
+            if (arguments == null || IsColumnReference(arguments, identity))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="text"/> names a column belonging to <paramref name="identity"/> —
+    /// the scanned object, not a column on some other table, or an outer reference a Nested Loops
+    /// join passed it in one row at a time. A wrapped column stops an index seek only when it is
+    /// actually the scanned table's own column: an outer reference already varies one row at a time
+    /// no matter what wraps it, so it costs nothing extra, and a column on some other table was never
+    /// going to seek this one anyway.
+    ///
+    /// <para>Null <paramref name="identity"/> means the caller has not identified a scan, and keeps
+    /// this method's old, coarser behavior: <see cref="ColumnReferenceRegex"/> alone, so any dotted
+    /// name counts as a column and no bare name does. That regex is still every non-null identity's
+    /// first check too — a real table or an aliased table variable always renders its own column
+    /// dotted, at minimum <c>[table].[col]</c> — but there it is followed by an ownership check: an
+    /// outer reference and a column on another table are dotted too, and the fix is telling them
+    /// apart, not giving up on dotted names altogether.</para>
+    ///
+    /// <para>Un-owned dotted names are read with <see cref="BracketedNameRegex"/>, one at a time:</para>
+    /// <list type="bullet">
+    /// <item>A run of two or more bracket parts right after literal <c> as </c> is the aliased form —
+    /// <c>[..].[I].[X] as [i].[X]</c> or <c>@tv.[col] as [v].[col]</c> — and it owns the scan only when
+    /// the scan has an alias and it matches the LAST-BUT-ONE part, the alias right before the column
+    /// (case-insensitively). The part before <c> as </c> is not a reference of its own — in a self
+    /// join it names the OTHER instance of the same table, under its own alias — so it is skipped
+    /// outright rather than read as a second, competing reference.</item>
+    /// <item>A run of two or more bracket parts with no <c> as </c> before it is the unaliased dotted
+    /// form — <c>[db].[schema].[table].[col]</c>, or <c>[#t].[col]</c> for a temp table — and it owns
+    /// the scan only when the scan has NO alias and its table matches the LAST-BUT-ONE part
+    /// (case-insensitively, and cleaned of a temp table's full tempdb name). A scan with an alias
+    /// always renders its own column through that alias, so an unaliased dotted reference elsewhere
+    /// in the same predicate names a different object.</item>
+    /// <item>A single bracket part is the bare form — read as a column only on an unaliased table
+    /// variable, unless it is a parameter or variable (<c>[@p1]</c>), an optimizer expression
+    /// (<c>[Expr1003]</c>), the name of a function call (followed by <c>(</c>) rather than a
+    /// reference, or a name <see cref="ScanIdentity.BareOuterReferences"/> lists as another
+    /// unaliased table variable's outer reference rather than this one's own column. A string
+    /// literal that looks bracketed (<c>'[Y]'</c>) is never read as a name at all — see
+    /// <see cref="BracketedNameRegex"/>.</item>
+    /// </list>
+    /// </summary>
+    private static bool IsColumnReference(string text, ScanIdentity? identity)
+    {
+        if (identity == null)
+            return ColumnReferenceRegex.IsMatch(text);
+
+        var scan = identity.Value;
+
+        foreach (Match match in BracketedNameRegex.Matches(text))
+        {
+            if (!match.Groups["name"].Success || match.Groups["call"].Success)
+                continue; // a string literal, or the name of a function
+
+            var name = match.Groups["name"].Value;
+
+            // "<prefix> as [alias].[col]" — the prefix is not a reference of its own; the real
+            // reference is the [alias].[col] pair that follows, matched separately on its own turn
+            // through this loop.
+            if (FollowedByAsBracket(text, match.Index + match.Length))
+                continue;
+
+            var parts = NamePartRegex.Matches(name);
+            if (parts.Count >= 2)
+            {
+                var owner = StripBrackets(parts[^2].Value);
+
+                if (PrecededByAs(text, match.Index))
+                {
+                    // Aliased: [alias].[col]. Owned only through a matching alias.
+                    if (!string.IsNullOrEmpty(scan.Alias) &&
+                        string.Equals(owner, scan.Alias, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                else
+                {
+                    // Unaliased dotted: [..].[table].[col]. An aliased scan's own column never
+                    // renders this way, so this can only own the scan when the scan has none. The
+                    // parser cleans a temp table's full tempdb name (#t___...___000000000003) down
+                    // to #t in the scan's own name, so the owner here is cleaned the same way.
+                    if (string.IsNullOrEmpty(scan.Alias) && !string.IsNullOrEmpty(scan.Table) &&
+                        string.Equals(ShowPlanParser.CleanTempTableName(owner), scan.Table,
+                            StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+
+                continue;
+            }
+
+            // A single bracketed part.
+            if (name.StartsWith("[@", StringComparison.Ordinal))
+                continue; // a parameter or a variable: [@p1]
+
+            if (ExpressionColumnRegex.IsMatch(name))
+                continue; // an optimizer-generated expression, not an actual column: [Expr1003]
+
+            if (scan.IsTableVariable && string.IsNullOrEmpty(scan.Alias) &&
+                !scan.BareOuterReferences.Contains(StripBrackets(name)))
+                return true; // a bare name — this unaliased table variable's own column
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when <paramref name="text"/>[<paramref name="index"/>..] starts with the literal
+    /// <c> as [</c> — the start of the <c>[alias].[col]</c> half of the aliased column-reference
+    /// form, which follows the part that is not a reference of its own.
+    /// </summary>
+    private static bool FollowedByAsBracket(string text, int index) =>
+        index >= 0 && index + 5 <= text.Length &&
+        text.AsSpan(index, 5).Equals(" as [", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when <paramref name="text"/>[..<paramref name="index"/>] ends with the literal
+    /// <c> as </c> — <paramref name="index"/> is a match's own start, so this reads the four
+    /// characters right before it.
+    /// </summary>
+    private static bool PrecededByAs(string text, int index) =>
+        index >= 4 && text.AsSpan(index - 4, 4).Equals(" as ", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Strips the brackets off one bracket part matched by <see cref="NamePartRegex"/> — never a
+    /// whole dotted chain, so a plain Replace is enough; a "]]"-escaped literal bracket (which the
+    /// parser, elsewhere, does not unescape either) passes through unchanged.
+    /// </summary>
+    private static string StripBrackets(string bracketPart) =>
+        bracketPart.Replace("[", "").Replace("]", "");
+
+    /// <summary>
+    /// Returns the text between the parenthesis at <paramref name="openParenIndex"/> and its match,
+    /// or null if the parentheses do not balance. Needed because the target type of a conversion can
+    /// carry its own parentheses — numeric(18,0), varchar(50) — so the first ')' is not the end.
+    /// </summary>
+    private static string? ExtractBalancedArguments(string text, int openParenIndex)
+    {
+        var depth = 0;
+        for (var i = openParenIndex; i < text.Length; i++)
+        {
+            if (text[i] == '(')
+            {
+                depth++;
+            }
+            else if (text[i] == ')')
+            {
+                depth--;
+                if (depth == 0)
+                    return text[(openParenIndex + 1)..i];
+            }
+        }
+
+        return null;
+    }
+
+    // Rule 33 only looks at tables with at least this many rows, and DetectCeGuess relies on that:
+    // the equality guess is a power of the row count, so on a small table it lands on the fixed
+    // guesses below, and from this size up it stays clear of them (0.3% and 5.6% at this size,
+    // falling as the table grows).
+    private const double CeGuessMinTableRows = 100_000;
 
     /// <summary>
     /// Detects well-known CE default selectivity guesses by comparing EstimateRows to TableCardinality.
     /// Returns a description of the guess pattern, or null if no known pattern matches.
+    ///
+    /// Where each guess comes from was measured on SQL Server 2025: a 100,000-row heap with no
+    /// statistics, estimated plans through SET SHOWPLAN_XML, CE 70 through
+    /// FORCE_LEGACY_CARDINALITY_ESTIMATION and CE 120 to 170 through the compatibility level. The
+    /// versions from 120 to 170 agree except where a row says otherwise.
+    ///   equality, a = 5 or a IS NULL       CE 120+: rows^0.5        CE 70: rows^0.75
+    ///   inequality, a &gt; 5                 30%, every CE
+    ///   BETWEEN or a two-sided range       CE 70: 9%               CE 120+: 9% on a column with known values
+    ///   LIKE                               CE 120+: 9%              CE 70: not a fixed guess
+    ///   two inequalities, two columns      CE 120+: 16.43%          CE 70: 9%
+    ///   range on variables, or on an expression, ABS(a) BETWEEN 5 AND 10   CE 120+: 16.43%   CE 70: 9%
+    ///   one column compared with another   10%, every CE
+    ///   equality on an expression, ABS(a) = 5   CE 130+: 10%        CE 120: rows^0.5    CE 70: rows^0.75
+    ///   two 10% guesses, a = b AND c = d   CE 120+: 3.16%           CE 70: 1%
+    /// The 16.43% is 30% times the square root of 30%, how CE 120+ combines two 30% guesses.
     /// </summary>
-    private static string? DetectCeGuess(double estimateRows, double tableCardinality)
+    /// <param name="estimateRows">The scan's estimated row count.</param>
+    /// <param name="tableCardinality">The table's row count.</param>
+    /// <param name="ceModelVersion">
+    /// The statement's CardinalityEstimationModelVersion: 70 is the legacy estimator, 120 and later
+    /// the current one, and 0 means the plan did not say, so both stay possible.
+    /// </param>
+    private static string? DetectCeGuess(double estimateRows, double tableCardinality, int ceModelVersion = 0)
     {
         if (tableCardinality <= 0) return null;
         var selectivity = estimateRows / tableCardinality;
+        var pct = $"{selectivity * 100:N1}%";
+        var legacy = ceModelVersion == 70;
+        var current = ceModelVersion >= 120;
 
-        // Known CE guess selectivities with a 2% tolerance band
+        // Equality is not a fixed share of the table, so it is checked on its own, to 1%. The two
+        // estimators use different powers of the row count, so a plan that names its estimator only
+        // gets the one that estimator uses.
+        static bool Near(double rows, double guess) => Math.Abs(rows - guess) <= guess * 0.01;
+
+        if (!legacy && Near(estimateRows, Math.Sqrt(tableCardinality)))
+            return $"matches the equality guess (an equality or IS NULL with no statistics to use), the square root of the row count ({pct})";
+        if (!current && Near(estimateRows, Math.Pow(tableCardinality, 0.75)))
+            return $"matches the equality guess (an equality or IS NULL with no statistics to use), the row count to the power 0.75 ({pct})";
+
+        // The fixed guesses, with a 2% tolerance band
         return selectivity switch
         {
-            >= 0.29 and <= 0.31 => $"matches the 30% equality guess ({selectivity * 100:N1}%)",
-            >= 0.098 and <= 0.102 => $"matches the 10% inequality guess ({selectivity * 100:N1}%)",
-            >= 0.088 and <= 0.092 => $"matches the 9% LIKE/BETWEEN guess ({selectivity * 100:N1}%)",
-            >= 0.155 and <= 0.175 => $"matches the ~16.4% compound predicate guess ({selectivity * 100:N1}%)",
-            >= 0.009 and <= 0.011 => $"matches the 1% multi-inequality guess ({selectivity * 100:N1}%)",
+            >= 0.29 and <= 0.31 =>
+                $"matches the 30% guess for an inequality such as > or < ({pct})",
+            >= 0.088 and <= 0.092 =>
+                current ? $"matches the 9% guess for BETWEEN or a two-sided range on a column with known values, or for LIKE ({pct})"
+                : legacy ? $"matches the 9% guess for BETWEEN, a two-sided range, or two inequalities on different columns ({pct})"
+                : $"matches the 9% guess for BETWEEN or a two-sided range ({pct})",
+            >= 0.098 and <= 0.102 =>
+                ceModelVersion is 0 or >= 130
+                    ? $"matches the 10% guess for comparing one column with another, or for an equality on an expression such as a function of a column ({pct})"
+                    : $"matches the 10% guess for comparing one column with another ({pct})",
+            >= 0.155 and <= 0.175 when !legacy =>
+                $"matches the 16.4% guess for two inequalities on different columns, or for a BETWEEN or range on variables or on an expression ({pct})",
+            >= 0.009 and <= 0.011 when !current =>
+                $"matches the 1% guess that CE 70 gets from multiplying two 10% guesses, as when two predicates each compare one column with another ({pct})",
             _ => null
         };
     }
@@ -1930,10 +3099,32 @@ public static partial class PlanAnalyzer
     private static partial Regex LeadingWildcardLikeRegExp();
     [GeneratedRegex(@"\bCASE\s+(WHEN\b|$)", RegexOptions.IgnoreCase)]
     private static partial Regex CaseInPredicateRegExp();
-    [GeneratedRegex(@"(?:\bWITH\s+|\,\s*)(\w+)\s+AS\s*\(", RegexOptions.IgnoreCase)]
-    private static partial Regex CteDefinitionRegExp();
     [GeneratedRegex(@"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase)]
     private static partial Regex IsNullCoalesceRegExp();
+    [GeneratedRegex(@"\bCONVERT_IMPLICIT\s*\(", RegexOptions.IgnoreCase)]
+    private static partial Regex ConvertImplicitRegExp();
+    // A column reference in a ScalarString is multi-part bracket-qualified ([schema].[table]).
+    // A variable is a single bracket pair with an @ prefix ([@0]), so excluding @ from the first
+    // part is what separates the two.
+    [GeneratedRegex(@"\[[^\]@]+\]\.\[")]
+    private static partial Regex ColumnReferenceRegExp();
+    [GeneratedRegex(@"^\[Expr\d+\]$")]
+    private static partial Regex ExpressionColumnRegExp();
+    [GeneratedRegex(@"\[(?:[^\]]|\]\])*\]")]
+    private static partial Regex NamePartRegExp();
+    [GeneratedRegex(@"'(?:[^']|'')*'|(?<name>\[(?:[^\]]|\]\])*\](?:\.\[(?:[^\]]|\]\])*\])*)(?<call>\s*\()?")]
+    private static partial Regex BracketedNameRegExp();
+    // The operator a comparison turns on in a ScalarString: >=, <=, <>, !=, >, <, = or like.
+    // Without like, [col] like upper([@p]) had no operator at all, fell to the assume-the-worst
+    // default, and a function on the pattern was reported as a function on the column.
+    [GeneratedRegex(@"(?<![<>])([<>=!]{1,2})(?![<>=])|\s(like)\s", RegexOptions.IgnoreCase)]
+    private static partial Regex ComparisonOperatorRegExp();
+    // What joins one comparison to the next in a compound predicate. String literals and
+    // bracketed identifiers are matched first, so an AND inside one of them (N'Tom AND Jerry',
+    // [Terms and Conditions]) is consumed whole and never reaches the capture group. Only a
+    // Groups[1] match is a real operator.
+    [GeneratedRegex(@"'(?:[^']|'')*'|\[(?:[^\]]|\]\])*\]|\s(AND|OR)\s", RegexOptions.IgnoreCase)]
+    private static partial Regex LogicalOperatorRegExp();
     [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase)]
     private static partial Regex OptimizeForUnknownRegExp();
     [GeneratedRegex(@"\bNOT\s+IN\b", RegexOptions.IgnoreCase)]

@@ -60,7 +60,29 @@ public static class ComposeLimits
     /// <see cref="!:StorageVersion.SchemaVersion"/> would break the viewer's connect-time version gate. A Postgres
     /// interval literal.
     /// </summary>
-    public const string StatementTimeout = "15s";
+    public const string StatementTimeout = "60s";
+
+    /// <summary>
+    /// The per-session <c>temp_file_limit</c> applied to the <c>viewer</c>/<c>mcp</c> roles (#4605) — the
+    /// backstop on-disk-spill half of the DoS controls, next to <see cref="StatementTimeout"/>'s wall-clock
+    /// half. A composed read that would spill past this many bytes of on-disk temp files (a bad join, a sort
+    /// that outgrew work_mem) is cancelled by the store itself with SQLSTATE 53400 rather than running to the
+    /// statement_timeout while writing gigabytes to the store's own volume and starving the collector's
+    /// writes. Rendered by the SAME single renderer as <see cref="StatementTimeout"/>
+    /// (<see cref="DarlingManagedRoles.BuildComposeStatementTimeoutSql"/> + <c>tools/provision-roles.sql</c>),
+    /// for the same reason: one renderer for both role settings so provisioning and the control-plane reload
+    /// can never disagree about either ceiling. A Postgres size literal; superuser-only
+    /// (<c>PGC_SUSET</c>), like <c>log_min_duration_statement</c> and <c>log_parameter_max_length</c> already
+    /// are on these same two roles.
+    ///
+    /// <para><b>1 GB, final.</b> The largest legitimate <c>viewer</c>/<c>mcp</c> spill per call observed in
+    /// the field (<c>pg_stat_statements</c>, summed across the leader and its parallel workers, so this
+    /// per-process ceiling is at or below the call's real total) was 322 MB, from the rollup coverage probe
+    /// — 1 GB leaves that better than 3x headroom. The runaway panel #4605 exists for spilled 1,830 MB per
+    /// call. No <c>max_parallel_workers_per_gather</c> cap accompanies this: that lever was considered and
+    /// ruled out.</para>
+    /// </summary>
+    public const string TempFileLimit = "1GB";
 
     /// <summary>The fixed percentile for <c>percentile_cont</c> (p95) — a hardcoded default per the
     /// defaults-over-speculative-config rule; a per-panel percentile knob is a clean later add.</summary>

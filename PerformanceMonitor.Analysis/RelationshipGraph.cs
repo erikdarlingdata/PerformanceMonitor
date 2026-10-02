@@ -23,10 +23,27 @@ public class RelationshipGraph
     }
 
     /// <summary>
+    /// The seam a sibling graph derives through (#3542): <c>false</c> starts EMPTY, so the derived class's
+    /// constructor builds its own edge sets with <see cref="AddEdge"/> and none of the SQL Server chains
+    /// above are reachable from its facts. The parameterless constructor is untouched and builds exactly
+    /// what it always did — seven Lite tests construct it directly and its behaviour is the SQL Server
+    /// graph's contract. <c>true</c> is the same graph by another route, kept so a derived class that WANTS
+    /// the SQL Server chains underneath its own can say so explicitly rather than by omission.
+    /// </summary>
+    protected RelationshipGraph(bool buildSqlServerEdges)
+    {
+        if (buildSqlServerEdges)
+            BuildGraph();
+    }
+
+    /// <summary>
     /// Returns all edges originating from the given fact key,
     /// filtered to only those whose predicates are true.
+    /// Virtual (#3542, between waves) for the one derived graph whose edges can name an ALIAS destination
+    /// (<see cref="PgTargetFactKeys.BadActorFamily"/>) that must be resolved against the fact set at
+    /// story-build time; the SQL Server graph never overrides it and this body is byte-for-byte what it was.
     /// </summary>
-    public List<Edge> GetActiveEdges(string sourceKey, IReadOnlyDictionary<string, Fact> factsByKey)
+    public virtual List<Edge> GetActiveEdges(string sourceKey, IReadOnlyDictionary<string, Fact> factsByKey)
     {
         if (!_edges.TryGetValue(sourceKey, out var edges))
             return [];
@@ -43,7 +60,10 @@ public class RelationshipGraph
         return _edges.TryGetValue(sourceKey, out var edges) ? edges : [];
     }
 
-    private void AddEdge(string source, string destination, string category,
+    /// <summary>Registers one conditional edge. Protected rather than private (#3542) so
+    /// <see cref="PgTargetRelationshipGraph"/> declares its chains through the same machinery — the
+    /// edge shape, the predicate contract and <see cref="GetActiveEdges"/> are the shared part.</summary>
+    protected void AddEdge(string source, string destination, string category,
         string predicateDescription, System.Func<IReadOnlyDictionary<string, Fact>, bool> predicate)
     {
         if (!_edges.ContainsKey(source))
@@ -72,6 +92,7 @@ public class RelationshipGraph
         BuildLatchEdges();
         BuildTempDbEdges();
         BuildQueryEdges();
+        BuildMaintenanceEdges();
     }
 
     /* ── CPU Pressure ── */
@@ -331,6 +352,27 @@ public class RelationshipGraph
         AddEdge("WRITELOG", "IO_WRITE_LATENCY_MS", "log_io",
             "Write latency elevated — disk confirms log I/O bottleneck",
             facts => HasFact(facts, "IO_WRITE_LATENCY_MS") && facts["IO_WRITE_LATENCY_MS"].BaseSeverity > 0);
+
+        // #3538 A5: the two halves of commit latency on a synchronous availability group. A commit on the
+        // primary pays the local log flush (WRITELOG) AND the wait for the synchronous secondary to harden
+        // (HADR_SYNC_COMMIT), so each is the other's natural next question. Both edges gate on the
+        // destination having FIRED in its own right (BaseSeverity >= 0.5, the root entry point), not on
+        // mere presence: WRITELOG is in every window of an OLTP fleet, and an edge on presence would
+        // append it to every HADR story and consume it from its own.
+        //
+        // HADR_SYNC_COMMIT → WRITELOG: the replica wait is the root and the primary's own log flush is
+        // also slow — the commit path is slow end to end, and the local half is the one the operator can
+        // measure without leaving the primary.
+        AddEdge("HADR_SYNC_COMMIT", "WRITELOG", "log_io",
+            "Log-flush waits also elevated — the primary's own log write is part of the commit cost",
+            facts => HasFact(facts, "WRITELOG") && facts["WRITELOG"].BaseSeverity >= 0.5);
+
+        // WRITELOG → HADR_SYNC_COMMIT: a log-flush finding on a primary whose synchronous secondary is also
+        // making commits wait — the story should say so before its advice sends the operator to local
+        // storage, because the larger half of the commit may be the replica round trip.
+        AddEdge("WRITELOG", "HADR_SYNC_COMMIT", "log_io",
+            "Synchronous-commit waits also elevated — the replica round trip is part of the commit cost",
+            facts => HasFact(facts, "HADR_SYNC_COMMIT") && facts["HADR_SYNC_COMMIT"].BaseSeverity >= 0.5);
     }
 
     /* ── Latch Contention ── */
@@ -410,6 +452,54 @@ public class RelationshipGraph
         AddEdge("PLAN_REGRESSION", "CPU_SPIKE", "query_performance",
             "CPU spike — the regressed plan is burning CPU",
             facts => HasFact(facts, "CPU_SPIKE") && facts["CPU_SPIKE"].BaseSeverity > 0);
+    }
+
+    /* ── Maintenance ── */
+
+    /// <summary>
+    /// #3538 A9: the edges that let a maintenance window be ONE incident. Before these, nothing in the
+    /// graph touched SCH_M or RUNNING_JOBS, so a nightly index rebuild surfaced as two or three unlinked
+    /// single-node cards every night — the schema-lock waits, the long-running job, and the write-latency /
+    /// log-flush pair — each re-litigating the same event with nobody saying they were the same event.
+    /// <see cref="InferenceEngine.ClusterIntoIncidents"/> unions stories across an ACTIVE edge, so one
+    /// fired edge from each symptom onto the job is what folds them into one incident that names it.
+    ///
+    /// <para>The predicate on every edge is the same: RUNNING_JOBS FIRED — its base severity is above
+    /// zero, which <c>FactScorer.ScoreJobFact</c> grants only when at least one Agent job is running past
+    /// its own historical duration (the fact's value is the running-long count; the concerning bar is 1).
+    /// Mere presence of the fact would not do: the collector emits RUNNING_JOBS whenever ANY job is
+    /// running, and an edge on presence would pin every SCH_M or write-latency finding to whatever
+    /// routine job happened to be executing. The edges run symptom → job (the direction the operator
+    /// reasons in: "what is holding schema locks / hammering the log? — that job"), and only that way:
+    /// a job → symptom edge would let a RUNNING_JOBS root consume SCH_M into its own story and change
+    /// which key the persisted finding is rooted on, and the clustering needs one direction only.</para>
+    ///
+    /// <para>What this does NOT do: it does not model the maintenance SCHEDULE (a window that MOVES is
+    /// still undetectable) and does not score recurrence (the same incident every night reads as new every
+    /// night) — the structural half of A9, deferred. Naming the job is not these edges' doing either, but
+    /// it is done: since #3653 (PR #3693) the collectors put the worst long-running job's name on the
+    /// RUNNING_JOBS fact's <see cref="Fact.ObjectName"/> and the job card states it. These edges reach only
+    /// the REGULAR symptom facts; the sub-threshold ANOMALY_* stories of the same window — the case where
+    /// the regular symptom did not fire — are folded onto the job's incident by
+    /// <see cref="AnomalyIncidentReconciler"/>'s maintenance arm (#3704), which uses the same three source
+    /// keys and the same fired-gate rather than a fourth edge.</para>
+    /// </summary>
+    private void BuildMaintenanceEdges()
+    {
+        // SCH_M → RUNNING_JOBS (schema-modification waits while a job runs long — index maintenance)
+        AddEdge("SCH_M", "RUNNING_JOBS", "maintenance",
+            "Agent job running past its normal duration — the schema locks are probably its index maintenance",
+            facts => HasFact(facts, "RUNNING_JOBS") && facts["RUNNING_JOBS"].BaseSeverity > 0);
+
+        // IO_WRITE_LATENCY_MS → RUNNING_JOBS (write latency while a job runs long — rebuild/CHECKDB write volume)
+        AddEdge("IO_WRITE_LATENCY_MS", "RUNNING_JOBS", "maintenance",
+            "Agent job running past its normal duration — its write volume is a candidate for the latency",
+            facts => HasFact(facts, "RUNNING_JOBS") && facts["RUNNING_JOBS"].BaseSeverity > 0);
+
+        // WRITELOG → RUNNING_JOBS (log-flush waits while a job runs long — a rebuild is fully logged)
+        AddEdge("WRITELOG", "RUNNING_JOBS", "maintenance",
+            "Agent job running past its normal duration — a fully logged rebuild or reload drives log flushes",
+            facts => HasFact(facts, "RUNNING_JOBS") && facts["RUNNING_JOBS"].BaseSeverity > 0);
     }
 
     private static bool HasFact(IReadOnlyDictionary<string, Fact> facts, string key)

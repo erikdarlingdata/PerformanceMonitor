@@ -30,8 +30,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <para><b>What is NOT a regime here.</b> Export was the obvious fourth candidate and it does not
 /// exist: <c>PerformanceMonitor.Ui.DataGridExport</c> is synchronous, store-unaware, and iterates
 /// <c>grid.Items</c>, so every CSV/copy path formats rows a visible-tab load already paid for. The
-/// long-running operations a user knowingly waits minutes for (snapshot_now, analyze_now, purge_now,
-/// Get Actual Plan) are COMMANDS on the command plane below, not reads.</para>
+/// long-running operations a user knowingly waits minutes for (snapshot_now, analyze_now,
+/// Get Actual Plan; purge_now was one until #4825, and now starts in the background and answers at once) are COMMANDS on the command plane below, not reads.</para>
 ///
 /// <para><b>Why none of these is <c>StorageCommandDeadlines.McpReadSeconds</c>.</b> That constant is
 /// 30 s for the MCP read surface and its derivation does not transfer. The MCP's worst verified read
@@ -100,6 +100,16 @@ public static class ViewerCommandDeadlines
     /// it on every attempt, auto-refresh included. A read that is part of a fan-out therefore takes
     /// <see cref="FanOutReadSeconds"/>, derived from that concurrent measurement, and the two are the
     /// same number for any width the pool can serve without contention worth pricing.</para>
+    ///
+    /// <para><b>UNDER the managed store's shipped server-side ceiling, deliberately, since #4442.</b> A
+    /// locked-down Viewer seat (<c>postgres.connectAs = "viewer"</c>) runs these same reads under the
+    /// <c>viewer</c> role's <c>statement_timeout</c>, now shipped at 60 s. #4442's own rule — a paired
+    /// client deadline sits strictly above the server ceiling, so the store's <c>57014</c> is what a user
+    /// sees rather than a client-side stream fault — does not extend to this constant: the permit
+    /// argument above (a single control can hold every one of a ten-connection managed pool's permits) is
+    /// the tighter and prior bound, measured in #3004, and it does not move because the ceiling did. A
+    /// user on this surface still sees a client-side timeout at 15 s, not the server's <c>57014</c>; #4442
+    /// files a follow-up to revisit the viewer's own band with fresh latency data before raising it.</para>
     ///
     /// <para>The asymmetry, worked out for this surface rather than assumed: too short and one panel
     /// shows an error the user can retry — and the auto-refresh timer retries it within 30 s anyway,

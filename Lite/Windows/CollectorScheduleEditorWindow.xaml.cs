@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -53,6 +54,7 @@ public partial class CollectorScheduleEditorWindow : Window
 
         SetupCopyFromServerCombo();
         LoadServerSchedule();
+        SetDeltaBoundHint();
     }
 
     /// <summary>
@@ -78,6 +80,7 @@ public partial class CollectorScheduleEditorWindow : Window
         _editingSchedules = CloneScheduleList(_scheduleManager.GetDefaultSchedule());
         ScheduleGrid.ItemsSource = _editingSchedules;
         DetectActivePreset();
+        SetDeltaBoundHint();
     }
 
     private void SetupCopyFromServerCombo()
@@ -221,6 +224,16 @@ public partial class CollectorScheduleEditorWindow : Window
 
     private void SaveButton_Click(object sender, RoutedEventArgs e)
     {
+        /* Flush any in-progress cell edit into the bound items before we read them. */
+        ScheduleGrid.CommitEdit(DataGridEditingUnit.Row, true);
+
+        bool revertingToDefault = !_isEditingDefault && UseDefaultCheckBox.IsChecked == true;
+        if (!revertingToDefault && !ValidateSchedule(out var error))
+        {
+            MessageBox.Show(error, "Collector Schedules", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         if (_isEditingDefault)
         {
             /* Save to default schedule */
@@ -255,6 +268,44 @@ public partial class CollectorScheduleEditorWindow : Window
     // ──────────────────────────────────────────────────────────────────
     //  Helpers
     // ──────────────────────────────────────────────────────────────────
+
+    /// <summary>Refuses a schedule the pipeline can't honor before it is saved (mirrors the Darling
+    /// viewer's editor): negative frequency, retention under a day, or a delta-family cadence past the
+    /// gap-policy cap (#3532) — the message names the policy so the refusal isn't mysterious.</summary>
+    private bool ValidateSchedule(out string error)
+    {
+        foreach (var item in _editingSchedules)
+        {
+            if (ScheduleManager.FrequencyError(item.Name, item.FrequencyMinutes) is string frequencyError)
+            {
+                error = frequencyError;
+                return false;
+            }
+
+            if (item.RetentionDays < 1)
+            {
+                error = $"'{item.Name}': retention (days) must be at least 1.";
+                return false;
+            }
+        }
+
+        error = "";
+        return true;
+    }
+
+    /// <summary>The always-visible cadence-cap note under the grid, built from the shared constants so
+    /// the shown numbers and collector list can never drift from what the validation enforces.</summary>
+    private void SetDeltaBoundHint()
+    {
+        var deltaNames = ScheduleManager.GetDefaultSchedules()
+            .Where(s => CollectorDeltaCalculator.IsDeltaFamily(s.Name))
+            .Select(s => s.Name);
+
+        DeltaBoundText.Text =
+            $"Delta collectors ({string.Join(", ", deltaNames)}) accept at most {CollectorDeltaCalculator.MaxDeltaFrequencyMinutes} minutes: " +
+            $"they store the change in cumulative counters between runs, and past the {CollectorDeltaCalculator.DefaultMaxGapSeconds / 60}-minute " +
+            "delta gap policy every reading would be discarded as stale and recorded as zero.";
+    }
 
     private static List<CollectorSchedule> CloneScheduleList(IReadOnlyList<CollectorSchedule> source)
     {

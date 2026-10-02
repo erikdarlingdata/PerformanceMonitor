@@ -288,7 +288,7 @@ public class CollectorMeasurementSeamTests
     [Fact]
     public void AnOrdinaryRunLeavesTheColumnNull_ExactlyAsBefore()
     {
-        /* 69 collectors measure nothing. None of them may start writing a note. */
+        /* 70 collectors measure nothing. None of them may start writing a note. */
         Assert.Null(CollectorMeasurementNote.Render(CollectorContext.NoMeasurements));
         Assert.Null(CollectorMeasurementNote.Compose(null, CollectorContext.NoMeasurements));
         Assert.Null(new CollectorRunResult(12, 34, 56, CollectorContext.NoMeasurements).Note);
@@ -435,7 +435,7 @@ public class CollectorMeasurementSeamTests
            a skip would silently exempt exactly the case a scanner cannot reason about.
 
            WHAT THIS SCAN CANNOT SEE, stated rather than assumed. It reads PerformanceMonitor.Collectors
-           only - which is where every definition lives (69 concrete ones, flat, one-to-one with
+           only - which is where every definition lives (70 concrete ones, flat, one-to-one with
            CollectorCatalog.All), but Measure is public, so a HOST could call it and this would not know.
            Widening the sweep would be worse rather than better: `.Measure(` is a name this codebase uses
            heavily for unrelated things - WPF's UIElement.Measure(Size), and the Compose subsystem's
@@ -533,6 +533,57 @@ public class CollectorMeasurementSeamTests
                 BlockedProcessReportCollector.EmptyReportMeasurement,
                 BlockedProcessReportCollector.UnparsedReportMeasurement,
                 BlockedProcessReportCollector.EventsStoredMeasurement,
+                /* #3653 A5: the identity-epoch markers. Measured by ServerEpoch on behalf of the carrier
+                   collectors (wait_stats and cpu_utilization for the SQL Server instance pair, pg_statement_stats
+                   for stats_reset, pg_wait_stats for pg_postmaster_start_time), which is why the consts live in
+                   ServerEpoch.cs beside the three .Measure( calls - the resolver reads consts from the calling
+                   file. A count of 1 on the run that saw the epoch; the rendered `identity_epoch_changes=1`
+                   on that run's collection_log row is the discontinuity marker in the store. */
+                ServerEpoch.IdentityChangesMeasurement,
+                ServerEpoch.StatementsChangesMeasurement,
+                /* #4677: the statements eviction count for the pass. Measured by ServerEpoch.ObserveStatementsDealloc on behalf
+                   of pg_statement_stats, declared beside the other markers and placed by its position in ServerEpoch.cs. */
+                ServerEpoch.StatementsDeallocMeasurement,
+                ServerEpoch.PostmasterChangesMeasurement,
+                /* #3885: the job-history identity regression - a numeric epoch on one table, measured by
+                   job_history's own ReadAsync (which is why its const lives in JobHistoryCollector.cs).
+                   Not a ServerEpoch marker: a reseeded sysjobhistory IDENTITY says nothing about any
+                   cumulative counter on the instance, so it forgets no baselines and carries its own count. */
+                JobHistoryCollector.IdentityRegressionsMeasurement,
+                JobHistoryCollector.IdentityWatermarkMeasurement,
+                JobHistoryCollector.IdentityTargetRowMeasurement,
+                /* #4046: log lines a pg_read_file reader skipped because the target's UTC log_timezone did not
+                   write them. Measured through PgServerLogTail on behalf of pg_log_events and pg_deadlocks, which
+                   is why the const lives in PgServerLogTail.cs beside its one .Measure( call. */
+                PgServerLogTail.ForeignZoneLinesMeasurement,
+                /* #4699: the resume marker's disclosures, measured through PgServerLogTail.TryConsumeResumeRow on
+                   behalf of the stderr log consumers, which is why the consts live in PgServerLogTail.cs beside
+                   the .Measure( calls. */
+                PgServerLogTail.FilesSkippedByRotationMeasurement,
+                PgServerLogTail.BytesSkippedMeasurement,
+                PgServerLogTail.ResumeFileMissingMeasurement,
+                PgServerLogTail.ResumeFileRecycledMeasurement,
+                PgServerLogTail.MatchesLimitedMeasurement,
+                /* #4058 item 3: plan captures whose query id or duration failed the guarded casts. A real auto_explain
+                   line never does, so each one is a forgery, skipped rather than stored under query id 0. Measured by
+                   plan capture's own ReadAsync, which is why the const lives in PgPlanCaptureCollector.cs. */
+                PgPlanCaptureCollector.ForgedCaptureMeasurement,
+                /* #4053 part a1b: csvlog records the parser discarded during resync or for a bad shape. Measured by
+                   pg_log_events' own ReadAsync on the csvlog route, which is why the const lives in
+                   PgLogEventsCollector.cs. */
+                PgLogEventsCollector.CsvRecordsDiscardedMeasurement,
+                /* #4053 part a2: jsonlog records the parser discarded (a cut head, or a bad shape). Measured by
+                   pg_log_events' own ReadAsync on the jsonlog route, which is why the const lives in
+                   PgLogEventsCollector.cs. */
+                PgLogEventsCollector.JsonRecordsDiscardedMeasurement,
+                /* #4058: deadlock-shaped records that IsRaiseShaped caught before FromEntry ever ran. Measured
+                   by pg_deadlocks' own ReadAsync, which is why the const lives in PgDeadlocksCollector.cs. */
+                PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement,
+                /* #4200: whether the blocked_process_report / deadlocks XE shred gate skipped the cast+shred
+                   this cycle. Both collectors declare their own const (same "shred_gated" string, each read
+                   from its own trailing result set), so only one need be listed here for the distinct-label
+                   set this assertion actually checks. */
+                BlockedProcessReportCollector.ShredGatedMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

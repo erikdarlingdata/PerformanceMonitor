@@ -28,7 +28,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// (<c>CancelAfter</c>, #2871) and not a connection permit (<c>MaxPoolSize</c>, #2901) but a SERVER-SIDE
 /// <c>statement_timeout</c> on the login role — <c>ALTER ROLE mcp/viewer SET statement_timeout</c>, written
 /// by startup provisioning from <c>config.config_service.compose_statement_timeout_seconds</c>, shipped
-/// default 15 s, clamped 5–600 by
+/// default 60 s (#4442; a store still at the previous shipped 15 s moves on its migration rung), clamped
+/// 5–600 by
 /// <see cref="StoreConfigProvider.ClampComposeStatementTimeoutSeconds"/>. It is a ROLE setting, so it
 /// bounds every statement those identities run, not merely the composed queries it is named for —
 /// <see cref="DarlingTrendReader.QueryStoreDurationTrendSql"/> and
@@ -37,15 +38,15 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Why a client-side deadline does not simply defer to that GUC.</b> Three reasons, and they land
 /// differently per deployment shape rather than being one argument repeated:</para>
 ///
-/// <para>1. <b>Bring-your-own PostgreSQL has no such GUC at all.</b> The roles are created out-of-band by
-/// <c>Darling/tools/provision-roles.sql</c>, which provisions <c>admin</c> and <c>viewer</c> and
-/// deliberately NO <c>mcp</c> role, and sets <c>statement_timeout</c> on <c>viewer</c> only. The MCP host in
-/// that mode connects with the operator's own <c>postgres.connectionString</c>
-/// (<see cref="DarlingMcpHostService"/>), which is typically the owner or <c>admin</c> identity and carries
-/// no <c>statement_timeout</c>. So on a BYO store this read surface has NO server-side bound, and Npgsql's
-/// undocumented default is currently the only thing bounding it. Remove that inheritance without replacing
-/// it and the reads become unbounded. A BYO operator also has no knob here — the store column reaches the
-/// roles only through managed provisioning — which is why these values are deliberately not aggressive.</para>
+/// <para>1. <b>Bring-your-own PostgreSQL may have no such GUC at all.</b> The roles are created out-of-band by
+/// <c>Darling/tools/provision-roles.sql</c>, which sets a fixed <c>statement_timeout</c> on <c>viewer</c> and
+/// <c>mcp</c>, and the MCP host in that mode connects as them only when <c>postgres.mcpConnectionString</c> says
+/// so (#3914). Unset, it connects with <c>postgres.connectionString</c> — the owner, which carries no
+/// <c>statement_timeout</c> (<see cref="DarlingMcpHostService"/>). So on such a store this read surface has NO
+/// server-side bound, and a client-side deadline is the only thing bounding it. Remove that inheritance without
+/// replacing it and the reads become unbounded. A BYO operator also has no knob here — the store column reaches
+/// the roles only through the service's own provisioning (managed, or the compose store) — which is why these
+/// values are deliberately not aggressive.</para>
 ///
 /// <para>2. <b>On a managed store the GUC is operator-tunable to 600 s, and it is per-ROLE.</b> An operator
 /// who raises <c>compose_statement_timeout_seconds</c> so one heavy custom view can finish raises it for
@@ -109,32 +110,34 @@ internal static class McpCommandDeadlines
     /// <c>InteractiveReadSeconds</c>, both of which cover their surface's writes for the same reason.</para>
     ///
     /// <para>ABOVE the managed store's shipped server-side ceiling, deliberately. The <c>mcp</c> role's
-    /// default <c>statement_timeout</c> is 15 s and it fires on this surface in production TODAY: on
-    /// 2026-09-04 <c>get_query_store_duration_trend</c> over a 7-day window returned
+    /// default <c>statement_timeout</c> was 15 s and fired on this surface in production: on 2026-09-04
+    /// <c>get_query_store_duration_trend</c> over a 7-day window returned
     /// <c>57014: canceling statement due to statement timeout</c> against the live us-east-1 store — with
     /// #2736's corrected-rollup routing already engaged — while the same read at the shipped 24 h default
-    /// returned its full series. Sitting above 15 s is what keeps the server-side timeout the one that
+    /// returned its full series. #4442 raised the shipped ceiling to 60 s (existing stores move on their
+    /// migration rung); sitting above it — at 75 s — is what keeps the server-side timeout the one that
     /// fires on a managed store, because <c>57014</c> NAMES the cause where Npgsql's own deadline renders
     /// as <c>Exception while reading from stream</c> and gets misdiagnosed as a network fault — the exact
-    /// confusion #2826 exists to prevent. A client deadline at or under 15 s would start pre-empting a
-    /// bound that already works and already reports well.</para>
+    /// confusion #2826 exists to prevent. A client deadline at or under the 60 s ceiling would start
+    /// pre-empting a bound that already works and already reports well.</para>
     ///
-    /// <para>BELOW the 30 s it replaces, and below the sibling half of the same surface. The viewer's pin
-    /// set the standard that a deadline must be MEANINGFULLY under the inherited default rather than equal
-    /// to it, and <see cref="StorageCommandDeadlines.McpReadSeconds"/> — the <c>DarlingPg*Reader</c> family
-    /// serving these same 136 tools from <c>.Storage</c> — is 30, which is numerically the Npgsql default
-    /// and was derived (#2888) before the role GUC was part of this sweep's reasoning. This surface's half
-    /// must not be the looser of the two, so the ceiling is that constant, asserted relationally in
-    /// <c>McpReadCommandTimeoutTests</c> rather than by copying its number.</para>
+    /// <para>ABOVE <see cref="StorageCommandDeadlines.McpReadSeconds"/> now, and deliberately: #4442 raises
+    /// only the composed web/MCP read path above the 60 s ceiling, and leaves the <c>.Storage</c>
+    /// <c>DarlingPg*Reader</c> family (which serves the same tools through a different reader) at its #3004
+    /// band, strictly UNDER the ceiling — that family's client deadline still fires before a managed store's
+    /// own <c>57014</c> would, which is today's behaviour and unchanged by this issue. The two constants used
+    /// to be ordered the other way (this one had to stay at or under the storage half's); #4442 inverts that
+    /// relation on purpose rather than by omission, and <c>McpReadCommandTimeoutTests</c> pins the new
+    /// direction so a future edit has to notice which one it is restoring.</para>
     /// </summary>
-    internal const int ReadSeconds = 20;
+    internal const int ReadSeconds = 75;
 
     /// <summary>
-    /// The composed-query deadline when the operator's configured value cannot be read — 15 s, which is the
-    /// shipped default in three other places (<see cref="DarlingConfig.ComposeStatementTimeoutSeconds"/>,
-    /// <c>ComposeSpec.StatementTimeout</c>, and the <c>value &lt;= 0</c> arm of
-    /// <see cref="StoreConfigProvider.ClampComposeStatementTimeoutSeconds"/>), so a store that cannot answer
-    /// lands on the same number a store that has never been tuned would.
+    /// The composed-query deadline when the operator's configured value cannot be read — 60 s (#4442, raised
+    /// from a shipped 15 s), which is the shipped default in three other places
+    /// (<see cref="DarlingConfig.ComposeStatementTimeoutSeconds"/>, <c>ComposeSpec.StatementTimeout</c>, and
+    /// the <c>value &lt;= 0</c> arm of <see cref="StoreConfigProvider.ClampComposeStatementTimeoutSeconds"/>),
+    /// so a store that cannot answer lands on the same number a store that has never been tuned would.
     ///
     /// <para><b>Defensive on purpose, mirroring <c>DarlingManagedRoles</c>' own read of this column.</b> The
     /// row may not be seeded yet, the store may predate the V78 column, and the read runs on a
@@ -150,7 +153,7 @@ internal static class McpCommandDeadlines
     /// strictly worse. The one exception is cancellation, which is re-thrown — a caller that gave up must
     /// not be told the store is untunable.</para>
     /// </summary>
-    internal const int ComposedQueryFallbackSeconds = 15;
+    internal const int ComposedQueryFallbackSeconds = 60;
 
     /// <summary>
     /// <para>The deadline for the composed-query runner — <c>RunComposedQueryAsync</c>, reached from both the

@@ -365,18 +365,209 @@ public sealed class DarlingCollectorRunnerTests
     }
 
     private static async Task InsertJobHistoryInstanceAsync(
-        NpgsqlDataSource dataSource, CancellationToken ct, int serverId, long jobHistoryId, long instanceId)
+        NpgsqlDataSource dataSource, CancellationToken ct, int serverId, long jobHistoryId, long instanceId,
+        DateTime? collectionTime = null)
     {
         await using var connection = await dataSource.OpenConnectionAsync(ct);
         using var command = new NpgsqlCommand(@"
 INSERT INTO job_history (job_history_id, collection_time, server_id, server_name, instance_id)
 VALUES ($1, $2, $3, $4, $5)", connection);
         command.Parameters.AddWithValue(jobHistoryId);
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime ?? DateTime.UtcNow, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue("NUM-WM-SRV");
         command.Parameters.AddWithValue(instanceId);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// #4197: job_history's numeric watermark (instance_id) had NO bound at all before this issue — every
+    /// cycle scanned every chunk in retention. Proves the probe-then-confirm read returns the exact same
+    /// value the old unbounded MAX would, in all four shapes the fallback has to get right: an empty table,
+    /// a gap wider than WatermarkPolicy.RecentWatermarkWindow (the bounded probe alone would wrongly answer
+    /// null), the routine case where the probe finds the newest row directly, and a fresh runner instance
+    /// standing in for a service restart reading rows a prior process wrote.
+    /// </summary>
+    [Fact]
+    public async Task GetLastCollectedInstanceIdAsync_MatchesUnboundedMax_OnEmptyGapNormalAndRestart()
+    {
+        var pg = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(pg), "Set DARLING_TEST_PG to run the numeric-watermark window/fallback read.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var dataSource = NpgsqlDataSource.Create(pg!);
+        await using (var migrateConnection = await dataSource.OpenConnectionAsync(ct))
+        {
+            await PgMigrations.MigrateAsync(migrateConnection, ct);
+        }
+
+        var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
+        const int serverId = -880077;
+        await CleanServerRowsAsync(dataSource, "job_history", serverId, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* Empty table: no rows at all for this server. */
+            Assert.Null(await runner.GetLastCollectedInstanceIdAsync(serverId, "job_history", "instance_id", ct));
+
+            /* Gap wider than the bound: the ONLY row is well outside RecentWatermarkWindow (6h), so the
+               bounded probe alone finds nothing — this is exactly the case a naive bound-with-no-fallback
+               would answer null (wrongly, "first run") instead of the true, old value. */
+            var gapFloor = DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow - TimeSpan.FromHours(2);
+            await InsertJobHistoryInstanceAsync(dataSource, ct, serverId, jobHistoryId: 9_200_001, instanceId: 500, collectionTime: gapFloor);
+            Assert.Equal(500L, await runner.GetLastCollectedInstanceIdAsync(serverId, "job_history", "instance_id", ct));
+
+            /* Normal cycle: a recent row lands inside the window, ahead of the old one. The bounded probe
+               finds it directly, and the value still matches what an unbounded MAX would have said. */
+            await InsertJobHistoryInstanceAsync(dataSource, ct, serverId, jobHistoryId: 9_200_002, instanceId: 750, collectionTime: DateTime.UtcNow - TimeSpan.FromMinutes(5));
+            Assert.Equal(750L, await runner.GetLastCollectedInstanceIdAsync(serverId, "job_history", "instance_id", ct));
+
+            /* Restart: a FRESH runner over a fresh data source, standing in for a service process that
+               stopped and started — reading rows a prior process wrote must answer identically. */
+            await using var restartedDataSource = NpgsqlDataSource.Create(pg!);
+            var restartedRunner = new DarlingCollectorRunner(restartedDataSource, new CollectorDeltaCalculator());
+            Assert.Equal(750L, await restartedRunner.GetLastCollectedInstanceIdAsync(serverId, "job_history", "instance_id", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(pg!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanServerRowsAsync(cleanup, "job_history", serverId, cleanupCt));
+        }
+    }
+
+    private static async Task InsertDefaultTraceEventAsync(
+        NpgsqlDataSource dataSource, CancellationToken ct, int serverId, long eventId, DateTime eventTime)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        using var command = new NpgsqlCommand(@"
+INSERT INTO default_trace_events (default_trace_event_id, collection_time, server_id, server_name, event_time)
+VALUES ($1, $2, $3, $4, $5)", connection);
+        command.Parameters.AddWithValue(eventId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(eventTime, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue("TS-WM-SRV");
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(eventTime, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// #4197's headline case: default_trace_events is one of the ring-buffer collectors whose
+    /// GetLastCollectedTimeAsync read used to decompress every retained chunk on every cycle. Same four
+    /// shapes as the numeric twin above — the bound here also predicates on collection_time, the
+    /// PARTITIONING column, deliberately distinct from event_time (the watermark column this reads),
+    /// matching production where the two can diverge.
+    /// </summary>
+    [Fact]
+    public async Task GetLastCollectedTimeAsync_RingBufferWatermark_MatchesUnboundedMax_OnEmptyGapNormalAndRestart()
+    {
+        var pg = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(pg), "Set DARLING_TEST_PG to run the ring-buffer watermark window/fallback read.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var dataSource = NpgsqlDataSource.Create(pg!);
+        await using (var migrateConnection = await dataSource.OpenConnectionAsync(ct))
+        {
+            await PgMigrations.MigrateAsync(migrateConnection, ct);
+        }
+
+        var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
+        const int serverId = -880066;
+        await CleanServerRowsAsync(dataSource, "default_trace_events", serverId, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* Empty table. */
+            Assert.Null(await runner.GetLastCollectedTimeAsync(serverId, "default_trace_events", "event_time", ct));
+
+            /* Gap wider than RecentWatermarkWindow: only an old row exists. A bound with no fallback would
+               wrongly answer null here; the fallback must recover the true, old watermark. */
+            var oldEvent = DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow - TimeSpan.FromHours(3);
+            await InsertDefaultTraceEventAsync(dataSource, ct, serverId, eventId: 9_300_001, eventTime: oldEvent);
+            var afterGap = await runner.GetLastCollectedTimeAsync(serverId, "default_trace_events", "event_time", ct);
+            Assert.NotNull(afterGap);
+            Assert.Equal(DateTime.SpecifyKind(oldEvent, DateTimeKind.Unspecified), afterGap!.Value, TimeSpan.FromSeconds(1));
+
+            /* Normal cycle: a recent row inside the window, the routine steady state. */
+            var recentEvent = DateTime.UtcNow - TimeSpan.FromMinutes(5);
+            await InsertDefaultTraceEventAsync(dataSource, ct, serverId, eventId: 9_300_002, eventTime: recentEvent);
+            var afterRecent = await runner.GetLastCollectedTimeAsync(serverId, "default_trace_events", "event_time", ct);
+            Assert.NotNull(afterRecent);
+            Assert.Equal(DateTime.SpecifyKind(recentEvent, DateTimeKind.Unspecified), afterRecent!.Value, TimeSpan.FromSeconds(1));
+
+            /* Restart: a fresh runner over a fresh data source reads the same rows the same way. */
+            await using var restartedDataSource = NpgsqlDataSource.Create(pg!);
+            var restartedRunner = new DarlingCollectorRunner(restartedDataSource, new CollectorDeltaCalculator());
+            var afterRestart = await restartedRunner.GetLastCollectedTimeAsync(serverId, "default_trace_events", "event_time", ct);
+            Assert.NotNull(afterRestart);
+            Assert.Equal(DateTime.SpecifyKind(recentEvent, DateTimeKind.Unspecified), afterRestart!.Value, TimeSpan.FromSeconds(1));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(pg!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanServerRowsAsync(cleanup, "default_trace_events", serverId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4197: GetLastCollectedTimeForDatabaseAsync (the per-database twin, reached with no clamp by the
+    /// XE ring-buffer collectors — deadlocks / blocked_process_report — on Azure SQL DB) gets the same
+    /// probe-then-confirm treatment. default_trace_events' own database_name column stands in for a
+    /// PerDatabaseWatermarkColumn here; the method reads whatever column name it is given, so this proves
+    /// the fallback branch specifically, complementing the server-scoped test's fuller matrix above.
+    /// </summary>
+    [Fact]
+    public async Task GetLastCollectedTimeForDatabaseAsync_FallsBackToUnbounded_WhenProbeWindowIsEmpty()
+    {
+        var pg = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(pg), "Set DARLING_TEST_PG to run the per-database watermark fallback read.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var dataSource = NpgsqlDataSource.Create(pg!);
+        await using (var migrateConnection = await dataSource.OpenConnectionAsync(ct))
+        {
+            await PgMigrations.MigrateAsync(migrateConnection, ct);
+        }
+
+        var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
+        const int serverId = -880055;
+        const string databaseName = "PERDB-WM-DB";
+        await CleanServerRowsAsync(dataSource, "default_trace_events", serverId, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* Only a row older than RecentWatermarkWindow, for this database. The bounded probe alone
+               finds nothing; the method must fall back to the true unbounded MAX rather than answer null. */
+            var oldEvent = DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow - TimeSpan.FromHours(1);
+            await using (var connection = await dataSource.OpenConnectionAsync(ct))
+            using (var insert = new NpgsqlCommand(@"
+INSERT INTO default_trace_events (default_trace_event_id, collection_time, server_id, server_name, event_time, database_name)
+VALUES ($1, $2, $3, $4, $5, $6)", connection))
+            {
+                insert.Parameters.AddWithValue(9_400_001L);
+                insert.Parameters.AddWithValue(DateTime.SpecifyKind(oldEvent, DateTimeKind.Unspecified));
+                insert.Parameters.AddWithValue(serverId);
+                insert.Parameters.AddWithValue("PERDB-WM-SRV");
+                insert.Parameters.AddWithValue(DateTime.SpecifyKind(oldEvent, DateTimeKind.Unspecified));
+                insert.Parameters.AddWithValue(databaseName);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            var result = await runner.GetLastCollectedTimeForDatabaseAsync(
+                serverId, "default_trace_events", "event_time", "database_name", databaseName, ct);
+            Assert.NotNull(result);
+            Assert.Equal(DateTime.SpecifyKind(oldEvent, DateTimeKind.Unspecified), result!.Value, TimeSpan.FromSeconds(1));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(pg!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanServerRowsAsync(cleanup, "default_trace_events", serverId, cleanupCt));
+        }
     }
 
     /// <summary>
@@ -614,6 +805,81 @@ public class ServerWatermarkReadFloorTests
         Assert.Contains("MAX(last_execution_time)", bounded, StringComparison.Ordinal);
         Assert.Contains("MAX(last_execution_time)", unbounded, StringComparison.Ordinal);
         Assert.Contains("server_id = $1", bounded, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4197: the per-database watermark's bound, same shape as the server-scoped one but with the
+    /// database predicate ahead of it — $3 rather than $2 for collection_time.
+    /// </summary>
+    [Fact]
+    public void TheBoundedServerWatermarkForDatabaseSql_PredicatesOnThePartitioningColumn()
+    {
+        var bounded = DarlingCollectorRunner.BuildServerWatermarkForDatabaseSql("query_store_stats", "last_execution_time", "database_name", bounded: true);
+        var unbounded = DarlingCollectorRunner.BuildServerWatermarkForDatabaseSql("query_store_stats", "last_execution_time", "database_name", bounded: false);
+
+        Assert.Contains("collection_time > $3", bounded, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time", unbounded, StringComparison.Ordinal);
+        Assert.Contains("database_name = $2", bounded, StringComparison.Ordinal);
+        Assert.Contains("database_name = $2", unbounded, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4749: the Query Store cache's seed read returns the value and its witness in one statement. The witness
+    /// is the newest <c>collection_time</c> among the rows AT the maximum value, so the outer query is limited
+    /// to those rows by an inner <c>MAX</c> over the same bounded predicates, and the unaliased
+    /// <c>MAX(last_execution_time)</c> stays in the text for the tests that count watermark reads by it.
+    /// </summary>
+    [Fact]
+    public void TheWatermarkWithWitnessForDatabaseSql_TakesTheNewestStampAmongTheRowsAtTheMaximumValue()
+    {
+        var sql = DarlingCollectorRunner.BuildServerWatermarkWithWitnessForDatabaseSql("query_store_stats", "last_execution_time", "database_name");
+        const string Predicates = "WHERE server_id = $1 AND database_name = $2 AND collection_time > $3";
+
+        Assert.StartsWith("SELECT MAX(last_execution_time), MAX(collection_time) FROM query_store_stats ", sql, StringComparison.Ordinal);
+        Assert.Equal(2, sql.Split(Predicates).Length - 1);
+        Assert.EndsWith(
+            "AND last_execution_time = (SELECT MAX(last_execution_time) FROM query_store_stats " + Predicates + ")",
+            sql,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4197: job_history's numeric (instance_id) watermark read carried NO bound at all before this
+    /// issue — this pins that it now has the same collection_time bound as its timestamp siblings, on the
+    /// PARTITIONING column rather than on instance_id itself (which does not partition the table).
+    ///
+    /// <para>#4487: BOTH forms are now scoped to the server's NEWEST collected batch (an inner
+    /// <c>MAX(collection_time)</c> subquery), not an all-time max — an all-time max survives an identity
+    /// reseed at the OLD epoch's higher number forever, which is the field bug. So the UNBOUNDED form now
+    /// legitimately mentions <c>collection_time</c> too (in its own inner subquery, with no <c>&gt;</c>
+    /// lower bound), and this pin asserts the bounded/unbounded distinction by the presence of the $2
+    /// parameter rather than by "unbounded never says collection_time".</para>
+    /// </summary>
+    [Fact]
+    public void TheBoundedServerWatermarkInstanceIdSql_PredicatesOnThePartitioningColumn()
+    {
+        var bounded = DarlingCollectorRunner.BuildServerWatermarkInstanceIdSql("job_history", "instance_id", bounded: true);
+        var unbounded = DarlingCollectorRunner.BuildServerWatermarkInstanceIdSql("job_history", "instance_id", bounded: false);
+
+        Assert.Contains("collection_time > $2", bounded, StringComparison.Ordinal);
+        Assert.DoesNotContain("$2", unbounded, StringComparison.Ordinal);
+        Assert.Contains("MAX(instance_id)", bounded, StringComparison.Ordinal);
+        Assert.Contains("MAX(instance_id)", unbounded, StringComparison.Ordinal);
+        /* #4487: both forms now scope to the newest collected batch via an inner MAX(collection_time). */
+        Assert.Contains("collection_time = (SELECT MAX(collection_time)", bounded, StringComparison.Ordinal);
+        Assert.Contains("collection_time = (SELECT MAX(collection_time)", unbounded, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4197: RecentWatermarkWindow sits comfortably under a day — the chunk width and the compress_after
+    /// both TimescaleSupport ships — so the probe this window drives lands inside the current,
+    /// (near-certainly) uncompressed chunk rather than one TimescaleDB has already compressed.
+    /// </summary>
+    [Fact]
+    public void RecentWatermarkWindow_StaysUnderOneDay()
+    {
+        Assert.True(WatermarkPolicy.RecentWatermarkWindow < TimeSpan.FromDays(1));
+        Assert.True(WatermarkPolicy.RecentWatermarkWindow > TimeSpan.Zero);
     }
 }
 
@@ -905,11 +1171,20 @@ public class ServerWatermarkDispatchGateTests
     /// that performs the server-scoped watermark read, so deleting the gate — or adding a second, ungated
     /// read site — fails here. It cannot prove the branch polarity; that is what the behavioural pins above
     /// are for. The two together are the claim.</para>
+    ///
+    /// <para><b>Two readers since #3778.</b> <c>GetLastCollectedTimeWithFrameAsync</c> is the server-scoped read
+    /// for a definition that declares a <c>UtcWatermarkColumn</c> (the CPU collector's <c>sample_time_utc</c>
+    /// beside its local <c>sample_time</c>), and it is a server-scoped read like the other: the same #2797
+    /// argument applies to it — a fan-out cycle overwrites the value before any query is built — so every body
+    /// that calls EITHER reader must call the gate. Tracked as one family so a third reader added under the
+    /// same name prefix has to be enlisted here on purpose, and the pair read's own presence is asserted so the
+    /// widening cannot pass on the plain read alone.</para>
     /// </summary>
     [Fact]
     public void EveryServerScopedWatermarkReadSite_AlsoCallsTheDispatchGate()
     {
         const string Read = nameof(DarlingCollectorRunner.GetLastCollectedTimeAsync);
+        const string PairRead = nameof(DarlingCollectorRunner.GetLastCollectedTimeWithFrameAsync);
         const string Gate = nameof(DarlingCollectorRunner.ServerWatermarkIsDiscarded);
 
         var assemblyPath = typeof(DarlingCollectorRunner).Assembly.Location;
@@ -919,34 +1194,46 @@ public class ServerWatermarkDispatchGateTests
            right the hard way are now properties of the scanner: MethodSpec resolution, without which the
            generic gate read as never called, and no cursor skip. Grouped by METHOD TOKEN rather than by name,
            so two overloads cannot be merged into one apparent body. */
-        var byBody = IlCallSiteScanner.FindCalls(assemblyPath, [Read, Gate])
+        var byBody = IlCallSiteScanner.FindCalls(assemblyPath, [Read, PairRead, Gate])
             .GroupBy(c => c.MethodToken);
 
         var readerBodies = 0;
+        var pairReaderBodies = 0;
         var gatedBodies = 0;
         var totalGateCalls = 0;
 
         foreach (var bodyCalls in byBody)
         {
             var callsRead = false;
+            var callsPairRead = false;
             var callsGate = false;
 
             foreach (var call in bodyCalls)
             {
-                if (call.CalleeName == Read)
-                {
-                    callsRead = true;
-                }
-                else
+                if (call.CalleeName == Gate)
                 {
                     callsGate = true;
                     totalGateCalls++;
+                }
+                else if (call.CalleeName == PairRead)
+                {
+                    callsRead = true;
+                    callsPairRead = true;
+                }
+                else
+                {
+                    callsRead = true;
                 }
             }
 
             if (callsRead)
             {
                 readerBodies++;
+                if (callsPairRead)
+                {
+                    pairReaderBodies++;
+                }
+
                 if (callsGate)
                 {
                     gatedBodies++;
@@ -957,6 +1244,9 @@ public class ServerWatermarkDispatchGateTests
         Assert.True(readerBodies > 0,
             $"No method body in the service assembly calls {Read} — either the read moved or the IL walk "
             + "resolved nothing. Either way this test can say nothing about the gate.");
+        Assert.True(pairReaderBodies > 0,
+            $"No method body in the service assembly calls {PairRead} — the #3778 frame-aware read is declared "
+            + "and consulted by nothing, so the CPU collector's watermark is back on the local stamp alone.");
         Assert.True(totalGateCalls > 0,
             $"{Gate} is never called anywhere in the service assembly. The gate exists but nothing consults "
             + "it, so the server-scoped watermark read is unguarded and #2797 is not fixed.");

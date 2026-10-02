@@ -69,7 +69,7 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData("get_session_stats", "server_name")]
-    [InlineData("get_active_queries", "server_name,hours_back,database_name,blocking_only,limit,as_of")]
+    [InlineData("get_active_queries", "server_name,hours_back,database_name,blocking_only,limit,full_text,as_of")]
     [InlineData("get_waiting_tasks", "server_name,hours_back,limit,as_of")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
@@ -115,6 +115,10 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
         Assert.Contains("wait_duration_ms", sql, StringComparison.Ordinal);
         Assert.Contains("resource_description", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        /* #3541 A3: the cap is the caller's ($4), not the 500 the reader hid under a tool that advertised
+           `limit` and then published a bare envelope. */
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 500", sql, StringComparison.Ordinal);
     }
 
     [Theory]

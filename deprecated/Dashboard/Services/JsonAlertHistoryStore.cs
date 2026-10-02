@@ -192,6 +192,15 @@ namespace PerformanceMonitorDashboard.Services
         }
 
         /// <summary>
+        /// #3916: the analysis #2054 hold's restart seed. Deliberately ANY row for (serverId, metricName) —
+        /// unchanged behaviour: every Dashboard analysis page raises the tray balloon through the shared
+        /// service's <c>showTrayNotification</c> sink (wired in MainWindow), so every page row this store
+        /// holds is a delivered page. Delegates to <see cref="GetLastAlertTimeAsync"/> without a dedup key.
+        /// </summary>
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
+            => GetLastAlertTimeAsync(serverId, metricName);
+
+        /// <summary>
         /// Gets alert history from the log (excludes hidden alerts).
         /// </summary>
         /// <param name="includeMuted">

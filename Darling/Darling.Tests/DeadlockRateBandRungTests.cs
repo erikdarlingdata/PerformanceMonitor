@@ -287,6 +287,11 @@ public sealed class DeadlockRateBandRungTests
     ///
     /// <para>Comments and strings are stripped with the shared walker first, per the repo pin about
     /// hand-rolled maskers giving different wrong answers.</para>
+    ///
+    /// <para><b>Widened by #3539 A3/A8d</b> to the two denominators that landed beside this rung's: the
+    /// blocking window (a bundle omitting it bands every blocking server Warning-by-count and never
+    /// Critical) and the collector count (a bundle omitting it grades a failing count presence-flat again).
+    /// Same census, four members.</para>
     /// </summary>
     [Fact]
     public void EveryProductionMetricBundleDeclaresTheWindowAndTheTiers()
@@ -303,7 +308,9 @@ public sealed class DeadlockRateBandRungTests
                 found++;
 
                 if (!AssignsMember(initializer, "DeadlockWindow")
-                    || !AssignsMember(initializer, "DeadlockRateThresholds"))
+                    || !AssignsMember(initializer, "DeadlockRateThresholds")
+                    || !AssignsMember(initializer, "BlockingWindow")
+                    || !AssignsMember(initializer, "CollectorCount"))
                 {
                     offenders.Add(System.IO.Path.GetFileName(file));
                 }
@@ -319,8 +326,9 @@ public sealed class DeadlockRateBandRungTests
 
         Assert.True(
             offenders.Count == 0,
-            "these production metric bundles carry a deadlock count with no window or no tiers beside it, "
-          + "so they band a bare count or band on the shipped pair: "
+            "these production metric bundles carry a count with no denominator beside it (deadlock window, "
+          + "deadlock tiers, blocking window or collector count), so they band a bare count, band on the "
+          + "shipped pair, or grade presence-flat: "
           + string.Join(", ", offenders.Distinct().OrderBy(f => f, StringComparer.Ordinal)));
     }
 

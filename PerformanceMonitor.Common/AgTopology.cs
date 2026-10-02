@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Linq;
 
 namespace PerformanceMonitor.Common;
@@ -200,7 +202,7 @@ public static class AgTopology
                 worst = Worse(worst, database.SynchronizationStateSeverity);
             }
 
-            cards.Add(new AgTopologyCard
+            var card = new AgTopologyCard
             {
                 ServerId = first.ServerId,
                 ServerName = first.ServerName,
@@ -209,9 +211,26 @@ public static class AgTopology
                 DatabaseCollectionTime = dbRows is { Count: > 0 } ? dbRows[0].CollectionTime : null,
                 PrimaryReplica = replicaItems.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName,
                 Severity = worst,
-                Replicas = replicaItems,
-                Databases = databaseItems,
-            });
+                /* Every replica row of one AG carries the SAME group_id (the engine stamps one id per AG), so
+                   the first non-null one found is the card's — tolerant of a row or two still NULL mid-upgrade
+                   rather than requiring every row to agree. */
+                GroupId = replicaItems.Select(r => r.GroupId).FirstOrDefault(g => !string.IsNullOrWhiteSpace(g)),
+            };
+
+            /* Replicas/Databases are get-only ObservableCollections (#4238) — populated here, once, rather than
+               assigned, so the SAME instance can be reused across a later UpdateFrom without ever handing WPF a
+               new ItemsSource reference for the nested, non-virtualized replica-chip / database-grid lists. */
+            foreach (var replica in replicaItems)
+            {
+                card.Replicas.Add(replica);
+            }
+
+            foreach (var database in databaseItems)
+            {
+                card.Databases.Add(database);
+            }
+
+            cards.Add(card);
         }
 
         /* Worst-first, then AG name, then reporting server — problems surface without scrolling, and the several
@@ -232,15 +251,206 @@ public static class AgTopology
     }
 
     /// <summary>The header counts. Groups and views differ exactly when an AG has more than one monitored
-    /// reporter, and that difference is what a reader seeing one AG name twice needs said out loud.</summary>
+    /// reporter, and that difference is what a reader seeing one AG name twice needs said out loud.
+    ///
+    /// <para><b>#4475:</b> a group's identity is the AG NAME plus a CONNECTED COMPONENT over its cards'
+    /// replica-name sets, not the exact set. Per Microsoft's docs, <c>sys.dm_hadr_availability_replica_states</c>
+    /// on a server hosting a SECONDARY replica returns only LOCAL information — so a real AG monitored from its
+    /// secondary reports a card carrying only that secondary's own name, while the SAME AG monitored from its
+    /// primary reports the full replica set. Exact-set identity would then count that one AG as two groups,
+    /// which is a regression from the name-only count this Views split exists to improve on (#4238). Two cards
+    /// are the same group when they share a name (case-insensitive) AND their replica-name sets overlap; that
+    /// makes {P,S1,S2} + {S1} + {S2} one group by transitivity even though no two sets are equal.
+    ///
+    /// <para><b>Known limit:</b> two monitored SECONDARIES of one AG, with its primary unmonitored, share no
+    /// replica name with each other (each reports only itself) and so count as two groups. Nothing in the
+    /// collected rows links them — that would need the AG's <c>group_id</c>, which the replica-states DMV does
+    /// not expose to a non-primary reporter.</para>
+    ///
+    /// <para>Every Amazon RDS for SQL Server Multi-AZ instance carries its own internal AG named
+    /// <c>RDSAG0</c>, so a fleet of them would otherwise collapse into "1 group" by name alone — the case this
+    /// split exists to fix, still held by disjoint replica sets never unioning across different instances.</para>
+    /// </summary>
     public static (int DistinctGroups, int ReportingServers, int Views) Counts(IReadOnlyList<AgTopologyCard> cards)
     {
         ArgumentNullException.ThrowIfNull(cards);
 
         return (
-            cards.Select(c => Key(c.AgName)).Distinct(StringComparer.Ordinal).Count(),
+            CountDistinctGroups(cards.Select(c => (c.AgName, (IEnumerable<string?>)c.Replicas.Select(r => r.ReplicaServerName), c.GroupId))),
             cards.Select(c => c.ServerId).Distinct().Count(),
             cards.Count);
+    }
+
+    /// <summary>
+    /// Counts distinct AG groups by connected components (#4475), with a members overload that carries no
+    /// <c>group_id</c> — every member falls back to the name-plus-overlap rule below, unchanged from before
+    /// V151. Kept so the pre-existing id-less callers and pins compile and behave exactly as before.
+    /// </summary>
+    public static int CountDistinctGroups(IEnumerable<(string? AgName, IEnumerable<string?> ReplicaServerNames)> members)
+    {
+        ArgumentNullException.ThrowIfNull(members);
+
+        return CountDistinctGroups(members.Select(m => (m.AgName, m.ReplicaServerNames, (string?)null)));
+    }
+
+    /// <summary>
+    /// Counts distinct AG groups by connected components, extended for <c>sys.availability_groups.group_id</c>
+    /// (#4475/V151). <b>The count rule:</b>
+    /// <list type="bullet">
+    /// <item>A member that carries a <see cref="Guid"/>-shaped <c>GroupId</c> (case-insensitive text compare)
+    /// unions with every OTHER member whose <c>GroupId</c> matches it EXACTLY — the engine stamps the same GUID
+    /// on every replica of one AG, so this closes the one gap the name-plus-overlap rule alone could not: two
+    /// monitored SECONDARIES of one AG, with its primary unmonitored, share no replica name with each other
+    /// (each reports only itself under <c>sys.dm_hadr_availability_replica_states</c>'s local-only rule), so
+    /// they union on group_id alone even though their replica-name sets are disjoint.</item>
+    /// <item>Two members that BOTH carry a group_id, but DIFFERENT ones, never union — even when they share a
+    /// name and their replica sets overlap. A group_id is definitive: two different ids can never mean the same
+    /// AG, so nothing below overrides that verdict.</item>
+    /// <item>A member with NO group_id (a row collected before V151, or an id-less caller) falls back to the
+    /// pre-existing name-plus-replica-overlap rule (below) among the OTHER id-less members — case-insensitive
+    /// name match, replica-name sets overlap (or both empty, matched by name alone), never bridging an empty
+    /// set to a same-named non-empty one.</item>
+    /// <item>A WITH-id member and a WITHOUT-id member of the SAME name whose replica sets overlap still union —
+    /// the same AG, observed once before the V151 upgrade landed on that reporter and once after. The id-less
+    /// member does not get a group_id from this union; it simply joins the same connected component.</item>
+    /// </list>
+    /// Shared by <see cref="Counts"/> and the MCP/web AG reader's equivalent distinct-AG count
+    /// (<c>DarlingAgReader.Build</c>), so the two surfaces cannot drift back apart. No store read: both callers
+    /// already carry the replica names (and now the group id) on the rows they group.
+    /// </summary>
+    public static int CountDistinctGroups(IEnumerable<(string? AgName, IEnumerable<string?> ReplicaServerNames, string? GroupId)> members)
+    {
+        ArgumentNullException.ThrowIfNull(members);
+
+        var items = members
+            .Select(m => (
+                Name: Key(m.AgName),
+                Replicas: new HashSet<string>(
+                    m.ReplicaServerNames.Select(n => (n ?? "").ToUpperInvariant()).Where(n => n.Length > 0),
+                    StringComparer.Ordinal),
+                GroupId: string.IsNullOrWhiteSpace(m.GroupId) ? null : m.GroupId.Trim().ToUpperInvariant()))
+            .ToList();
+
+        var parent = new int[items.Count];
+        for (var i = 0; i < parent.Length; i++)
+        {
+            parent[i] = i;
+        }
+
+        int Find(int i)
+        {
+            while (parent[i] != i)
+            {
+                i = parent[i];
+            }
+
+            return i;
+        }
+
+        void Union(int a, int b)
+        {
+            var ra = Find(a);
+            var rb = Find(b);
+            if (ra != rb)
+            {
+                parent[ra] = rb;
+            }
+        }
+
+        /* Pass 1: members that carry a group_id union EXACTLY on it, regardless of name -- a group_id is
+           definitive, and two different ids never union even under a matching name (handled by never reaching
+           the name+overlap pass below for a with-id member paired with another with-id member of a DIFFERENT
+           id). */
+        var byGroupId = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+        for (var i = 0; i < items.Count; i++)
+        {
+            if (items[i].GroupId is string groupId)
+            {
+                if (!byGroupId.TryGetValue(groupId, out var indices))
+                {
+                    indices = new List<int>();
+                    byGroupId[groupId] = indices;
+                }
+
+                indices.Add(i);
+            }
+        }
+
+        foreach (var indices in byGroupId.Values)
+        {
+            for (var a = 1; a < indices.Count; a++)
+            {
+                Union(indices[0], indices[a]);
+            }
+        }
+
+        /* Pass 2: the pre-existing name-plus-overlap rule, run over every pair that is NOT both with-id-and-
+           different-id. A with-id member still takes part here so it can join a same-named WITHOUT-id member
+           whose replicas overlap (the same AG seen before and after the V151 upgrade); two with-id members of
+           DIFFERENT ids must never union even if their names match and replicas overlap, so that specific pair
+           is skipped. Only same-named members can ever union, so grouping by name first keeps the pairwise
+           comparison quadratic within one AG name's cards rather than across the whole fleet. */
+        var byName = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+        for (var i = 0; i < items.Count; i++)
+        {
+            if (!byName.TryGetValue(items[i].Name, out var indices))
+            {
+                indices = new List<int>();
+                byName[items[i].Name] = indices;
+            }
+
+            indices.Add(i);
+        }
+
+        foreach (var indices in byName.Values)
+        {
+            for (var a = 0; a < indices.Count; a++)
+            {
+                for (var b = a + 1; b < indices.Count; b++)
+                {
+                    var (ia, ib) = (indices[a], indices[b]);
+
+                    /* Two members that BOTH carry a group_id never union here on name+overlap alone -- pass 1
+                       already decided their relationship definitively (same id -> already unioned; different
+                       id -> must never union), and letting name+overlap override that would defeat the whole
+                       point of carrying an id. */
+                    if (items[ia].GroupId is not null && items[ib].GroupId is not null)
+                    {
+                        continue;
+                    }
+
+                    var setA = items[ia].Replicas;
+                    var setB = items[ib].Replicas;
+
+                    /* An empty set can never overlap anything. Two empty same-named members still union by
+                       name alone (there is nothing else to key them on), but an empty member never unions with
+                       a same-named member that DOES have replicas: that would bridge unrelated groups on the
+                       strength of one row with no data, which is the bug this method exists to avoid. */
+                    var matches = (setA.Count == 0 && setB.Count == 0) || setA.Overlaps(setB);
+                    if (matches)
+                    {
+                        Union(ia, ib);
+                    }
+                }
+            }
+        }
+
+        var roots = new HashSet<int>();
+        for (var i = 0; i < items.Count; i++)
+        {
+            roots.Add(Find(i));
+        }
+
+        return roots.Count;
+    }
+
+    /// <summary>The identity a card keeps across refreshes (#4238): the (reporting server, AG) pair BuildCards
+    /// already groups by. A tab reconciles its new cards against its live collection by this key, so an AG whose
+    /// topology did not change keeps its bound container instead of getting torn down and rebuilt.</summary>
+    public static (int ServerId, string AgKey) CardKey(AgTopologyCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        return (card.ServerId, Key(card.AgName));
     }
 
     private static string Key(string? agName) => (agName ?? "").ToUpperInvariant();
@@ -269,6 +479,7 @@ public static class AgTopology
             FailoverModeDesc = row.FailoverModeDesc,
             EndpointUrl = row.EndpointUrl,
             Severity = Worse(Worse(Worse(Worse(syncHealth, connected), operational), recovery), role),
+            GroupId = row.GroupId,
         };
     }
 
@@ -290,6 +501,133 @@ public static class AgTopology
         IsSuspended = row.IsSuspended,
         SuspendReasonDesc = row.SuspendReasonDesc,
     };
+
+    /* ─────────────────────────── in-place refresh (#4238) ─────────────────────────── */
+
+    /// <summary>
+    /// Syncs <paramref name="live"/> to hold exactly the identities in <paramref name="fresh"/>, in
+    /// <paramref name="fresh"/>'s order, reusing existing instances (updated via <paramref name="updateInPlace"/>)
+    /// for every identity that survives the refresh. This is what lets a bound WPF container list add or remove
+    /// containers only for what actually changed topology, instead of tearing down and rebuilding every container
+    /// on every refresh — the Darling viewer's AG tab uses it for its top-level card list, and
+    /// <see cref="AgTopologyCard.UpdateFrom"/> uses the same method for a card's nested Replicas/Databases, so
+    /// there is one reconciliation rule instead of a family of near-identical ones.
+    /// </summary>
+    public static void Reconcile<TItem, TKey>(
+        ObservableCollection<TItem> live,
+        IReadOnlyList<TItem> fresh,
+        Func<TItem, TKey> keyOf,
+        Action<TItem, TItem> updateInPlace)
+        where TKey : notnull
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(fresh);
+        ArgumentNullException.ThrowIfNull(keyOf);
+        ArgumentNullException.ThrowIfNull(updateInPlace);
+
+        var freshKeys = new HashSet<TKey>(fresh.Count);
+        foreach (var item in fresh)
+        {
+            freshKeys.Add(keyOf(item));
+        }
+
+        /* Remove first, so an identity that later re-inserts (edge case: duplicate keys in `fresh`) cannot be
+           removed right after being (re)inserted below. */
+        for (var i = live.Count - 1; i >= 0; i--)
+        {
+            if (!freshKeys.Contains(keyOf(live[i])))
+            {
+                live.RemoveAt(i);
+            }
+        }
+
+        var liveByKey = new Dictionary<TKey, TItem>(live.Count);
+        foreach (var item in live)
+        {
+            liveByKey[keyOf(item)] = item;
+        }
+
+        for (var i = 0; i < fresh.Count; i++)
+        {
+            var key = keyOf(fresh[i]);
+            if (liveByKey.TryGetValue(key, out var existing))
+            {
+                updateInPlace(existing, fresh[i]);
+
+                var currentIndex = live.IndexOf(existing);
+                if (currentIndex != i)
+                {
+                    live.Move(currentIndex, i);
+                }
+            }
+            else
+            {
+                live.Insert(i, fresh[i]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A cheap fingerprint of every field a card renders, including both grains' collection times — a refresh
+    /// whose rows hash identically to the last render is, by construction, a refresh that would change nothing
+    /// on screen, so the tab can skip reconciling and re-binding 40+ cards entirely rather than walking them to
+    /// discover that (#4238). Order-sensitive by design: <see cref="BuildCards"/>' sort is itself part of what
+    /// "the same render" means.
+    /// </summary>
+    public static int ComputeDigest(IReadOnlyList<AgTopologyCard> cards)
+    {
+        ArgumentNullException.ThrowIfNull(cards);
+
+        var hash = new HashCode();
+        hash.Add(cards.Count);
+
+        foreach (var card in cards)
+        {
+            hash.Add(card.ServerId);
+            hash.Add(card.AgName);
+            hash.Add(card.CollectionTime);
+            hash.Add(card.DatabaseCollectionTime);
+            hash.Add(card.PrimaryReplica);
+            hash.Add(card.Severity);
+
+            hash.Add(card.Replicas.Count);
+            foreach (var replica in card.Replicas)
+            {
+                hash.Add(replica.ReplicaServerName);
+                hash.Add(replica.RoleDesc);
+                hash.Add(replica.IsPrimary);
+                hash.Add(replica.IsLocal);
+                hash.Add(replica.OperationalStateDesc);
+                hash.Add(replica.ConnectedStateDesc);
+                hash.Add(replica.RecoveryHealthDesc);
+                hash.Add(replica.SynchronizationHealthDesc);
+                hash.Add(replica.AvailabilityModeDesc);
+                hash.Add(replica.FailoverModeDesc);
+                hash.Add(replica.EndpointUrl);
+                hash.Add(replica.Severity);
+            }
+
+            hash.Add(card.Databases.Count);
+            foreach (var database in card.Databases)
+            {
+                hash.Add(database.DatabaseName);
+                hash.Add(database.ReplicaServerName);
+                hash.Add(database.IsLocal);
+                hash.Add(database.SynchronizationStateDesc);
+                hash.Add(database.SynchronizationStateSeverity);
+                hash.Add(database.AvailabilityModeDesc);
+                hash.Add(database.LogSendQueueKb);
+                hash.Add(database.RedoQueueKb);
+                hash.Add(database.LogSendRateKbPerSec);
+                hash.Add(database.RedoRateKbPerSec);
+                hash.Add(database.SecondaryLagSeconds);
+                hash.Add(database.IsSuspended);
+                hash.Add(database.SuspendReasonDesc);
+            }
+        }
+
+        return hash.ToHashCode();
+    }
 }
 
 /// <summary>One replica-grain row as collected, app-neutral. <c>ServerName</c> is the REPORTING server.</summary>
@@ -309,6 +647,10 @@ public sealed class AgTopologyReplicaRow
     public string? AvailabilityModeDesc { get; init; }
     public string? FailoverModeDesc { get; init; }
     public string? EndpointUrl { get; init; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475) — the same GUID on every replica
+    /// of one AG, stamped by the engine. Null on a row collected before this column existed.</summary>
+    public string? GroupId { get; init; }
 }
 
 /// <summary>One database-grain row as collected. Queue sizes are KB and rates KB/s (the DMV's units), both
@@ -331,23 +673,51 @@ public sealed class AgTopologyDatabaseRow
     public string? SuspendReasonDesc { get; init; }
     public string? AvailabilityModeDesc { get; init; }
     public long? SecondaryLagSeconds { get; init; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475), carried on the database grain
+    /// too since the collector stamps it there as well. Unused by <see cref="CountDistinctGroups"/> today (the
+    /// count rule works off the replica grain), kept for symmetry with the SQL and the storage-layer row.</summary>
+    public string? GroupId { get; init; }
+}
+
+/// <summary>
+/// Base for the three bound view models a refresh updates in place (#4238) instead of replacing, so a WPF
+/// container already realized for an item keeps showing that SAME item — only its property values move. Plain
+/// BCL (<see cref="INotifyPropertyChanged"/>, no WPF dependency), matching this file's "pure" contract.
+/// </summary>
+public abstract class AgTopologyObservable : INotifyPropertyChanged
+{
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>One blanket notification refreshes every binding on this instance — including computed
+    /// properties like <see cref="AgTopologyCard.SubtitleDisplay"/> — without hand-tracking which of a dozen
+    /// display properties depends on which field. WPF treats a null/empty property name as "re-read everything
+    /// bound to this object"; only an element a virtualizing panel has actually realized pays for that.</summary>
+    protected void RaiseAllPropertiesChanged() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+
+    protected void RaisePropertyChanged(string propertyName) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
 
 /// <summary>One replica chip, pre-banded. The view layer adds only a brush for <see cref="Severity"/>.</summary>
-public sealed class AgTopologyReplica
+public sealed class AgTopologyReplica : AgTopologyObservable
 {
-    public string? ReplicaServerName { get; init; }
-    public string? RoleDesc { get; init; }
-    public bool IsPrimary { get; init; }
-    public bool? IsLocal { get; init; }
-    public string? OperationalStateDesc { get; init; }
-    public string? ConnectedStateDesc { get; init; }
-    public string? RecoveryHealthDesc { get; init; }
-    public string? SynchronizationHealthDesc { get; init; }
-    public string? AvailabilityModeDesc { get; init; }
-    public string? FailoverModeDesc { get; init; }
-    public string? EndpointUrl { get; init; }
-    public HealthSeverity Severity { get; init; }
+    public string? ReplicaServerName { get; set; }
+    public string? RoleDesc { get; set; }
+    public bool IsPrimary { get; set; }
+    public bool? IsLocal { get; set; }
+    public string? OperationalStateDesc { get; set; }
+    public string? ConnectedStateDesc { get; set; }
+    public string? RecoveryHealthDesc { get; set; }
+    public string? SynchronizationHealthDesc { get; set; }
+    public string? AvailabilityModeDesc { get; set; }
+    public string? FailoverModeDesc { get; set; }
+    public string? EndpointUrl { get; set; }
+    public HealthSeverity Severity { get; set; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475). Null on a row collected before
+    /// this column existed — the count rule falls back to name+overlap for those.</summary>
+    public string? GroupId { get; set; }
 
     public string RoleDisplay => string.IsNullOrWhiteSpace(RoleDesc) ? "UNKNOWN ROLE" : RoleDesc!;
 
@@ -392,26 +762,51 @@ public sealed class AgTopologyReplica
 
     public string ModeDisplay =>
         string.Join(" · ", new[] { AvailabilityModeDesc, FailoverModeDesc }.Where(v => !string.IsNullOrWhiteSpace(v)));
+
+    /// <summary>Copies every field from a freshly read replica of the SAME identity, then raises one blanket
+    /// change notification (#4238). The caller (<see cref="AgTopologyCard.UpdateFrom"/>, via
+    /// <see cref="AgTopology.Reconcile{TItem,TKey}"/>) only calls this for a replica whose identity survived the
+    /// refresh, so the bound chip element stays the same instance.</summary>
+    public void UpdateFrom(AgTopologyReplica latest)
+    {
+        ArgumentNullException.ThrowIfNull(latest);
+
+        ReplicaServerName = latest.ReplicaServerName;
+        RoleDesc = latest.RoleDesc;
+        IsPrimary = latest.IsPrimary;
+        IsLocal = latest.IsLocal;
+        OperationalStateDesc = latest.OperationalStateDesc;
+        ConnectedStateDesc = latest.ConnectedStateDesc;
+        RecoveryHealthDesc = latest.RecoveryHealthDesc;
+        SynchronizationHealthDesc = latest.SynchronizationHealthDesc;
+        AvailabilityModeDesc = latest.AvailabilityModeDesc;
+        FailoverModeDesc = latest.FailoverModeDesc;
+        EndpointUrl = latest.EndpointUrl;
+        Severity = latest.Severity;
+        GroupId = latest.GroupId;
+
+        RaiseAllPropertiesChanged();
+    }
 }
 
 /// <summary>One database row in a card's grid, pre-banded.</summary>
-public sealed class AgTopologyDatabase
+public sealed class AgTopologyDatabase : AgTopologyObservable
 {
-    public string? DatabaseName { get; init; }
-    public string? ReplicaServerName { get; init; }
-    public bool? IsLocal { get; init; }
-    public string? SynchronizationStateDesc { get; init; }
-    public HealthSeverity SynchronizationStateSeverity { get; init; }
-    public string? AvailabilityModeDesc { get; init; }
-    public long? LogSendQueueKb { get; init; }
-    public long? RedoQueueKb { get; init; }
-    public long? LogSendRateKbPerSec { get; init; }
-    public long? RedoRateKbPerSec { get; init; }
-    public double? EstimatedSendDrainMinutes { get; init; }
-    public double? EstimatedRedoCompletionMinutes { get; init; }
-    public long? SecondaryLagSeconds { get; init; }
-    public bool? IsSuspended { get; init; }
-    public string? SuspendReasonDesc { get; init; }
+    public string? DatabaseName { get; set; }
+    public string? ReplicaServerName { get; set; }
+    public bool? IsLocal { get; set; }
+    public string? SynchronizationStateDesc { get; set; }
+    public HealthSeverity SynchronizationStateSeverity { get; set; }
+    public string? AvailabilityModeDesc { get; set; }
+    public long? LogSendQueueKb { get; set; }
+    public long? RedoQueueKb { get; set; }
+    public long? LogSendRateKbPerSec { get; set; }
+    public long? RedoRateKbPerSec { get; set; }
+    public double? EstimatedSendDrainMinutes { get; set; }
+    public double? EstimatedRedoCompletionMinutes { get; set; }
+    public long? SecondaryLagSeconds { get; set; }
+    public bool? IsSuspended { get; set; }
+    public string? SuspendReasonDesc { get; set; }
 
     public string DatabaseDisplay => DatabaseName ?? "—";
     public string ReplicaDisplay => ReplicaServerName ?? "—";
@@ -437,24 +832,61 @@ public sealed class AgTopologyDatabase
     /// state, which already carries the verdict.</summary>
     public HealthSeverity DataMovementSeverity =>
         IsSuspended == true ? HealthSeverity.Critical : HealthSeverity.Unknown;
+
+    /// <summary>Same shape as <see cref="AgTopologyReplica.UpdateFrom"/> (#4238).</summary>
+    public void UpdateFrom(AgTopologyDatabase latest)
+    {
+        ArgumentNullException.ThrowIfNull(latest);
+
+        DatabaseName = latest.DatabaseName;
+        ReplicaServerName = latest.ReplicaServerName;
+        IsLocal = latest.IsLocal;
+        SynchronizationStateDesc = latest.SynchronizationStateDesc;
+        SynchronizationStateSeverity = latest.SynchronizationStateSeverity;
+        AvailabilityModeDesc = latest.AvailabilityModeDesc;
+        LogSendQueueKb = latest.LogSendQueueKb;
+        RedoQueueKb = latest.RedoQueueKb;
+        LogSendRateKbPerSec = latest.LogSendRateKbPerSec;
+        RedoRateKbPerSec = latest.RedoRateKbPerSec;
+        EstimatedSendDrainMinutes = latest.EstimatedSendDrainMinutes;
+        EstimatedRedoCompletionMinutes = latest.EstimatedRedoCompletionMinutes;
+        SecondaryLagSeconds = latest.SecondaryLagSeconds;
+        IsSuspended = latest.IsSuspended;
+        SuspendReasonDesc = latest.SuspendReasonDesc;
+
+        RaiseAllPropertiesChanged();
+    }
 }
 
 /// <summary>One reporting server's VIEW of one Availability Group — the card each app renders.</summary>
-public sealed class AgTopologyCard
+public sealed class AgTopologyCard : AgTopologyObservable
 {
-    public int ServerId { get; init; }
+    public int ServerId { get; set; }
 
     /// <summary>The REPORTING server — the monitored instance whose DMVs produced this view, not necessarily the
     /// AG's primary.</summary>
-    public string ServerName { get; init; } = "";
+    public string ServerName { get; set; } = "";
 
-    public string? AgName { get; init; }
-    public DateTime CollectionTime { get; init; }
-    public DateTime? DatabaseCollectionTime { get; init; }
-    public string? PrimaryReplica { get; init; }
-    public HealthSeverity Severity { get; init; }
-    public IReadOnlyList<AgTopologyReplica> Replicas { get; init; } = Array.Empty<AgTopologyReplica>();
-    public IReadOnlyList<AgTopologyDatabase> Databases { get; init; } = Array.Empty<AgTopologyDatabase>();
+    public string? AgName { get; set; }
+    public DateTime CollectionTime { get; set; }
+    public DateTime? DatabaseCollectionTime { get; set; }
+    public string? PrimaryReplica { get; set; }
+    public HealthSeverity Severity { get; set; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475) — taken from the card's first
+    /// replica row, which is the same value every replica of this AG stores (the engine stamps one group_id
+    /// per AG, identically on every replica). Null on a card built entirely from rows collected before this
+    /// column existed.</summary>
+    public string? GroupId { get; set; }
+
+    /// <summary>Get-only and never reassigned (#4238): the SAME collection instance lives for the card's whole
+    /// life, so the nested, non-virtualized replica-chip <c>ItemsControl</c> never sees a new
+    /// <c>ItemsSource</c> reference and never rebuilds its containers either. <see cref="UpdateFrom"/> mutates
+    /// its contents through <see cref="AgTopology.Reconcile{TItem,TKey}"/>.</summary>
+    public ObservableCollection<AgTopologyReplica> Replicas { get; } = new();
+
+    /// <summary>Same contract as <see cref="Replicas"/>, for the per-database grid.</summary>
+    public ObservableCollection<AgTopologyDatabase> Databases { get; } = new();
 
     public string AgNameDisplay => string.IsNullOrWhiteSpace(AgName) ? "—" : AgName!;
     public string SeverityLabel => AgTopology.SeverityLabel(Severity);
@@ -479,5 +911,46 @@ public sealed class AgTopologyCard
 
             return text;
         }
+    }
+
+    public AgTopologyCard()
+    {
+        /* HasDatabases derives from Databases.Count, which a property-changed notification on this object alone
+           cannot see — only the collection itself knows when it grows from 0 (no per-database rows collected
+           yet) to some. UpdateFrom mutates Databases in place rather than replacing it, so without this the
+           DataGrid's visibility trigger would go stale the first time a card's database rows show up after its
+           card was already on screen (#4238). */
+        Databases.CollectionChanged += (_, _) => RaisePropertyChanged(nameof(HasDatabases));
+    }
+
+    /// <summary>Updates every field from a freshly built card of the SAME (<see cref="AgTopology.CardKey"/>)
+    /// identity, then raises one blanket change notification (#4238) — the caller only calls this when the
+    /// identity survived a refresh, so the card's bound container stays the same instance and only its content
+    /// redraws. The nested Replicas/Databases lists are reconciled the same way a tab reconciles its own card
+    /// list, through the shared <see cref="AgTopology.Reconcile{TItem,TKey}"/>.</summary>
+    public void UpdateFrom(AgTopologyCard latest)
+    {
+        ArgumentNullException.ThrowIfNull(latest);
+
+        ServerId = latest.ServerId;
+        ServerName = latest.ServerName;
+        AgName = latest.AgName;
+        CollectionTime = latest.CollectionTime;
+        DatabaseCollectionTime = latest.DatabaseCollectionTime;
+        PrimaryReplica = latest.PrimaryReplica;
+        Severity = latest.Severity;
+        GroupId = latest.GroupId;
+
+        AgTopology.Reconcile(
+            Replicas, latest.Replicas,
+            static r => (r.ReplicaServerName ?? "").ToUpperInvariant(),
+            static (existing, updated) => existing.UpdateFrom(updated));
+
+        AgTopology.Reconcile(
+            Databases, latest.Databases,
+            static d => ((d.DatabaseName ?? "").ToUpperInvariant(), (d.ReplicaServerName ?? "").ToUpperInvariant()),
+            static (existing, updated) => existing.UpdateFrom(updated));
+
+        RaiseAllPropertiesChanged();
     }
 }

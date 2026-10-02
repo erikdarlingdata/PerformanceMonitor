@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Globalization;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -53,9 +52,14 @@ public static class QueryStorePlanMap
     public const string LastSeenColumn = "last_seen";
 
     /* This const mirrors the IMMUTABLE migration rung that created the table and stays byte-frozen with it.
-       The LIVE shape differs in one place: V77 relaxed digest to nullable for the #2312 content-less marker
+       The LIVE shape differs in two places: V77 relaxed digest to nullable for the #2312 content-less marker
        rows (a plan whose XML the engine cannot persist gets a map row with a NULL digest, so the probe reads
-       it as known instead of refetching it forever). */
+       it as known instead of refetching it forever), and V149 (#4250) drops the last_seen btree index and
+       sets fillfactor 90, so the liveness touch's UPDATE (see TouchAndProbeSql below) can go HOT: last_seen
+       is the only indexed column that touch ever changed, so once nothing indexes it and the page has
+       fillfactor headroom, the touch stops writing a new index entry and (once the page has room) stops
+       moving the tuple. The prune (DarlingRetention.UnorderedRowCappedDeleteSql, item 3 of #4250) is the
+       only other reader of that index and keeps working off a row-capped sequential scan instead. */
     public const string CreateTableSql = @"CREATE TABLE IF NOT EXISTS collect.query_store_plan_map (
     server_id integer NOT NULL,
     database_name text NOT NULL,
@@ -64,8 +68,7 @@ public static class QueryStorePlanMap
     plan_hash text,
     last_seen timestamp NOT NULL,
     PRIMARY KEY (server_id, database_name, plan_id)
-);
-CREATE INDEX IF NOT EXISTS idx_query_store_plan_map_last_seen ON collect.query_store_plan_map(last_seen);";
+);";
 
     /* Deliberately NO index on digest. Nothing reads this table by digest: readers resolve
        (server_id, database_name, plan_id) -> digest through the primary key, the liveness touch joins on that
@@ -254,23 +257,23 @@ ORDER BY batch.server_id, batch.database_name, batch.plan_id";
     public static bool MarginOrderingHolds(int chunkIntervalDays) =>
         PruneMarginDays < chunkIntervalDays + 1;
 
-    /// <summary>
-    /// Retires map rows whose facts have all aged out: an index range scan on <see cref="LastSeenColumn"/>
-    /// against the fact horizon plus <see cref="PruneMarginDays"/>, time-sliced like every sibling purge.
-    ///
-    /// <para>Timestamp-driven, NOT an existence check against <c>query_store_stats</c>. An anti-join against a
-    /// 43 GB hypertable per map row is exactly the cost this architecture avoids, and it is unnecessary here
-    /// because <see cref="TouchAndProbeSql"/> keeps <c>last_seen</c> current for anything live — the same argument the
-    /// dimension GC already rests on, applied to one more timestamped table.</para>
-    ///
-    /// <para>A plan whose query goes quiet needs no special handling: it stops being touched, its facts age out
-    /// within retention, and the margin ordering retires the map row before the dim row it points at.</para>
-    /// </summary>
-    public static string PruneSql(int chunkIntervalDays) =>
-        "DELETE FROM collect.query_store_plan_map WHERE " + LastSeenColumn + " < $1" +
-        " AND " + LastSeenColumn + " >= (SELECT min(" + LastSeenColumn + ") FROM collect.query_store_plan_map WHERE " +
-        LastSeenColumn + " < $1)" +
-        " AND " + LastSeenColumn + " < (SELECT min(" + LastSeenColumn + ") FROM collect.query_store_plan_map WHERE " +
-        LastSeenColumn + " < $1) + INTERVAL '" +
-        chunkIntervalDays.ToString(CultureInfo.InvariantCulture) + " days'";
+    /* Retires map rows whose facts have all aged out. Since V149 (#4250) dropped LastSeenColumn's btree
+       index, the three-scan slice shape this table used to run here (two min() subqueries plus the
+       DELETE) cost a sequential scan three times over per statement — on this table's field scale
+       (4.04 M rows / 709 MB), a real but modest cost; on its sibling query_store_text (6.86 M rows / ~5
+       GB main fork + ~4.35 GB TOAST) the same shape reads on the order of tens of GB per slice. #4250
+       item 3 replaced it fleet-wide (both tables) with DarlingRetention.UnorderedRowCappedDeleteSql: a
+       single ctid-capped scan with no ORDER BY, which this table's PRIMARY KEY is not indexed by anyway
+       (LastSeenColumn has no index to sort through), removing the two extra scans entirely. See that
+       builder's summary for why dropping the ordering is correct against a FIXED cutoff, and
+       DarlingRetention.LivenessTouchedTablePruneRowCap for how the cap is sized from the field's
+       last_seen age histogram.
+
+       Timestamp-driven, NOT an existence check against query_store_stats. An anti-join against a 43 GB
+       hypertable per map row is exactly the cost this architecture avoids, and it is unnecessary here
+       because TouchAndProbeSql keeps last_seen current for anything live — the same argument the
+       dimension GC already rests on, applied to one more timestamped table.
+
+       A plan whose query goes quiet needs no special handling: it stops being touched, its facts age out
+       within retention, and the margin ordering retires the map row before the dim row it points at. */
 }

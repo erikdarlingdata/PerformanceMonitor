@@ -28,7 +28,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (<see cref="ViewerDataService.GetManagedServersAsync"/>), enriched with the observed collection facts.
 /// The dots still come from collection freshness (the viewer never pings a monitored server), and
 /// Connect/Disconnect have no meaning and are omitted. Favorites remain viewer-local
-/// (<see cref="ViewerServerStore"/>, matched by server name), starred and sorted-to-top here.</para>
+/// (<see cref="ViewerServerStore"/>, filed under the server's id so an edit of its host keeps the star, #4768),
+/// starred and sorted-to-top here.</para>
 /// </summary>
 public partial class MainWindow
 {
@@ -44,14 +45,15 @@ public partial class MainWindow
     // ── Server-list enrichment (favorites + freshness) ──────────────────────────────
 
     /// <summary>
-    /// Stamps each row's favorite flag from the registry (by server name) and returns the list sorted
+    /// Stamps each row's favorite flag from the registry (by server id; #4768) and returns the list sorted
     /// favorites-first, then by display name — Lite's pin ordering. Called on load and after a registry change.
+    /// A flag an earlier version filed under the server's name is carried over to the id on this read.
     /// </summary>
     private List<DarlingServer> ApplyFavoritesAndSort(List<DarlingServer> servers)
     {
         foreach (var s in servers)
         {
-            s.IsFavorite = _serverStore.IsFavorite(s.ServerName);
+            s.IsFavorite = _serverStore.IsFavorite(s.ServerId, s.ServerName);
         }
 
         return SortWithFavorites(servers);
@@ -70,7 +72,7 @@ public partial class MainWindow
            whatever the sidebar currently shows. */
         foreach (var s in _fleet.All)
         {
-            s.IsFavorite = _serverStore.IsFavorite(s.ServerName);
+            s.IsFavorite = _serverStore.IsFavorite(s.ServerId, s.ServerName);
         }
 
         /* Re-sort through the model and rebind its projection once, rather than assigning a fresh list to
@@ -141,6 +143,83 @@ public partial class MainWindow
         finally
         {
             _statusRefreshInFlight = false;
+        }
+    }
+
+    /// <summary>
+    /// Drops the viewer-local favorite pin and alert-acknowledgement state for a server that left the
+    /// registry. The one cleanup both kinds of remove run: the context-menu remove in this window, and a
+    /// remove made elsewhere that <see cref="SyncServerSetAsync"/> notices.
+    /// </summary>
+    private void ForgetRemovedServer(DarlingServer server)
+    {
+        _serverStore.SetFavorite(server.ServerId, false, server.ServerName);
+        _alertStateService.RemoveServerState(server.ServerId);
+    }
+
+    private bool _serverSetSyncInFlight;
+
+    /// <summary>True while passes are skipped for want of a config list, so the skip is logged once, not per tick.</summary>
+    private bool _serverSetSyncSkipping;
+
+    /// <summary>
+    /// Picks up servers added or removed outside this window (another viewer, the web viewer, the MCP add and
+    /// remove tools) on the fleet refresh tick. Reads the config server list, which on a seeded store is the
+    /// list <see cref="LoadServersAsync"/> loads, and compares its server ids with the loaded fleet's
+    /// (<see cref="ViewerServerSetSync"/>). An unchanged set ends there, with no reload and no sidebar
+    /// rebuild. A changed set runs <see cref="ForgetRemovedServer"/> for each server that left, then the
+    /// reload a local add or remove ends with, which keeps the selection.
+    ///
+    /// <para>Only the config list can change anything. When the store is not seeded, or the seeded check
+    /// fails this tick, there is no config list and the pass does nothing: the observed list the load falls
+    /// back to lacks every configured server that has never collected, and comparing it would forget each of
+    /// them. A store an older service has not seeded keeps the behavior it had before this sync: changes made
+    /// elsewhere show after a restart.</para>
+    ///
+    /// <para>Single-flight like the tick's other reads: a tick that lands while a pass is still in flight
+    /// drops, and the next tick compares again. A failed read is logged and left to the next tick rather than
+    /// shown as a connection failure, because nothing on screen is wrong yet that was not wrong before.</para>
+    /// </summary>
+    private async Task SyncServerSetAsync()
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        if (_serverSetSyncInFlight)
+        {
+            return;
+        }
+
+        _serverSetSyncInFlight = true;
+        try
+        {
+            var registered = await _dataService.GetConfigManagedServersAsync();
+
+            if (registered is null && !_serverSetSyncSkipping)
+            {
+                ViewerLogger.Info(
+                    "ServerList",
+                    "server list sync paused: the config server list is not readable (the store is not seeded, " +
+                    "or the seeded check failed); it resumes on the first tick that can read it");
+            }
+
+            _serverSetSyncSkipping = registered is null;
+
+            await ViewerServerSetSync.ApplyAsync(
+                _fleet.All,
+                registered,
+                ForgetRemovedServer,
+                () => LoadServersAsync(preserveSelection: true));
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("ServerList", $"server list read failed: {ex.Message}");
+        }
+        finally
+        {
+            _serverSetSyncInFlight = false;
         }
     }
 
@@ -264,9 +343,29 @@ public partial class MainWindow
         List<CollectorHealthRow> health;
         try
         {
-            health = serverId.HasValue
-                ? await _dataService.GetCollectionHealthAsync(serverId.Value)
-                : await _dataService.GetFleetCollectionHealthAsync();
+            /* #4226: the same fleet-wide rollup-backed, memoized read the Overview cards take their counts
+               from — a per-server tab filters it to that server's rows; an aggregate tab concatenates every
+               server's rows for the cumulative total, replacing what used to be a second raw fleet scan
+               (FleetCollectionHealthSql) or a raw per-server scan (GetCollectionHealthAsync) every tick.
+               FleetCollectionHealthByServerSql itself carries no config_monitored_servers.is_enabled scope
+               (a #4226 regression, fixed below it): a per-server tab must see that EXACT server's rows
+               whether or not it is currently enabled or even registered yet, the same as the raw scans it
+               replaced. Only the CUMULATIVE branch (no tab scope) still wants "enabled fleet only" — the
+               scope FleetCollectionHealthSql had — so it is applied here, against the registry already in
+               memory, instead of inside the shared SQL. */
+            var byServer = await _dataService.GetFleetCollectionHealthByServerAsync();
+            if (serverId.HasValue)
+            {
+                health = byServer.TryGetValue(serverId.Value, out var serverRows) ? serverRows : new List<CollectorHealthRow>();
+            }
+            else
+            {
+                var enabledServerIds = _fleet.All.Where(s => s.IsEnabled).Select(s => s.ServerId).ToHashSet();
+                health = byServer
+                    .Where(kvp => enabledServerIds.Contains(kvp.Key))
+                    .SelectMany(kvp => kvp.Value)
+                    .ToList();
+            }
         }
         catch (Exception ex)
         {
@@ -293,13 +392,15 @@ public partial class MainWindow
         if (failing.Count > 0)
         {
             CollectorHealthText.Text = $"Collectors: {failing.Count} erroring";
-            CollectorHealthText.Foreground = System.Windows.Media.Brushes.OrangeRed;
+            // #4635: the fixed OrangeRed (#FF4500) was 3.44:1 on Light's status bar, under WCAG AA's 4.5:1 text floor.
+            /* #4679: a live reference, not a copy - a copy kept the old theme's colour after a theme switch until the next tick. No fallback: all three themes declare the key. */
+            CollectorHealthText.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, "CriticalTextBrush");
             CollectorHealthText.ToolTip = "Failing: " + string.Join(", ", failing.Select(h => h.CollectorName).Distinct());
         }
         else
         {
             CollectorHealthText.Text = $"Collectors: {health.Count} OK";
-            CollectorHealthText.Foreground = (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
+            CollectorHealthText.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, "ForegroundMutedBrush");
             CollectorHealthText.ToolTip = null;
         }
     }
@@ -379,7 +480,7 @@ public partial class MainWindow
             return;
         }
 
-        var isFavorite = _serverStore.ToggleFavorite(server.ServerName);
+        var isFavorite = _serverStore.ToggleFavorite(server.ServerId, server.ServerName);
         server.IsFavorite = isFavorite;
         ReapplyFavoritesToServerList();
 
@@ -405,7 +506,9 @@ public partial class MainWindow
                config-driven set); on a pre-seed store showing collect.servers, seed a new definition from the
                server's name so the operator can add it to the store. */
             var row = await _dataService.GetMonitoredServerAsync(server.ServerId);
-            var favorite = _serverStore.IsFavorite(server.ServerName);
+            /* Filed under the server's id (#4768); the collected name and the row's host are what earlier
+               versions filed it under, so a flag found under either is carried over here. */
+            var favorite = _serverStore.IsFavorite(server.ServerId, server.ServerName, row?.Host);
 
             var dialog = row is not null
                 ? new AddServerDialog(_dataService, _serverStore, ProfileStore, row, favorite) { Owner = this }
@@ -452,8 +555,7 @@ public partial class MainWindow
                Deliberately not gated on the write (#2434), unlike the pin toggle and the import above:
                this is removing a pin for a server that no longer exists, so a refused write leaves a stale
                entry nothing reads rather than losing anything the operator would miss. The store logs it. */
-            _serverStore.SetFavorite(server.ServerName, false);
-            _alertStateService.RemoveServerState(server.ServerId);
+            ForgetRemovedServer(server);
             await LoadServersAsync(preserveSelection: true);
             StatusText.Text = $"Removed '{server.DisplayName}' from monitoring.";
         }
@@ -477,11 +579,13 @@ public partial class MainWindow
     /// <summary>
     /// "Silence This Server" — writes a whole-server mute rule (see
     /// <see cref="ViewerDataService.BuildServerSilenceRule"/>) the running Darling service honors on its next
-    /// config reload: every future alert for this server is flagged muted (channels skipped for email/Teams/Slack)
-    /// and so never toasts. The Darling shortcut over the multi-step Manage Mute Rules dialog, mirroring Lite's
-    /// one-click "Silence This Server". Idempotent: an existing active silence is reported, not duplicated. Keyed
-    /// on the server's DISPLAY name (what the alert engine's mute context + the alert rows carry). A read-only
-    /// seat / schema-skew / failure degrades to the friendly status message like the other server-row writes.
+    /// config reload: every future alert for this server is flagged muted (channels skipped for email/Teams/Slack).
+    /// The tray does not wait for that: the rule joins <see cref="_viewerMuteRules"/> on success, so this viewer's
+    /// toast filter honors it from the next poll (#3570 — before, "never toasts" held only once the service had
+    /// reloaded and stamped the next row muted). The Darling shortcut over the multi-step Manage Mute Rules
+    /// dialog, mirroring Lite's one-click "Silence This Server". Idempotent: an existing active silence is
+    /// reported, not duplicated. Keyed on the server's store id (the display name is not unique). A read-only seat / schema-skew / failure degrades to the friendly status message like
+    /// the other server-row writes.
     /// </summary>
     private async void ServerContextMenu_Silence_Click(object sender, RoutedEventArgs e)
     {
@@ -494,16 +598,21 @@ public partial class MainWindow
         try
         {
             var rules = await _dataService.GetMuteRulesAsync();
-            if (rules.Any(r => ViewerDataService.IsWholeServerSilence(r, server.DisplayName) && r.Enabled && !r.IsExpired))
+            if (rules.Any(r => ViewerDataService.IsWholeServerSilence(r, server.ServerId, server.DisplayName) && r.Enabled && !r.IsExpired))
             {
                 StatusText.Text = $"'{server.DisplayName}' is already silenced.";
                 return;
             }
 
-            await _dataService.InsertMuteRuleAsync(ViewerDataService.BuildServerSilenceRule(server.DisplayName));
-            /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. */
+            var silence = ViewerDataService.BuildServerSilenceRule(server.ServerId, server.DisplayName);
+            await _dataService.InsertMuteRuleAsync(silence);
+            /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. #3570: and
+               hand the rule to the toast filter now (persist-then-cache), for the same reason. */
             server.SetSilenced(true);
-            StatusText.Text = $"Silenced all alerts for '{server.DisplayName}'. Right-click → Unsilence to restore.";
+            _viewerMuteRules.Add(silence);
+            StatusText.Text =
+                $"Silenced all alerts for '{server.DisplayName}' — tray toasts stop now; the service applies it within "
+                + $"{ViewerDataService.ServiceReloadTickSeconds} s. Right-click → Unsilence to restore.";
         }
         catch (ViewerReadOnlyException ex)
         {
@@ -538,21 +647,49 @@ public partial class MainWindow
         try
         {
             var rules = await _dataService.GetMuteRulesAsync();
-            var silences = rules.Where(r => ViewerDataService.IsWholeServerSilence(r, server.DisplayName)).ToList();
-            if (silences.Count == 0)
+            var plan = ViewerDataService.PlanUnsilence(
+                rules, server.ServerId, server.DisplayName,
+                _fleet.All.Select(x => (x.ServerId, x.DisplayName)).ToList());
+            const string listLoading = "the server list is still loading, so an older silence that also covers other servers was kept. Try again in a moment.";
+            if (plan.DeleteRuleIds.Count == 0)
             {
-                StatusText.Text = $"'{server.DisplayName}' is not silenced.";
+                StatusText.Text = plan.ServerListIncomplete
+                    ? $"'{server.DisplayName}' is still silenced: {listLoading}"
+                    : $"'{server.DisplayName}' is not silenced.";
                 return;
             }
 
-            foreach (var rule in silences)
+            /* Replacements first: a failure part-way leaves a server silenced twice, never unsilenced. */
+            foreach (var replacement in plan.CreateRules)
             {
-                await _dataService.DeleteMuteRuleAsync(rule.Id);
+                await _dataService.InsertMuteRuleAsync(replacement);
+                _viewerMuteRules.Add(replacement);
             }
 
-            /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. */
+            foreach (var id in plan.DeleteRuleIds)
+            {
+                await _dataService.DeleteMuteRuleAsync(id);
+            }
+
+            /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. #3570: and
+               drop the silences from the toast filter's set too, so an un-silenced server can toast on the
+               next poll rather than after the next re-read. */
+            _viewerMuteRules.RemoveAll(r => plan.DeleteRuleIds.Contains(r.Id));
+            if (plan.ServerListIncomplete)
+            {
+                /* A legacy silence was kept, so the server is still silenced: leave the bell on. */
+                StatusText.Text = $"'{server.DisplayName}' is still silenced: {listLoading}";
+                return;
+            }
+
             server.SetSilenced(false);
-            StatusText.Text = $"Unsilenced '{server.DisplayName}'.";
+            StatusText.Text = plan.CreateRules.Count == 0
+                ? $"Unsilenced '{server.DisplayName}'."
+                : $"Unsilenced '{server.DisplayName}'; kept {plan.CreateRules.Count} other server(s) that shared its legacy silence silenced, now keyed by server.";
+            if (plan.CreateRules.Count > 0)
+            {
+                ViewerLogger.Info("ServerManagement", StatusText.Text);
+            }
         }
         catch (ViewerReadOnlyException ex)
         {
@@ -572,9 +709,16 @@ public partial class MainWindow
     /// <summary>
     /// Refreshes every server's whole-server-silence indicator (#2031) from the store's mute rules — the
     /// sidebar muted-bell and the context menu's Silence/Unsilence exclusivity both read the resulting
-    /// <see cref="DarlingServer.IsSilenced"/> flag. Rides the alert poll (the same cadence as the badge), over
-    /// the WHOLE fleet like the badge does, so a silence created from another seat (or over MCP) surfaces here
-    /// within a poll tick. Never throws — a broken read must not disturb the refresh loop.
+    /// <see cref="DarlingServer.IsSilenced"/> flag — and, from the SAME read, replaces
+    /// <see cref="_viewerMuteRules"/>, the rule set the tray-toast filter judges polled rows against (#3570).
+    /// One store read serves both because they want the same thing: the rules in force right now, as the store
+    /// has them. Rides the alert poll (the same cadence as the badge), over the WHOLE fleet like the badge does,
+    /// so a rule created from another seat (or over MCP) reaches both the bell and the tray within a poll tick.
+    ///
+    /// <para>Never throws — a broken read must not disturb the refresh loop — and on a failed read the rule set
+    /// is LEFT AS IT WAS rather than emptied: the previous read's rules, plus whatever this viewer wrote since,
+    /// stay in force for the tray until a read succeeds. Emptying it would let one store blip un-mute every
+    /// snoozed toast on this seat, which is the #3354 defect one process over.</para>
     /// </summary>
     private async Task UpdateServerSilencedAsync()
     {
@@ -585,12 +729,34 @@ public partial class MainWindow
 
         try
         {
+            var readStartedUtc = DateTime.UtcNow;
             var rules = await _dataService.GetMuteRulesAsync();
             var active = rules.Where(r => r.Enabled && !r.IsExpired).ToList();
 
+            /* Replace, not merge: the store is the authority. A rule this viewer added locally before this read
+               began is in the store too (persist-then-cache), so it comes back in `rules`; a rule deleted from
+               another seat is absent from `rules` and drops out here, which is the un-mute direction working.
+
+               The one exception is a rule this viewer wrote WHILE the read was in flight. The click handlers
+               run on this same UI thread, so a Snooze can land between the await above and this line; that
+               rule is not in `rules` (the SELECT began before the INSERT) and a plain replace would drop it
+               until the next poll — a one-tick hole in the very guarantee #3570 adds. Every local writer
+               stamps CreatedAtUtc at the click, so "written during this read" is exactly "created at or after
+               the read began", and only THOSE are carried over. A stale rule from a previous read can never
+               pass that test, so a remote delete still lands on this poll. */
+            foreach (var local in _viewerMuteRules)
+            {
+                if (local.CreatedAtUtc >= readStartedUtc && !active.Any(a => a.Id == local.Id))
+                {
+                    active.Add(local);
+                }
+            }
+
+            _viewerMuteRules = active;
+
             foreach (var server in _fleet.All)
             {
-                server.SetSilenced(active.Any(r => ViewerDataService.IsWholeServerSilence(r, server.DisplayName)));
+                server.SetSilenced(active.Any(r => ViewerDataService.IsWholeServerSilence(r, server.ServerId, server.DisplayName)));
             }
         }
         catch (Exception ex)
@@ -633,6 +799,7 @@ public partial class MainWindow
             await LoadServersAsync(preserveSelection: true);
             var msg = $"Added {dialog.AddedCount} server(s)";
             if (dialog.SkippedCount > 0) msg += $", skipped {dialog.SkippedCount} duplicate(s)";
+            if (dialog.CollidedCount > 0) msg += $", {dialog.CollidedCount} collided (id matches another server)";
             if (dialog.FailedCount > 0) msg += $", {dialog.FailedCount} failed";
             StatusText.Text = msg + ". The Darling service will start collecting them on its next reload.";
         }
@@ -801,9 +968,10 @@ public partial class MainWindow
             /* Push the migratable definitions into the store so the service collects them (integrated auth
                travels; a SQL server's secret does not cross machines, so it lands locally only). */
             var pushedToStore = 0;
+            var collidedInStore = 0;
             if (_dataService is not null && !_dataService.IsReadOnly && OperatingSystem.IsWindows())
             {
-                pushedToStore = await ViewerServerMigration.ImportFromStoreAsync(_serverStore, ProfileStore, _dataService);
+                (pushedToStore, collidedInStore) = await ViewerServerMigration.ImportFromStoreAsync(_serverStore, ProfileStore, _dataService);
             }
 
             /* #2434: "Imported N" is a claim about a file, and the registry write behind it can refuse —
@@ -824,6 +992,10 @@ public partial class MainWindow
             if (pushedToStore > 0)
             {
                 message += $"\nAdded {pushedToStore} to the monitored store (the service will collect them on its next reload).";
+            }
+            if (collidedInStore > 0)
+            {
+                message += $"\n{collidedInStore} not added to the monitored store: the id matches a different server already there (see the viewer log).";
             }
             if (copied > 0)
             {

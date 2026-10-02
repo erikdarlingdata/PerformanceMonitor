@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -140,9 +141,121 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The top procedure-stats groups for one server over [<paramref name="startUtc"/>,
     /// <paramref name="endUtc"/>], pre-sorted by total elapsed time descending (the grid's default sort).
+    ///
+    /// <para>#4231 stage 3b: routes to Raw or the hourly rollup exactly as the MCP reader's
+    /// <c>DarlingDataReader.GetTopProceduresByCpuRoutedAsync</c> does — the tier decided over
+    /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (#4231).
+    /// An hourly-routed page carries only what the rollup has: <c>object_type</c>/<c>sql_handle</c>/
+    /// <c>plan_handle</c>/reads/writes/spills columns are unavailable and read as their defaults, exactly the
+    /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. An hourly-routed page
+    /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
+    /// does not add the hour that begins there). Use
+    /// <see cref="GetTopProceduresByCpuTierAsync"/> to also learn which tier answered.</para>
     /// </summary>
     public async Task<List<ViewerProcedureStatsRow>> GetTopProceduresByCpuAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        var (rows, _) = await GetTopProceduresByCpuTierAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        return rows;
+    }
+
+    /// <summary>#4231 stage 3b: <see cref="GetTopProceduresByCpuAsync"/>'s routed form, also returning which
+    /// tier answered ("raw" or "hourly") — the Queries-tab header suffix reads this.</summary>
+    public async Task<(List<ViewerProcedureStatsRow> Rows, string Tier)> GetTopProceduresByCpuTierAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var routedTier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, startUtc, rollups.ProcedureGrainHourly, dailyAvailable: false,
+            coverage.For(TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView));
+        if (routedTier == RetentionTier.Daily)
+        {
+            routedTier = RetentionTier.Hourly;
+        }
+
+        if (routedTier == RetentionTier.Hourly)
+        {
+            var hourlyRows = await GetTopProceduresByCpuHourlyAsync(coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+            return (hourlyRows, "hourly");
+        }
+
+        return (await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw");
+    }
+
+    /// <summary>#4231 stage 3b: the hourly-rollup arm — builds its FROM clause ONLY through
+    /// <see cref="RollupCoverage.StitchedRelationSql"/> (never a literal rollup name), groups by
+    /// <c>(database_name, schema_name, object_name)</c> (the rollup has no object_type), and leaves
+    /// <c>object_type</c>/<c>sql_handle</c>/<c>plan_handle</c>/reads/writes/spills at their defaults — the
+    /// rollup has none of those columns.</summary>
+    private async Task<List<ViewerProcedureStatsRow>> GetTopProceduresByCpuHourlyAsync(
+        RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
+        IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+    {
+        var fromClause = coverage.StitchedRelationSql(
+            TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        var sql = BuildTopProceduresHourlySql(fromClause);
+
+        var rows = new List<ViewerProcedureStatsRow>();
+        await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        AddServerWindowParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new ViewerProcedureStatsRow
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                SchemaName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                ObjectName = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                /* #4231 stage 3b: the rollup has no object_type column. */
+                ObjectType = "",
+                TotalExecutions = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                TotalCpuUs = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                TotalElapsedUs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                MinWorkerTimeUs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                MaxWorkerTimeUs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                MinElapsedTimeUs = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                MaxElapsedTimeUs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+            });
+        }
+
+        return rows;
+    }
+
+    /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
+    /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>): a range whose To is 14:00 sums the
+    /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
+    /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
+    /// test can read the text.</summary>
+    internal static string BuildTopProceduresHourlySql(string fromClause) => $"""
+        SELECT
+            database_name,
+            schema_name,
+            object_name,
+            CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
+            CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
+            MIN(worker_time_min) AS min_worker_time,
+            MAX(worker_time_max) AS max_worker_time,
+            MIN(elapsed_time_min) AS min_elapsed_time,
+            MAX(elapsed_time_max) AS max_elapsed_time
+        FROM {fromClause}
+        WHERE server_id = $1
+        AND   bucket >= $2
+        AND   bucket < $3
+        AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        GROUP BY database_name, schema_name, object_name
+        HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
+        ORDER BY SUM(worker_time_sum) DESC
+        LIMIT $4
+        """;
+
+    /// <summary>The Raw-tier read, unchanged — what <see cref="GetTopProceduresByCpuAsync"/> ran before #4231
+    /// stage 3b added the hourly arm.</summary>
+    private async Task<List<ViewerProcedureStatsRow>> GetTopProceduresByCpuRawAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
         var rows = new List<ViewerProcedureStatsRow>();
 
@@ -190,6 +303,18 @@ public sealed partial class ViewerDataService
 
         return rows;
     }
+
+    /// <summary>
+    /// #4231: the raw floor for <c>procedure_stats</c> over [<paramref name="startUtc"/>,
+    /// <paramref name="endUtc"/>] — the shared probe (<see cref="RawWindowFloor"/>), never a second, hand-copied
+    /// floor query. The Queries tab's <c>LoadTopProceduresAsync</c> reads
+    /// this beside <see cref="GetTopProceduresByCpuAsync"/> so the grid header can disclose a window the raw
+    /// tier no longer fully holds, the same fact <c>get_top_procedures_by_cpu</c> reports over MCP.
+    /// </summary>
+    public Task<DateTime?> GetProcedureStatsWindowFloorAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.ProcedureStats, serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
     /// Top-Procedures comparison — Lite's <c>GetProcedureStatsComparisonAsync</c> ported. Same

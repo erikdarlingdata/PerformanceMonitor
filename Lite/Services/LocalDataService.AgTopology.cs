@@ -50,7 +50,8 @@ SELECT
     synchronization_health_desc,
     availability_mode_desc,
     failover_mode_desc,
-    endpoint_url
+    endpoint_url,
+    group_id
 FROM ag_replica_states AS r
 WHERE r.collection_time = (SELECT MAX(x.collection_time) FROM ag_replica_states AS x WHERE x.server_id = r.server_id)
 ORDER BY r.server_name, r.ag_name, r.replica_server_name";
@@ -75,7 +76,8 @@ SELECT
     is_suspended,
     suspend_reason_desc,
     availability_mode_desc,
-    secondary_lag_seconds
+    secondary_lag_seconds,
+    group_id
 FROM ag_database_replica_states AS d
 WHERE d.collection_time = (SELECT MAX(x.collection_time) FROM ag_database_replica_states AS x WHERE x.server_id = d.server_id)
 ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
@@ -122,6 +124,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
                 AvailabilityModeDesc = AgText(reader, 11),
                 FailoverModeDesc = AgText(reader, 12),
                 EndpointUrl = AgText(reader, 13),
+                GroupId = AgText(reader, 14),
             });
         }
 
@@ -157,6 +160,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
                 SuspendReasonDesc = AgText(reader, 13),
                 AvailabilityModeDesc = AgText(reader, 14),
                 SecondaryLagSeconds = AgCount(reader, 15),
+                GroupId = AgText(reader, 16),
             });
         }
 

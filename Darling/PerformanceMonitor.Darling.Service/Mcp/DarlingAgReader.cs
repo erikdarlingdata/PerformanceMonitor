@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -16,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -34,10 +34,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para><b>Latest collection per server.</b> Each server contributes only the rows from its newest AG collection
 /// (the <c>JOIN ... MAX(collection_time) GROUP BY server_id</c> shape <c>DarlingFleetReader</c> uses for its
-/// latest-snapshot reads). Because the collectors write NO row when a server has no AGs, a server whose AGs were
-/// dropped keeps returning its last non-empty snapshot — so every group carries its
-/// <see cref="AvailabilityGroupView.CollectionTime"/> and the UI shows it, rather than the reader guessing a
-/// staleness threshold.</para>
+/// latest-snapshot reads, now floor-bounded — see <see cref="DarlingAgStatesReader"/>, #4228). Because the
+/// collectors write NO row when a server has no AGs, a server whose AGs were dropped keeps returning its last
+/// non-empty snapshot no matter how old — so every group carries its <see cref="AvailabilityGroupView.CollectionTime"/>
+/// and the UI shows it. <see cref="DarlingAgStatesReader.StalenessHorizon"/> only picks HOW that server's row gets
+/// fetched (its own point read instead of feeding the shared floor); it never gates WHETHER the row comes back.</para>
 ///
 /// <para><b>Banding lives here (R1).</b> Every severity below is derived server-side and serialized with the
 /// result; the browser only maps a severity NAME to a CSS class and never re-derives a threshold. The mappings are
@@ -66,84 +67,14 @@ internal static class DarlingAgReader
         Converters = { new JsonStringEnumConverter() },
     };
 
-    /* ─────────────────────────── SQL (public for dialect pinning) ─────────────────────────── */
+    /* ─────────────────────────── SQL ─────────────────────────── */
 
-    /// <summary>Every replica row from each server's NEWEST AG collection. The inner aggregate picks the latest
-    /// instant per server and the join keeps ALL rows at that instant (not <c>DISTINCT ON</c>, which would keep
-    /// only one replica). Joined to the ENABLED registry, like every other fleet read — a server disabled in the
-    /// control plane leaves the fleet surfaces at once instead of showing stale AG cards until its rows age out.
-    /// $1 an optional server_id filter — NULL means the whole fleet.</summary>
-    public const string ReplicaStatesSql = @"
-SELECT
-    r.server_id,
-    r.server_name,
-    r.collection_time,
-    r.ag_name,
-    r.replica_server_name,
-    r.role_desc,
-    r.is_local,
-    r.operational_state_desc,
-    r.connected_state_desc,
-    r.recovery_health_desc,
-    r.synchronization_health_desc,
-    r.availability_mode_desc,
-    r.failover_mode_desc,
-    r.endpoint_url
-FROM collect.ag_replica_states AS r
-JOIN
-(
-    SELECT server_id, MAX(collection_time) AS max_collection_time
-    FROM collect.ag_replica_states
-    WHERE ($1::integer IS NULL OR server_id = $1)
-    GROUP BY server_id
-) AS latest
-    ON r.server_id = latest.server_id
-    AND r.collection_time = latest.max_collection_time
-JOIN servers AS s
-    ON s.server_id = r.server_id
-    AND s.is_enabled
-WHERE ($1::integer IS NULL OR r.server_id = $1)
-ORDER BY r.server_name, r.ag_name, r.replica_server_name";
-
-    /// <summary>Every database-grain row from each server's NEWEST AG collection, same latest-snapshot shape as
-    /// <see cref="ReplicaStatesSql"/>. Windowed independently of the replica read: the two collectors run as
-    /// separate sweeps, so their newest instants need not coincide. $1 an optional server_id filter — NULL means
-    /// the whole fleet.</summary>
-    public const string DatabaseReplicaStatesSql = @"
-SELECT
-    d.server_id,
-    d.server_name,
-    d.collection_time,
-    d.ag_name,
-    d.database_name,
-    d.replica_server_name,
-    d.is_local,
-    d.synchronization_state_desc,
-    d.last_hardened_lsn,
-    d.last_commit_lsn,
-    d.log_send_queue_size,
-    d.redo_queue_size,
-    d.log_send_rate,
-    d.redo_rate,
-    d.is_suspended,
-    d.suspend_reason_desc,
-    d.availability_mode_desc,
-    d.secondary_lag_seconds
-FROM collect.ag_database_replica_states AS d
-JOIN
-(
-    SELECT server_id, MAX(collection_time) AS max_collection_time
-    FROM collect.ag_database_replica_states
-    WHERE ($1::integer IS NULL OR server_id = $1)
-    GROUP BY server_id
-) AS latest
-    ON d.server_id = latest.server_id
-    AND d.collection_time = latest.max_collection_time
-JOIN servers AS s
-    ON s.server_id = d.server_id
-    AND s.is_enabled
-WHERE ($1::integer IS NULL OR d.server_id = $1)
-ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
+    /// <summary>The statement text and the two-step, floor-bounded read live in
+    /// <see cref="DarlingAgStatesReader"/> (#4228) — the Viewer's AG tab, <c>/api/ag</c> and this tool all call
+    /// the SAME implementation now, so there is one place, not three, that can disagree about what "the newest
+    /// snapshot" means. <see cref="ReadReplicasAsync"/> / <see cref="ReadDatabasesAsync"/> below map its raw rows
+    /// into this file's <see cref="ReplicaRow"/> / <see cref="DatabaseRow"/>, unchanged from before the move, so
+    /// <see cref="Build"/> and everything downstream of it needed no edit.</summary>
 
     /* ─────────────────────────── the read ─────────────────────────── */
 
@@ -156,19 +87,34 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
         NpgsqlDataSource postgres,
         int? serverIdFilter = null,
         DateTime? nowUtc = null,
+        int? limit = null,
         CancellationToken cancellationToken = default)
     {
-        var replicas = await ReadReplicasAsync(postgres, serverIdFilter, cancellationToken);
+        var effectiveNow = nowUtc ?? DateTime.UtcNow;
+        var replicas = await ReadReplicasAsync(postgres, serverIdFilter, effectiveNow, cancellationToken);
 
         /* Short-circuit: no replica rows means no AGs anywhere in scope, and the database-grain table cannot
            hold rows for an AG that has no replicas. The common case (a fleet with no Always On at all) therefore
            costs exactly one indexed read that returns nothing — this read runs on every dashboard poll. */
         var databases = replicas.Count == 0
             ? new List<DatabaseRow>()
-            : await ReadDatabasesAsync(postgres, serverIdFilter, cancellationToken);
+            : await ReadDatabasesAsync(postgres, serverIdFilter, effectiveNow, cancellationToken);
 
-        return Build(replicas, databases, nowUtc ?? DateTime.UtcNow);
+        return Build(replicas, databases, effectiveNow, limit);
     }
+
+    /// <summary>
+    /// The nav-gate probe (#4189): "how many availability groups does this scope have", without building a
+    /// single <see cref="AvailabilityGroupView"/> to answer it — no per-replica columns, no ORDER BY, no
+    /// database-grain read. <see cref="DarlingAgStatesReader.GetReplicaGroupCountAsync"/> in place of the
+    /// topology read <see cref="GetAgHealthAsync"/> runs; that read's own <c>AvailabilityGroupCount</c> is
+    /// exactly this number for the same scope and instant.
+    /// </summary>
+    public static Task<int> GetAvailabilityGroupCountAsync(
+        NpgsqlDataSource postgres,
+        int? serverIdFilter = null,
+        CancellationToken cancellationToken = default) =>
+        DarlingAgStatesReader.GetReplicaGroupCountAsync(postgres, serverIdFilter, DateTime.UtcNow, cancellationToken);
 
     /// <summary>
     /// Assembles the raw rows into per-(server, AG) groups — pure, so the grouping and every band unit-test
@@ -182,7 +128,8 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
     internal static AgHealthResult Build(
         IReadOnlyList<ReplicaRow> replicas,
         IReadOnlyList<DatabaseRow> databases,
-        DateTime nowUtc)
+        DateTime nowUtc,
+        int? limit = null)
     {
         /* Group key is (server_id, ag_name) — one card per reporting server's view of an AG. A NULL ag_name is
            possible under quorum loss (the catalog views fall back to cached metadata); it groups under an empty
@@ -215,11 +162,26 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
                 worst = Worse(worst, database.SynchronizationStateSeverity);
             }
 
+            /* The tie-break magnitude for #4471's cap: the worst (largest) queue-drain signal anywhere in the
+               group — secondary lag if any database reports it, else the bigger of the two queue depths. Used
+               only to order groups that TIE on severity (severity is not banded on lag/queue by design, see the
+               class doc's "What the badge deliberately does NOT band" paragraph), so a page cut by limit drops
+               the least-lagging tied groups first rather than an arbitrary alphabetical tail. */
+            long worstMagnitude = 0;
+            foreach (var database in databaseViews)
+            {
+                worstMagnitude = Math.Max(worstMagnitude, database.SecondaryLagSeconds ?? 0);
+                worstMagnitude = Math.Max(worstMagnitude, Math.Max(database.LogSendQueueKb ?? 0, database.RedoQueueKb ?? 0));
+            }
+
             groups.Add(new AvailabilityGroupView
             {
                 ServerId = first.ServerId,
                 ServerName = first.ServerName,
                 AgName = first.AgName,
+                /* Every replica row of one AG carries the SAME group_id (V151); tolerate a row or two still
+                   NULL mid-upgrade rather than requiring every row in the group to agree. */
+                GroupId = replicaViews.Select(r => r.GroupId).FirstOrDefault(g => !string.IsNullOrWhiteSpace(g)),
                 CollectionTime = first.CollectionTime,
                 DatabaseCollectionTime = dbRows is { Count: > 0 } ? dbRows[0].CollectionTime : null,
                 PrimaryReplica = replicaViews.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName,
@@ -227,33 +189,151 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
                 SeverityLabel = SeverityLabel(worst),
                 Replicas = replicaViews,
                 Databases = databaseViews,
+                WorstMagnitude = worstMagnitude,
             });
         }
 
-        /* Worst-first, then by name — the same "problems surface without scrolling" ordering the fleet roll-up
-           uses, and DESC by severity matches the house grid default. */
+        /* Worst-first, then by the largest lag/queue magnitude, then by name — the same "problems surface without
+           scrolling" ordering the fleet roll-up uses (DESC by severity matches the house grid default), with the
+           magnitude tie-break (#4471) so a page a limit cuts drops the LEAST-lagging tied groups, never the most
+           severe. */
         groups.Sort(CompareGroups);
 
-        return new AgHealthResult
+        var totalGroupCount = groups.Count;
+
+        /* #4474: the caller's limit is an UPPER bound, never a promise — the response still has to fit
+           McpResponseBudget.DefaultBytes. A field-measured 42-group/2-replica/6-14-database fleet answered
+           63,333 characters at the old fixed DefaultGroupLimit=11 (about 2x the 32 KB budget), because 11 was
+           sized from a 2.7 KB/group fixture and real groups ran closer to 6 KB. So the cut is now BYTE-FIT:
+           groups are added one at a time, most-severe-first, and the walk stops before the group that would push
+           the running serialized size past the budget — never after. Each candidate group is serialized exactly
+           ONCE (its own bytes are cached, not re-derived by re-serializing the growing array), so this stays
+           O(n) rather than O(n^2) on a large fleet. */
+        var effectiveLimit = limit is int callerLimit ? Math.Max(0, Math.Min(callerLimit, totalGroupCount)) : totalGroupCount;
+        var candidateGroups = groups.Take(effectiveLimit).ToList();
+
+        /* The envelope's own bytes (everything but the availability_groups array contents) — measured ONCE off
+           an empty-page shell of the real result, so the running total below only has to add each group's own
+           bytes plus its separating comma, not re-serialize the whole growing array every step. */
+        var envelopeBytes = SerializedByteCount(BuildResult(nowUtc, groups, Array.Empty<AvailabilityGroupView>(), 0, false, null));
+
+        var pagedGroups = new List<AvailabilityGroupView>();
+        var runningBytes = envelopeBytes;
+        var budgetCut = false;
+
+        for (var i = 0; i < candidateGroups.Count; i++)
+        {
+            var group = candidateGroups[i];
+            var groupBytes = SerializedByteCount(group);
+            /* Every group after the first pays a comma; the first pays none, so this slightly over-counts a
+               single-group page by one byte rather than under-counting — the safe direction for a budget. */
+            var addedBytes = groupBytes + (pagedGroups.Count == 0 ? 0 : 1);
+
+            if (pagedGroups.Count > 0 && runningBytes + addedBytes > McpResponseBudget.DefaultBytes)
+            {
+                /* Stop BEFORE the group that would cross the budget — but always keep at least 1 group, even
+                   an oversized one, so a single huge AG never reads back as an empty result. */
+                budgetCut = true;
+                break;
+            }
+
+            pagedGroups.Add(group);
+            runningBytes += addedBytes;
+        }
+
+        var limitCut = candidateGroups.Count < totalGroupCount;
+        var groupsTruncated = budgetCut || limitCut;
+
+        /* The note names the actual reason: a caller who passed a small explicit limit is not helped by being
+           told to raise it if what actually cut the page was the byte budget (or the other way around) — #4474's
+           whole point is that the two can now disagree. budgetCut wins the wording when both are true, since
+           raising limit alone would not change the outcome. */
+        string? BuildNote(int returnedCount) =>
+            groupsTruncated
+                ? budgetCut
+                    ? $"TRUNCATED: {totalGroupCount} groups were in scope; only {returnedCount} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget (most severe first, then by the largest lag/queue depth). Scope by server_name to see the rest."
+                    : $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {returnedCount} (most severe first, then by the largest lag/queue depth) are returned. Scope by server_name, or raise limit, to see the rest."
+                : null;
+
+        var groupsTruncatedNote = BuildNote(pagedGroups.Count);
+        var result = BuildResult(nowUtc, groups, pagedGroups, totalGroupCount, groupsTruncated, groupsTruncatedNote);
+
+        /* The fill loop above measures each candidate group against an envelope with NO note (a null,
+           untruncated shell) — but the note itself (and the groups_truncated flag) are only known once the
+           fill decides whether it truncated, so a note that names actual byte counts can itself push the
+           final result over budget. Re-measure the REAL result — the one actually serialized and returned —
+           and drop the last group (rebuilding the note with the new, smaller count each time, since the note's
+           own text changes with the count) while it's still over budget and more than one group remains. This
+           is a tail correction only: the per-group fill above still serializes each candidate exactly once. */
+        while (SerializedByteCount(result) > McpResponseBudget.DefaultBytes && pagedGroups.Count > 1)
+        {
+            pagedGroups.RemoveAt(pagedGroups.Count - 1);
+            groupsTruncated = true;
+            budgetCut = true;
+            groupsTruncatedNote = BuildNote(pagedGroups.Count);
+            result = BuildResult(nowUtc, groups, pagedGroups, totalGroupCount, groupsTruncated, groupsTruncatedNote);
+        }
+
+        return result;
+    }
+
+    /// <summary>Assembles the <see cref="AgHealthResult"/> envelope around a (possibly paged) group list —
+    /// factored out of <see cref="Build"/> so the byte-budget walk above can call it with an EMPTY page to
+    /// measure the envelope's own bytes exactly once, then again with the real page for the response actually
+    /// returned. <paramref name="allGroups"/> is always the FULL sorted set (for the roll-up counts, which
+    /// describe the whole scope, never just the returned page).</summary>
+    private static AgHealthResult BuildResult(
+        DateTime nowUtc,
+        List<AvailabilityGroupView> allGroups,
+        IReadOnlyList<AvailabilityGroupView> pagedGroups,
+        int totalGroupCount,
+        bool groupsTruncated,
+        string? groupsTruncatedNote) =>
+        new()
         {
             /* Naive UTC, like every other instant the API emits — the browser appends the zone itself (R5). */
             GeneratedAt = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified),
-            AvailabilityGroupCount = groups.Count,
-            ReportingServerCount = groups.Select(g => g.ServerId).Distinct().Count(),
-            DistinctAgCount = groups.Select(g => Key(g.AgName)).Distinct(StringComparer.Ordinal).Count(),
-            WorstSeverity = groups.Count == 0 ? HealthSeverity.Unknown : groups.Max(g => g.Severity),
-            AvailabilityGroups = groups,
+            /* #4471: these three roll-up counts (and WorstSeverity below) describe the WHOLE scope, not just the
+               returned page — the same reason findings_truncated's total_finding_count in get_analysis_findings
+               is measured before that tool's own limit cuts. A caller reading distinct_ag_count off a truncated
+               page must still get the fleet's real distinct-AG count, not the page's. */
+            AvailabilityGroupCount = totalGroupCount,
+            ReportingServerCount = allGroups.Select(g => g.ServerId).Distinct().Count(),
+            /* #4475: identity is the AG name plus a CONNECTED COMPONENT over replica-name sets, not the exact
+               set — a real AG monitored from its secondary reports only that secondary's own name (the DMV
+               returns local information only off the primary), so exact-set identity would double-count it.
+               Shares AgTopology's counting helper so the viewer and this read cannot drift back apart. */
+            DistinctAgCount = AgTopology.CountDistinctGroups(
+                allGroups.Select(g => (g.AgName, (IEnumerable<string?>)g.Replicas.Select(r => r.ReplicaServerName), g.GroupId))),
+            WorstSeverity = allGroups.Count == 0 ? HealthSeverity.Unknown : allGroups.Max(g => g.Severity),
+            AvailabilityGroups = pagedGroups,
+            GroupsReturned = pagedGroups.Count,
+            GroupsTotal = totalGroupCount,
+            GroupsTruncated = groupsTruncated,
+            GroupsTruncatedNote = groupsTruncatedNote,
         };
-    }
 
-    /// <summary>Worst severity first, then AG name, then reporting server — so the several perspectives on one AG
-    /// stay adjacent once severity ties.</summary>
+    /// <summary>UTF-8 byte count of <paramref name="value"/> serialized with the shared <see cref="JsonOptions"/>
+    /// — the same encoding the tool actually returns, so the byte-budget walk in <see cref="Build"/> measures
+    /// what a caller really receives rather than a char count or a different serializer's shape.</summary>
+    private static int SerializedByteCount<T>(T value) =>
+        System.Text.Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(value, JsonOptions));
+
+    /// <summary>Worst severity first, then the largest lag/queue magnitude (#4471's cap tie-break — see the
+    /// group-building loop above), then AG name, then reporting server — so the several perspectives on one AG
+    /// stay adjacent once every other key ties.</summary>
     private static int CompareGroups(AvailabilityGroupView a, AvailabilityGroupView b)
     {
         var bySeverity = b.Severity.CompareTo(a.Severity);
         if (bySeverity != 0)
         {
             return bySeverity;
+        }
+
+        var byMagnitude = b.WorstMagnitude.CompareTo(a.WorstMagnitude);
+        if (byMagnitude != 0)
+        {
+            return byMagnitude;
         }
 
         var byName = string.Compare(a.AgName ?? "", b.AgName ?? "", StringComparison.OrdinalIgnoreCase);
@@ -297,6 +377,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
             AvailabilityModeDesc = row.AvailabilityModeDesc,
             FailoverModeDesc = row.FailoverModeDesc,
             EndpointUrl = row.EndpointUrl,
+            GroupId = row.GroupId,
         };
     }
 
@@ -464,87 +545,43 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
 
     /* ─────────────────────────── reads ─────────────────────────── */
 
+    /// <summary>Maps <see cref="DarlingAgStatesReader"/>'s raw rows (#4228) into this file's own
+    /// <see cref="ReplicaRow"/>, field for field, so <see cref="Build"/> and every banding rule below it needed
+    /// no change when the read moved.</summary>
     private static async Task<List<ReplicaRow>> ReadReplicasAsync(
-        NpgsqlDataSource postgres, int? serverIdFilter, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int? serverIdFilter, DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var rows = new List<ReplicaRow>();
-        await using var command = postgres.CreateCommand(ReplicaStatesSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddServerFilter(command, serverIdFilter);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var raw = await DarlingAgStatesReader.GetReplicaStatesAsync(postgres, serverIdFilter, nowUtc, cancellationToken);
+        var rows = new List<ReplicaRow>(raw.Count);
+        foreach (var row in raw)
         {
             rows.Add(new ReplicaRow(
-                reader.GetInt32(0),
-                reader.GetString(1),
-                reader.GetDateTime(2),
-                Text(reader, 3),
-                Text(reader, 4),
-                Text(reader, 5),
-                Flag(reader, 6),
-                Text(reader, 7),
-                Text(reader, 8),
-                Text(reader, 9),
-                Text(reader, 10),
-                Text(reader, 11),
-                Text(reader, 12),
-                Text(reader, 13)));
+                row.ServerId, row.ServerName, row.CollectionTime, row.AgName, row.ReplicaServerName, row.RoleDesc,
+                row.IsLocal, row.OperationalStateDesc, row.ConnectedStateDesc, row.RecoveryHealthDesc,
+                row.SynchronizationHealthDesc, row.AvailabilityModeDesc, row.FailoverModeDesc, row.EndpointUrl,
+                row.GroupId));
         }
 
         return rows;
     }
 
+    /// <summary>Same mapping as <see cref="ReadReplicasAsync"/>, for the database grain.</summary>
     private static async Task<List<DatabaseRow>> ReadDatabasesAsync(
-        NpgsqlDataSource postgres, int? serverIdFilter, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int? serverIdFilter, DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var rows = new List<DatabaseRow>();
-        await using var command = postgres.CreateCommand(DatabaseReplicaStatesSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddServerFilter(command, serverIdFilter);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var raw = await DarlingAgStatesReader.GetDatabaseReplicaStatesAsync(postgres, serverIdFilter, nowUtc, cancellationToken);
+        var rows = new List<DatabaseRow>(raw.Count);
+        foreach (var row in raw)
         {
             rows.Add(new DatabaseRow(
-                reader.GetInt32(0),
-                reader.GetString(1),
-                reader.GetDateTime(2),
-                Text(reader, 3),
-                Text(reader, 4),
-                Text(reader, 5),
-                Flag(reader, 6),
-                Text(reader, 7),
-                Text(reader, 8),
-                Text(reader, 9),
-                Count(reader, 10),
-                Count(reader, 11),
-                Count(reader, 12),
-                Count(reader, 13),
-                Flag(reader, 14),
-                Text(reader, 15),
-                Text(reader, 16),
-                Count(reader, 17)));
+                row.ServerId, row.ServerName, row.CollectionTime, row.AgName, row.DatabaseName, row.ReplicaServerName,
+                row.IsLocal, row.SynchronizationStateDesc, row.LastHardenedLsn, row.LastCommitLsn, row.LogSendQueueSize,
+                row.RedoQueueSize, row.LogSendRate, row.RedoRate, row.IsSuspended, row.SuspendReasonDesc,
+                row.AvailabilityModeDesc, row.SecondaryLagSeconds, row.GroupId));
         }
 
         return rows;
     }
-
-    /// <summary>Binds the optional server filter as a nullable integer — NULL means the whole fleet, which is what
-    /// the SQL's <c>$1::integer IS NULL OR ...</c> guard reads.</summary>
-    private static void AddServerFilter(NpgsqlCommand command, int? serverIdFilter) =>
-        command.Parameters.Add(new NpgsqlParameter
-        {
-            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer,
-            Value = (object?)serverIdFilter ?? DBNull.Value,
-        });
-
-    private static string? Text(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-
-    private static bool? Flag(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetBoolean(ordinal);
-
-    private static long? Count(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : Convert.ToInt64(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
 
     /* ─────────────────────────── raw-read carriers ─────────────────────────── */
 
@@ -563,7 +600,8 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
         string? SynchronizationHealthDesc,
         string? AvailabilityModeDesc,
         string? FailoverModeDesc,
-        string? EndpointUrl);
+        string? EndpointUrl,
+        string? GroupId);
 
     /// <summary>One database-grain row, exactly as <c>collect.ag_database_replica_states</c> stores it. Queue sizes
     /// are KB and rates KB/s (the DMV's units), both instantaneous gauges rather than counters.</summary>
@@ -585,7 +623,8 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
         bool? IsSuspended,
         string? SuspendReasonDesc,
         string? AvailabilityModeDesc,
-        long? SecondaryLagSeconds);
+        long? SecondaryLagSeconds,
+        string? GroupId);
 }
 
 /// <summary>One replica inside a group, pre-banded. Every <c>*_severity</c> is derived server-side (R1).</summary>
@@ -620,6 +659,10 @@ public sealed class AgReplicaView
     [JsonPropertyName("availability_mode")] public string? AvailabilityModeDesc { get; init; }
     [JsonPropertyName("failover_mode")] public string? FailoverModeDesc { get; init; }
     [JsonPropertyName("endpoint_url")] public string? EndpointUrl { get; init; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475). Null on a row collected before
+    /// this column existed.</summary>
+    [JsonPropertyName("group_id")] public string? GroupId { get; init; }
 }
 
 /// <summary>One database-on-a-replica row inside a group, pre-banded.</summary>
@@ -667,6 +710,11 @@ public sealed class AvailabilityGroupView
     [JsonPropertyName("server_id")] public int ServerId { get; init; }
     [JsonPropertyName("ag_name")] public string? AgName { get; init; }
 
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475) — the same GUID the engine stamps
+    /// on every replica of this AG, taken from whichever replica row carried it. Null when every replica row in
+    /// this group predates V151.</summary>
+    [JsonPropertyName("group_id")] public string? GroupId { get; init; }
+
     /// <summary>When the reporting server's newest REPLICA-grain snapshot was taken (naive UTC). The collectors
     /// write nothing for a server with no AGs, so a group that stops refreshing keeps its last instant here —
     /// surfaced rather than silently aged out.</summary>
@@ -686,6 +734,12 @@ public sealed class AvailabilityGroupView
     [JsonPropertyName("severity_label")] public string SeverityLabel { get; init; } = "";
     [JsonPropertyName("replicas")] public IReadOnlyList<AgReplicaView> Replicas { get; init; } = Array.Empty<AgReplicaView>();
     [JsonPropertyName("databases")] public IReadOnlyList<AgDatabaseView> Databases { get; init; } = Array.Empty<AgDatabaseView>();
+
+    /// <summary>#4471's severity-tie tie-break ONLY — the largest secondary_lag_seconds or queue-depth (KB)
+    /// anywhere in the group, never serialized. Lag and queue depth are deliberately NOT banded into severity
+    /// (see the class doc), so this exists purely to order same-severity groups by that raw magnitude before a
+    /// <c>limit</c> cut, rather than let it fall to an arbitrary name sort.</summary>
+    [JsonIgnore] internal long WorstMagnitude { get; init; }
 }
 
 /// <summary>The full AG topology payload — the <c>/api/ag</c> body and the <c>get_ag_health</c> MCP tool's
@@ -701,10 +755,40 @@ public sealed class AgHealthResult
     /// <summary>How many monitored servers reported any AG.</summary>
     [JsonPropertyName("reporting_server_count")] public int ReportingServerCount { get; init; }
 
-    /// <summary>How many distinct <c>ag_name</c>s are represented, collapsing the multiple monitored replicas that
-    /// report the same AG.</summary>
+    /// <summary>How many distinct AGs are represented, by identity (AG name plus replica set, #4475) rather than
+    /// name alone — so two monitored replicas of the SAME AG still collapse to one, but two different AGs that
+    /// happen to share a name (every Amazon RDS for SQL Server Multi-AZ instance's internal <c>RDSAG0</c>) do
+    /// not.</summary>
     [JsonPropertyName("distinct_ag_count")] public int DistinctAgCount { get; init; }
 
     [JsonPropertyName("worst_severity")] public HealthSeverity WorstSeverity { get; init; }
     [JsonPropertyName("availability_groups")] public IReadOnlyList<AvailabilityGroupView> AvailabilityGroups { get; init; } = Array.Empty<AvailabilityGroupView>();
+
+    /// <summary>#4471: how many groups this response actually carries in <see cref="AvailabilityGroups"/> —
+    /// <see cref="GroupsTotal"/> when nothing was cut, or the caller's <c>limit</c> otherwise.</summary>
+    [JsonPropertyName("groups_returned")] public int GroupsReturned { get; init; }
+
+    /// <summary>#4471: how many (reporting server, AG) groups the scope held BEFORE the <c>limit</c> cut —
+    /// identical to <see cref="AvailabilityGroupCount"/>, carried under its own name so a caller reading this
+    /// tool's truncation trio (<see cref="GroupsReturned"/>/<see cref="GroupsTotal"/>/<see cref="GroupsTruncated"/>)
+    /// never has to cross-reference a differently-named field for the same number.</summary>
+    [JsonPropertyName("groups_total")] public int GroupsTotal { get; init; }
+
+    /// <summary>#4471: true when <see cref="GroupsTotal"/> exceeded the caller's <c>limit</c> and the tail — the
+    /// least severe, then least-lagging — was cut. Scope by <c>server_name</c> or raise <c>limit</c> to see the
+    /// rest; the most severe groups are always the ones kept.</summary>
+    [JsonPropertyName("groups_truncated")] public bool GroupsTruncated { get; init; }
+
+    /// <summary>Null unless <see cref="GroupsTruncated"/> — the same shape as <c>get_analysis_findings</c>'
+    /// <c>findings_truncated_note</c>, spelling out the cut and the fix instead of leaving a caller to infer one
+    /// from the bare flag.</summary>
+    [JsonPropertyName("groups_truncated_note")] public string? GroupsTruncatedNote { get; init; }
+}
+
+/// <summary>The <c>/api/ag/count</c> body (#4189) — the one field <see cref="AgHealthResult.AvailabilityGroupCount"/>
+/// carries, under the same name, so <c>refreshAgNav</c> reads it without fetching the topology that field lives
+/// inside.</summary>
+public sealed class AvailabilityGroupCountResult
+{
+    [JsonPropertyName("availability_group_count")] public int AvailabilityGroupCount { get; init; }
 }

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -31,12 +32,22 @@ public partial class AvailabilityGroupsTab : UserControl
     private LocalDataService? _dataService;
     private bool _loading;
 
+    /// <summary>The one long-lived card collection AgCards is ever bound to (#4238) — a refresh reconciles this
+    /// in place through <see cref="AgTopology.Reconcile{TItem,TKey}"/> rather than replacing it, so an unchanged
+    /// AG's realized container survives the refresh.</summary>
+    private readonly ObservableCollection<AgTopologyCard> _cards = new();
+
+    /// <summary>The last render's fingerprint (<see cref="AgTopology.ComputeDigest"/>). A refresh whose rows hash
+    /// the same skips reconciling and re-binding entirely.</summary>
+    private int? _lastDigest;
+
     /// <summary>True once a load has seen at least one AG — the shell's cue to reveal the tab.</summary>
     public bool HasAvailabilityGroups { get; private set; }
 
     public AvailabilityGroupsTab()
     {
         InitializeComponent();
+        AgCards.ItemsSource = _cards;
     }
 
     /// <summary>Wires the data service. Nothing is read until the first refresh.</summary>
@@ -60,7 +71,17 @@ public partial class AvailabilityGroupsTab : UserControl
         _loading = true;
         try
         {
-            Render(await _dataService.GetAgTopologyAsync());
+            var cards = await _dataService.GetAgTopologyAsync();
+
+            /* Same rows as the last render — skip reconciling and re-binding entirely (#4238). */
+            var digest = AgTopology.ComputeDigest(cards);
+            if (_lastDigest == digest)
+            {
+                return;
+            }
+
+            _lastDigest = digest;
+            Render(cards);
         }
         catch (Exception ex)
         {
@@ -73,13 +94,18 @@ public partial class AvailabilityGroupsTab : UserControl
         }
     }
 
-    private void Render(List<AgTopologyCard> cards)
+    /// <summary>Applies a freshly read topology to the tab. <c>internal</c> so tests can drive it directly with
+    /// constructed card lists (#4238), the same way <see cref="BuildSummary"/> already is.</summary>
+    internal void Render(List<AgTopologyCard> cards)
     {
         HasAvailabilityGroups = cards.Count > 0;
 
-        AgCards.ItemsSource = cards;
+        /* Reconciled in place, keyed by (reporting server, AG): an unchanged AG keeps its card instance (and so
+           its realized WPF container); only a topology change adds or removes one (#4238). */
+        AgTopology.Reconcile(_cards, cards, AgTopology.CardKey, static (existing, updated) => existing.UpdateFrom(updated));
+
         EmptyState.Visibility = cards.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        CardScroller.Visibility = cards.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        AgCards.Visibility = cards.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
         SummaryText.Text = BuildSummary(cards);
     }
 

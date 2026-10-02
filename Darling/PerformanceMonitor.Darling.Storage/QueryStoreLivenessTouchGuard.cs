@@ -125,12 +125,21 @@ public static class QueryStoreLivenessTouchGuard
     /// proportional to the width, so this divisor is also, to within the arrival pattern, the divisor on that
     /// rate.</para>
     ///
-    /// <para>A quarter leaves 4x headroom inside the margin for the collection cadence, for clock skew
-    /// between the service and the store, and for a sweep that runs late. There is no measurement that
-    /// prefers 4 to 3 or to 6; it is a safety factor, and it is stated as one so nobody reads the width
-    /// below as a measured quantity.</para>
+    /// <para><b>#4250: measured at the PREVIOUS divisor (4, a 6-hour guard)</b> on one production store — the
+    /// Query Store-ingesting store, a steady window with no restart inside — <c>query_store_plan_map</c> and
+    /// <c>query_store_text</c> together took about 163 K touches an hour, 3.9 M a day, all non-HOT, which was
+    /// roughly 13.5% of that store's WAL in the window. That is the cost a wider guard buys back, and it is
+    /// why the divisor moved to 2.</para>
+    ///
+    /// <para>Half leaves 2x headroom inside the NAMED one-day margin for the collection cadence, clock skew
+    /// between the service and the store, and a sweep that runs late — and a full 4x against the WORST-CASE
+    /// room: swept over the shipped retention arithmetic (dim-feeding retention floored at 1 day, the
+    /// plan-content knob off), the least room any reachable configuration leaves is TWO days, and 12 hours
+    /// still fits inside that floor 4 times. There is no measurement that prefers 2 to 1 or to 3; it is a
+    /// safety factor informed by, but not derived from, the write-volume measurement above, and it is stated
+    /// as one so nobody reads the width below as a measured quantity.</para>
     /// </summary>
-    public const int MarginShareDivisor = 4;
+    public const int MarginShareDivisor = 2;
 
     /// <summary>
     /// The guard width in hours: <see cref="StampSkewMarginHours"/> divided by

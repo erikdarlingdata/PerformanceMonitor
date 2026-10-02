@@ -58,6 +58,12 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
 
     public int BlockingWaitSecondsThreshold => App.AlertBlockingWaitSecondsThreshold;
     public int DeadlockCountThreshold => App.AlertDeadlockThreshold;
+    /* #3653 (A8e): Lite has no deadlock-rate knob, so the engine grades on the shipped pair — the same
+       pair Lite's own fleet card and Performance Calendar band on (DeadlockRateThresholds.Default). Not a
+       new setting: a Lite operator who wants the card's tiers moved has no surface for that today either,
+       and inventing one here would put a knob under the alert that the card does not honour. */
+    public DeadlockRateThresholds DeadlockRateThresholds => DeadlockRateThresholds.Default;
+    /* #3539 A4: pass-through of a knob the engine no longer reads — see the interface member's doc. */
     public int PoisonWaitThresholdMs => App.AlertPoisonWaitThresholdMs;
     public int LongRunningQueryThresholdMinutes => App.AlertLongRunningQueryThresholdMinutes;
 
@@ -68,6 +74,10 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool LongRunningQueryExcludeBackups => App.AlertLongRunningQueryExcludeBackups;
     public bool LongRunningQueryExcludeMiscWaits => App.AlertLongRunningQueryExcludeMiscWaits;
     public bool LongRunningQueryExcludeCdc => App.AlertLongRunningQueryExcludeCdc;
+    /* #3653 (A5, Q5): the opt-out knob, two settings.json arrays seeded with the production read's defaults (App
+       says how absent vs present-and-empty are told apart); the engine normalises them on read. */
+    public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes => App.AlertLongRunningQueryExcludedProgramNamePrefixes;
+    public IReadOnlyList<string> LongRunningQueryExcludedLogins => App.AlertLongRunningQueryExcludedLogins;
 
     public int TempDbSpaceThresholdPercent => App.AlertTempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => App.AlertLowDiskThresholdPercent;
@@ -80,6 +90,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public int DiskCriticalFreePercent => App.AlertDiskCriticalFreePercent;
     public int DiskCriticalFreeGb => App.AlertDiskCriticalFreeGb;
     public int SelfDiskFreeWarnPercent => 10;
+    public int SelfDiskFreeWarnGb => 50;
     public int CollectionStaleMinutes => ServerHealthThresholds.CollectionStoppedMinutesDefault;
     public int CollectionFailureThreshold => 10;
     public int PvsThresholdPercent => App.AlertPvsThresholdPercent;
@@ -87,7 +98,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
 
     /* #2349: the file-growth gates, same clamps as Darling's adapter so the two SKUs cannot disagree about
        what a threshold means. Zero disables one gate rather than being nonsense, so rise-only or level-only
-       needs no second switch. */
+       needs no second switch. The rise is MB per HOUR averaged over the lookback (#3539 A8c). */
     public bool FileGrowthEnabled => App.AlertFileGrowthEnabled;
     public int FileGrowthRiseMb => Math.Max(0, App.AlertFileGrowthRiseMb);
     public int FileGrowthVolumePercent => Math.Clamp(App.AlertFileGrowthVolumePercent, 0, 100);

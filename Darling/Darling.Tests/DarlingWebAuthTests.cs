@@ -103,6 +103,16 @@ public sealed class DarlingWebAuthTests
     [InlineData("\n//evil.com", "/evil.com")]           // LF variant
     [InlineData("/\r\n/evil.com", "/evil.com")]         // CRLF variant
     [InlineData("/dead\tlocks", "/deadlocks")]          // controls are stripped, the rest survives
+    /* #4221: alert links are hash routes ({publicBaseUrl}/#/triage?...), so a return value now routinely
+       carries a fragment. These pin that a fragment changes nothing about the open-redirect guard — the
+       hostile forms above still collapse to a single-slash site-relative path with the fragment along for
+       the ride, and a legitimate hash route passes through byte for byte. */
+    [InlineData("//evil.example/#/x", "/evil.example/#/x")]                       // protocol-relative + fragment -> still collapsed
+    [InlineData("/\\evil.example", "/evil.example")]                              // slash-backslash trick, unchanged shape from above
+    [InlineData("https://evil.example/#/triage", "/https://evil.example/#/triage")] // absolute URL -> becomes an inert site-relative path
+    [InlineData("javascript:alert(1)", "/javascript:alert(1)")]                   // javascript: scheme -> inert path, not executed
+    [InlineData("javascript://alert(1)#/x", "/javascript://alert(1)#/x")]         // javascript: + fake authority + fragment -> still inert
+    [InlineData("/#/triage?server=a&metric=b", "/#/triage?server=a&metric=b")]    // a real alert route survives unchanged
     public void SanitizeRedirectPath_ForcesSingleSlashSiteRelative(string input, string expected)
         => Assert.Equal(expected, DarlingWebHostService.SanitizeRedirectPath(input));
 
@@ -363,5 +373,30 @@ public sealed class DarlingWebAuthTests
         /* The placeholder must not leak into either rendering. */
         Assert.DoesNotContain("<!--SSO-->", withOidc, StringComparison.Ordinal);
         Assert.DoesNotContain("<!--SSO-->", withoutOidc, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4221: alert links are hash routes, and the server never sees the fragment — only client script can
+    /// carry it through sign-in. Both legs must build their <c>return</c> value from
+    /// <c>location.hash</c> too, not just <c>pathname + search</c>, or the recipient lands on Fleet Overview
+    /// instead of the alert.
+    /// </summary>
+    [Fact]
+    public void LoginPage_ReturnValues_CarryLocationHash()
+    {
+        var withOidc = DarlingWebHostService.BuildLoginPageHtml(oidcEnabled: true);
+        var withoutOidc = DarlingWebHostService.BuildLoginPageHtml(oidcEnabled: false);
+
+        /* The SSO anchor's return= is built only when OIDC is enabled (the fragment splice above). */
+        Assert.Contains("location.pathname + location.search + location.hash", withOidc, StringComparison.Ordinal);
+
+        /* The token form's hidden return field is unconditional — it is in the base LoginPageHtml, not the
+           OIDC-only fragment. */
+        Assert.Contains("name='return'", withOidc, StringComparison.Ordinal);
+        Assert.Contains("name='return'", withoutOidc, StringComparison.Ordinal);
+        Assert.Contains("document.getElementById('return').value = location.pathname + location.search + location.hash;",
+            withOidc, StringComparison.Ordinal);
+        Assert.Contains("document.getElementById('return').value = location.pathname + location.search + location.hash;",
+            withoutOidc, StringComparison.Ordinal);
     }
 }

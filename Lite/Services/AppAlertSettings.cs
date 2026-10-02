@@ -53,6 +53,12 @@ public sealed class AppAlertSettings : IAlertSettings
 
     public double AnalysisNotifySeverity        => App.AnalysisNotifySeverity;
     public int    AnalysisNotifyCooldownMinutes => App.AnalysisNotifyCooldownMinutes;
+    /* #3916: the analysis page cap per hold-back window is Lite's per-event cap (default 10). */
+    public int    AnalysisPageCap               => Math.Clamp(App.AlertPerEventMaxPerCycle, 1, 100);
+
+    /// <summary>#3712: Lite's live value for the one routing knob — overriding the interface's shipped default
+    /// so the Settings window's choice reaches the gate on the next analysis pass, no restart.</summary>
+    public FindingRoute UncorroboratedFindingRoute => App.AnalysisUncorroboratedRoute;
 
     /* #2710: Lite serves no web dashboard, so there is no triage page to link to — empty is the honest
        constant, and the shared webhook service omits the link on every channel because of it. */

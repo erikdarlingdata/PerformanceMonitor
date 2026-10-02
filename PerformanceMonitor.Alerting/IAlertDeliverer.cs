@@ -91,4 +91,37 @@ public interface IAlertDeliverer
     /// must not throw for channel failures — a dead SMTP server must not abort the engine's sweep.
     /// </summary>
     Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// <see cref="DeliverAsync"/>, and then SAYS what the channels did (#3580): the
+    /// <see cref="AlertDelivery"/> the deliverer recorded on the alert's history row, or <c>null</c> when it
+    /// has no single answer to give.
+    ///
+    /// <para><b>Why a second method rather than a return value on the first.</b> The never-throws contract
+    /// above is deliberate and stays: a channel fault is the deliverer's to record, not the engine's to
+    /// handle, and every condition-class alert wants exactly that. The two DOCUMENT-class self-alerts (the
+    /// collector-cost digest and the fleet-sweep rollup) are the exception, because their once-a-day gate
+    /// has to answer "was one delivered today" and not "did this process fire one today" — on the v3.8.0
+    /// install night three service restarts re-announced both documents on every store, six re-posts among
+    /// ~23 channel posts, while the one pair whose delivery had genuinely FAILED was correctly re-attempted
+    /// after the restart. Distinguishing those two cases needs the disposition at the fire site, and
+    /// nothing else on the engine's side does; so the report rides a separate method. The two
+    /// document-class self-alerts needed the answer first, for the reason above. Since #4752 the engine's
+    /// own <c>AlertEngine.FireAsync</c> asks on every fire too, so a fire that no channel delivered can be
+    /// tried again: a condition-class family reads a fire whose every channel failed
+    /// (<see cref="AlertDelivery.Sent"/> false with a <see cref="AlertDelivery.SendError"/> set) and retries
+    /// it after 1, 2, 4 ... minutes, never later than the family's own cooldown. <c>null</c> still reads as
+    /// delivered, and <see cref="DeliverAsync"/> stays for a caller that needs no answer.</para>
+    ///
+    /// <para><b>Required, not defaulted — CONTRIBUTING's Two-Store Parity rule, which names this interface.</b>
+    /// A default body here would have compiled, and would have left Lite's deliverer and fourteen test fakes
+    /// quietly inheriting an answer nobody wrote down. So every implementer states its answer: Darling's
+    /// deliverer reports the disposition its history row was written with, and since #4752 Lite's reports the
+    /// disposition its send returned, though Lite hosts neither daily document; each fake states its own
+    /// answer. <c>null</c> means "unreported", never "failed" — every asker treats it the way every
+    /// fire before #3580 was treated, as delivered — and a deliverer that KNOWS a send failed reports
+    /// <see cref="AlertDelivery.ChannelFailed"/>, the one disposition the two document askers withhold their
+    /// delivered-today stamp on.</para>
+    /// </summary>
+    Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default);
 }

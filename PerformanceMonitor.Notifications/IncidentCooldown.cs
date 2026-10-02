@@ -85,6 +85,17 @@ public sealed class IncidentCooldown
                successful send or because the seed answered with a real one. The freshness test discards
                that distinction, and #3430's aggregate ceiling turns on it. */
             var everSent = _cooldowns.TryGetValue(key, out var last);
+            if (everSent && last > now)
+            {
+                /* #4732: a send time AHEAD of the clock (it stepped back since the send, or the seed above read a
+                   history row from before the step) is replaced by this reading and counted from there, so the
+                   repeat is due one window after the first evaluation that sees the step, not the step plus the
+                   window. Compare-and-swap: a Stamp that landed meanwhile is newer than either. (This assembly
+                   does not reference PerformanceMonitor.Common, where LastFiredStamp holds the rule for maps.) */
+                _cooldowns.TryUpdate(key, now, last);
+                last = now;
+            }
+
             var fresh = !everSent || now - last >= window;
             if (fresh)
                 anyFresh = true;

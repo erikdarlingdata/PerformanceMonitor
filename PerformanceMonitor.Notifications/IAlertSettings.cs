@@ -91,6 +91,31 @@ public interface IAlertSettings
     int    AnalysisNotifyCooldownMinutes { get; }
 
     /// <summary>
+    /// The most analysis PAGE incidents one hold-back window may deliver as individual messages (#3916). A
+    /// window holding more collapses into ONE summary naming every incident — so a restart or install burst
+    /// (every story re-paging at once across the fleet) arrives as one message, not dozens. Each SKU maps its
+    /// existing per-event cap: Darling <c>alerts.perEventMax</c> (default 5), Lite
+    /// <c>App.AlertPerEventMaxPerCycle</c> (default 10), Dashboard <c>UserPreferences.AlertPerEventMaxPerCycle</c>
+    /// (default 10). Clamped 1–100 at each adapter.
+    /// </summary>
+    int    AnalysisPageCap { get; }
+
+    /// <summary>
+    /// Where an UNCORROBORATED analysis finding goes (#3712) — <c>analysis.uncorroborated_route</c>: a lone
+    /// fact with no second fact in its chain and no matched co-fire check. <see cref="FindingRoute.Digest"/>
+    /// (shipped) keeps it off the paging channels and puts it in the daily digest and the web/MCP surfaces;
+    /// <see cref="FindingRoute.Page"/> restores the pre-#3712 behaviour where every notify-worthy finding
+    /// pages. A CORROBORATED finding pages under either value — the knob moves only the uncorroborated arm.
+    /// See <see cref="FindingRouting.Classify(PerformanceMonitor.Analysis.AnalysisFinding, FindingRoute)"/>.
+    ///
+    /// <para>Defaulted on the interface rather than declared abstract, on <see cref="NotificationRoutes"/>'
+    /// precedent and for the same reason: the default IS the ruling, so an adapter that does not implement
+    /// this member has opted into nothing but the shipped behaviour. Darling reads it from darling.json
+    /// (<c>analysis.uncorroboratedRoute</c>); Lite from its settings file.</para>
+    /// </summary>
+    FindingRoute UncorroboratedFindingRoute => FindingRoute.Digest;
+
+    /// <summary>
     /// The externally reachable base URL of the app's own web dashboard (#2710) — e.g.
     /// <c>http://10.0.0.5:5153</c> — used ONLY to build the per-alert triage-page link every webhook channel
     /// carries (<see cref="TriageLink.Build"/>). Empty means "no link" and every payload renders exactly as it
@@ -101,4 +126,18 @@ public interface IAlertSettings
     /// NOT a store column and survives store config reloads); Lite serves no web page and always returns empty.
     /// </summary>
     string TriageBaseUrl { get; }
+
+    /// <summary>
+    /// The sparse notification routes layered over the per-channel destinations above (#3598): a family or
+    /// exact-metric match with a destination per channel type, empty meaning "inherit the member above".
+    /// Resolved by <see cref="NotificationRouter.Resolve"/> once per firing, after the cooldown decision, in
+    /// both the email path and the webhook fan-out. A live read like every other member, so a store reload
+    /// that swaps the route list is honored on the next firing with no restart.
+    ///
+    /// <para>Defaulted to EMPTY on the interface rather than declared abstract, deliberately: an empty list
+    /// resolves every channel to the parent default and the fan-out is byte-identical to the pre-routes
+    /// one, so an adapter that does not implement this member has opted out of nothing — Lite has no
+    /// routes table and its adapter takes this default. Only Darling's store-backed adapter overrides it.</para>
+    /// </summary>
+    System.Collections.Generic.IReadOnlyList<NotificationRoute> NotificationRoutes => System.Array.Empty<NotificationRoute>();
 }

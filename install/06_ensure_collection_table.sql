@@ -107,6 +107,79 @@ BEGIN
                 END;
             END;
 
+            /*
+            Schema upgrade: perfmon_stats.cntr_value_per_second from integer to real division
+
+            #3653 (#3540 A11): the computed column shipped as cntr_value_delta / NULLIF(sample_interval_seconds, 0)
+            (bigint / integer), and T-SQL integer division truncates, so every rate under one event per second
+            read as 0. The install-time copy of this block at the bottom of this file converges existing installs
+            when the installer re-runs; this copy is the runtime path for a caller that asks this procedure to
+            ensure a table that already exists.
+
+            Guard predicate: the column exists in sys.computed_columns and its type is an integer type. That is
+            the defect itself (integer division yields an integer-typed column) rather than a text match on the
+            stored definition, whose spelling SQL Server normalises and may change between versions. The real
+            division yields numeric(33,12), so a converged column never matches and a second run is a no-op.
+
+            Drop and re-add are guarded separately so an interrupted run (dropped, then failed before re-add)
+            converges on the next run instead of leaving the column missing. The column is non-persisted and
+            nothing indexes it, no view is schema-bound to it (install/47 and 48 carry no SCHEMABINDING), and
+            no CREATE STATISTICS names it, so both statements are metadata-only and complete instantly.
+            */
+            IF @table_name = N'perfmon_stats'
+            BEGIN
+                IF EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM sys.computed_columns AS cc
+                    WHERE cc.object_id = OBJECT_ID(N'collect.perfmon_stats')
+                    AND   cc.name = N'cntr_value_per_second'
+                    AND   TYPE_NAME(cc.system_type_id) IN (N'bigint', N'int', N'smallint', N'tinyint')
+                )
+                BEGIN
+                    EXECUTE sys.sp_executesql
+                        N'ALTER TABLE collect.perfmon_stats DROP COLUMN cntr_value_per_second;';
+
+                    IF @debug = 1
+                    BEGIN
+                        RAISERROR(N'Dropped integer-division cntr_value_per_second from %s', 0, 1, @full_table_name) WITH NOWAIT;
+                    END;
+                END;
+
+                IF NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM sys.columns AS c
+                    WHERE c.object_id = OBJECT_ID(N'collect.perfmon_stats')
+                    AND   c.name = N'cntr_value_per_second'
+                )
+                BEGIN
+                    EXECUTE sys.sp_executesql
+                        N'ALTER TABLE collect.perfmon_stats ADD cntr_value_per_second AS (cntr_value_delta * 1.0 / NULLIF(sample_interval_seconds, 0));';
+
+                    IF @debug = 1
+                    BEGIN
+                        RAISERROR(N'Re-added cntr_value_per_second to %s as real division', 0, 1, @full_table_name) WITH NOWAIT;
+                    END;
+
+                    INSERT INTO
+                        config.collection_log
+                    (
+                        collector_name,
+                        collection_status,
+                        error_message
+                    )
+                    VALUES
+                    (
+                        N'ensure_collection_table',
+                        N'SCHEMA_UPGRADE',
+                        N'Redefined cntr_value_per_second on ' + @full_table_name + N' as real division (#3653)'
+                    );
+                END;
+            END;
+
             RETURN;
         END;
 
@@ -784,10 +857,10 @@ BEGIN
         /*Delta column calculated by framework for cumulative counters*/
         cntr_value_delta bigint NULL,
         sample_interval_seconds integer NULL,
-        /*Analysis helper - per-second rate*/
+        /*Analysis helper - per-second rate. #3653: * 1.0 for real division (numeric(33,12)), matches install/02; the upgrade block above converges existing tables*/
         cntr_value_per_second AS
         (
-            cntr_value_delta /
+            cntr_value_delta * 1.0 /
               NULLIF(sample_interval_seconds, 0)
         ),
         CONSTRAINT PK_perfmon_stats PRIMARY KEY CLUSTERED (collection_time, collection_id) WITH (DATA_COMPRESSION = PAGE)
@@ -1394,5 +1467,57 @@ AND NOT EXISTS
 BEGIN
     ALTER TABLE collect.deadlock_xml ADD is_processed bit NOT NULL DEFAULT 0;
     PRINT 'Added is_processed column to collect.deadlock_xml';
+END;
+GO
+
+/*
+Schema upgrade: perfmon_stats.cntr_value_per_second from integer to real division (#3653, #3540 A11)
+
+The computed column shipped as cntr_value_delta / NULLIF(sample_interval_seconds, 0). Both operands are
+integer types, so T-SQL performed integer division: seven batch requests over a 60-second interval read as
+0 per second, every counter running under one event per second was a flat zero, and
+report.daily_summary_v2's throughput rows averaged those zeros. install/02 now creates the column as
+cntr_value_delta * 1.0 / NULLIF(sample_interval_seconds, 0) (numeric(33,12)); this block converges an
+existing install to the same shape. It runs here, during installation, for the same reason the is_processed
+blocks above do: install/47 re-creates the view that averages this column later in the same run, and the
+run order (06 before 47) means the view is always compiled against the converged column.
+
+Guard: the column exists in sys.computed_columns AND its type is an integer type. Integer division yields
+an integer-typed column, so the type IS the defect; the real division yields numeric, so a converged
+column never matches and re-running this script is a no-op. The drop and the re-add are guarded
+independently so an interrupted run converges on the next one rather than leaving the column missing.
+
+Metadata-only: the column is non-persisted (is_persisted = 0), no index includes it, no view is
+schema-bound to it, and no user statistics name it, so neither ALTER touches a data page. The
+config.ensure_collection_table procedure above carries the same block for the runtime path.
+*/
+IF OBJECT_ID(N'collect.perfmon_stats', N'U') IS NOT NULL
+AND EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.computed_columns AS cc
+    WHERE cc.object_id = OBJECT_ID(N'collect.perfmon_stats')
+    AND   cc.name = N'cntr_value_per_second'
+    AND   TYPE_NAME(cc.system_type_id) IN (N'bigint', N'int', N'smallint', N'tinyint')
+)
+BEGIN
+    ALTER TABLE collect.perfmon_stats DROP COLUMN cntr_value_per_second;
+    PRINT 'Dropped integer-division cntr_value_per_second from collect.perfmon_stats (#3653)';
+END;
+GO
+
+IF OBJECT_ID(N'collect.perfmon_stats', N'U') IS NOT NULL
+AND NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.columns AS c
+    WHERE c.object_id = OBJECT_ID(N'collect.perfmon_stats')
+    AND   c.name = N'cntr_value_per_second'
+)
+BEGIN
+    ALTER TABLE collect.perfmon_stats ADD cntr_value_per_second AS (cntr_value_delta * 1.0 / NULLIF(sample_interval_seconds, 0));
+    PRINT 'Re-added collect.perfmon_stats.cntr_value_per_second as real division (#3653)';
 END;
 GO

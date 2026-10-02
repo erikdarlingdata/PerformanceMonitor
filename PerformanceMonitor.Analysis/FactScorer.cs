@@ -10,11 +10,50 @@ namespace PerformanceMonitor.Analysis;
 ///
 /// Layer 1: Base severity 0.0-1.0 from thresholds alone.
 /// Layer 2: Amplifiers multiply base up to 2.0 max using corroborating facts.
+/// Layer 3: Tuning-class keys (parallelism, high-DOP queries, the routine ANOMALY_* case) are capped at
+/// the WARNING ceiling unless an impact peer co-fired or, for an anomaly, its own deviation is extreme.
 ///
 /// Formula: severity = min(base * (1.0 + sum(amplifiers)), 2.0)
 /// </summary>
 public class FactScorer
 {
+    /// <summary>
+    /// The source registry: every <see cref="Fact.Source"/> value a collector on either SKU emits, in the
+    /// spelling the facts carry (#3541 A13).
+    ///
+    /// <para><b>Why a registry exists at all.</b> Sources were only ever string literals — in the collectors
+    /// that stamp them, in the switch below that scores them, and in the four the <c>get_analysis_facts</c>
+    /// description happened to mention ("waits, blocking, config, memory") out of the fifteen that exist. A
+    /// caller filtering on any of the other eleven got <c>[]</c>, which reads as "no facts of that kind" for
+    /// a value that could never have matched. The MCP tools now publish THIS list as the accepted set and
+    /// refuse anything outside it; the analysis-side tests pin it against every <c>Source = "..."</c> literal
+    /// in the three collector assemblies AND against the switch arms below, so a new source that lands in a
+    /// collector without landing here fails a test rather than becoming the sixteenth silent value.</para>
+    ///
+    /// <para>Sorted, and kept sorted, because the list is published verbatim in a refusal message and a
+    /// description on both SKUs. <c>coverage</c> and <c>sessions</c> are emitted but not scored (they carry
+    /// context, base severity 0); they are still filterable, so they are still members. <c>perfmon</c> is
+    /// named in the amplifier context set below but no collector emits it, so it is NOT a member — a filter
+    /// on it would always be empty, which is the outcome this registry exists to refuse.</para>
+    ///
+    /// <para>The fourteen <c>pg_</c> members (eleven from #3542 v1, three from #3691 v2) are the PostgreSQL-TARGET vocabulary (D2), declared in
+    /// <see cref="PgTargetSources"/> and registered here the day they were declared — before any content lane
+    /// emits one — so the D2 rule (a PostgreSQL fact can never wear a SQL Server source) is enforced by the same
+    /// sweep that guards the rest of the list rather than by convention.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> KnownSources = new[]
+    {
+        "anomaly", "bad_actor", "blocking", "config", "coverage", "cpu", "database_config", "disk", "io",
+        "jobs", "memory",
+        PgTargetSources.BloatSource, PgTargetSources.BlockingSource, PgTargetSources.BufferSource, PgTargetSources.ConfigSource,
+        PgTargetSources.CpuSource, PgTargetSources.DatabaseSource, PgTargetSources.GrowthSource, PgTargetSources.IoSource,
+        PgTargetSources.KernelSource, PgTargetSources.MemorySource, PgTargetSources.PlansSource,
+        PgTargetSources.PostureSource, PgTargetSources.QueriesSource, PgTargetSources.ReplicationSource,
+        PgTargetSources.SessionsSource, PgTargetSources.TempSource, PgTargetSources.VacuumSource,
+        PgTargetSources.WaitsSource, PgTargetSources.WriteSource,
+        "queries", "sessions", "tempdb", "waits",
+    };
+
     /// <summary>
     /// Scores all facts: Layer 1 (base severity), then Layer 2 (amplifiers).
     /// </summary>
@@ -38,6 +77,9 @@ public class FactScorer
                 "disk" => ScoreDiskFact(fact),
                 "bad_actor" => ScoreBadActorFact(fact),
                 "anomaly" => ScoreAnomalyFact(fact),
+                /* #3542 D2: the PostgreSQL-target vocabulary is pg_-prefixed precisely so it lands in ONE
+                   arm and never in any of the SQL Server ones above; PgTargetScorer routes it per source. */
+                _ when PgTargetSources.IsPgSource(fact.Source) => PgTargetScorer.ScoreBase(fact),
                 _ => 0.0
             };
         }
@@ -46,6 +88,10 @@ public class FactScorer
         var contextSources = new HashSet<string>
             { "config", "cpu", "io", "tempdb", "memory", "queries", "perfmon",
               "database_config", "jobs", "sessions", "disk", "bad_actor", "anomaly" };
+        /* The pg_ sources join the context set for the same reason "cpu" and "sessions" are in it: a
+           PG_CPU_PERCENT at 30% or a CONFIG_PG_MAX_CONNECTIONS context fact has base 0, and an amplifier
+           that reads it (the load-family confirmer, the saturation ceiling) must still be able to see it. */
+        contextSources.UnionWith(PgTargetSources.All);
         var factsByKey = facts
             .Where(f => f.BaseSeverity > 0 || contextSources.Contains(f.Source))
             .ToFactLookup();
@@ -86,17 +132,19 @@ public class FactScorer
         // (thread exhaustion), SOS_SCHEDULER_YIELD (CPU starvation), or RESOURCE_SEMAPHORE (grant
         // starvation) — because then the parallelism genuinely IS driving an outage and CRITICAL is
         // earned. "Co-fired" must mean SIGNIFICANT, not merely present. Only THREADPOOL's base is
-        // self-gating: ScoreWaitFact requires >= 1hr total AND >= 1s avg before THREADPOOL scores at
-        // all, so BaseSeverity > 0 there already means real exhaustion — keep the presence check.
-        // SOS_SCHEDULER_YIELD (0.75, null) and RESOURCE_SEMAPHORE (0.01, null) have NO minimum guard,
-        // so their BaseSeverity > 0 fires on ANY trace of the wait; and SOS physically co-occurs with
+        // self-gating: ScoreWaitFact requires >= 15 min per observed hour AND >= 1s avg before THREADPOOL
+        // scores at all, so BaseSeverity > 0 there already means real exhaustion — keep the presence
+        // check. SOS_SCHEDULER_YIELD (0.75, null) and RESOURCE_SEMAPHORE (0.01, 0.10) have NO minimum
+        // guard, so their BaseSeverity > 0 fires on ANY trace of the wait; and SOS physically co-occurs with
         // high CXPACKET (parallel workers yield -> SOS) and is emitted for any delta_wait_time_ms > 0,
         // so a trivial SOS (e.g. 500ms over an hour) would release the cap on exactly the busy servers
         // the cap targets — re-admitting the CXPACKET=CRITICAL noise the cap exists to kill. Gate
         // SOS/RS on SIGNIFICANCE (fraction of period) via the same HasSignificantWait helper the
         // amplifiers use, not on mere presence: SOS at 0.25 (matches the CXPACKET SOS amplifier bar);
         // RS at 0.10 (RESOURCE_SEMAPHORE has no HasSignificantWait amplifier bar, so pick a bar here —
-        // 0.10 of period is meaningful grant starvation). Caps numeric Severity only — SeverityBand is
+        // 0.10 of period is meaningful grant starvation, and since #3538 A5 it is also the wait's own
+        // CRITICAL bar in GetWaitThresholds, so "significant enough to release the cap" and "saturated"
+        // are one number). Caps numeric Severity only — SeverityBand is
         // derived from it downstream, so a capped fact stays in WARNING without a separate band edit
         // and Lite parity is preserved.
         var impactPeerCoFired =
@@ -104,11 +152,26 @@ public class FactScorer
             || HasSignificantWait(factsByKey, "SOS_SCHEDULER_YIELD", 0.25)
             || HasSignificantWait(factsByKey, "RESOURCE_SEMAPHORE", 0.10);
 
+        // #3526: the SECOND escape, per-fact and for ANOMALY_* only — extremity. The impact-peer
+        // escape above is the right shape for CXPACKET (parallelism is only an outage when a thread/CPU/
+        // grant peer says so), but applied to every ANOMALY_* it made the baseline engine notification-
+        // inert at shipped settings: every anomaly ramp saturates its BASE at 1.0, the cap holds the FINAL
+        // at 1.49, and the notify floor is 1.5 — so a 20σ session spike beside a 15σ batch-request spike
+        // at 3am produced nothing that could page unless THREADPOOL/SOS/RESOURCE_SEMAPHORE happened to be
+        // in the picture too. The product's best per-server-calibrated statistics were structurally its
+        // quietest. An anomaly whose deviation is EXTREME against the cutoff it fired at (IsExtremeAnomaly:
+        // 3x its own fire threshold — 10.5σ on the 3.5σ robust path, 15σ on the 5.0σ heavy-tail path, 6σ
+        // classical; 3x the absolute bar on the never-blind fallback path) is released from the cap on its
+        // own evidence. Releasing the cap does NOT page by itself: base still maxes at 1.0, so the CRITICAL
+        // band is reached only through the anomaly co-fire amplifiers (AnomalyAmplifiers) — corroboration
+        // stays the house rule for >= 1.5, the escape merely stops the cap from discarding it. The
+        // impact-peer escape is unchanged and still releases everything; CXPACKET / CXCONSUMER /
+        // QUERY_HIGH_DOP have no extremity arm and stay capped however many anomalies co-fire beside them.
         if (!impactPeerCoFired)
         {
             foreach (var fact in facts)
             {
-                if (IsTuningClassKey(fact.Key))
+                if (IsTuningClassKey(fact.Key) && !IsExtremeAnomaly(fact))
                     fact.Severity = Math.Min(fact.Severity, TuningClassSeverityCeiling);
             }
         }
@@ -116,7 +179,8 @@ public class FactScorer
 
     /// <summary>
     /// Scores a wait fact using the fraction-of-period formula.
-    /// Some waits have absolute minimum thresholds to filter out background noise.
+    /// Two waits (THREADPOOL, PAGELATCH_UP) carry a minimum-wait gate expressed PER OBSERVED HOUR so the
+    /// same server reads the same at every <c>hours_back</c> (#3538 A7).
     /// </summary>
     private static double ScoreWaitFact(Fact fact)
     {
@@ -124,27 +188,34 @@ public class FactScorer
         if (fraction <= 0) return 0.0;
 
         // THREADPOOL: require both meaningful total wait time AND meaningful average.
-        // Tiny amounts are normal thread pool grow/shrink housekeeping, not exhaustion.
+        // Tiny amounts are normal thread pool grow/shrink housekeeping, not exhaustion. The total is
+        // judged per observed hour (ThreadpoolMinWaitMsPerObservedHour) — see the constant for why
+        // the pre-#3538 absolute 1 h bar meant "a quarter of the window" at 4 h, "the whole window" at
+        // 1 h and "0.6% of the window" at 168 h.
         if (fact.Key == "THREADPOOL")
         {
             var waitTimeMs = fact.Metadata.GetValueOrDefault("wait_time_ms");
             var avgMs = fact.Metadata.GetValueOrDefault("avg_ms_per_wait");
-            if (waitTimeMs < 3_600_000 || avgMs < 1_000) return 0.0;
+            if (waitTimeMs / ObservedHours(fact) < ThreadpoolMinWaitMsPerObservedHour
+                || avgMs < ThreadpoolMinAvgMsPerWait) return 0.0;
         }
 
-        // PAGELATCH_UP (tempdb allocation contention) is scored on ABSOLUTE wait_time_ms, not
+        // PAGELATCH_UP (tempdb allocation contention) is scored on wait_time_ms PER OBSERVED HOUR, not
         // fraction-of-period, because its source — the Dashboard's report.tempdb_contention_analysis
-        // contention_level CASE — trips on an absolute PAGELATCH_UP total (install/47:2515:
-        // pagelatch_up_ms > 10000 -> "MEDIUM - PAGELATCH_UP contention"). PAGELATCH_UP is the canonical
-        // PFS/GAM/SGAM allocation-page latch (the fix is add tempdb data files / TF 1118), and the source
-        // reads the SAME server-wide wait_stats this fact is built from, so scoring the wait total is a
-        // faithful port. Flat 0.5 (MEDIUM) at the source's single PAGELATCH_UP tier — there is no higher
-        // band for it there; the view's CRITICAL "allocation contention" comes from a tempdb-scoped
-        // dm_os_waiting_tasks flag (allocation_contention_warning, install/47:2503) that is NOT carried in
-        // this fact. Absolute-ms is consistent with the THREADPOOL gate just above (the analysis window is
-        // hours-scale; the source's window is 1 hour).
+        // contention_level CASE — trips on a PAGELATCH_UP total over the last hour (install/47:2411 reads
+        // collect.wait_stats WHERE collection_time >= DATEADD(HOUR, -1, ...); :2515: pagelatch_up_ms >
+        // 10000 -> "MEDIUM - PAGELATCH_UP contention"). PAGELATCH_UP is the canonical PFS/GAM/SGAM
+        // allocation-page latch (the fix is add tempdb data files / TF 1118), and the source reads the
+        // SAME server-wide wait_stats this fact is built from, so scoring the hourly wait total is a
+        // faithful port — the pre-#3538 form applied the source's one-hour bar to the WHOLE analysis
+        // window and so was 4x more sensitive than its source at the default 4 h and 168x at a week
+        // (PagelatchUpMinWaitMsPerObservedHour has the measurement). Flat 0.5 (MEDIUM) at the source's
+        // single PAGELATCH_UP tier — there is no higher band for it there; the view's CRITICAL
+        // "allocation contention" comes from a tempdb-scoped dm_os_waiting_tasks flag
+        // (allocation_contention_warning, install/47:2503) that is NOT carried in this fact.
         if (fact.Key == "PAGELATCH_UP")
-            return fact.Metadata.GetValueOrDefault("wait_time_ms") > 10_000 ? 0.5 : 0.0;
+            return fact.Metadata.GetValueOrDefault("wait_time_ms") / ObservedHours(fact) > PagelatchUpMinWaitMsPerObservedHour
+                ? 0.5 : 0.0;
 
         var thresholds = GetWaitThresholds(fact.Key);
         if (thresholds == null) return 0.0;
@@ -153,19 +224,71 @@ public class FactScorer
     }
 
     /// <summary>
+    /// The hours the collector actually observed inside the window a wait fact was summed over — the
+    /// divisor for the per-hour gates above (#3538 A7). Read from the fact's own metadata rather than
+    /// from <see cref="AnalysisContext"/>, which the scorer never sees: every wait fact carries
+    /// <c>period_duration_ms</c> (the nominal window) and, from a collector that stamps coverage (#3538
+    /// A2), <c>coverage_fraction</c>; their product is the observed time (see
+    /// <see cref="FactCollectorHelpers.AddCoverageFraction"/> for why the divisor travels under that
+    /// name). A collector that stamps no coverage — the frozen Dashboard twin — divides by its nominal
+    /// window, which is exactly what its own fractions do.
+    ///
+    /// <para>A fact with no <c>period_duration_ms</c> at all is read as a ONE-HOUR window. Every collector
+    /// stamps the period, so only a hand-built fact lacks it; reading it as one hour makes the per-hour
+    /// bars read as plain totals (10 s of PAGELATCH_UP, 15 min of THREADPOOL), which is the one reading a
+    /// fact with no window can honestly have.</para>
+    ///
+    /// <para>A <c>coverage_fraction</c> of exactly 0 (what <c>WindowCoverage.Unobserved</c> stamps) falls back
+    /// to the NOMINAL window rather than to a near-zero divisor. That branch defends the arithmetic against
+    /// 0/0 and should be moot: both collectors emit no wait fact at all when <c>ObservedDurationMs &lt;= 0</c>,
+    /// so a fact carrying zero coverage and a non-zero wait total is a fact no shipped collector produces. If
+    /// one ever did, dividing by ~0 would turn any trace into an enormous hourly rate and fire on the
+    /// artifact; the nominal reading is the pre-#3538 form — the least-sensitive honest one — and is pinned
+    /// so the choice cannot silently flip.</para>
+    /// </summary>
+    private static double ObservedHours(Fact fact)
+    {
+        var periodMs = fact.Metadata.GetValueOrDefault("period_duration_ms");
+        if (periodMs <= 0) return 1.0;
+        var coverage = fact.Metadata.GetValueOrDefault("coverage_fraction", 1.0);
+        var observedMs = coverage > 0 ? periodMs * coverage : periodMs;
+        return observedMs / 3_600_000.0;
+    }
+
+    /// <summary>
     /// Scores blocking/deadlock facts using events-per-hour thresholds.
     /// </summary>
     private static double ScoreBlockingFact(Fact fact)
     {
-        var value = fact.Value; // events per hour
+        var value = fact.Value; // events per hour, over the busiest 4-hour sub-window since #3871
         if (value <= 0) return 0.0;
 
         return fact.Key switch
         {
-            // Blocking: concerning >10/hr, critical >50/hr
+            // Blocking: concerning >10/hr, critical >50/hr — MEASURED, at the 4-hour grain, and the value
+            // graded here is that grain's: the busiest 4-hour sub-window of the pass, computed by the
+            // collectors (#3871), with the whole-window average kept beside it as events_per_hour context.
+            // Lineage: the primary production fleet's 14-day read (#3653 box (a), 2026-09-22) put non-zero
+            // 4-HOUR windows at p99 = 59 events/h with five windows >= 50, so the pair sits on the storm
+            // mode at the grain it was measured on — which is exactly why the value had to become the peak:
+            // graded as a 24-hour average the same storm read Information, graded at its own grain it reads
+            // CRITICAL on any pass length. (This paragraph supersedes the earlier "inherited, not measured"
+            // note: the #3539 A3 alerting band at 5/20 remains a different instrument — the scorer's story
+            // still reaches CRITICAL through its amplifiers — but the pair itself is now measured, not
+            // inherited.)
             "BLOCKING_EVENTS" => ApplyThresholdFormula(value, 10, 50),
-            // Deadlocks: concerning >5/hr (no critical — any sustained deadlocking is bad)
-            "DEADLOCKS" => ApplyThresholdFormula(value, 5, null),
+            // Deadlocks: 5/hr concerning, 20/hr critical — the SAME pair the alerting layer derived from
+            // 14 days of collect.deadlocks on the 43-server dogfood fleet (2,722 deadlocks over 14,448
+            // server-hours; ServerHealthThresholds.DeadlockWarnPerHourDefault /
+            // DeadlockCriticalPerHourDefault in PerformanceMonitor.Common/ServerHealthBands.cs, #3368):
+            // 5/hr is the 99.94th percentile of server-hours (99.1% hold at most two), and 20/hr sits
+            // inside the measured empty interval [16, 89] between the routine mode (which tops out at 15)
+            // and the storms (90, 102). The pre-#3538 pair was (5, null) — base saturated at 1.0 the moment
+            // the WARNING bar was reached, so 5/hr and 90/hr scored identically and the CRITICAL band was
+            // reachable only through amplifiers. Now 5/hr roots a story at 0.5 and the storm mode
+            // saturates at 1.0. The literals are repeated rather than bound because this assembly does
+            // not reference PerformanceMonitor.Common; FactScorerTests pins the two pairs equal.
+            "DEADLOCKS" => ApplyThresholdFormula(value, 5, 20),
             // Blocking chain: scored by structural magnitude. Value = worst-chain depth >= 1
             // for any emitted chain, so the value<=0 guard above never trips this arm.
             "BLOCKING_CHAIN" => ScoreBlockingChain(fact),
@@ -393,10 +516,13 @@ public class FactScorer
             // Plan regression: worst per-exec cost factor vs the best plan. Concerning 2x, critical 10x.
             "PLAN_REGRESSION" => ApplyThresholdFormula(fact.Value, 2, 10),
             // WS4: plan-XML advisories (advise-only), parsed from the top collected query plans.
-            // Each scores its 0.4 advisory base only when >=1 was found (Value = count) and roots a
-            // standalone card via InferenceEngine.ConfigAdvisoryRootKeys. The specific suggested
-            // indexes / warning detail ride in the finding drill-down (Fact metadata is numeric only).
-            "MISSING_INDEX" => fact.Value > 0 ? 0.4 : 0.0,
+            // Each scores only when >=1 was found (Value = count) and roots a standalone card via
+            // InferenceEngine.ConfigAdvisoryRootKeys. The specific suggested indexes / warning detail
+            // ride in the finding drill-down (Fact metadata is numeric only). PLAN_WARNING keeps the
+            // 0.4 advisory base: a warning is an observation about a plan. MISSING_INDEX is demoted to
+            // the Information rung (#3805, MissingIndexCorroborationSeverity): a request is
+            // corroboration, and never outranks a standing misconfiguration.
+            "MISSING_INDEX" => fact.Value > 0 ? MissingIndexCorroborationSeverity : 0.0,
             "PLAN_WARNING" => fact.Value > 0 ? 0.4 : 0.0,
             _ => 0.0
         };
@@ -582,8 +708,33 @@ public class FactScorer
         return tierBase * impact;
     }
 
+    /// <summary>
+    /// The MISSING_INDEX root's severity (#3805): the Information rung, the same 0.25 as
+    /// <see cref="ConfigChangeAttribution.InformationSeverity"/> and for the same reason — a card that
+    /// attributes and does not accuse. Inside both readers' INFO band (below 0.75), BELOW every standing
+    /// misconfiguration advisory (the 0.4 CONFIG_* base, the 0.3 FILE_AUTOGROWTH_PERCENT base) so a
+    /// missing-index request never sorts above a setting that is wrong today, and above 0 so the story still
+    /// roots (InferenceEngine.ConfigAdvisoryRootKeys), persists, recurs and mutes under its unchanged
+    /// story_path_hash. Until #3805 the fact scored the 0.4 advisory base beside PLAN_WARNING, level with a
+    /// bad MAXDOP. The maintainer's position that moved it: a request "corroborates a measured-slow plan; it
+    /// never drives a finding" — it is weak evidence (plan-cache-bounded counters, one operator's
+    /// statement-scoped estimate) that the engine surfaces, with its caveat, beside the measured facts, not
+    /// as a peer of them. Not a measured number — a position in an ordering, stated so the ordering is the
+    /// thing reviewed. What this deliberately does NOT do is stop the fact rooting: the graph has no edge
+    /// from a measured root (CPU_SPIKE, IO_READ_LATENCY_MS, PAGEIOLATCH_*) to MISSING_INDEX, so unrooted it
+    /// would vanish from every story and the drill-down's CREATE statements with it; giving it those edges
+    /// changes every co-firing story's path hash (every standing mute), which is a maintainer's call.
+    /// </summary>
+    public const double MissingIndexCorroborationSeverity = 0.25;
+
     // Wait-profile severity ramp (see the ANOMALY_WAIT_PROFILE arm). Floor matches the detectors'
-    // DefaultRatioThreshold; these are HONEST per-second-scale starting values — CALIBRATE ON SQL2025/HAMMERDB.
+    // DefaultRatioThreshold; these are HONEST per-second-scale starting values. UNCALIBRATED as of the
+    // 2026-09 dogfood measurement (#3538 A5): that pass measured each wait TYPE's fraction of a 4-hour
+    // window (the statistic GetWaitThresholds grades) over 1,075 server-windows, not the all-types
+    // ms/sec PEAK-over-baseline-mean ratio this ramp grades, so none of its figures transfers here.
+    // Calibrating this ramp needs the wait-profile detector's own ratio distribution over the fleet —
+    // per server-window, peak ms/sec ÷ the hour-of-week baseline mean — which is one more column on the
+    // same read, not a different instrument; until it is read, 4x/12x stand as reasoned values.
     private const double WaitProfileRatioFloor = 4.0;
     private const double WaitProfileRatioSpan = 8.0;
 
@@ -591,23 +742,190 @@ public class FactScorer
     // on a thin baseline (baseline_low_quality=1) the stored deviation_sigma is the real (small) z that the
     // 2σ gate would zero out — so grade off the absolute exceedance (peak ÷ the absolute-fallback bar, which
     // is >= 1.0 on a fire) instead: floor 0.5 AT the bar (clears InferenceEngine's 0.5 entry-point), ramping
-    // to 1.0 at 2× the bar. Sensible default — CALIBRATE ON SQL2025/HAMMERDB.
+    // to 1.0 at 2× the bar. UNCALIBRATED as of the 2026-09 dogfood measurement, which read wait fractions
+    // and never the fallback exceedance: this path grades a store whose baseline is too thin to trust,
+    // which is a fresh install's first days, and the measured fleet is not that. The 2x-the-bar span is
+    // a reasoned shape (the same 2x every deviation ramp saturates at), not a measured one, and the
+    // measurement that would calibrate it is a young store's exceedance distribution, not more fleet.
     private const double LowQualityFallbackSpan = 1.0;
+
+    /* #3538 A7: the per-observed-hour gates two wait facts carry before their fraction is graded. Both
+       were absolute totals before — THREADPOOL >= 3,600,000 ms, PAGELATCH_UP > 10,000 ms — applied to
+       whatever window the caller asked for, so hours_back changed the verdict on an unchanged server:
+       a THREADPOOL total that is a quarter of a 4 h window (the shipped default, where these were tuned)
+       is the WHOLE of a 1 h window and 0.6% of a 168 h one, while a PAGELATCH_UP bar meant for one hour
+       of wait_stats was met by 42x the exposure at a week. Dividing by ObservedHours(fact) makes the
+       same per-hour rate score the same at every window; dividing by OBSERVED rather than nominal hours
+       (#3538 A2) keeps collector downtime from deflating the rate the way it deflated the fractions. */
+
+    /// <summary>
+    /// THREADPOOL: the wait total per observed hour below which the fact is thread-pool housekeeping,
+    /// not exhaustion. 15 min/hr is the pre-#3538 absolute 1 h bar expressed at the 4 h default window it
+    /// was tuned on — identical behaviour there, window-invariant everywhere else. In fraction terms it
+    /// is 0.25 of observed time (the numerator sums concurrent waiters, so this is "a quarter of the
+    /// schedulers' worth of tasks parked for want of a worker"), which is why THREADPOOL's
+    /// GetWaitThresholds pair (0.01, null) is dominated by this gate: any fact that clears it has already
+    /// saturated its fraction ramp. Fleet lineage (2026-09, 43 servers, 4 days, 405 non-zero server-hours):
+    /// THREADPOOL per hour p50 6 ms, p99 488 ms, max 5,801 ms — the worst hour measured is 0.6% of this
+    /// bar, and no hour reached the old 3,600,000 ms either. The bar is set by what exhaustion IS, not by
+    /// where the healthy fleet sits; the measurement says only that nothing routine approaches it.
+    /// </summary>
+    private const double ThreadpoolMinWaitMsPerObservedHour = 900_000;
+
+    /// <summary>
+    /// THREADPOOL: the minimum average wait per task. A one-second average means tasks are genuinely
+    /// queued for a worker, not briefly parked during pool growth. Unchanged from the pre-#3538 gate and
+    /// not a rate, so it needs no window scaling. Fleet lineage: max avg_ms_per_wait on any THREADPOOL
+    /// row in the 4-day pass was 247.5 ms.
+    /// </summary>
+    private const double ThreadpoolMinAvgMsPerWait = 1_000;
+
+    /// <summary>
+    /// PAGELATCH_UP: the wait total per observed hour above which the fact scores its flat 0.5. 10 s/hr is
+    /// the ported source's own bar at the ported source's own window — report.tempdb_contention_analysis
+    /// sums PAGELATCH_UP over collect.wait_stats for the LAST HOUR (install/47:2411) and trips at
+    /// &gt; 10000 ms (:2515) — so this is the port made faithful, not a re-derivation. Fleet lineage (2026-09,
+    /// 1,075 server-4h-windows): PAGELATCH_UP per 4 h p50 35.5 ms, p90 1,091 ms, p99 5,830 ms, max
+    /// 14,274 ms; the old absolute &gt; 10,000 ms fired on 2 of those windows (0.19%), both of them under 3.6 s
+    /// per hour — they fired only because the bar meant for one hour was being applied to four. Under the
+    /// hourly form no measured window reaches it. The alternative — 2.5 s/hr, which would have kept the
+    /// 4 h default firing on exactly those two windows — was rejected because that sensitivity was an
+    /// accident of the default window length, never a calibrated choice. What this cannot see: a 10 s
+    /// burst inside one hour of a longer window averages out (the per-sample-vs-window class, #3538 A8).
+    /// </summary>
+    private const double PagelatchUpMinWaitMsPerObservedHour = 10_000;
 
     // Layer-3 tuning-class severity ceiling (see ScoreAll). Parallelism/anomaly signals describe a tuning
     // opportunity, not an outage — their FINAL severity is capped here (bands are >= 1.5 CRITICAL) unless an
-    // impact peer co-fired. 1.49 keeps a capped fact in the WARNING band without touching SeverityBand.
+    // impact peer co-fired or (#3526, ANOMALY_* only) the anomaly's own deviation is extreme. 1.49 keeps a
+    // capped fact in the WARNING band without touching SeverityBand.
     private const double TuningClassSeverityCeiling = 1.49;
+
+    /* #3526: the extremity escape's multiple (see IsExtremeAnomaly). An anomaly leaves the tuning-class cap
+       when its deviation is this many times the cutoff it FIRED at. Every deviation ramp saturates its base
+       at 2x its anchor (ScoreAnomalyFact: 0.5 at the anchor, 1.0 at 2x), so 3x sits a full anchor PAST the
+       point where the ramp stopped distinguishing — "extreme" means "so far out the scorer ran out of
+       scale", not "the top of the ramp". The arithmetic per path, with the detectors' shipped cutoffs
+       (AnomalyThresholds): robust modified-z 3.5 → the escape opens at 10.5σ; heavy-tail modified-z 5.0
+       (waits, query duration) → 15σ; classical z 2.0 (rollup-bound metrics, pre-#1743 facts) → 6σ — the
+       #1743 fleet measurement read a busy tenant's REAL 2-3x evening surge at 1.4-2.0 classical sigmas,
+       so 6 classical sigmas against a stddev that history has already inflated is a genuinely rare
+       reading, not a busy evening. All three sit under the 25σ display cap (SigmaDisplayCap), so a fact
+       can actually carry them. The never-blind fallback path (baseline_low_quality) has no meaningful
+       sigma, so it escapes only at 3x its ABSOLUTE bar (fallback_exceedance >= 3): I/O latency 150 ms,
+       batch requests 15,000/s, sessions 1,500, query duration 15 s total elapsed — and CPU (bar 90%) and
+       memory total/target (bar 101%) can never reach 3x their bars, so a young store's CPU or memory
+       anomaly cannot escape on an untrustworthy baseline at all, which is correct: "we do not know your
+       normal yet" is not evidence of an outage. An operator who scales a metric's deviation threshold
+       scales its fire_threshold with it (ModifiedZThresholdFor), so the escape bar tracks the knob — up
+       to the display cap: AnomalyGate clamps the stored deviation_sigma at SigmaDisplayCap (25σ) BEFORE
+       the scorer ever sees it, so a bar above 25σ would be unreachable and the escape would go silently
+       dead for exactly the deployments that tuned a metric hard (a knob past ~8.3x the shipped anchor
+       puts 3x over 25) — the same "structurally quietest" defect this constant exists to fix, just for a
+       differently-tuned store. IsExtremeAnomaly therefore takes min(3x anchor, SigmaDisplayCap): a sigma
+       pinned at the cap means "at least 25σ", which is extreme under any anchor an operator can set. The
+       wait profile's modified_z is not display-capped (BaselineMath.ModifiedZScore) and needs no such
+       bound. */
+    private const double ExtremeAnomalyMultiple = 3.0;
 
     /// <summary>
     /// Tuning-class keys whose FINAL severity is capped at the WARNING ceiling (Layer 3) unless an
     /// impact peer co-fired: parallelism (CXPACKET/CXCONSUMER), excessive-DOP queries, and every
-    /// anomaly fact. Today only CXPACKET can exceed the ceiling on amplifiers (ANOMALY_* and
-    /// QUERY_HIGH_DOP already max at 1.0) — the rest is forward-safety as those ramps evolve.
+    /// anomaly fact. CXPACKET and (#3526) the corroborated ANOMALY_* families can exceed the ceiling
+    /// on amplifiers; an anomaly is released from the cap only when <see cref="IsExtremeAnomaly"/> holds.
+    /// QUERY_HIGH_DOP still maxes at 1.0 — its membership is forward-safety as that ramp evolves.
     /// </summary>
     private static bool IsTuningClassKey(string key) =>
         key is "CXPACKET" or "CXCONSUMER" or "QUERY_HIGH_DOP"
         || key.StartsWith("ANOMALY_", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The deviation-scored anomaly families (the z-score / modified-z detectors: peak vs a per-server
+    /// hour-of-week baseline, graded off <c>deviation_sigma</c> against <c>fire_threshold</c>, or off
+    /// <c>fallback_exceedance</c> on the low-quality path). Shared by <see cref="ScoreAnomalyFact"/> and
+    /// <see cref="IsExtremeAnomaly"/> so the two cannot route a key differently.
+    /// </summary>
+    private static bool IsDeviationScoredAnomalyKey(string key) =>
+        /* #3542: the PostgreSQL z-score families are registered in PgTargetScorer, not here — the shared
+           extremity escape and ramp then read the same AnomalyGate metadata for both engines (#3584). */
+        PgTargetScorer.IsDeviationScoredAnomalyKey(key)
+        || key.StartsWith("ANOMALY_CPU_SPIKE", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_READ_LATENCY", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_WRITE_LATENCY", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_BATCH_REQUESTS", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_SESSION_SPIKE", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_QUERY_DURATION", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_MEMORY_PRESSURE", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #1743: the cutoff a deviation-scored anomaly actually FIRED at (carried by the detector as
+    /// <c>fire_threshold</c>): the knob-scaled classical threshold on the classical path, the knob-scaled
+    /// modified-z cutoff on the robust path, and the pre-#1743 default of 2.0 when the fact carries none.
+    /// The severity ramp anchors here and the extremity escape is a multiple of it.
+    /// </summary>
+    private static double FireAnchor(Fact fact)
+    {
+        var anchor = fact.Metadata.GetValueOrDefault("fire_threshold", 2.0);
+        return anchor <= 0 ? 2.0 : anchor;
+    }
+
+    /// <summary>
+    /// #3526: whether an ANOMALY_* fact's deviation is extreme enough to leave the Layer-3 tuning-class
+    /// cap on its own evidence (see <see cref="ExtremeAnomalyMultiple"/> for the arithmetic). Routes
+    /// each family off the SAME metadata its severity ramp grades from, so a fact can never be extreme
+    /// on one statistic while scored on another:
+    /// <list type="bullet">
+    ///   <item>Deviation-scored families, trustworthy baseline: <c>deviation_sigma &gt;= 3 x fire_threshold</c>.</item>
+    ///   <item>Deviation-scored families, low-quality baseline: <c>fallback_exceedance &gt;= 3</c> — the
+    ///     stored sigma is the real (small, meaningless) z the detector refused to trust, so the escape
+    ///     must not read it either.</item>
+    ///   <item>ANOMALY_WAIT_PROFILE on the robust trigger: <c>modified_z &gt;= 3 x 5.0</c>; on the
+    ///     pre-#1743 / robust-less ratio trigger: <c>ratio &gt;= 3 x 4.0</c>. Never for <c>is_new</c> — a
+    ///     first-occurrence profile's sentinel ratio (NoBaselineRatio, 100) is a scoring device, not a
+    ///     measurement, and "no baseline" cannot be "extreme against baseline".</item>
+    ///   <item>ANOMALY_PG_WAIT_PROFILE (#3691): the same three readings through
+    ///     <see cref="PgTargetScorer.IsExtremeWaitProfileAnomaly"/>, with the ratio arm anchored on the
+    ///     PostgreSQL profile's own firing multiple; the PostgreSQL deadlock-rate ratio family stays capped.</item>
+    /// </list>
+    /// The ratio/count/delta families — blocking and deadlock spikes, day-over-day object growth and
+    /// contention, the legacy per-type ANOMALY_WAIT_ facts — stay capped: none is graded in sigmas, so
+    /// "3x the fire threshold" has no calibrated meaning for them, and the blocking/deadlock classes
+    /// already reach CRITICAL through their never-capped impact keys (BLOCKING_EVENTS, BLOCKING_CHAIN,
+    /// DEADLOCKS) when the events are real.
+    /// </summary>
+    private static bool IsExtremeAnomaly(Fact fact)
+    {
+        if (!fact.Key.StartsWith("ANOMALY_", StringComparison.OrdinalIgnoreCase)) return false;
+
+        if (IsDeviationScoredAnomalyKey(fact.Key))
+        {
+            if (fact.Metadata.GetValueOrDefault("baseline_low_quality") >= 1.0)
+                return fact.Metadata.GetValueOrDefault("fallback_exceedance") >= ExtremeAnomalyMultiple;
+
+            // Bounded at the display cap — see ExtremeAnomalyMultiple: the stored sigma can never exceed it.
+            var escapeBar = Math.Min(ExtremeAnomalyMultiple * FireAnchor(fact), Baselines.AnomalyThresholds.SigmaDisplayCap);
+            return fact.Metadata.GetValueOrDefault("deviation_sigma") >= escapeBar;
+        }
+
+        /* #3691 (#3689 §5 residue): the PostgreSQL wait profile escapes the same way its SQL Server twin
+           below does — the one PG arm, delegating so the predicate sits beside the ramp it must agree with
+           (PgTargetScorer.ScoreRatioAnomaly): same is_new refusal, same 3x heavy-tail modified-z bar on a
+           robust bucket, and 3x ITS OWN ratio anchor (PgRatioAnomalyThreshold) otherwise, where the arm below
+           reads 3x WaitProfileRatioFloor. The multiple is passed so "extreme" is one number for both engines. */
+        if (PgTargetScorer.IsPgRatioAnomalyKey(fact.Key))
+            return PgTargetScorer.IsExtremeWaitProfileAnomaly(fact, ExtremeAnomalyMultiple);
+
+        if (fact.Key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))
+        {
+            if (fact.Metadata.GetValueOrDefault("is_new") > 0) return false;
+            var modifiedZ = fact.Metadata.GetValueOrDefault("modified_z");
+            if (modifiedZ > 0)
+                return modifiedZ >= ExtremeAnomalyMultiple * Baselines.AnomalyThresholds.HeavyTailModifiedZThreshold;
+            return fact.Metadata.GetValueOrDefault("ratio") >= ExtremeAnomalyMultiple * WaitProfileRatioFloor;
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Scores anomaly facts based on deviation from baseline.
@@ -616,13 +934,14 @@ public class FactScorer
     /// </summary>
     private static double ScoreAnomalyFact(Fact fact)
     {
-        if (fact.Key.StartsWith("ANOMALY_CPU_SPIKE", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_READ_LATENCY", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_WRITE_LATENCY", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_BATCH_REQUESTS", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_SESSION_SPIKE", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_QUERY_DURATION", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_MEMORY_PRESSURE", StringComparison.OrdinalIgnoreCase))
+        /* #3542: the PostgreSQL ratio families (deadlock rate) have their own ramp — the SQL Server ratio
+           arms below recognise ANOMALY_BLOCKING_SPIKE / ANOMALY_DEADLOCK_SPIKE by literal prefix and would
+           never see them. The PostgreSQL z-score families deliberately fall THROUGH to the shared
+           deviation ramp below via IsDeviationScoredAnomalyKey. */
+        if (PgTargetScorer.IsPgRatioAnomalyKey(fact.Key))
+            return PgTargetScorer.ScoreRatioAnomaly(fact);
+
+        if (IsDeviationScoredAnomalyKey(fact.Key))
         {
             // Deviation-based scoring: 2σ = 0.5, 4σ = 1.0
             var deviation = fact.Metadata.GetValueOrDefault("deviation_sigma");
@@ -651,8 +970,7 @@ public class FactScorer
                shape for classical fires and for pre-#1743 facts (default 2.0), and the same
                proportional shape for robust fires at 3.5 or 5.0. Without the anchor, a family
                firing at 5σ scores saturated-flat 1.0 forever against a ramp built for 2σ fires. */
-            var anchor = fact.Metadata.GetValueOrDefault("fire_threshold", 2.0);
-            if (anchor <= 0) anchor = 2.0;
+            var anchor = FireAnchor(fact);
             if (deviation < anchor) return 0.0;
             var base_score = 0.5 + 0.5 * Math.Min((deviation - anchor) / anchor, 1.0);
             return base_score * confidence;
@@ -663,7 +981,8 @@ public class FactScorer
         // (peak window all-types ms/sec ÷ baseline mean), so the ramp is far smaller than the old
         // 5×/20× that was calibrated to a ~240×-inflated per-hour-vs-per-interval input: 4× → 0.5,
         // saturating to 1.0 at 12×. Starting values matching the detectors' DefaultRatioThreshold;
-        // CALIBRATE ON THE SQL2025/HAMMERDB BOX.
+        // still uncalibrated — see WaitProfileRatioFloor for what the 2026-09 fleet pass did and did not
+        // measure, and which read would calibrate this ramp.
         if (fact.Key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))
         {
             /* #1743: detectors with robust baselines fire this fact on the MODIFIED z-score, and
@@ -771,9 +1090,254 @@ public class FactScorer
             "PLAN_REGRESSION" => PlanRegressionAmplifiers(),
             "DB_CONFIG" => DbConfigAmplifiers(),
             "DISK_SPACE" => DiskSpaceAmplifiers(),
+            /* #3542: BEFORE the ANOMALY_ arm, so ANOMALY_PG_* routes to the PostgreSQL table and not to the
+               SQL Server load-family confirmers (CPU_SQL_PERCENT is not a fact a PostgreSQL pass can emit). */
+            _ when PgTargetScorer.IsPgKey(fact.Key) => PgTargetScorer.Amplifiers(fact.Key),
+            _ when fact.Key.StartsWith("ANOMALY_", StringComparison.OrdinalIgnoreCase) => AnomalyAmplifiers(fact.Key),
             _ => []
         };
     }
+
+    /// <summary>
+    /// #3526: the anomaly co-fire arm — corroboration for the baseline engine's findings, which had no
+    /// amplifiers at all and so could never leave their 1.0 base. Modelled on the impact-peer style of
+    /// the Layer-3 escape and the PAGEIOLATCH / IO-latency arms: a sibling anomaly family firing in the
+    /// same window (BaseSeverity &gt; 0 — the scorer zeroes anything under its cutoff, so &gt; 0 means
+    /// "fired against its own baseline") is a co-fire, and a MEASURED absolute fact confirming the same
+    /// pressure (SQL CPU &gt;= 80%, the I/O-latency fact at its concerning bar, grant waiters, the
+    /// buffer-pool / log waits at the bars their own arms use) is a co-fire.
+    ///
+    /// <para>Worked numbers — the arm's magnitudes are chosen so corroboration can carry an EXTREME anomaly
+    /// past the 1.5 notify floor and nothing can carry a routine one there:</para>
+    /// <list type="bullet">
+    ///   <item>Base at the fire threshold (0.5) with two co-fires: 0.5 x (1 + 0.3 + 0.3) = 0.8. With every
+    ///     arm lit (the load family's maximum is +1.2): 1.1. Never reaches 1.5, and the Layer-3 cap holds
+    ///     regardless because the anomaly is not extreme.</item>
+    ///   <item>Base saturated but ROUTINE (2x the anchor — 4σ classical, 7σ robust; 1.0) with three co-fires:
+    ///     1.0 x 1.9 = 1.9 → capped to 1.49. Still WARNING: saturation is not extremity, and the cap is
+    ///     exactly what keeps a busy evening from paging.</item>
+    ///   <item>Base EXTREME (&gt;= 3x the anchor; 1.0, the cap released) alone: 1.0. Below the cap it escaped
+    ///     — a lone 20σ reading with nothing else moving does not page, by design: the CRITICAL band is
+    ///     earned only with corroboration (the same rule every other base fact follows), and a solitary
+    ///     extreme reading is exactly the shape a collector hiccup or a variance-collapsed baseline pinned
+    ///     at the 25σ display cap produces.</item>
+    ///   <item>Base EXTREME with one +0.3 co-fire: 1.3, WARNING. With two: 1.6 → pages. The issue's own
+    ///     3am shape — a 20σ session spike (root, extreme) beside a 15σ batch-request anomaly (+0.3) and
+    ///     SQL CPU at 85% (+0.3) — scores 1.6 and reaches the operator for the first time at shipped
+    ///     settings. A +0.3 and a +0.2 land on 1.5 exactly: two independent corroborators is the bar.</item>
+    /// </list>
+    /// </summary>
+    private static List<AmplifierDefinition> AnomalyAmplifiers(string key)
+    {
+        if (key.StartsWith("ANOMALY_SESSION_SPIKE", StringComparison.OrdinalIgnoreCase)
+            || key.StartsWith("ANOMALY_BATCH_REQUESTS", StringComparison.OrdinalIgnoreCase)
+            || key.StartsWith("ANOMALY_CPU_SPIKE", StringComparison.OrdinalIgnoreCase)
+            || key.StartsWith("ANOMALY_QUERY_DURATION", StringComparison.OrdinalIgnoreCase))
+            return LoadAnomalyAmplifiers(key);
+
+        if (key.StartsWith("ANOMALY_READ_LATENCY", StringComparison.OrdinalIgnoreCase))
+            return ReadLatencyAnomalyAmplifiers();
+
+        if (key.StartsWith("ANOMALY_WRITE_LATENCY", StringComparison.OrdinalIgnoreCase))
+            return WriteLatencyAnomalyAmplifiers();
+
+        if (key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))
+            return WaitProfileAnomalyAmplifiers();
+
+        if (key.StartsWith("ANOMALY_MEMORY_PRESSURE", StringComparison.OrdinalIgnoreCase))
+            return MemoryPressureAnomalyAmplifiers();
+
+        // Blocking/deadlock spikes and the object-stats anomalies have no arm: they are not released from
+        // the cap (IsExtremeAnomaly) and their impact lives in the never-capped BLOCKING_* / DEADLOCKS keys.
+        return [];
+    }
+
+    /// <summary>
+    /// A sibling anomaly family fired in the same window against its own baseline. The self-key is
+    /// skipped by the callers, so a family never corroborates itself.
+    /// </summary>
+    private static bool AnomalyCoFired(Dictionary<string, Fact> facts, string siblingKey) =>
+        facts.TryGetValue(siblingKey, out var sibling) && sibling.BaseSeverity > 0;
+
+    /// <summary>
+    /// The LOAD family — sessions, batch requests, CPU, query duration — corroborate one another (a real
+    /// surge moves more than one of them) and are confirmed by measured SQL CPU at the 80% bar the SOS
+    /// and compile-gateway arms already use. Each sibling is +0.3; the root's own key is omitted.
+    /// </summary>
+    private static List<AmplifierDefinition> LoadAnomalyAmplifiers(string selfKey)
+    {
+        var amplifiers = new List<AmplifierDefinition>();
+        void Sibling(string siblingKey, string description)
+        {
+            if (selfKey.StartsWith(siblingKey, StringComparison.OrdinalIgnoreCase)) return;
+            amplifiers.Add(new()
+            {
+                Description = description,
+                Boost = 0.3,
+                Predicate = facts => AnomalyCoFired(facts, siblingKey)
+            });
+        }
+
+        Sibling("ANOMALY_SESSION_SPIKE", "Session-count anomaly co-fired — the surge is visible in connections too");
+        Sibling("ANOMALY_BATCH_REQUESTS", "Batch-request anomaly co-fired — the surge is visible in throughput too");
+        Sibling("ANOMALY_CPU_SPIKE", "CPU anomaly co-fired — the surge is consuming CPU far above this server's norm");
+        Sibling("ANOMALY_QUERY_DURATION", "Query-duration anomaly co-fired — the surge is slowing queries");
+        amplifiers.Add(new()
+        {
+            Description = "SQL Server CPU >= 80% — the surge is consuming real CPU, not just moving a counter",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var cpu) && cpu.Value >= 80
+        });
+        return amplifiers;
+    }
+
+    /// <summary>
+    /// ANOMALY_READ_LATENCY: a per-server read-latency deviation confirmed by the absolute read-latency fact
+    /// at its concerning bar (20 ms — "bad in absolute terms, not only for you"), by the wait profile
+    /// shifting (queries are actually waiting on it), by write latency deviating alongside (a storage-side
+    /// event, not one hot file), and by PAGEIOLATCH at the IO_READ_LATENCY_MS arm's own 10% bar.
+    /// </summary>
+    private static List<AmplifierDefinition> ReadLatencyAnomalyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "Read latency at the absolute concerning bar — slow for any server, not only against this baseline",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("IO_READ_LATENCY_MS", out var io) && io.BaseSeverity >= 0.5
+        },
+        new()
+        {
+            Description = "Wait-profile anomaly co-fired — queries are waiting on the slow reads",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WAIT_PROFILE")
+        },
+        new()
+        {
+            Description = "Write-latency anomaly co-fired — the storage path is slow in both directions",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WRITE_LATENCY")
+        },
+        new()
+        {
+            Description = "PAGEIOLATCH waits elevated — buffer pool misses confirm the read pressure",
+            Boost = 0.2,
+            Predicate = facts => HasSignificantWait(facts, "PAGEIOLATCH_SH", 0.10)
+                              || HasSignificantWait(facts, "PAGEIOLATCH_EX", 0.10)
+        }
+    ];
+
+    /// <summary>
+    /// ANOMALY_WRITE_LATENCY: the write-side twin — the absolute write-latency fact at its concerning bar
+    /// (10 ms), the wait profile shifting, read latency deviating alongside, and WRITELOG at the
+    /// IO_WRITE_LATENCY_MS arm's own 5% bar.
+    /// </summary>
+    private static List<AmplifierDefinition> WriteLatencyAnomalyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "Write latency at the absolute concerning bar — slow for any server, not only against this baseline",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("IO_WRITE_LATENCY_MS", out var io) && io.BaseSeverity >= 0.5
+        },
+        new()
+        {
+            Description = "Wait-profile anomaly co-fired — queries are waiting on the slow writes",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WAIT_PROFILE")
+        },
+        new()
+        {
+            Description = "Read-latency anomaly co-fired — the storage path is slow in both directions",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_READ_LATENCY")
+        },
+        new()
+        {
+            Description = "WRITELOG waits elevated — transaction log I/O confirms the write pressure",
+            Boost = 0.2,
+            Predicate = facts => HasSignificantWait(facts, "WRITELOG", 0.05)
+        }
+    ];
+
+    /// <summary>
+    /// ANOMALY_WAIT_PROFILE: the all-types wait rate shifting against its baseline, corroborated by WHAT the
+    /// waiting is costing — I/O latency deviating (+0.3 each side), query duration deviating (+0.3: the
+    /// waits are landing on user queries), and the load family moving (+0.2 each: a surge is driving it).
+    /// </summary>
+    private static List<AmplifierDefinition> WaitProfileAnomalyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "Read-latency anomaly co-fired — the wait shift is storage-bound",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_READ_LATENCY")
+        },
+        new()
+        {
+            Description = "Write-latency anomaly co-fired — the wait shift is log/storage-bound",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WRITE_LATENCY")
+        },
+        new()
+        {
+            Description = "Query-duration anomaly co-fired — the waits are landing on user queries",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_QUERY_DURATION")
+        },
+        new()
+        {
+            Description = "CPU anomaly co-fired — a load surge is driving the wait shift",
+            Boost = 0.2,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_CPU_SPIKE")
+        },
+        new()
+        {
+            Description = "Session-count anomaly co-fired — a connection surge is driving the wait shift",
+            Boost = 0.2,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_SESSION_SPIKE")
+        }
+    ];
+
+    /// <summary>
+    /// ANOMALY_MEMORY_PRESSURE: total-over-target deviating against baseline, corroborated by the symptoms
+    /// real memory pressure produces — ring-buffer pressure notifications (the engine saying so itself),
+    /// grant waiters at the PAGEIOLATCH arm's bar, RESOURCE_SEMAPHORE in the wait stats, PAGEIOLATCH at
+    /// the 10% bar (buffer pool churn), and read latency deviating (the churn reaching storage).
+    /// </summary>
+    private static List<AmplifierDefinition> MemoryPressureAnomalyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "Memory-pressure notifications present — the engine itself is reporting pressure",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("MEMORY_PRESSURE_EVENTS", out var mp) && mp.BaseSeverity > 0
+        },
+        new()
+        {
+            Description = "Memory grant waiters present — grants competing for the same memory",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("MEMORY_GRANT_PENDING", out var mg) && mg.Value >= 1
+        },
+        new()
+        {
+            Description = "RESOURCE_SEMAPHORE waits present — grant pressure visible in wait stats",
+            Boost = 0.2,
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && rs.BaseSeverity > 0
+        },
+        new()
+        {
+            Description = "PAGEIOLATCH waits elevated — buffer pool churning under the pressure",
+            Boost = 0.2,
+            Predicate = facts => HasSignificantWait(facts, "PAGEIOLATCH_SH", 0.10)
+                              || HasSignificantWait(facts, "PAGEIOLATCH_EX", 0.10)
+        },
+        new()
+        {
+            Description = "Read-latency anomaly co-fired — the churn is reaching storage",
+            Boost = 0.2,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_READ_LATENCY")
+        }
+    ];
 
     /// <summary>
     /// PARAMETER_SENSITIVITY: a single plan with wildly varying per-execution cost.
@@ -1305,56 +1869,167 @@ public class FactScorer
     }
 
     /// <summary>
-    /// Default thresholds for wait types (fraction of examined period).
-    /// Returns null for unrecognized waits — they get severity 0.
+    /// Thresholds for wait types: (concerning, critical) as a FRACTION of the observed period, graded by
+    /// <see cref="ApplyThresholdFormula"/> — 0.5 at concerning (the InferenceEngine root entry point),
+    /// 1.0 at critical; a null critical saturates at concerning. Returns null for a wait type with no
+    /// entry — the fact scores 0, stays a context fact, and can never root a story.
+    ///
+    /// <para><b>Every entry carries its measurement lineage (#3538 A5).</b> The population is the
+    /// 2026-09 dogfood read: 43 SQL Server primaries on one production store class, 4 days of
+    /// <c>wait_stats</c> bucketed into 1,075 server-4-hour windows, each wait type's
+    /// <c>SUM(delta_wait_time_ms) ÷ (4 h)</c> — the same fraction-of-period this method grades, divided by
+    /// the NOMINAL window; the collectors now divide by OBSERVED time (#3538 A2), so the fleet figures are
+    /// the lower-bound reading of what a fully-collected window shows the scorer, and a partly-collected
+    /// one reads higher. Percentiles are over the non-zero windows; "fires on N of 1,075" counts every
+    /// window. Where the fleet does not exhibit a wait, the entry says "unmeasured" — an honest lineage
+    /// includes what the data could not calibrate, and a bar on an absent wait is set by what the wait
+    /// MEANS, not by where a fleet that never sees it sits.</para>
+    ///
+    /// <para><b>The method, from the alerting layer's bands (ServerHealthBands.cs, #3368):</b> the
+    /// concerning bar sits at the top of the routine mode (≈ p99 of windows), so a typical window bands
+    /// nothing and about one window in a hundred roots a story; the critical bar sits inside a measured
+    /// empty interval — above every window measured — so nothing routine can saturate. A pair with a null
+    /// critical is one the method did not need to ramp: either the bar is already at p99.9 (SOS), or the
+    /// fleet never approaches it (the PAGEIOLATCH / CXPACKET / LCK_M_S / LCK_M_IS family), and lowering a
+    /// bar on one fleet's silence would be calibrating to an absence.</para>
+    ///
+    /// <para><b>What the fraction is, and is not.</b> The numerator sums the wait time of every CONCURRENT
+    /// task, so a fraction above 1.0 is legal and the same 0.25 means different things on 4 schedulers and
+    /// on 64 (the measurement lane's A3 note, documented on the collectors). The bars here are calibrated
+    /// on the fleet's RAW fraction — normalising by scheduler count would re-scale every measured figure
+    /// and needs its own read, so it is deliberately not done here.</para>
+    ///
+    /// <para><b>The one measurably over-firing constant was WRITELOG.</b> Its inherited (0.10, null)
+    /// saturated base 1.0 in 339 of 1,075 windows (31.5%) — a third of routine windows on a commit-heavy
+    /// OLTP fleet read as a saturated log-flush finding. Nothing else in the table fired on more than 2
+    /// windows in 1,075.</para>
     /// </summary>
     private static (double concerning, double? critical)? GetWaitThresholds(string waitType)
     {
         return waitType switch
         {
-            // CPU pressure
+            // ── CPU pressure ──
+            // Measured: p50 0.088, p90 0.335, p99 0.603, p99.9 0.744, max 0.835; 1 of 1,075 windows
+            // reaches 0.75. The inherited bar sits at the 99.9th percentile of the fleet — kept as is.
+            // No critical: SOS is the CPU story's root and reaches CRITICAL through its amplifiers
+            // (CPU %, CXPACKET, THREADPOOL), not on its own fraction.
             "SOS_SCHEDULER_YIELD" => (0.75, null),
+            // Dominated by the ScoreWaitFact gate (ThreadpoolMinWaitMsPerObservedHour = 0.25 of observed
+            // time + 1 s average): any THREADPOOL fact that clears the gate has fraction >= 0.25 and
+            // saturates here, so THREADPOOL's base is effectively 0 or 1.0 — deliberately: exhaustion is
+            // an outage, not a gradient. Measured: max fraction 4.1e-4 (295 non-zero windows); the gate's
+            // own lineage is on the constant. Not ramped with the other 0.01 entries because the gate
+            // already refuses to let a trace score at all.
             "THREADPOOL"          => (0.01, null),
 
-            // Memory pressure
+            // ── Memory pressure ──
+            // Measured: SH p50 0.012, p90 0.047, p99 0.098, max 0.154 (10 windows >= 0.10, 0 >= 0.25);
+            // EX p99 0.046, max 0.093. Neither reaches the inherited bar on this fleet — a buffer pool
+            // that fits its working set. Conservative, not wrong; lineage only, not lowered on silence.
             "PAGEIOLATCH_SH"      => (0.25, null),
             "PAGEIOLATCH_EX"      => (0.25, null),
-            "RESOURCE_SEMAPHORE"  => (0.01, null),
-            // Query-compile memory pressure — ramped: healthy servers see some compile-gateway
-            // waits, so 1% of period is concerning but 10% is critical.
+            // Unmeasured: RESOURCE_SEMAPHORE accrued ZERO wait time in 4 days on 43 servers, so the fleet
+            // cannot place its concerning bar; it can only say what the inherited (0.01, null) did — base
+            // 1.0 at 36 s of grant queueing per hour, on ANY trace — and that the ramp shape RS_QUERY_COMPILE
+            // already carries is the honest one: 1% of observed time queued for a grant roots a story at
+            // 0.5, and 10% (the Layer-3 cap-release bar in ScoreAll, "meaningful grant starvation")
+            // saturates. The 0.01 floor is kept because a trace of RESOURCE_SEMAPHORE IS abnormal on a
+            // healthy server (the fleet's zero says so); the ramp stops a trace from reading as a storm.
+            "RESOURCE_SEMAPHORE"  => (0.01, 0.10),
+            // Query-compile memory pressure — ramped: healthy servers see some compile-gateway waits, so
+            // 1% of period is concerning but 10% is critical. Measured: 4 non-zero windows on 1 server,
+            // max 2.2e-4 (a scheduled compile burst, ~3 s at the same hour daily) — under the floor.
             "RESOURCE_SEMAPHORE_QUERY_COMPILE" => (0.01, 0.10),
 
-            // Parallelism (CXCONSUMER is grouped into CXPACKET by collector)
+            // ── Parallelism (every CX* wait is grouped into CXPACKET by the collector) ──
+            // Measured: 25 non-zero windows, max 0.0187 (CXPACKET) / 0.068 (CXCONSUMER) — this fleet runs
+            // little parallelism, so the bar is unmeasured in the sense that matters. Inherited; the
+            // Layer-3 tuning-class cap, not this bar, is what keeps parallelism out of the CRITICAL band.
             "CXPACKET"            => (0.25, null),
 
-            // Log I/O
-            "WRITELOG"            => (0.10, null),
+            // ── Log I/O ──
+            // RE-DERIVED (#3538 A5). Inherited (0.10, null) saturated base 1.0 on 339 of 1,075 windows
+            // (31.5%): p50 0.065, p90 0.163, p99 0.243, p99.9 0.302, max 0.313 — WRITELOG is this OLTP
+            // fleet's steady-state commit cost, present in every window, and the bar sat below its median
+            // times two. Concerning 0.25 ≈ p99: 10 of 1,075 windows (0.9%) reach 0.5 and root a story —
+            // the top of the routine mode, the method's WARNING placement. Critical 0.50: above every
+            // window measured (1.6x the max), and half of observed time spent in log-flush waits summed
+            // across committers is a log that is genuinely not keeping up. The fleet's worst window
+            // (0.313) scores 0.63 — a WARNING that roots, not a CRITICAL. The IO_WRITE_LATENCY_MS
+            // amplifier's corroboration bar (HasSignificantWait 0.05) is a different question — "is
+            // WRITELOG present enough to confirm a write-latency finding" — and is not moved by this.
+            "WRITELOG"            => (0.25, 0.50),
 
-            // Lock waits — serializable/repeatable read lock modes
-            "LCK_M_RS_S"  => (0.01, null),
-            "LCK_M_RS_U"  => (0.01, null),
-            "LCK_M_RIn_NL" => (0.01, null),
-            "LCK_M_RIn_S" => (0.01, null),
-            "LCK_M_RIn_U" => (0.01, null),
-            "LCK_M_RIn_X" => (0.01, null),
-            "LCK_M_RX_S"  => (0.01, null),
-            "LCK_M_RX_U"  => (0.01, null),
-            "LCK_M_RX_X"  => (0.01, null),
+            // ── Availability-group synchronous commit ──
+            // NEW (#3538 A5). The second-largest wait on the fleet and, before this entry, invisible to the
+            // engine: measured in 1,050 of 1,075 windows, p50 0.045, p90 0.129, p99 0.288, p99.9 0.474,
+            // max 0.591; 14 windows >= 0.25. HADR_SYNC_COMMIT is the primary waiting for a synchronous
+            // secondary to harden the log before a commit can return — the AG sibling of WRITELOG, and on
+            // an AG fleet the larger half of commit latency. Concerning 0.30 ≈ p99 (≈ 1% of windows root);
+            // critical 0.50 sits between p99.9 (0.474) and the max (0.591), so only the single worst
+            // window measured saturates. Ramped, because every window carries some of it and a null
+            // critical would make a routine 0.30 read the same as a 0.59 replica stall. The advice is
+            // evidence-gated and names the counter-objective (FactAdvice): synchronous commit is a
+            // durability policy, and the remediation is never "switch to async".
+            "HADR_SYNC_COMMIT"    => (0.30, 0.50),
 
-            // Reader/writer blocking locks
+            // ── Lock waits: serializable / repeatable-read range-lock modes ──
+            // RAMPED (#3538 A5) from the inherited (0.01, null), which saturated base 1.0 on any trace — 36 s
+            // of range-lock waiting per hour read as a saturated finding. A range lock IS abnormal (it
+            // means SERIALIZABLE, which nothing should be running by accident), so the 0.01 floor stays;
+            // the ramp to 0.10 lets a trace root at 0.5 while only sustained range-locking saturates.
+            // Measured: RS_U max 0.00118 (553 non-zero windows), RS_S max 0.00032 (14 windows) — both
+            // under the floor; RIn_* and RX_* did not reach the measurement's top-70 cut, so their bars
+            // are unmeasured and inherited by shape from RS_*.
+            "LCK_M_RS_S"  => (0.01, 0.10),
+            "LCK_M_RS_U"  => (0.01, 0.10),
+            "LCK_M_RIn_NL" => (0.01, 0.10),
+            "LCK_M_RIn_S" => (0.01, 0.10),
+            "LCK_M_RIn_U" => (0.01, 0.10),
+            "LCK_M_RIn_X" => (0.01, 0.10),
+            "LCK_M_RX_S"  => (0.01, 0.10),
+            "LCK_M_RX_U"  => (0.01, 0.10),
+            "LCK_M_RX_X"  => (0.01, 0.10),
+
+            // ── Reader/writer blocking locks (the RCSI signal) ──
+            // Measured: LCK_M_S max 8.6e-4 (971 windows), LCK_M_IS max 0.0117 (104 windows) — never within
+            // 4x of the inherited bar. Conservative; lineage only.
             "LCK_M_S"  => (0.05, null),
             "LCK_M_IS" => (0.05, null),
 
-            // General lock contention (grouped X, U, IX, SIX, BU, etc.)
+            // ── General lock contention (X, U, IX, SIX, BU, ... grouped into LCK by the collector) ──
+            // Measured per constituent, not as the grouped sum the scorer sees: LCK_M_U max 0.129 (1 window
+            // >= 0.10), LCK_M_IX max 0.048, LCK_M_X max 0.020. The grouped fraction is their sum, so at most
+            // a handful of windows reach 0.10 on this fleet. Inherited; lineage only.
             "LCK" => (0.10, null),
 
-            // Schema locks — DDL operations, index rebuilds
-            "SCH_M" => (0.01, null),
+            // ── Schema locks — DDL, index rebuilds ──
+            // RAMPED (#3538 A5) from (0.01, null) for the same reason as the range locks: a trace of SCH_M
+            // during maintenance saturated a finding. Unmeasured: below the measurement's top-70 cut
+            // (< 1.7e-4 in every window).
+            "SCH_M" => (0.01, 0.10),
 
-            // Latch contention — page latch (not I/O latch) indicates
-            // in-memory contention, often TempDB allocation or hot pages
+            // ── Latch contention (page latch, not I/O latch — in-memory hot pages, tempdb allocation) ──
+            // Measured: LATCH_EX p99 0.0051, p99.9 0.351, max 0.378 — 2 of 1,075 windows (0.19%) reach the
+            // inherited 0.25, a heavy tail on an otherwise silent wait. At the bar already; kept. LATCH_SH
+            // did not reach the top-70 cut: unmeasured, inherited.
             "LATCH_EX" => (0.25, null),
             "LATCH_SH" => (0.25, null),
+
+            // ── Benign by measurement: no bar, spelled out so nobody adds one ──
+            // PREEMPTIVE_OS_QUERYREGISTRY is the fleet's #7 wait by fraction (present in ALL 1,075 windows,
+            // p50 0.016, p90 0.067, p99 0.114, max 0.175) and is fleet-UNIFORM: ~152,881 waiting tasks per
+            // hour per server (min 10,011, max 293,171), ~1 ms each — about 42 registry queries a second on
+            // every server around the clock, unrelated to workload and not this product's collectors (the
+            // agent-status collector's dm_server_services reads are ~36/hr, 0.02% of it). Uniformity at
+            // that rate is the managed platform's own service/state polling. A bar on it either never
+            // fires or fires on platform noise, so it has NO threshold — the same outcome the default arm
+            // below gives every unlisted wait, written as an entry so the measurement travels with the
+            // decision. (This is the scorer's benign tier; it is unrelated to sp_HealthParser's
+            // #ignore_waits copy in SystemHealthSignificance, which gates discrete >= 500 ms XE wait_info
+            // events that a 1 ms registry call can never produce, and to the collector-side
+            // IgnoredWaitDefaults, which decides what is STORED and is a collection-policy list.)
+            "PREEMPTIVE_OS_QUERYREGISTRY" => null,
 
             _ => null
         };

@@ -52,6 +52,10 @@ defects survived long enough to be found here.
 - **`pg_read_file`'s ACL is `postgres=X/postgres`.** The `pg_read_server_files` role does *not* carry
   EXECUTE; a superuser must grant it explicitly. That grant also exposes `pg_hba.conf`, which is why the
   plan-capture collector reports its absence as a grant the operator must choose to give.
+- **`pg_read_binary_file(text, bigint, bigint)` has the same ACL and needs the same explicit grant.** The
+  three log readers switch to it on their own once it's granted. It returns `bytea`, so a byte that isn't
+  valid UTF-8, which a failed login can plant in the log, no longer fails the whole read the way it does
+  through `pg_read_file` ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)).
 
 ## Two majors at once, for version drift
 

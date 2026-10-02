@@ -572,6 +572,11 @@ public sealed class DocCommentHygieneTests
         ["!:DarlingServerConnector"] =
             "MARKER. Names DarlingServerConnector, which this repository declares.",
 
+        ["!:McpCommandDeadlines.ReadSeconds"] =
+            "MARKER. Names McpCommandDeadlines.ReadSeconds, both of which this repository declares. Two "
+            + "sites (#4442): ViewerCommandDeadlines and StorageCommandDeadlines each cite the mcp read "
+            + "deadline as the sibling half of their own client-deadline derivation.",
+
         ["!:StallWaitProbePolicy.HardBudget"] =
             "MARKER. Names StallWaitProbePolicy.HardBudget, both of which this repository declares.",
 
@@ -645,10 +650,6 @@ public sealed class DocCommentHygieneTests
             + "the target only because System.Text.Json.JsonEncodedText is spelled in no C# here. Right "
             + "answer, different question; labelling it DANGLING would credit the resolver with a check it "
             + "does not perform.",
-
-        ["ListBox"] =
-            "OUTSIDE. System.Windows.Controls.ListBox, used from XAML rather than from C#, so the C# "
-            + "identifier universe cannot contain it. Three sites, across both SKUs.",
 
         ["NpgsqlBatch"] =
             "OUTSIDE. Npgsql's batch type, named in prose about why the code does not use it.",

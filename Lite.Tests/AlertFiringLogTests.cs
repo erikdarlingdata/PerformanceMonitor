@@ -102,19 +102,21 @@ public class AlertFiringLogTests
         var engineSource = ReadAlertEngineSource();
 
         var directCalls = engineSource.Split('\n')
-            .Where(l => l.Contains("_deliverer.DeliverAsync(", System.StringComparison.Ordinal))
+            .Where(l => l.Contains("_deliverer.Deliver", System.StringComparison.Ordinal))
             .Select(l => l.Trim())
             .ToList();
 
-        /* Exactly one: the funnel's own call. Any other is a family that skipped the log. */
+        /* Exactly one: the funnel's own call. Any other is a family that skipped the log. Both delivery
+           methods count (#4752: the funnel calls the reporting one, DeliverAndReportAsync, so it can tell a
+           fire nobody received from a delivered one), so a family that calls either directly is caught. */
         Assert.Single(directCalls);
-        Assert.Contains("await _deliverer.DeliverAsync(outcome, ct);", directCalls[0], System.StringComparison.Ordinal);
+        Assert.Contains("return await _deliverer.DeliverAndReportAsync(outcome, ct);", directCalls[0], System.StringComparison.Ordinal);
 
         /* And the funnel really does log before delivering - logging after would lose the record of an alert
            whose delivery hung, which is exactly the alert someone later goes looking for. */
-        var funnel = engineSource[engineSource.IndexOf("private async Task FireAsync(AlertOutcome outcome", System.StringComparison.Ordinal)..];
+        var funnel = engineSource[engineSource.IndexOf("private async Task<AlertDelivery?> FireAsync(AlertOutcome outcome", System.StringComparison.Ordinal)..];
         var logIndex = funnel.IndexOf("AlertFiringLog.Fired(", System.StringComparison.Ordinal);
-        var deliverIndex = funnel.IndexOf("_deliverer.DeliverAsync(", System.StringComparison.Ordinal);
+        var deliverIndex = funnel.IndexOf("_deliverer.DeliverAndReportAsync(", System.StringComparison.Ordinal);
         Assert.True(logIndex > 0 && logIndex < deliverIndex, "the funnel must log BEFORE it delivers");
     }
 

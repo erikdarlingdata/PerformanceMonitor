@@ -43,6 +43,11 @@ internal static class EmailTemplateBuilder
     /// (a custom alert rule's name). Null or empty renders <paramref name="metricName"/> unchanged, so
     /// built-in alerts are byte-identical. Severity/color still derive from <paramref name="metricName"/>.
     /// </param>
+    /// <param name="triageUrl">
+    /// #4220: the per-alert triage-page link (<see cref="TriageLink.Build"/>), the same URL the webhook
+    /// channels carry for this firing. Null (the pre-#4220 default) renders BOTH bodies exactly as before —
+    /// no anchor in the HTML body, no line in the plain-text body.
+    /// </param>
     public static (string HtmlBody, string PlainTextBody) BuildAlertEmail(
         string metricName,
         string serverName,
@@ -52,7 +57,8 @@ internal static class EmailTemplateBuilder
         AlertBranding branding,
         AlertContext? context = null,
         string? detailText = null,
-        string? displayName = null)
+        string? displayName = null,
+        string? triageUrl = null)
     {
         var utcNow = DateTime.UtcNow;
         var localNow = DateTime.Now;
@@ -64,10 +70,10 @@ internal static class EmailTemplateBuilder
 
         var html = BuildHtmlBody(titleName, serverName, currentValue,
             thresholdValue, utcNow, localNow, accentColor, badgeText, branding, context: context, emailCooldownMinutes: emailCooldownMinutes,
-            prose: prose);
+            prose: prose, triageUrl: triageUrl);
 
         var plain = BuildPlainTextBody(titleName, serverName, currentValue,
-            thresholdValue, utcNow, localNow, emailCooldownMinutes, branding, context, prose);
+            thresholdValue, utcNow, localNow, emailCooldownMinutes, branding, context, prose, triageUrl);
 
         return (html, plain);
     }
@@ -105,7 +111,8 @@ internal static class EmailTemplateBuilder
         bool isTest = false,
         AlertContext? context = null,
         int emailCooldownMinutes = 15,
-        string? prose = null)
+        string? prose = null,
+        string? triageUrl = null)
     {
         var sb = new StringBuilder(2048);
 
@@ -177,6 +184,16 @@ internal static class EmailTemplateBuilder
         {
             sb.Append("<tr><td style=\"padding:4px 24px 12px 24px;\">");
             sb.Append($"<span style=\"font-family:{FontStack};font-size:12px;color:#B0B0B0;\">&#128206; Attached: {WebUtility.HtmlEncode(context.AttachmentFileName)}</span>");
+            sb.Append("</td></tr>");
+        }
+
+        /* #4220: the triage-page link, one HTML-encoded anchor, above the footer. Null (base URL unset, or
+           the dashboard disabled — see DarlingAlertSettings.TriageBaseUrl) renders nothing here, same as
+           the pre-#4220 body. */
+        if (!string.IsNullOrEmpty(triageUrl))
+        {
+            sb.Append("<tr><td style=\"padding:4px 24px 16px 24px;\">");
+            sb.Append($"<a href=\"{WebUtility.HtmlEncode(triageUrl)}\" style=\"display:inline-block;font-family:{FontStack};font-size:13px;font-weight:600;color:#FFFFFF;background-color:{accentColor};padding:8px 16px;border-radius:4px;text-decoration:none;\">{WebUtility.HtmlEncode(TriageLink.LinkLabel(triageUrl))}</a>");
             sb.Append("</td></tr>");
         }
 
@@ -266,6 +283,31 @@ internal static class EmailTemplateBuilder
                 }
                 sb.Append("</td></tr>");
             }
+            else if (item.Records.Count > 0)
+            {
+                /* #3644: a record-shaped item (a drill-down's top-N rows) as a compact list in the same
+                   table idiom as the fields below — one data row per record, labelled "#N", carrying the
+                   summary line; then one query row per text, labelled as the flat field is. Three rows
+                   with seven attributes are six table rows instead of twenty-one, and the row number a
+                   reader saw on Slack is the row number here. The plain-text body renders the same list. */
+                sb.Append("<tr><td style=\"padding:2px 24px 8px 24px;\">");
+                sb.Append($"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\" style=\"background-color:#333333;border-radius:4px;\">");
+
+                for (int i = 0; i < item.Records.Count; i++)
+                {
+                    var record = item.Records[i];
+                    bool lastRecord = i == item.Records.Count - 1;
+                    AppendDataRow(sb, $"#{record.Ordinal}", record.Summary, lastRecord && record.Texts.Count == 0);
+                    for (int t = 0; t < record.Texts.Count; t++)
+                    {
+                        var (label, text) = record.Texts[t];
+                        AppendQueryRow(sb, label, text, lastRecord && t == record.Texts.Count - 1);
+                    }
+                }
+
+                sb.Append("</table>");
+                sb.Append("</td></tr>");
+            }
             else
             {
                 /* Detail item fields */
@@ -314,7 +356,8 @@ internal static class EmailTemplateBuilder
         int emailCooldownMinutes,
         AlertBranding branding,
         AlertContext? context = null,
-        string? prose = null)
+        string? prose = null,
+        string? triageUrl = null)
     {
         var sb = new StringBuilder();
         sb.Append($"{branding.EditionName} Alert\r\n");
@@ -363,6 +406,23 @@ internal static class EmailTemplateBuilder
                         sb.Append($"  {para}\r\n");
                     }
                 }
+                else if (item.Records.Count > 0)
+                {
+                    /* #3644: the HTML body's compact record list, in text — the summary on the "#N" line,
+                       each text indented under it, one line per line of the statement. */
+                    foreach (var record in item.Records)
+                    {
+                        sb.Append($"  #{record.Ordinal}: {record.Summary}\r\n");
+                        foreach (var (label, text) in record.Texts)
+                        {
+                            sb.Append($"    {label}:\r\n");
+                            foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
+                            {
+                                sb.Append($"      {line}\r\n");
+                            }
+                        }
+                    }
+                }
                 else
                 {
                     foreach (var (label, value) in item.Fields)
@@ -376,6 +436,13 @@ internal static class EmailTemplateBuilder
         if (!string.IsNullOrEmpty(context?.AttachmentFileName))
         {
             sb.Append($"\r\nAttached: {context.AttachmentFileName}\r\n");
+        }
+
+        /* #4220: same link as the HTML anchor (BuildHtmlBody), as a plain line — null renders nothing,
+           same as the pre-#4220 body. */
+        if (!string.IsNullOrEmpty(triageUrl))
+        {
+            sb.Append($"\r\n{TriageLink.LinkLabel(triageUrl)}: {triageUrl}\r\n");
         }
 
         /* Footer — mirrors the HTML body's cooldown disclosure (BuildHtmlBody). The HTML and

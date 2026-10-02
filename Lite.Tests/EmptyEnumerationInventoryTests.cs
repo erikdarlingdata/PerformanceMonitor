@@ -83,8 +83,8 @@ public sealed class EmptyEnumerationInventoryTests : IClassFixture<SharedDuckDbF
            against the collectors that actually enumerate. A collector that starts enumerating without an
            entry here would quietly never be qualified; one that stops enumerating would carry a mapping
            for a note it can no longer produce. Same shape as the on-load set's pin against the schedule
-           table. Probed on an ON-PREM target: query_store and index_object_stats deliberately return no
-           enumeration on Azure SQL DB, where the collector runs per-database instead. */
+           table. Probed on an ON-PREM target: on Azure SQL DB none of the five enumerates (query_store_health
+           was the last, #3764) — every one of them runs on the host's per-database connection loop there. */
         var onPrem = new CollectorContext
         {
             ServerId = ServerId,
@@ -396,13 +396,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             1, "ROWS", databaseName + "_data", "C:\\data\\" + databaseName + ".mdf", 128.00m);
 
     /// <summary>The Azure sibling shape (#2643): NULL database_id / file_id / physical_name, a file_name
-    /// that says it is a whole database, and a real size — exactly what the arm projects.</summary>
+    /// that says it is a whole database, the allocated data space as total_size_mb and the data space
+    /// used as used_size_mb. Exactly what the arm projects.</summary>
     private async Task SeedSiblingSizeAsync(string databaseName, DateTime collectionTimeUtc) =>
         await ExecAsync(@"
 INSERT INTO database_size_stats
     (collection_id, collection_time, server_id, server_name, database_name, database_id,
-     file_id, file_type_desc, file_name, physical_name, total_size_mb)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+     file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             _nextId++, collectionTimeUtc, ServerId, "TestSrv", databaseName, null,
-            null, "ROWS", "(whole database)", null, 23.00m);
+            null, "ROWS", "(whole database)", null, 128.00m, 23.00m);
 }

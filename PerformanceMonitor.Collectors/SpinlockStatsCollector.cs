@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
@@ -79,6 +80,9 @@ OPTION(RECOMPILE);";
         new CollectorColumn("delta_spins", CollectorColumnType.BigInt),
         new CollectorColumn("delta_sleep_time", CollectorColumnType.BigInt),
         new CollectorColumn("delta_backoffs", CollectorColumnType.BigInt),
+        /* Appended (Darling V127 / Lite v60, #3540): the measured seconds the row's deltas accrued over, or
+           0 when no delta was knowable. At the END because both stores' writers are positional. */
+        new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -106,10 +110,20 @@ OPTION(RECOMPILE);";
         /* Delta groups, key (spinlock_name), and the shared gap policy are the parity contract.
            spins_per_collision is a computed ratio, not a cumulative counter — no delta (mirrors
            the Dashboard's collect.spinlock_stats table). */
-        var deltaCollisions = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_collisions", row.SpinlockName, row.Collisions, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaSpins = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_spins", row.SpinlockName, row.Spins, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaSleepTime = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_sleep_time", row.SpinlockName, row.SleepTime, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaBackoffs = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_backoffs", row.SpinlockName, row.Backoffs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaCollisions = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "spinlock_stats_collisions", row.SpinlockName, row.Collisions, out var collisionsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSpins = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "spinlock_stats_spins", row.SpinlockName, row.Spins, out var spinsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSleepTime = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "spinlock_stats_sleep_time", row.SpinlockName, row.SleepTime, out var sleepInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaBackoffs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "spinlock_stats_backoffs", row.SpinlockName, row.Backoffs, out var backoffsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        /* The interval is stored beside the deltas (#3540), the minimum over the row's four groups, so the
+           stored (0, 0) pair means "no delta in this row is knowable" — see WaitStatsCollector.WritePayload
+           for the full argument. This is the one family where the groups CAN disagree without a DMV reset:
+           backoffs is a 32-bit int on SQL Server 2016/2017 (the CONVERT in the query is for that) and wraps
+           on its own while collisions/spins/sleep_time carry on. The minimum marks that one row unknowable
+           rather than reporting a wrapped counter's 0 over a real interval as "no backoffs" — the trade is
+           one row's real collision delta once per 2^31 backoffs against a fabricated idle reading, and
+           the whole point of the pair is never to fabricate idle. */
+        var sampleIntervalSeconds = Math.Min(Math.Min(collisionsInterval, spinsInterval), Math.Min(sleepInterval, backoffsInterval));
 
         writer
             .Value(row.SpinlockName)       /* spinlock_name VARCHAR */
@@ -121,6 +135,7 @@ OPTION(RECOMPILE);";
             .Value(deltaCollisions)        /* delta_collisions BIGINT */
             .Value(deltaSpins)             /* delta_spins BIGINT */
             .Value(deltaSleepTime)         /* delta_sleep_time BIGINT */
-            .Value(deltaBackoffs);         /* delta_backoffs BIGINT */
+            .Value(deltaBackoffs)          /* delta_backoffs BIGINT */
+            .Value(sampleIntervalSeconds); /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 }

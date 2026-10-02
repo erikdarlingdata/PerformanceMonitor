@@ -95,7 +95,13 @@ namespace PerformanceMonitorDashboard.Models
         public int CpuThresholdPercent { get; set; } = 90; // Alert when CPU > X%
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.Total; // Total non-idle CPU (default) or SQL scheduler only
         public bool NotifyOnPoisonWaits { get; set; } = true;
-        public int PoisonWaitThresholdMs { get; set; } = 500; // Alert when avg ms per wait > X
+        /// <summary>
+        /// Retired as a threshold by #3653 (#3593's class); kept as a persisted setting so saved preferences
+        /// round-trip. The Poison Wait alert now grades accumulated wait over a ten-minute window against the
+        /// bars on <see cref="PerformanceMonitor.Alerting.PoisonWaitEvaluator"/>, shared with Lite and Darling;
+        /// MainWindow.AlertEngine no longer reads this member, and the Settings box that edits it is disabled.
+        /// </summary>
+        public int PoisonWaitThresholdMs { get; set; } = 500;
         public bool NotifyOnLongRunningQueries { get; set; } = true;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30; // Alert when query runs > X minutes
         public int LongRunningQueryMaxResults { get; set; } = 5; // Max number of long-running queries returned per check

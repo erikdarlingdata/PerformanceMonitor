@@ -1,0 +1,733 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Npgsql;
+using PerformanceMonitor.Analysis;
+
+namespace PerformanceMonitor.Darling.Analysis;
+
+public sealed partial class PgTargetFactCollector
+{
+    /// <summary>
+    /// The window's session picture from <c>pg_session_states</c>, in one read: the PEAK capture (the one whose
+    /// denormalised <c>total_sessions</c> was highest; ties to the newest), the NEWEST capture, and the window's
+    /// shape — how many captures stored rows and how many of those rows were <c>state_is_redacted</c>. <c>$1</c>
+    /// server_id, <c>$2</c>/<c>$3</c> window (naive UTC).
+    ///
+    /// <para><b>Why the denormalised totals and not a count of rows.</b> <c>pg_session_states</c> is an EXCEPTION
+    /// table (the collector's own remarks; <c>DarlingPgSessionStatesReader.PgSessionStatesCaptureCountsSql</c>'s
+    /// doc): a capture stores one row per session that had a transaction open past the collector's floors, capped
+    /// at a hundred, and the instance-wide counts — <c>total_sessions</c>, <c>active_sessions</c>,
+    /// <c>idle_in_transaction_sessions</c> — repeat on every stored row precisely so that any one row answers
+    /// "out of how many" (the V86 design comment). <c>MAX()</c> per <c>collection_time</c> is therefore a pick,
+    /// not an aggregate: every row of a capture carries the same four integers. Counting the stored rows would
+    /// report the reportable subset, never the pool.</para>
+    ///
+    /// <para><b>What the exception shape costs this family, stated rather than hidden.</b> A capture in which no
+    /// session was over a floor stores NOTHING, so a quiet minute is absent from this series and the peak is the
+    /// peak over the captures that had something to report. On a pool filled by short OLTP sessions with nothing
+    /// idle past ten seconds or open past thirty, the collector may store no capture at all and this family says
+    /// nothing — <c>captures_with_rows</c> rides the fact so the advice can say over how many captures the peak
+    /// was seen. That rung landed (V133, #3716): <c>pg_database_stats.numbackends</c> is the universal one-minute
+    /// series, and since lane 25 of #3691 <see cref="PgTargetNumbackendsPeakSql"/> reads it as the saturation
+    /// NUMERATOR wherever the store carries it. This read's peak is then the FALLBACK numerator and still the source
+    /// of the state breakdown (active / idle in transaction / other), which <c>numbackends</c> — a count with no
+    /// state — cannot give.</para>
+    ///
+    /// <para><b><c>total_sessions</c> counts every backend <c>pg_stat_activity</c> reports</b>, PostgreSQL's own
+    /// background processes included (checkpointer, walwriter, background writer, autovacuum launcher and
+    /// workers, logical replication launcher — a handful on a stock build), minus the collector's own session and
+    /// minus parallel workers. The collector could not filter to <c>client backend</c> because <c>backend_type</c>
+    /// is a privileged column that redacts to NULL without <c>pg_read_all_stats</c>. Background processes do
+    /// NOT consume <c>max_connections</c> slots, so the ratio this read feeds runs a few points HIGH of the true
+    /// client share — the safe direction for a cliff detector (a false alarm at the margin, never a missed
+    /// refusal) — and the advice says so beside the number.</para>
+    ///
+    /// <para><b>The redacted share is over ROWS, not captures</b>, because redaction is per-backend and
+    /// ownership-based (measured, V86: the unprivileged login sees its own backends whole and every other
+    /// role's blank), so a login without the grant redacts essentially every stored row and one with it none;
+    /// a per-capture vote would say the same thing with a coarser denominator. The <c>coalesce(…, false)</c> is
+    /// the reader's own NULL rule for a boolean flag that a pre-flag row cannot carry.</para>
+    ///
+    /// <para>Every <c>FROM</c> / <c>JOIN</c> names the collector table or a CTE; <c>collection_log</c> — which
+    /// the reader's capture-count SQL uses for the honest-empty denominator — is not an analysis table and is
+    /// not read here.</para>
+    /// </summary>
+    public const string PgTargetSessionPeakSql = @"
+WITH captures AS (
+    SELECT
+        collection_time,
+        MAX(total_sessions)                                        AS total_sessions,
+        MAX(active_sessions)                                       AS active_sessions,
+        MAX(idle_in_transaction_sessions)                          AS idle_in_transaction_sessions,
+        COUNT(*)                                                   AS rows_stored,
+        COUNT(*) FILTER (WHERE coalesce(state_is_redacted, false)) AS rows_redacted
+    FROM pg_session_states
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY collection_time
+),
+peak AS (
+    SELECT collection_time, total_sessions, active_sessions, idle_in_transaction_sessions
+    FROM captures
+    ORDER BY total_sessions DESC NULLS LAST, collection_time DESC
+    LIMIT 1
+),
+latest AS (
+    SELECT collection_time, total_sessions, active_sessions, idle_in_transaction_sessions
+    FROM captures
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+window_shape AS (
+    SELECT
+        COUNT(*)                        AS captures_with_rows,
+        CAST(SUM(rows_stored) AS bigint)   AS rows_stored,
+        CAST(SUM(rows_redacted) AS bigint) AS rows_redacted
+    FROM captures
+)
+SELECT
+    p.total_sessions                AS peak_total_sessions,
+    p.active_sessions               AS peak_active_sessions,
+    p.idle_in_transaction_sessions  AS peak_idle_in_transaction_sessions,
+    p.collection_time               AS peak_at,
+    l.total_sessions                AS latest_total_sessions,
+    l.active_sessions               AS latest_active_sessions,
+    l.idle_in_transaction_sessions  AS latest_idle_in_transaction_sessions,
+    l.collection_time               AS latest_at,
+    w.captures_with_rows,
+    w.rows_stored,
+    w.rows_redacted
+FROM window_shape AS w
+CROSS JOIN peak AS p
+CROSS JOIN latest AS l";
+
+    /// <summary>
+    /// The window's peak of <c>pg_stat_database.numbackends</c> summed over the databases at ONE instant, from
+    /// <c>pg_database_stats</c> (V133, #3716; consumed since lane 25 of #3691, design §3.6): <c>$1</c> server_id,
+    /// <c>$2</c>/<c>$3</c> window (naive UTC). One row always: how many distinct <c>collection_time</c>s the window
+    /// holds, how many of those carried the column, and the peak instant's sum and time (NULL when none did).
+    ///
+    /// <para><b>SUM per <c>collection_time</c>, THEN the peak over instants — never a SUM over the window.</b> The
+    /// collector stores one row per database per collection, each carrying that database's backends at the moment
+    /// of the read, so the server's client population at that instant is the sum across its databases at that one
+    /// <c>collection_time</c>; the window's peak is the largest such instant. A sum over the window would be
+    /// backends × minutes, a nonsense against a ceiling of slots. <c>numbackends</c> is a LEVEL, never differenced
+    /// (the V133 rung doc): a <c>stats_reset</c> does not touch it and the reset-aware machinery the counters need
+    /// is deliberately absent here.</para>
+    ///
+    /// <para><b>NULL means "not sampled", never 0</b> (the rung's row contract): a pre-V133 row carries NULL. The
+    /// shared-relations row (the NULL-named <c>database_name</c> PostgreSQL emits for shared catalogs) is NOT the
+    /// NULL the rung doc expected — measured on PostgreSQL 18, <c>pg_stat_get_db_numbackends(0)</c> reports <c>0</c>
+    /// there (the database-less processes are not attributed to it), so the row sums in as nothing and a store
+    /// where it did read NULL would sum the same. An instant is SAMPLED when at least one of its rows is non-NULL
+    /// (<c>COUNT(numbackends) &gt; 0</c> — the shape <c>SUM() IS NOT NULL</c> tests); an instant whose every row is
+    /// NULL sums to NULL and is not a candidate for the peak. The caller reads the two counts and decides whether
+    /// the sampled instants cover enough of the window to be the numerator (<see cref="ChooseSaturationNumerator"/>).</para>
+    ///
+    /// <para><b>What the level counts.</b> Backends attached to a database: client backends, and also the
+    /// background workers that are inside one at the instant — autovacuum workers, parallel workers,
+    /// logical-replication workers, an extension's per-database scheduler (measured: a fresh TimescaleDB store
+    /// reads 2 for its own database with one client connected) — and none of the database-less processes
+    /// (checkpointer, walwriter, background writer, the launchers, physical WAL senders, I/O workers) that
+    /// <c>pg_session_states.total_sessions</c> counted. Workers hold no <c>max_connections</c> slot either, so the
+    /// ratio can still read a hair high while a vacuum or a parallel plan is running — the safe direction, and far
+    /// less of it than the capture's total, which is what "client-only" means here rather than a literal
+    /// <c>backend_type</c> filter the view does not offer.</para>
+    ///
+    /// <para><c>LEFT JOIN … ON true</c> against the peak CTE rather than a <c>CROSS JOIN</c>, so the shape row
+    /// survives a window with no sampled instant and the caller can stamp the coverage it saw. Every <c>FROM</c> /
+    /// <c>JOIN</c> names the collector table or a CTE.</para>
+    /// </summary>
+    public const string PgTargetNumbackendsPeakSql = @"
+WITH instants AS (
+    SELECT
+        collection_time,
+        SUM(numbackends) AS numbackends
+    FROM pg_database_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY collection_time
+),
+shape AS (
+    SELECT
+        COUNT(*)                                        AS database_stats_samples,
+        COUNT(*) FILTER (WHERE numbackends IS NOT NULL) AS numbackends_samples
+    FROM instants
+),
+peak AS (
+    SELECT collection_time, numbackends
+    FROM instants
+    WHERE numbackends IS NOT NULL
+    ORDER BY numbackends DESC, collection_time DESC
+    LIMIT 1
+)
+SELECT
+    s.database_stats_samples,
+    s.numbackends_samples,
+    p.numbackends       AS peak_numbackends,
+    p.collection_time   AS peak_at
+FROM shape AS s
+LEFT JOIN peak AS p ON true";
+
+    /// <summary>
+    /// Which numerator the saturation fact divides by the ceiling, from the two counts
+    /// <see cref="PgTargetNumbackendsPeakSql"/> returns: <c>numbackends</c> when the sampled instants cover at least
+    /// <see cref="PgTargetScorer.NumbackendsCoverageFloor"/> of the window's <c>pg_database_stats</c> instants;
+    /// otherwise the capture peak — <c>Partial</c> when SOME instant carried the column and the window still fell
+    /// under the floor (a store mid-migration), so the fact can say why the level it also reports was not used.
+    /// A window with no <c>pg_database_stats</c> instant at all is the capture peak, not partial: there is nothing
+    /// the column could have covered.
+    /// </summary>
+    public readonly record struct SaturationNumeratorChoice(bool UseNumbackends, bool Partial);
+
+    /// <summary>The pure half of the numerator decision — see <see cref="SaturationNumeratorChoice"/>. Static and
+    /// public so the three shapes (none → capture; all → numbackends; part → capture + partial) are pinned
+    /// without a store.</summary>
+    public static SaturationNumeratorChoice ChooseSaturationNumerator(long databaseStatsSamples, long numbackendsSamples)
+    {
+        if (databaseStatsSamples <= 0 || numbackendsSamples <= 0)
+            return new SaturationNumeratorChoice(UseNumbackends: false, Partial: false);
+
+        var coverage = numbackendsSamples / (double)databaseStatsSamples;
+        return coverage >= PgTargetScorer.NumbackendsCoverageFloor
+            ? new SaturationNumeratorChoice(UseNumbackends: true, Partial: false)
+            : new SaturationNumeratorChoice(UseNumbackends: false, Partial: true);
+    }
+
+    /// <summary>
+    /// The window's idle-in-transaction HOLDERS from <c>pg_session_states</c> (v2 — #3691 lane 14, design §3.10):
+    /// every stored row that was <c>is_idle_in_transaction</c> with <c>xact_duration_ms</c> at or over the floor
+    /// <c>$4</c> (the scorer's WARNING bar, passed rather than repeated so the SQL and the constant cannot drift),
+    /// grouped by HOLDER IDENTITY — <c>application_name</c> + <c>username</c> + <c>database_name</c> — with how many
+    /// captures each identity was seen over the floor in, its longest transaction, the largest <c>horizon_age</c> it
+    /// carried and when it was last seen; the window's shape (captures with a holder, holder rows, the most holders
+    /// in one capture) and the peak capture ride every row. Longest holder first; at most 25 identities. <c>$1</c>
+    /// server_id, <c>$2</c>/<c>$3</c> window (naive UTC).
+    ///
+    /// <para><b>Identity, not pid.</b> The V86 table stores no query text by design, and a pid is one backend's
+    /// lifetime — the chronic shape this fact exists for is a CODE PATH that parks a transaction every time it
+    /// runs, from the same application, as the same role, in the same database, on a fresh connection each time.
+    /// Grouping by the three names is what makes "seen in 6 of 48 captures" mean recurrence rather than one
+    /// session's six sightings; <c>COUNT(DISTINCT collection_time)</c> is the recurrence, so three parked sessions
+    /// in one capture count once. Each name is <c>coalesce</c>d to the empty string so a NULL <c>application_name</c>
+    /// (a client that set none) groups as one identity rather than never grouping at all.</para>
+    ///
+    /// <para><b>Redacted rows are excluded by the flag, not by accident.</b> Under redaction <c>state</c> is NULL and
+    /// <c>is_idle_in_transaction</c> is not set, so such rows could not cross the floor anyway; the explicit
+    /// <c>NOT coalesce(state_is_redacted, false)</c> says so, and the caller does not run this read at all when the
+    /// window's rows are majority-redacted — that window stamps the permissions advisory instead of reading zero
+    /// holders off blank rows.</para>
+    ///
+    /// <para><b><c>horizon_age</c> keeps the collector's <c>-1</c> sentinel</b> (pins nothing — a READ COMMITTED
+    /// reader, an UPDATE that matched no rows, V86) through <c>coalesce(…, -1)</c> and <c>MAX()</c>: an identity
+    /// whose every sighting pinned nothing reads <c>-1</c>, one that ever pinned reads the largest age it pinned.
+    /// The scorer escalates on <c>&gt; 0</c> only.</para>
+    ///
+    /// <para>Every <c>FROM</c> / <c>JOIN</c> names the collector table or a CTE.</para>
+    /// </summary>
+    public const string PgTargetIdleInTransactionSql = @"
+WITH holders AS (
+    SELECT
+        collection_time,
+        coalesce(application_name, '')     AS application_name,
+        coalesce(username, '')             AS username,
+        coalesce(database_name, '')        AS database_name,
+        xact_duration_ms,
+        coalesce(horizon_age, -1)          AS horizon_age,
+        coalesce(is_horizon_holder, false) AS is_horizon_holder
+    FROM pg_session_states
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   coalesce(is_idle_in_transaction, false)
+    AND   NOT coalesce(state_is_redacted, false)
+    AND   xact_duration_ms >= $4
+),
+per_capture AS (
+    SELECT
+        collection_time,
+        COUNT(*)              AS holders_in_capture,
+        MAX(xact_duration_ms) AS max_xact_duration_ms
+    FROM holders
+    GROUP BY collection_time
+),
+window_shape AS (
+    SELECT
+        COUNT(*)                                              AS captures_with_holders,
+        CAST(coalesce(SUM(holders_in_capture), 0) AS bigint)  AS holder_rows,
+        coalesce(MAX(holders_in_capture), 0)                  AS peak_concurrent_holders
+    FROM per_capture
+),
+peak_capture AS (
+    SELECT collection_time, holders_in_capture
+    FROM per_capture
+    ORDER BY holders_in_capture DESC, max_xact_duration_ms DESC, collection_time DESC
+    LIMIT 1
+),
+identities AS (
+    SELECT
+        application_name,
+        username,
+        database_name,
+        COUNT(DISTINCT collection_time) AS captures_seen,
+        MAX(xact_duration_ms)           AS max_xact_duration_ms,
+        MAX(horizon_age)                AS max_horizon_age,
+        bool_or(is_horizon_holder)      AS is_horizon_holder,
+        MAX(collection_time)            AS last_seen_at
+    FROM holders
+    GROUP BY application_name, username, database_name
+)
+SELECT
+    i.application_name,
+    i.username,
+    i.database_name,
+    i.captures_seen,
+    i.max_xact_duration_ms,
+    i.max_horizon_age,
+    i.is_horizon_holder,
+    i.last_seen_at,
+    w.captures_with_holders,
+    w.holder_rows,
+    w.peak_concurrent_holders,
+    p.collection_time      AS peak_at,
+    p.holders_in_capture   AS peak_holders
+FROM identities AS i
+CROSS JOIN window_shape AS w
+CROSS JOIN peak_capture AS p
+ORDER BY i.max_xact_duration_ms DESC, i.captures_seen DESC, i.application_name, i.username, i.database_name
+LIMIT 25";
+
+    /// <summary>
+    /// <c>PG_CONNECTION_SATURATION</c> — the window's peak backend count over the ceiling lane 2's config family
+    /// emitted a moment ago — or <c>PG_MONITORING_PERMISSIONS</c> when the <c>state_is_redacted</c> share says the
+    /// monitoring login could not see session state (filled by lane 3 — #3542 step 3, design §3.6); and, since
+    /// lane 14 of #3691, <c>PG_IDLE_IN_TRANSACTION</c> from the same captures' rows over the duration floor
+    /// (<see cref="PgTargetIdleInTransactionSql"/>, design §3.10). Three reads on one connection
+    /// (<see cref="PgTargetSessionPeakSql"/> first — it decides whether the others may be trusted; then the
+    /// holders; then, once a ceiling exists to divide by, <see cref="PgTargetNumbackendsPeakSql"/>), at most two
+    /// facts: the idle fact and EITHER the saturation ratio or the permissions advisory, never both of those.
+    ///
+    /// <para><b>The numerator, since lane 25 of #3691: <c>numbackends</c> first, the capture peak as the stated
+    /// fallback.</b> v1 divided <c>pg_session_states</c>' peak <c>total_sessions</c> by the ceiling, and that figure
+    /// is an EXCEPTION-capture peak — a capture exists only when some session tripped a rule — so the fraction ran
+    /// high on a server that captures often and blind on one that never does (the fleet's captures per server
+    /// spanned 59 – 2,100 over 7 days). <c>pg_stat_database.numbackends</c> (V133) is a LEVEL sampled every minute
+    /// on every server, attached-to-a-database backends only, and <c>SUM</c> over the databases at one
+    /// <c>collection_time</c> is the server's population at that instant; the window's peak of those instants is the
+    /// numerator wherever the store carries the column on at least half of the window's instants
+    /// (<see cref="ChooseSaturationNumerator"/>). Where it does not — a pre-V133 store, or one mid-migration — the
+    /// capture peak is used exactly as v1 did, and the fact says so (<see cref="PgTargetScorer.SaturationNumeratorSourceKey"/>,
+    /// <see cref="PgTargetScorer.NumbackendsPartialKey"/>). BOTH readings ride the metadata whenever both exist:
+    /// <c>peak_total_sessions</c> stays for #3713's compare banding and for the state breakdown, which only the
+    /// capture has; <see cref="PgTargetScorer.PeakNumbackendsKey"/> is the level. The idle-in-transaction SHARE
+    /// (<c>peak_idle_in_transaction_share</c>, lane 3's amplifier gate and the graph's) keeps the capture's own
+    /// <c>total_sessions</c> as its denominator — <c>numbackends</c> has no state, so a share of it would be a count
+    /// from one instrument over a count from another. Two instruments, two denominators, each honest for what it
+    /// measures. The bars do not move.</para>
+    ///
+    /// <para><b>A window with NO capture still grades the level (lane 26 of #3691) — the level-only card.</b> Before
+    /// this lane the first read's empty was the family's empty: a quiet OLTP pool that tripped no capture rule in the
+    /// window got no saturation fact even where <c>numbackends</c> could have supplied the numerator alone. Now the
+    /// capture read's empty only records that there is no capture (<c>captures_with_rows = 0</c>); the ceiling is
+    /// still looked up and the level still read, and when the level DECIDES (coverage at or over the floor) the fact
+    /// is emitted with <c>Value</c> = the level's peak instant over the ceiling, <c>numerator_source = 1</c>, and
+    /// NONE of the capture-derived keys — no <c>peak_total_sessions</c>, no state split, no
+    /// <c>peak_idle_in_transaction_share</c>, no newest-capture figures, no <c>peak_age_s</c>. Absence is the honest
+    /// stamp: a share of 0 would claim "nothing parked", and nothing observed the states. Every reader of those keys
+    /// already treats absence as "not measured": the parked-share amplifier and the saturation ↔ idle edge gate
+    /// cannot match without the share (they ask for the key, not for 0), and #3713's compare banding
+    /// (<c>ComparisonBanding.BaselinedValueFor</c>) returns null without <c>peak_total_sessions</c>, so the level-only
+    /// row takes the absolute rule rather than a sigma against a bucket built from capture counts. Without a capture
+    /// there is no redaction verdict to take (the redacted-majority rule is over stored rows; zero rows are neither
+    /// redacted nor visible) and no idle-in-transaction read to run. When the level does NOT decide — a pre-V133
+    /// store, or one mid-migration — and there is no capture, the family is silent exactly as v1 was: a partial
+    /// window's level is the capture-peak lie in a new coat, and there is no capture peak to fall back to. A window
+    /// WITH a capture is composed byte for byte as lane 25 left it (pinned). The redacted-majority-WITH-captures
+    /// ruling (withhold the ratio although <c>numbackends</c> is unprivileged) is untouched here — it is the
+    /// coordinator's open item, not this lane's.</para>
+    ///
+    /// <para><b>The idle-in-transaction fact does not need the ceiling.</b> A duration is graded on its own bar, so
+    /// the second read runs after the redaction gate and BEFORE the ceiling lookup, and a window with no config
+    /// snapshot (no saturation fact) still states its parked transactions. Under a redacted majority the read is
+    /// skipped — <c>state</c> and the duration columns are NULL for every backend the login does not own, so
+    /// "no row over the floor" would be blindness read as an all-clear — and the permissions advisory carries
+    /// <see cref="PgTargetScorer.IdleInTransactionUnobservableKey"/> <c>= 1</c> so a reader of
+    /// <c>get_analysis_facts</c> sees WHY this family said nothing about parked transactions.</para>
+    ///
+    /// <para><b>The ceiling is composed here, at collect time, from the in-memory fact list</b> —
+    /// <c>facts.Find(CONFIG_PG_MAX_CONNECTIONS)</c> and <c>facts.Find(CONFIG_PG_SUPERUSER_RESERVED)</c>, the two
+    /// context facts <c>PgTargetFactCollector.Config.cs</c> emits at base 0 for exactly this reader (emission
+    /// order: Config before Sessions, the same seam Buffer and Write use for <c>shared_buffers</c> and
+    /// <c>max_wal_size</c>). This family never reads <c>pg_server_config</c> itself: the plan's resolution of the
+    /// two lanes' file overlap is that step 3 depends on step 2 through the KEYS alone, and the base-severity seam
+    /// (<c>ScoreSessionsFact(Fact)</c>) receives one fact, not a lookup, so the ratio must be on the fact before
+    /// scoring. The three numbers ride the fact as metadata so the advice states them and a reader of
+    /// <c>get_analysis_facts</c> can redo the division.</para>
+    ///
+    /// <para><b>usable = max_connections − superuser_reserved_connections − reserved_connections</b>, engine-defined:
+    /// PostgreSQL refuses the connection that would take the last <c>superuser_reserved_connections</c> slots
+    /// unless the role is a superuser, so an ordinary application sees the cliff there, not at
+    /// <c>max_connections</c>. PostgreSQL 16 added <c>reserved_connections</c> (slots held for members of
+    /// <c>pg_use_reserved_connections</c>, default 0) as a second carve-out ahead of the superuser one, and an
+    /// ordinary role hits that cliff first; the snapshot name list carries it since the between-waves pass, so
+    /// the third context fact is subtracted when present and 0 when absent (a pre-16 target has no such setting,
+    /// which is the same arithmetic as the 16+ default).</para>
+    ///
+    /// <para><b>Precedence: redaction first.</b> A majority-redacted window emits the permissions advisory and
+    /// returns — no saturation fact, no ratio — because under redaction the state columns and the collector's own
+    /// duration floors are NULL for every backend the login does not own, so which captures stored rows and what
+    /// they say about the pool is the login's blindness, not the server's state (the V86 comment's measured
+    /// case: four idle-in-transaction sessions under the privileged role, zero of the same nine backends under
+    /// the unprivileged one). <c>total_sessions</c> is a bare <c>count(*)</c> and survives redaction, so the
+    /// advisory still states the peak count it saw — as a count, never as a share of the ceiling.</para>
+    ///
+    /// <para><b>A window with no ceiling emits nothing.</b> No config snapshot at or before the window's end, or
+    /// a snapshot whose two rows did not normalise, means there is no denominator; a fact whose value could not
+    /// be the ratio would change what <see cref="Fact.Value"/> means from one pass to the next. Logged at debug
+    /// with the peak it would have graded, and the config family's own coverage describes the missing
+    /// snapshot.</para>
+    /// </summary>
+    private async partial Task CollectSessionFactsAsync(AnalysisContext context, List<Fact> facts)
+    {
+        /* Not a rate — nothing here divides by observed time — but an unobserved window has no peak worth
+           stating either, and the pass is "unavailable" on the coverage witness regardless. */
+        if (context.ObservedDurationMs <= 0)
+            return;
+
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+            using var cmd = new NpgsqlCommand(PgTargetSessionPeakSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+
+            long peakTotal = 0, peakActive = 0, peakIdleInTransaction = 0, latestTotal = 0, latestActive = 0, latestIdleInTransaction = 0, capturesWithRows = 0, rowsStored = 0, rowsRedacted = 0;
+            DateTime? peakAt = null, latestAt = null;
+            /* The reader is closed before the second read runs — Npgsql allows one open reader per connection. */
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                /* The CROSS JOIN against the two LIMIT 1 CTEs yields no row at all when the window stored no capture —
+                   the exception table's honest empty. Since lane 26 of #3691 that is NOT this family's empty: the
+                   zeroed locals say "no capture", and the level below may still grade the pool alone. */
+                if (await reader.ReadAsync(context.CancellationToken))
+                {
+                    peakTotal = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+                    peakActive = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
+                    peakIdleInTransaction = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
+                    peakAt = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+                    latestTotal = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+                    latestActive = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+                    latestIdleInTransaction = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+                    latestAt = reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7);
+                    capturesWithRows = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
+                    rowsStored = reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9));
+                    rowsRedacted = reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10));
+                }
+            }
+
+            /* A capture is one that stored rows and counted a positive peak; anything else is "no capture" — the
+               level-only path, where the capture-derived keys are ABSENT rather than zero. */
+            var hasCapture = rowsStored > 0 && peakTotal > 0;
+            if (!hasCapture)
+                capturesWithRows = 0;
+
+            var windowEnd = AsNaive(context.TimeRangeEnd);
+            var redactedShare = hasCapture ? rowsRedacted / (double)rowsStored : 0.0;
+
+            /* ── Redaction first: the login's blindness is the finding, and no ratio is built on blank rows. Only a
+               window WITH stored rows can be redacted — zero rows are neither blank nor visible. ── */
+            if (hasCapture && redactedShare >= PgTargetScorer.RedactedShareMajority)
+            {
+                var advisory = new Fact
+                {
+                    Source = PgTargetSources.SessionsSource,
+                    Key = PgTargetFactKeys.MonitoringPermissions,
+                    Value = redactedShare,
+                    ServerId = context.ServerId,
+                    Metadata =
+                    {
+                        ["rows_redacted_share"] = redactedShare,
+                        ["rows_redacted"] = rowsRedacted,
+                        ["rows_stored"] = rowsStored,
+                        ["captures_with_rows"] = capturesWithRows,
+                        /* A count, not a share of anything: count(*) is not a privileged read. */
+                        ["peak_total_sessions"] = peakTotal,
+                        /* The idle-in-transaction read is NOT run on blank rows: the family's silence on parked
+                           transactions this pass is the login's, and the stamp says so instead of a false zero. */
+                        [PgTargetScorer.IdleInTransactionUnobservableKey] = 1,
+                    },
+                };
+                if (peakAt is { } redactedPeakAt)
+                    advisory.Metadata["peak_age_s"] = Math.Max(0, (windowEnd - AsNaive(redactedPeakAt)).TotalSeconds);
+                facts.Add(advisory);
+                return;
+            }
+
+            /* ── The parked transactions, on the same connection: graded on duration alone, so they need no ceiling
+               and are stated before the ceiling lookup can return early. Skipped without a capture: the holders
+               are the captures' rows, and "no row over the floor" is not a finding when there are no rows. ── */
+            if (hasCapture)
+                await ReadIdleInTransactionAsync(connection, context, facts, capturesWithRows, redactedShare, windowEnd);
+
+            /* ── The ceiling, off lane 2's context facts (emission order: Config before Sessions). The third is
+               PostgreSQL 16+'s reserved_connections (pg_use_reserved_connections); absent on a pre-16 snapshot and
+               then 0, so the two mandatory facts alone still make a ceiling. ── */
+            var maxConnections = facts.Find(f => f.Key == PgTargetFactKeys.ConfigMaxConnections);
+            var reserved = facts.Find(f => f.Key == PgTargetFactKeys.ConfigSuperuserReserved);
+            var reservedForRole = facts.Find(f => f.Key == PgTargetFactKeys.ConfigReservedConnections)?.Value ?? 0;
+            if (maxConnections is null || reserved is null)
+            {
+                _logger?.LogDebug(
+                    "[PgTargetFactCollector] CollectSessionFactsAsync on server {ServerId} ({ServerName}) saw a peak of {PeakSessions} sessions over {Captures} captures but no max_connections / superuser_reserved_connections context fact to grade it against (no pg_server_config snapshot at or before the window's end); no saturation fact this pass.",
+                    context.ServerId, context.ServerName, peakTotal, capturesWithRows);
+                return;
+            }
+
+            var usable = maxConnections.Value - reserved.Value - reservedForRole;
+            /* PostgreSQL refuses to start with superuser_reserved_connections + reserved_connections >= max_connections,
+               so a non-positive ceiling is a snapshot that does not describe a running server; no claim. */
+            if (usable <= 0)
+                return;
+
+            /* ── The level (#3691 lane 25): read only once there is a ceiling to divide by, so a window this family
+               would not grade costs no third query. Same connection, same deadline, same degrade. ── */
+            var level = await ReadNumbackendsPeakAsync(connection, context);
+            var choice = ChooseSaturationNumerator(level.DatabaseStatsSamples, level.NumbackendsSamples);
+            /* A sampled instant always yields a peak row (the CTE filters on the same IS NOT NULL the count did); the
+               pattern match is the belt to that brace, so a store that somehow said "sampled" with no peak grades the
+               capture rather than a null. */
+            var numerator = peakTotal;
+            var useNumbackends = false;
+            if (choice.UseNumbackends && level.PeakNumbackends is { } levelPeak)
+            {
+                numerator = levelPeak;
+                useNumbackends = true;
+            }
+            else if (!hasCapture)
+            {
+                /* No capture AND the level did not decide (a pre-V133 store, or one mid-migration): there is no
+                   numerator that is not the capture-peak lie in a new coat, and no capture peak to fall back to —
+                   v1's silence, kept on purpose (#3691 lane 26). */
+                _logger?.LogDebug(
+                    "[PgTargetFactCollector] CollectSessionFactsAsync on server {ServerId} ({ServerName}) stored no session capture in the window and pg_stat_database.numbackends covered {Sampled} of {Instants} instants (under the floor); no saturation fact this pass.",
+                    context.ServerId, context.ServerName, level.NumbackendsSamples, level.DatabaseStatsSamples);
+                return;
+            }
+
+            var ratio = numerator / usable;
+            var fact = new Fact
+            {
+                Source = PgTargetSources.SessionsSource,
+                Key = PgTargetFactKeys.ConnectionSaturation,
+                Value = ratio,
+                ServerId = context.ServerId,
+                Metadata =
+                {
+                    ["saturation_ratio"] = ratio,
+                    /* Which instrument the ratio's top came from, and how much of the window the level covered —
+                       stamped either way so get_analysis_facts shows the verdict on every saturation fact. */
+                    [PgTargetScorer.SaturationNumeratorSourceKey] = useNumbackends ? PgTargetScorer.SaturationNumeratorNumbackends : PgTargetScorer.SaturationNumeratorCapturePeak,
+                    [PgTargetScorer.NumbackendsPartialKey] = choice.Partial ? 1 : 0,
+                    [PgTargetScorer.NumbackendsSamplesKey] = level.NumbackendsSamples,
+                    [PgTargetScorer.DatabaseStatsSamplesKey] = level.DatabaseStatsSamples,
+                },
+            };
+            /* The capture-derived keys, in lane 3's order (a reader of the persisted payload sees the keys as it always
+               did). ABSENT on the level-only card (#3691 lane 26): every reader of these keys treats absence as "not
+               measured" — a zero share would claim "nothing parked" of states nobody observed. */
+            if (hasCapture)
+            {
+                /* The capture peak stays under its v1 name whichever numerator decided: #3713's compare banding
+                   reads it, and the breakdown below is ITS breakdown. */
+                fact.Metadata["peak_total_sessions"] = peakTotal;
+                fact.Metadata["peak_active_sessions"] = peakActive;
+                fact.Metadata["peak_idle_in_transaction_sessions"] = peakIdleInTransaction;
+                /* Neither active nor idle-in-transaction: idle client sessions AND PostgreSQL's own background
+                   processes, which this series cannot tell apart (backend_type redacts). */
+                fact.Metadata["peak_other_sessions"] = Math.Max(0, peakTotal - peakActive - peakIdleInTransaction);
+                fact.Metadata["peak_idle_in_transaction_share"] = peakIdleInTransaction / (double)peakTotal;
+                fact.Metadata["latest_total_sessions"] = latestTotal;
+                fact.Metadata["latest_active_sessions"] = latestActive;
+                fact.Metadata["latest_idle_in_transaction_sessions"] = latestIdleInTransaction;
+            }
+            fact.Metadata["max_connections"] = maxConnections.Value;
+            fact.Metadata["superuser_reserved_connections"] = reserved.Value;
+            fact.Metadata["reserved_connections"] = reservedForRole;
+            fact.Metadata["usable_connections"] = usable;
+            fact.Metadata["max_connections_pending_restart"] = maxConnections.Metadata.GetValueOrDefault("pending_restart");
+            fact.Metadata["config_snapshot_age_s"] = maxConnections.Metadata.GetValueOrDefault("snapshot_age_s");
+            /* 0 on the level-only card — the one capture-side key that IS stamped there, because "no capture" is a
+               count the reader can act on, where a share or a split would be a claim about unobserved states. */
+            fact.Metadata["captures_with_rows"] = capturesWithRows;
+            if (hasCapture)
+            {
+                fact.Metadata["rows_redacted_share"] = redactedShare;
+                if (peakAt is { } at)
+                    fact.Metadata["peak_age_s"] = Math.Max(0, (windowEnd - AsNaive(at)).TotalSeconds);
+                if (latestAt is { } lastAt)
+                    fact.Metadata["latest_age_s"] = Math.Max(0, (windowEnd - AsNaive(lastAt)).TotalSeconds);
+            }
+            /* Both readings side by side whenever the level exists at all — including the partial fallback, where
+               the reader should see the number that was NOT used and why. A pre-V133 window has no level to show. */
+            if (level.PeakNumbackends is { } peakLevel)
+            {
+                fact.Metadata[PgTargetScorer.PeakNumbackendsKey] = peakLevel;
+                if (level.PeakAt is { } levelAt)
+                    fact.Metadata[PgTargetScorer.NumbackendsPeakAgeKey] = Math.Max(0, (windowEnd - AsNaive(levelAt)).TotalSeconds);
+            }
+
+            facts.Add(fact);
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* pg_session_states arrived in V86; a pre-migration store raises 42P01 here, which the reporter
+               classifies quiet. Degrades to "no facts" so one unavailable input cannot cost this server its
+               other facts, and WHY is reported, not assumed (#2826). An abandonment is NOT swallowed (#2443). */
+            ReportCollectionFailure(ex, context);
+        }
+    }
+
+    /// <summary>The one row <see cref="PgTargetNumbackendsPeakSql"/> returns: the window's instant count, how many
+    /// carried the level, and the peak instant (NULL when none did).</summary>
+    private readonly record struct NumbackendsPeak(long DatabaseStatsSamples, long NumbackendsSamples, long? PeakNumbackends, DateTime? PeakAt);
+
+    /// <summary>
+    /// The level's window shape from <see cref="PgTargetNumbackendsPeakSql"/>. Runs inside the caller's <c>try</c> on
+    /// the caller's connection (the shared three-outcome degrade covers it; an abandonment propagates). The shape row
+    /// always exists — a window with no <c>pg_database_stats</c> instant reads 0 / 0 / NULL — and a missing row is
+    /// read the same way rather than thrown on, so the caller's decision is one code path.
+    /// </summary>
+    private async Task<NumbackendsPeak> ReadNumbackendsPeakAsync(NpgsqlConnection connection, AnalysisContext context)
+    {
+        using var cmd = new NpgsqlCommand(PgTargetNumbackendsPeakSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        if (!await reader.ReadAsync(context.CancellationToken))
+            return new NumbackendsPeak(0, 0, null, null);
+
+        return new NumbackendsPeak(
+            DatabaseStatsSamples: reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0)),
+            NumbackendsSamples: reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1)),
+            PeakNumbackends: reader.IsDBNull(2) ? null : ToInt64(reader.GetValue(2)),
+            PeakAt: reader.IsDBNull(3) ? null : reader.GetDateTime(3));
+    }
+
+    /// <summary>
+    /// <c>PG_IDLE_IN_TRANSACTION</c> from <see cref="PgTargetIdleInTransactionSql"/>: no rows over the floor, no fact
+    /// (the exception table's honest empty — and, under the floor the scorer's WARNING bar sets, an absence that
+    /// means "nothing parked past a minute", stated by the saturation card's state breakdown rather than by a
+    /// zero-valued fact here). Otherwise ONE fact for the window, named for the LONGEST holder identity
+    /// (<see cref="Fact.ObjectName"/> <c>application as role</c>, <see cref="Fact.DatabaseName"/> its database —
+    /// the two string seams the doubles-only metadata cannot carry), with <see cref="Fact.Value"/> that holder's
+    /// longest transaction in SECONDS and the rest as metadata: the milliseconds the scorer grades, the holder's
+    /// horizon claim and recurrence, the most captures ANY identity recurred in (the amplifier's witness — the
+    /// chronic path may not be the longest one), how many distinct identities were over the floor, the window's
+    /// shape, and the peak capture (how many sessions were parked at once, and when).
+    ///
+    /// <para><b>Why one fact and not one per identity.</b> A finding row is keyed by fact key; the story that
+    /// roots here is "parked transactions on this server", and the advice names the longest holder and says how
+    /// many others there were. Per-identity facts would be N cards saying the same thing with a different
+    /// application_name, muted one at a time. The 25-identity cap bounds the read; <c>holder_identities</c>
+    /// states the count the read saw so a truncated list is visible as one.</para>
+    ///
+    /// <para>Runs inside the caller's <c>try</c>: the shared three-outcome degrade covers it, and an abandonment
+    /// propagates. Ages are measured from the window's end the caller asked for — no clock of its own.</para>
+    /// </summary>
+    private async Task ReadIdleInTransactionAsync(
+        NpgsqlConnection connection, AnalysisContext context, List<Fact> facts,
+        long capturesWithRows, double redactedShare, DateTime windowEnd)
+    {
+        using var cmd = new NpgsqlCommand(PgTargetIdleInTransactionSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        /* The scorer's WARNING bar IS the read floor (measured, 2026-09-19 — see the constant): a row under it is
+           not a holder this fact speaks of, and the constant is passed so the SQL cannot carry a second copy. */
+        cmd.Parameters.AddWithValue((long)PgTargetScorer.IdleInTransactionWarningMs);
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        if (!await reader.ReadAsync(context.CancellationToken))
+            return;
+
+        /* Row 1 is the longest holder (ORDER BY max_xact_duration_ms DESC); the window shape and the peak
+           capture repeat on every row, so they are read once, here. */
+        var applicationName = reader.GetString(0);
+        var username = reader.GetString(1);
+        var databaseName = reader.GetString(2);
+        var holderCapturesSeen = ToInt64(reader.GetValue(3));
+        var holderMaxMs = ToInt64(reader.GetValue(4));
+        var holderHorizonAge = reader.IsDBNull(5) ? -1L : ToInt64(reader.GetValue(5));
+        var holderIsHorizonHolder = !reader.IsDBNull(6) && reader.GetBoolean(6);
+        var holderLastSeenAt = reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7);
+        var capturesWithHolders = ToInt64(reader.GetValue(8));
+        var holderRows = ToInt64(reader.GetValue(9));
+        var peakConcurrentHolders = ToInt64(reader.GetValue(10));
+        var peakAt = reader.IsDBNull(11) ? (DateTime?)null : reader.GetDateTime(11);
+
+        if (holderMaxMs <= 0)
+            return;
+
+        /* Every identity: the recurrence witness is the MOST captures any one of them was seen in, and how many
+           pinned the horizon at some sighting — the chronic path need not be the longest holder. */
+        var identities = 1L;
+        var recurringCaptures = holderCapturesSeen;
+        var identitiesPinningHorizon = holderHorizonAge > 0 ? 1L : 0L;
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            identities++;
+            recurringCaptures = Math.Max(recurringCaptures, ToInt64(reader.GetValue(3)));
+            if (!reader.IsDBNull(5) && ToInt64(reader.GetValue(5)) > 0)
+                identitiesPinningHorizon++;
+        }
+
+        var fact = new Fact
+        {
+            Source = PgTargetSources.SessionsSource,
+            Key = PgTargetFactKeys.IdleInTransaction,
+            Value = holderMaxMs / 1_000.0,
+            ServerId = context.ServerId,
+            DatabaseName = string.IsNullOrEmpty(databaseName) ? null : databaseName,
+            /* The identity the advice names; application_name is what the client set and is operator-facing. */
+            ObjectName = $"{(string.IsNullOrEmpty(applicationName) ? "(no application_name)" : applicationName)} as {(string.IsNullOrEmpty(username) ? "(unknown role)" : username)}",
+            Metadata =
+            {
+                [PgTargetScorer.IdleInTransactionDurationMsKey] = holderMaxMs,
+                [PgTargetScorer.IdleInTransactionHolderHorizonAgeKey] = holderHorizonAge,
+                ["holder_is_horizon_holder"] = holderIsHorizonHolder ? 1 : 0,
+                ["holder_captures_seen"] = holderCapturesSeen,
+                [PgTargetScorer.IdleInTransactionRecurringCapturesKey] = recurringCaptures,
+                ["holder_identities"] = identities,
+                ["holder_identities_pinning_horizon"] = identitiesPinningHorizon,
+                ["captures_with_holders"] = capturesWithHolders,
+                ["captures_with_rows"] = capturesWithRows,
+                ["holder_rows"] = holderRows,
+                ["peak_concurrent_holders"] = peakConcurrentHolders,
+                ["floor_ms"] = PgTargetScorer.IdleInTransactionWarningMs,
+                ["rows_redacted_share"] = redactedShare,
+            },
+        };
+        if (holderLastSeenAt is { } lastSeen)
+            fact.Metadata["holder_last_seen_age_s"] = Math.Max(0, (windowEnd - AsNaive(lastSeen)).TotalSeconds);
+        if (peakAt is { } at)
+            fact.Metadata["peak_age_s"] = Math.Max(0, (windowEnd - AsNaive(at)).TotalSeconds);
+
+        facts.Add(fact);
+    }
+}

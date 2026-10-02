@@ -40,8 +40,11 @@ namespace PerformanceMonitor.Ui
         /// <summary>The day's total wait, in seconds (for the panel's key-metrics line).</summary>
         public decimal TotalWaitSeconds { get; init; }
 
-        /// <summary>The day's distinct-query count (for the panel's key-metrics line).</summary>
-        public long UniqueQueries { get; init; }
+        /// <summary>The day's distinct-query count (for the panel's key-metrics line), or <c>null</c> when the
+        /// store's rollup tier never carried the day (#3653 A6, Darling only): the line then says "not
+        /// materialized" rather than 0. Lite's host always assigns a measured count — it has no rollup tier —
+        /// so the nullability is a no-op there.</summary>
+        public long? UniqueQueries { get; init; }
 
         /// <summary>The day's peak/max block wait in ms (0 when unknown), shown on the panel's blocking reason.</summary>
         public long PeakBlockMs { get; init; }

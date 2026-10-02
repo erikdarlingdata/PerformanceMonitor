@@ -47,13 +47,17 @@ public sealed class PgSchemaGeneratorTests
            pg_buffer_usage (#2544, what is resident in shared buffers) = 61, plus
            pg_index_bloat (#2561) and pg_wait_sampling, pg_kernel_stats, pg_predicate_stats (#2603) and pg_plan_capture (#2566) = 66, plus
            pg_cpu_utilization (#2719, instance CPU via the RDS/Performance Insights API — no SQL route at
-           all, see its own doc comment) = 69. The catalog is
+           all, see its own doc comment) = 69, plus
+           pg_log_events (#3601, the classified server-log pipeline: the third reader of the same log the
+           deadlock and plan collectors tail, and the first to carry more than one family) = 70, plus
+           pg_database_size_stats (#3691 V136, the hourly per-database size series — the rung's other series, host
+           memory, is six columns on pg_cpu_utilization rather than a table) = 71. The catalog is
            deliberately
            engine-mixed: the schema generator walks it to
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(69, CollectorCatalog.All.Count);
+        Assert.Equal(71, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
@@ -181,7 +185,8 @@ public sealed class PgSchemaGeneratorTests
             "    max_wait_time_ms bigint,\n" +
             "    delta_waiting_requests_count bigint,\n" +
             "    delta_wait_time_ms bigint,\n" +
-            "    delta_max_wait_time_ms bigint\n" +
+            "    delta_max_wait_time_ms bigint,\n" +
+            "    sample_interval_seconds integer\n" +
             ");",
             ddl);
     }
@@ -206,7 +211,8 @@ public sealed class PgSchemaGeneratorTests
             "    delta_collisions bigint,\n" +
             "    delta_spins bigint,\n" +
             "    delta_sleep_time bigint,\n" +
-            "    delta_backoffs bigint\n" +
+            "    delta_backoffs bigint,\n" +
+            "    sample_interval_seconds integer\n" +
             ");",
             ddl);
     }
@@ -473,11 +479,12 @@ public sealed class PgSchemaGeneratorTests
            upgraded store's physical shape differ from a fresh one. */
         var v34 = Lf(PgMigrations.Scripts.Single(m => m.Version == 34).Sql);
 
-        /* The REPLICA-grain table is now the same two-migration story as the database grain below: V34
-           created its first 10 payload columns and V37 (#1696) appended is_local, so an upgraded store's
-           shape is V34 + V37 and only their sum equals the generator's current output. */
+        /* The REPLICA-grain table is now a three-migration story: V34 created its first 10 payload
+           columns, V37 (#1696) appended is_local, and V151 (#4475) appended group_id — so an upgraded
+           store's shape is V34 + V37 + V151 and only their sum equals the generator's current output. */
         var replicaColumns = AgReplicaStatesCollector.Instance.PayloadColumns;
         const int V34ReplicaColumnCount = 10;
+        const int V37ReplicaColumnCount = 11;
 
         Assert.Contains(
             CollectQualified(new TruncatedSchema(AgReplicaStatesCollector.Instance, V34ReplicaColumnCount)),
@@ -487,7 +494,7 @@ public sealed class PgSchemaGeneratorTests
 
         var v37 = Lf(PgMigrations.Scripts.Single(m => m.Version == 37).Sql);
 
-        foreach (var column in replicaColumns.Skip(V34ReplicaColumnCount))
+        foreach (var column in replicaColumns.Skip(V34ReplicaColumnCount).Take(V37ReplicaColumnCount - V34ReplicaColumnCount))
         {
             var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgReplicaStatesCollector.Instance, replicaColumns.Count)))
                 .Split('\n')
@@ -498,6 +505,21 @@ public sealed class PgSchemaGeneratorTests
             Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v37, StringComparison.Ordinal);
         }
 
+        /* V151 (#4475) appends group_id, the last replica-grain column, as its own additive rung — same
+           contract as V37 above. */
+        var v151ReplicaAlter = Lf(PgMigrations.Scripts.Single(m => m.Version == 151).Sql);
+
+        foreach (var column in replicaColumns.Skip(V37ReplicaColumnCount))
+        {
+            var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgReplicaStatesCollector.Instance, replicaColumns.Count)))
+                .Split('\n')
+                .Single(l => l.TrimStart().StartsWith(column.Name + " ", StringComparison.Ordinal))
+                .Trim()
+                .TrimEnd(',');
+
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v151ReplicaAlter, StringComparison.Ordinal);
+        }
+
         /* No "V34 was not widened in place" sweep for this grain, unlike the database one below: the
            TruncatedSchema assertion above already matches V34's ag_replica_states block EXACTLY, which is a
            strictly stronger statement than any name-absence check. A substring sweep would also be wrong
@@ -505,14 +527,16 @@ public sealed class PgSchemaGeneratorTests
            for it finds the other table's legitimate column and fails. */
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
 
-        /* The database-grain table is the one case where a single migration is NOT the whole story: V34
-           created its first 15 payload columns and V36 (#991 addendum) appended 6 more, so an upgraded
-           store's shape is V34 + V36 and only their SUM can equal the generator's current output.
+        /* The database-grain table is a three-migration story: V34 created its first 15 payload columns,
+           V36 (#991 addendum) appended 6 more, and V151 (#4475) appended group_id — so an upgraded store's
+           shape is V34 + V36 + V151 and only their SUM can equal the generator's current output.
            Reconstruct that here rather than weakening the pin to name-presence — generate the historical
-           15-column shape and assert V34 matches it exactly, then assert V36 appends the remaining columns
-           in order with the generator's own types. Together those two prove fresh == upgraded. */
+           15-column shape and assert V34 matches it exactly, then assert V36 and V151 each append their
+           own remaining columns in order with the generator's own types. Together those prove fresh ==
+           upgraded. */
         var currentColumns = AgDatabaseReplicaStatesCollector.Instance.PayloadColumns;
         const int V34ColumnCount = 15;
+        const int V36ColumnCount = 21;
 
         Assert.Contains(
             CollectQualified(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, V34ColumnCount)),
@@ -521,7 +545,7 @@ public sealed class PgSchemaGeneratorTests
 
         var v36 = Lf(PgMigrations.Scripts.Single(m => m.Version == 36).Sql);
 
-        foreach (var column in currentColumns.Skip(V34ColumnCount))
+        foreach (var column in currentColumns.Skip(V34ColumnCount).Take(V36ColumnCount - V34ColumnCount))
         {
             var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, currentColumns.Count)))
                 .Split('\n')
@@ -530,6 +554,21 @@ public sealed class PgSchemaGeneratorTests
                 .TrimEnd(',');
 
             Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v36, StringComparison.Ordinal);
+        }
+
+        /* V151 (#4475) appends group_id, the last database-grain column, as its own additive rung — same
+           contract as V36 above. */
+        var v151DatabaseAlter = Lf(PgMigrations.Scripts.Single(m => m.Version == 151).Sql);
+
+        foreach (var column in currentColumns.Skip(V36ColumnCount))
+        {
+            var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, currentColumns.Count)))
+                .Split('\n')
+                .Single(l => l.TrimStart().StartsWith(column.Name + " ", StringComparison.Ordinal))
+                .Trim()
+                .TrimEnd(',');
+
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v151DatabaseAlter, StringComparison.Ordinal);
         }
 
         /* And V34 must NOT have been widened in place: its CREATE TABLE IF NOT EXISTS is a no-op on a store
@@ -642,6 +681,10 @@ public sealed class PgSchemaGeneratorTests
             (102, PgServerConfigCollector.Instance),
             (103, PgDeadlocksCollector.Instance),
             (106, PgCpuUtilizationCollector.Instance),
+            (129, PgLogEventsCollector.Instance),
+            /* V136 (#3691) creates this table AND alters pg_cpu_utilization; only the CREATE half is the
+               generator's, so the comparison below takes the rung text up to its first ALTER. */
+            (136, PgDatabaseSizeStatsCollector.Instance),
         };
 
         /* Every PostgreSQL collector must appear above. One added without a rung listed here would
@@ -653,7 +696,7 @@ public sealed class PgSchemaGeneratorTests
 
         foreach (var (version, collector) in rungs)
         {
-            var rung = NormalizeDdl(PgMigrations.Scripts.Single(m => m.Version == version).Sql);
+            var rung = NormalizeDdl(CreateHalf(PgMigrations.Scripts.Single(m => m.Version == version).Sql));
 
             var generated = NormalizeDdl(
                     PgSchemaGenerator.CreateTable(collector)
@@ -670,6 +713,16 @@ public sealed class PgSchemaGeneratorTests
 
             Assert.Equal(generated, rung);
         }
+    }
+
+    /// <summary>A rung's CREATE half: the text before its first <c>ALTER TABLE</c>, or all of it when there is
+    /// none. V136 (#3691) is the first collector-creating rung that also alters another collector's table in
+    /// the same transaction; the ALTER half is pinned by that rung's own test against the collector's current
+    /// columns, and the V106 CREATE text those columns also live in stays under THIS comparison.</summary>
+    private static string CreateHalf(string sql)
+    {
+        var alter = sql.IndexOf("ALTER TABLE", StringComparison.Ordinal);
+        return alter < 0 ? sql : sql[..alter];
     }
 
     private static string NormalizeDdl(string sql) =>
@@ -748,5 +801,75 @@ public sealed class PgSchemaGeneratorTests
     public void SearchPath_ListsCollectConfigPublicInOrder()
     {
         Assert.Equal("collect, config, public", PgSchemaGenerator.SearchPath);
+    }
+
+    /// <summary>
+    /// #4503: the six Query Store rollups' KEPT group indexes must land IDENTICAL on a fresh migrate and on
+    /// an upgraded store — not merely the same key columns, but the same ORDER and the same NAME, because a
+    /// store's physical shape should never reveal whether it was installed fresh or upgraded (the same rule
+    /// <see cref="Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape"/> pins for the collector
+    /// tables above). Both sides are compared here by TEXT, since neither side's SQL can be executed
+    /// offline: <see cref="TimescaleSupport.QueryStoreRollupKeptIndexesSql"/> (the fresh side, run right
+    /// after each view's CREATE) must build its <c>CREATE INDEX</c> UNNAMED and end each kept column's
+    /// statement in <c>, bucket DESC)</c> — an explicit name or an ASC order would make the fresh side's
+    /// index a DIFFERENT object from an upgraded store's surviving auto-created one, which
+    /// <see cref="CaggGroupIndexDropLiveTests"/> proves live. <see cref="PgMigrations"/>'s V152 (the
+    /// upgraded side) must resolve the SAME kept columns — read from the same per-view drop lists this
+    /// rung's PR body documents — by catalog SHAPE rather than by a hand-built name, for the reason that
+    /// migration's own remarks give (a truncated auto-created name is not guessable from the view name
+    /// alone).
+    /// </summary>
+    [Fact]
+    public void QueryStoreRollupKeptIndexes_FreshSql_MatchesTheUpgradedShape_ForAllSixViews()
+    {
+        var v152 = PgMigrations.Scripts.Single(m => m.Version == 152).Sql;
+
+        var keptColumnsByView = new (string View, string[] KeptColumns)[]
+        {
+            (TimescaleSupport.QueryStoreStatsHourlyView, new[] { "server_id", "server_name" }),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, new[] { "server_id", "server_name" }),
+            (TimescaleSupport.QueryStoreStatsDailyView, new[] { "server_id" }),
+            (TimescaleSupport.QueryStoreStatsCorrectedDailyView, new[] { "server_id" }),
+            (TimescaleSupport.QueryStoreStatsIntervalDailyView, new[] { "server_id" }),
+            (TimescaleSupport.QueryStoreStatsDayGrainDailyView, new[] { "server_id" }),
+        };
+
+        var freshSqlByView = new (string View, string Sql)[]
+        {
+            (TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.CreateQueryStoreStatsHourlyKeptIndexesSql),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, TimescaleSupport.CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql),
+            (TimescaleSupport.QueryStoreStatsDailyView, TimescaleSupport.CreateQueryStoreStatsDailyKeptIndexesSql),
+            (TimescaleSupport.QueryStoreStatsCorrectedDailyView, TimescaleSupport.CreateQueryStoreStatsCorrectedDailyKeptIndexesSql),
+            (TimescaleSupport.QueryStoreStatsIntervalDailyView, TimescaleSupport.CreateQueryStoreStatsIntervalDailyKeptIndexesSql),
+            (TimescaleSupport.QueryStoreStatsDayGrainDailyView, TimescaleSupport.CreateQueryStoreStatsDayGrainDailyKeptIndexesSql),
+        };
+
+        foreach (var (view, keptColumns) in keptColumnsByView)
+        {
+            var freshSql = freshSqlByView.Single(f => f.View == view).Sql;
+
+            /* The fresh side names the aggregate it's building the DO block for, and every kept column
+               gets its own unnamed, DESC-ordered CREATE INDEX — never a hand-built name, never ASC. */
+            Assert.Contains($"view_name = '{view}'", freshSql, StringComparison.Ordinal);
+
+            foreach (var column in keptColumns)
+            {
+                Assert.Contains($"CREATE INDEX ON %s ({column}, bucket DESC)", freshSql, StringComparison.Ordinal);
+                Assert.DoesNotContain($"CREATE INDEX IF NOT EXISTS {view}_{column}_bucket_idx", freshSql, StringComparison.Ordinal);
+
+                /* The upgraded side (V152) drops this same view+column pair by SHAPE, never by a
+                   hand-built _materialized_hypertable_N name — the exact bug this rung's PR body traces. */
+                Assert.Contains($"'{view}'", v152, StringComparison.Ordinal);
+                Assert.DoesNotContain("_materialized_hypertable_", v152, StringComparison.Ordinal);
+            }
+        }
+
+        /* Both sides are driven by resolving the materialization from timescaledb_information.continuous_aggregates,
+           never a hard-coded internal name — the one property that makes either side portable across stores. */
+        Assert.Contains("timescaledb_information.continuous_aggregates", v152, StringComparison.Ordinal);
+        foreach (var (_, freshSql) in freshSqlByView)
+        {
+            Assert.Contains("timescaledb_information.continuous_aggregates", freshSql, StringComparison.Ordinal);
+        }
     }
 }

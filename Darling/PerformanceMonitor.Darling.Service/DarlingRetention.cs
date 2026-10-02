@@ -52,27 +52,54 @@ public static class DarlingRetention
     /// The base data-retention window the collection_log horizon is a multiple of. 30 days matches the
     /// dominant collector <see cref="CollectorScheduleDefaults"/> horizon and the Dashboard's
     /// <c>@effective_retention_days</c> default (config.data_retention).
+    /// <para>#3653: the NUMBER lives on <see cref="DarlingRetentionHorizons"/> in Storage, where the daily-summary
+    /// readers of both apps (the MCP health reader and the viewer's calendar, which cannot see this assembly)
+    /// judge a day against the same horizon this purge enforces. This and the three aliases below keep the
+    /// purge's own names; the values are read from one place.</para>
     /// </summary>
-    internal const int DataRetentionBaseDays = 30;
+    internal const int DataRetentionBaseDays = DarlingRetentionHorizons.DataRetentionBaseDays;
 
     /// <summary>
     /// collection_log isn't a collector, so it has no <see cref="CollectorScheduleDefaults"/> entry to carry
     /// its horizon. It is kept at 2x the base window (mirrors the Dashboard's <c>retention_date x2</c> rule)
     /// so a collector run-record survives long enough to diagnose WHY a collector failed AFTER its metric
     /// rows have aged out — a 30-day metric row and its failure log would otherwise expire together, erasing
-    /// the evidence. Effectively 60 days.
+    /// the evidence. Effectively 60 days. Aliased from Storage (#3653, see <see cref="DataRetentionBaseDays"/>).
     /// </summary>
-    internal const int CollectionLogRetentionDays = DataRetentionBaseDays * 2;
+    internal const int CollectionLogRetentionDays = DarlingRetentionHorizons.CollectionLogRetentionDays;
 
     /// <summary>
     /// #1743 follow-up: the raw collectors whose hypertables serve baselines DIRECTLY (their
     /// retired sum/sumsq rollups could not produce a median). Their effective purge horizon is
     /// floored at <see cref="BaselineMath.BaselineWindowDays"/> regardless of the user-editable
     /// schedule — the product-controlled insulation the rollups' fixed retention used to provide.
-    /// BaselineSupplyTests pins membership against the provider's raw-reading arms.
+    /// BaselineSupplyTests pins membership against the provider's raw-reading arms. Aliased from Storage
+    /// (#3653, see <see cref="DataRetentionBaseDays"/>): the daily-summary horizon floors the same collectors.
+    /// Since #3691 the set also carries the four <c>pg_*</c> hypertables the PostgreSQL-target baselines read
+    /// directly; the Storage declaration says why.
     /// </summary>
-    internal static readonly IReadOnlySet<string> BaselineServingRawCollectors =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "cpu_utilization", "file_io_stats" };
+    internal static readonly IReadOnlySet<string> BaselineServingRawCollectors = DarlingRetentionHorizons.BaselineServingRawCollectors;
+
+    /// <summary>
+    /// The horizon the purge ACTUALLY applies to one collector, given the days the schedule resolver produced:
+    /// clamped at one day (a retention of 0/negative would flip the cutoff into the present/future and
+    /// drop_chunks / DELETE the entire table — belt-and-suspenders with the resolver + the V17 CHECK), then
+    /// floored at <see cref="BaselineMath.BaselineWindowDays"/> for the <see cref="BaselineServingRawCollectors"/>
+    /// (#1743 follow-up / #1757, and #3691 for the PostgreSQL four) — the raw hypertables that serve baselines
+    /// directly get a product-controlled floor at the baseline window, restoring at the purge itself the
+    /// insulation the retired rollups' fixed retention used to provide by construction. Without it, lowering
+    /// one of these collectors' user-editable retention below 30 days silently shortens that family's baseline
+    /// supply; with it, the operator's shorter setting applies to nothing on these tables (their floor IS the
+    /// product's baseline contract). Pure, and the ONLY place the two rules meet, so BaselineSupplyTests can
+    /// drive a 7-day setting through the real seam for each member instead of reading the sweep's source.
+    /// </summary>
+    internal static int EffectivePurgeRetentionDays(string collectorName, int resolvedDays)
+    {
+        var retentionDays = Math.Max(1, resolvedDays);
+        return BaselineServingRawCollectors.Contains(collectorName)
+            ? Math.Max(retentionDays, BaselineMath.BaselineWindowDays)
+            : retentionDays;
+    }
 
     /// <summary>
     /// config_alert_log (the fired-alert history: what alerted + delivery status, read by the viewer Alert
@@ -82,9 +109,10 @@ public static class DarlingRetention
     /// purge path, so without a horizon it grows unbounded — the same class as the #1471 findings-cleanup gap.
     /// Kept 90 days (a quarter): alert history is low-volume and a valuable audit trail, so the horizon is
     /// generous, but it is BOUNDED. No operator setting governs this today (config_alert_settings carries the
-    /// cooldown / lookback knobs, not an alert-history horizon), so this constant is the single source of truth.
+    /// cooldown / lookback knobs, not an alert-history horizon), so this constant is the single source of truth
+    /// — read from Storage since #3653 (see <see cref="DataRetentionBaseDays"/>).
     /// </summary>
-    internal const int AlertHistoryRetentionDays = 90;
+    internal const int AlertHistoryRetentionDays = DarlingRetentionHorizons.AlertHistoryRetentionDays;
 
     /// <summary>
     /// config.config_command (the imperative command queue the Viewer/MCP/CLI enqueue into and the service
@@ -143,6 +171,27 @@ public static class DarlingRetention
     internal const int OversizedPlanBacklogRetentionDays = DataRetentionBaseDays;
 
     /// <summary>
+    /// #3953: the latest-snapshot interval table's horizon, on <c>first_execution_time</c>: the ruled 15 days, the
+    /// detector's 14-day window plus a day. A named constant, not a knob, and in no collector schedule: the table's
+    /// horizon is the detector's, not the store's, so a held purge (#1759) does not hold it. It is deliberately NOT a
+    /// raw-tier coverage consumer and NOT in <c>RetentionPolicies</c>: it has no <c>bucket</c> column for the arming
+    /// gate to measure, and joining the gate would hold raw's purge until the table covered raw's oldest row.
+    /// </summary>
+    internal const int QueryStoreIntervalLatestRetentionDays = 15;
+
+    /// <summary>
+    /// #3953 (V145): the WIDE interval table's own horizon, on <c>first_execution_time</c>, kept separately from
+    /// <see cref="QueryStoreIntervalLatestRetentionDays"/> because the two tables serve different readers at
+    /// different windows. The table keeps 9 days and deletes row by row on <c>first_execution_time</c>. A Query
+    /// Store interval can span a day, so 8 days is exactly the edge for an interval that starts just past the
+    /// horizon and closes inside a 7-day window; 9 days gives a day of margin. Reads use the table below raw's
+    /// chunk floor, down to L = max(window start, filled_since, table floor + 1 day), where the table floor is
+    /// the oldest <c>first_execution_time</c> the purge has left. Like <see cref="QueryStoreIntervalLatestRetentionDays"/>
+    /// this is a named constant, not a knob, and in no collector schedule.
+    /// </summary>
+    internal const int QueryStoreIntervalWideRetentionDays = 9;
+
+    /// <summary>
     /// #3466 (lane 2): the fleet-sweep tables' horizon — the base data horizon, deliberately, because a
     /// sweep document is a summary OF the base data and a sweep outliving the rows it summarized explains
     /// nothing: its drill-downs dangle and its diffs cite evidence no reader can re-check. Runs and their
@@ -165,6 +214,30 @@ public static class DarlingRetention
     /// service has not run yet — the reaper's job, not retention's.
     /// </summary>
     internal const string TerminalCommandStatuses = "status IN ('succeeded', 'failed')";
+
+    /// <summary>
+    /// The row cap for <see cref="QueryStorePlanMap"/>'s and <see cref="QueryStoreTextStore"/>'s prune
+    /// (#4250 item 3), shared by both tables rather than sized per table, because both clear it in ONE
+    /// batch at every measured rate and a single named constant is easier to keep correct than two.
+    ///
+    /// <para><b>Sizing (read-only field histogram of <c>last_seen</c> age, <c>collect.query_store_plan_map</c>
+    /// / <c>collect.query_store_text</c>).</b> Map rows retire only up to age 14 days, at roughly 180k-255k
+    /// rows/day; text rows retire up to age 32 days, at roughly 150k-220k rows/day. The purge runs twice a
+    /// day (<see cref="CollectorScheduleDefaults"/>'s cadence), so a normal, on-schedule run's due backlog
+    /// is about half a day's worth — map ≈90k-130k, text ≈75k-110k — and even ONE missed run (the whole
+    /// day's retirement landing on the next one) is at most the single busiest day observed: map 255k, text
+    /// 220k. 300,000 clears every one of those in a single batch (no second, empty-batch statement), while
+    /// still bounding a real backlog — a 10-day gap drains in roughly 7-9 batches per table (10 days ×
+    /// ~200k ÷ 300k), each its own committed transaction, never one unbounded delete.</para>
+    ///
+    /// <para><b>Transaction size per batch, worst case (one missed run).</b> Map: 255,000 rows × ≈175 B/row
+    /// (709 MB / 4.04 M rows, field-measured) ≈ 45 MB. Text: 220,000 rows × ≈1.4 KB/row (4,992 MB main +
+    /// 4,355 MB TOAST / 6.86 M rows, field-measured, TOAST included) ≈ 300 MB. Both are single-slice-sized
+    /// or smaller against the old shape's own one-day slice, which already deleted comparable row counts
+    /// per statement — this is not a new order of magnitude of transaction size, only a cheaper way to find
+    /// the same rows.</para>
+    /// </summary>
+    internal const int LivenessTouchedTablePruneRowCap = 300_000;
 
     /* Each one-day slice is bounded work (see TimeSlicedDeleteSql); the generous 300s per-slice command
        timeout (well above Npgsql's 30s default) is belt-and-suspenders for a slow disk. Slicing is also what
@@ -206,16 +279,59 @@ public static class DarlingRetention
     /// </param>
     /// <returns>
     /// A <see cref="PurgeSummary"/>: how many tables were touched and the coarse activity count (DELETE rows
-    /// plus dropped chunks). The daily caller discards it; the on-demand <c>purge_now</c> command reports it.
+    /// plus dropped chunks). The daily caller and the on-demand <c>purge_now</c> command both log it and record
+    /// it in the sweep's collection_log run-record; neither returns it to a client (#4825: <c>purge_now</c> answers
+    /// "started" at once, and the totals land in the run-record).
     /// </returns>
     /// <param name="planContentRetentionDays">
     /// The V75 plan-content horizon (#2316): days a payload-dimension row outlives its last sighting
     /// before the GC may take it, independent of the fact-coupled horizon. 0 (the default here, for
     /// callers and tests that predate the knob) disables it — the fact-coupled horizon stands alone.
     /// </param>
+    /// <param name="livenessTouchedTablePruneRowCap">
+    /// TEST SEAM ONLY (#4250 item 3's live loop test): the row cap the map/text prune uses in place of
+    /// <see cref="LivenessTouchedTablePruneRowCap"/>. Every real caller (<see cref="DarlingWorker"/>'s daily
+    /// sweep and its on-demand <c>purge_now</c> command) omits this, so production always runs the shipped
+    /// 300,000 constant; a live test can pass a small cap (e.g. 1,000) to exercise a multi-batch drain
+    /// without seeding hundreds of thousands of rows.
+    /// </param>
+    /// <param name="paceWal">
+    /// True paces the purge's WAL (#4823): each batch's WAL is measured and the purge waits, through a
+    /// <see cref="RetentionWalPacer"/>, so the WAL rate stays at half of what the store's own checkpoint
+    /// schedule absorbs. The daily sweep passes true, and so does the on-demand <c>purge_now</c> command since it
+    /// runs in the daily purge's own background slot rather than on the command loop (#4825). The default false
+    /// is for tests: it never reads <c>pg_settings</c> and never waits.
+    /// </param>
+    /// <param name="runLabel">
+    /// Names the run in its collection_log run-record (#4825): the on-demand <c>purge_now</c> command passes
+    /// <see cref="BuildManualPurgeLabel"/> so the record reads as a manual purge and names a custom horizon
+    /// when one was asked for. Null (the daily sweep) leaves the record's text exactly as it always was.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
-        Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0)
+        Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false,
+        string? runLabel = null)
+    {
+        /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
+           table is touched. */
+        var walPacer = paceWal ? await RetentionWalPacer.CreateAsync(postgres, logger, cancellationToken) : null;
+
+        return await PurgeWithPacerAsync(
+            postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
+            livenessTouchedTablePruneRowCap, walPacer, runLabel);
+    }
+
+    /// <summary>
+    /// The sweep behind <see cref="PurgeAsync"/>, with its <see cref="RetentionWalPacer"/> supplied instead of
+    /// built: null runs unpaced. Split out so a test can hand it a pacer with a tiny rate and a delay that
+    /// does not sleep (#4823's live test) while the public entry point keeps one simple switch.
+    /// </summary>
+    internal static async Task<PurgeSummary> PurgeWithPacerAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
+        Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null,
+        string? runLabel = null)
     {
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
@@ -233,6 +349,16 @@ public static class DarlingRetention
         /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
         var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
+        /* Decide the raw-relation skip on whether the extension is ACTUALLY installed in this store, not on
+           the worker's _timescaleAvailable latch. The latch can read false while the extension is present
+           (setup failed after CREATE EXTENSION already succeeded elsewhere, or a prior pass's failure was
+           transient) — a store the sweep would then treat as plain PostgreSQL, DELETEing raw rows the
+           service-triggered gated purge (#4299) is holding for exactly the reason the gate exists. Fail
+           toward keeping rows: a probe that cannot answer skips the three raw relations this pass rather
+           than guessing, logged once (not once per table). True plain PostgreSQL (no extension row) keeps
+           the DELETE fallback below unchanged. */
+        var rawSkipSafe = await ProbeRawSkipSafeAsync(postgres, logger, cancellationToken);
+
         try
         {
             foreach (var definition in CollectorCatalog.All)
@@ -247,22 +373,12 @@ public static class DarlingRetention
                     continue;
                 }
 
-                /* Clamp at the destructive sink (belt-and-suspenders with the resolver + the V17 CHECK): a
-                   retention of 0/negative would flip the cutoff into the present/future and drop_chunks /
-                   DELETE the entire table. Never purge with a horizon under 1 day. */
-                var retentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name) ?? schedule.RetentionDays);
-
-                /* #1743 follow-up: the two raw hypertables that SERVE BASELINES directly (their retired
-                   sum/sumsq rollups could not produce a median) get a product-controlled floor at the
-                   baseline window — restoring, at the purge itself, the insulation the rollups' own
-                   fixed retention used to provide by construction. Without this, lowering either
-                   collector's user-editable retention below 30 days would silently shorten the CPU or
-                   I/O baseline supply (#1757's shape); with it, the operator's shorter setting still
-                   applies to nothing (these two families' floors ARE the product's baseline contract). */
-                if (BaselineServingRawCollectors.Contains(definition.Name))
-                {
-                    retentionDays = Math.Max(retentionDays, BaselineMath.BaselineWindowDays);
-                }
+                /* Clamp at the destructive sink (never purge with a horizon under 1 day), then the baseline
+                   floor for the raw hypertables that SERVE BASELINES directly — SQL Server's cpu/file-io pair
+                   (#1757's shape) and the PostgreSQL-target four (#3691). EffectivePurgeRetentionDays carries
+                   the full argument; it is the seam the tests drive. */
+                var retentionDays = EffectivePurgeRetentionDays(
+                    definition.Name, retentionDaysFor?.Invoke(definition.Name) ?? schedule.RetentionDays);
 
                 /* #1784: this sweep and the tiered retention POLICY drop the same chunks, but only the policy
                    was coverage-gated. On a store where the #1680 gate is deliberately holding that policy —
@@ -276,6 +392,32 @@ public static class DarlingRetention
                    uncovered ones — there is no cutoff that drops the covered tail while sparing the uncovered
                    head. NOT an outright exclusion of tiered tables either: the moment coverage reaches back,
                    the normal horizon applies again, so a never-armed policy cannot mean unbounded growth. */
+                /* #4427: the three raw relations (membership from TimescaleSupport.RawRelations itself,
+                   never a copied list) leave this sweep's drop path entirely on a TimescaleDB store. The
+                   floor-only check just BELOW (IsTieredDropSafeAsync/IsRawTierDropSafeAsync) compares each
+                   rollup's OLDEST bucket against raw's oldest row, so it reads Covered even when a hole sits
+                   INSIDE the covered span — an outage seam the repair hasn't reached, a range the repair
+                   deferred, a failed repair. The service-triggered purge (#4299) already owns these three
+                   tables with the full gate (a fresh Covered verdict, a current repair epoch, a resolvable
+                   successor, and a clean interior-hole scan — DarlingWorker.TriggerRawPurgeCoreAsync); this
+                   sweep must not re-decide the same drop with a weaker check, or it defeats the very gate the
+                   hold exists to protect. Counted as neither purged nor failed — nothing here failed, and the
+                   rows are exactly where the gated purge (or a still-running repair) means them to be; the
+                   dimension GC below stays safe regardless, since its cutoff is measured from the oldest
+                   surviving digest-carrying fact row. Plain-PostgreSQL mode (timescaleAvailable false) is
+                   unaffected: there are no rollups there, so the DELETE fallback below is raw's only purge.
+                   Because this skip runs first, no raw table can ever reach the floor check below under
+                   Timescale, so IsTieredDropSafeAsync can no longer return false for any table that reaches
+                   it there — the call stays for the tables that DO reach it (the non-raw tiered ones), and
+                   for plain-PostgreSQL mode, where it is skipped by its own timescaleAvailable guard. */
+                if (rawSkipSafe && TimescaleSupport.RawRelations.Contains(definition.TargetTable))
+                {
+                    logger?.LogInformation(
+                        "Retention purge for {Table} is owned by the service-triggered, gated raw purge (#4299); the sweep does not drop it.",
+                        definition.TargetTable);
+                    continue;
+                }
+
                 if (timescaleAvailable && !await IsTieredDropSafeAsync(postgres, definition.TargetTable, logger, cancellationToken))
                 {
                     logger?.LogWarning(
@@ -307,7 +449,8 @@ public static class DarlingRetention
 
                 var deleted = await PurgeOneAsync(
                     postgres, definition.TargetTable, DeleteSqlFor(definition),
-                    utcNow.AddDays(-retentionDays), logger, cancellationToken);
+                    utcNow.AddDays(-retentionDays), logger, cancellationToken,
+                    pacer: walPacer);
                 if (deleted is not null)
                 {
                     tablesPurged++;
@@ -343,9 +486,14 @@ public static class DarlingRetention
                nominal horizon: drop_chunks only drops a chunk once its WHOLE range is past the cutoff (up to
                one ChunkIntervalDays of extra rows), and last_seen is refreshed under a guard rather than on
                every sighting. Two guards write it and the WIDER one is what the margin has to absorb: the
-               dim upsert's conflict arm at one hour, and the Query Store liveness touch at
-               QueryStoreLivenessTouchGuard.GuardHours — which is itself a stated share of this margin, so
-               the two cannot drift apart. */
+               dim upsert's conflict arm at PayloadDimensions.LastSeenRefreshGuardHours hours (widened from 1
+               to 6 by #4503 to cut non-HOT WAL on the indexed last_seen column — measured at ~42 KB of WAL
+               per touch on one production store), and the Query Store liveness touch at
+               QueryStoreLivenessTouchGuard.GuardHours (12 hours today) — which is itself a stated share of
+               this margin, so the two cannot drift apart. The one-day margin below covers both: 12 hours is
+               already the wider of the two guards, so #4503's 6-hour width fits inside the SAME margin with
+               no widening needed (PayloadDimensionGuardMarginTests, in Darling.Tests, pins guard <= margin so
+               a future guard change that outgrows it fails loudly rather than silently). */
             var widestFactRetentionDays = 1;
             foreach (var definition in CollectorCatalog.All)
             {
@@ -482,7 +630,8 @@ public static class DarlingRetention
                 var textDeleted = await PurgeOneAsync(
                     postgres, PgStatementText.TableName,
                     PgStatementText.PruneSql(TimescaleSupport.ChunkIntervalDays),
-                    textCutoff, logger, cancellationToken);
+                    textCutoff, logger, cancellationToken,
+                    pacer: walPacer);
                 if (textDeleted is not null)
                 {
                     tablesPurged++;
@@ -503,8 +652,11 @@ public static class DarlingRetention
                 var mapCutoff = ComputeMapCutoff(utcNow, widestFactRetentionDays, planContentRetentionDays);
                 var mapDeleted = await PurgeOneAsync(
                     postgres, QueryStorePlanMap.TableName,
-                    QueryStorePlanMap.PruneSql(TimescaleSupport.ChunkIntervalDays),
-                    mapCutoff, logger, cancellationToken);
+                    UnorderedRowCappedDeleteSql(
+                        QueryStorePlanMap.TableName, QueryStorePlanMap.LastSeenColumn, livenessTouchedTablePruneRowCap),
+                    mapCutoff, logger, cancellationToken,
+                    batchSize: livenessTouchedTablePruneRowCap,
+                    pacer: walPacer);
                 if (mapDeleted is not null)
                 {
                     tablesPurged++;
@@ -521,8 +673,11 @@ public static class DarlingRetention
                 var queryTextCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStoreTextStore.PruneMarginDays));
                 var queryTextDeleted = await PurgeOneAsync(
                     postgres, QueryStoreTextStore.TableName,
-                    QueryStoreTextStore.PruneSql(TimescaleSupport.ChunkIntervalDays),
-                    queryTextCutoff, logger, cancellationToken);
+                    UnorderedRowCappedDeleteSql(
+                        QueryStoreTextStore.TableName, QueryStoreTextStore.LastSeenColumn, livenessTouchedTablePruneRowCap),
+                    queryTextCutoff, logger, cancellationToken,
+                    batchSize: livenessTouchedTablePruneRowCap,
+                    pacer: walPacer);
                 if (queryTextDeleted is not null)
                 {
                     tablesPurged++;
@@ -550,13 +705,19 @@ public static class DarlingRetention
                     var dimDeleted = await PurgeOneAsync(
                         postgres,
                         dimTable,
+                        /* Illustrative at the CEILING cap when isPlanDim — PurgeOneAsync rebuilds this
+                           same statement per attempt at whatever cap #4130's adaptive sizing has chosen
+                           once adaptiveRowCapTimeColumn is set below, so this exact string is never the
+                           one executed for that table. */
                         isPlanDim
                             ? RowCappedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn, PlanDimDeleteRowCap)
                             : TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
                         ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff),
                         logger,
                         cancellationToken,
-                        batchSize: isPlanDim ? PlanDimDeleteRowCap : 1);
+                        batchSize: isPlanDim ? PlanDimDeleteRowCap : 1,
+                        adaptiveRowCapTimeColumn: isPlanDim ? PayloadDimensions.LastSeenColumn : null,
+                        pacer: walPacer);
                     if (dimDeleted is not null)
                     {
                         tablesPurged++;
@@ -596,11 +757,70 @@ public static class DarlingRetention
             {
                 var logDeleted = await PurgeOneAsync(
                     postgres, "collection_log", TimeSlicedDeleteSql("collection_log", "collection_time"),
-                    utcNow.AddDays(-CollectionLogRetentionDays), logger, cancellationToken);
+                    utcNow.AddDays(-CollectionLogRetentionDays), logger, cancellationToken,
+                    pacer: walPacer);
                 if (logDeleted is not null)
                 {
                     tablesPurged++;
                     totalRowsDeleted += logDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+            }
+
+            /* #3953: the latest-snapshot interval table, at its own 15-day horizon on first_execution_time (the
+               monitored clock the table partitions on). The batched DELETE, which is compressed-chunk safe; the
+               table is a plain heap until its hypertable conversion lands, and drop_chunks joins this block then,
+               in collection_log's shape above. Its pending-replay rows go at the same horizon: a batch still
+               pending after 15 days can no longer reach a window the table serves, and a removed server's rows
+               would otherwise stay forever. Failure-isolated like every sibling. */
+            var intervalLatestDeleted = await PurgeOneAsync(
+                postgres, QueryStoreIntervalLatest.TableName,
+                TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.TableName, "first_execution_time"),
+                utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            var intervalPendingDeleted = await PurgeOneAsync(
+                postgres, QueryStoreIntervalLatest.PendingTableName,
+                TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.PendingTableName, "recorded_at"),
+                utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            foreach (var deleted in new[] { intervalLatestDeleted, intervalPendingDeleted })
+            {
+                if (deleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += deleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+            }
+
+            /* #3953 (V145): the WIDE interval table beside V143's, at its own 9-day horizon
+               (QueryStoreIntervalWideRetentionDays) on first_execution_time — a shorter horizon than V143's 15
+               days. Same batched-DELETE shape, same pending-replay horizon reasoning, failure-isolated like every
+               sibling. The purge deletes row by row on first_execution_time, so the table floor the read gate
+               checks (MIN(first_execution_time)) advances as it runs, and reads below raw's floor stop one day
+               above it (L = max(window start, filled_since, table floor + 1 day)). */
+            var intervalWideDeleted = await PurgeOneAsync(
+                postgres, QueryStoreIntervalWide.TableName,
+                TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.TableName, "first_execution_time"),
+                utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            var intervalWidePendingDeleted = await PurgeOneAsync(
+                postgres, QueryStoreIntervalWide.PendingTableName,
+                TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.PendingTableName, "recorded_at"),
+                utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            foreach (var deleted in new[] { intervalWideDeleted, intervalWidePendingDeleted })
+            {
+                if (deleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += deleted.Value;
                 }
                 else
                 {
@@ -615,7 +835,8 @@ public static class DarlingRetention
                Failure-isolated like every sibling: a failed statement is warned + counted, the sweep goes on. */
             var alertLogDeleted = await PurgeOneAsync(
                 postgres, "config_alert_log", TimeSlicedDeleteSql("config_alert_log", "alert_time"),
-                utcNow.AddDays(-AlertHistoryRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-AlertHistoryRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             if (alertLogDeleted is not null)
             {
                 tablesPurged++;
@@ -642,7 +863,8 @@ public static class DarlingRetention
             var commandsDeleted = await PurgeOneAsync(
                 postgres, "config.config_command",
                 TimeSlicedDeleteSql("config.config_command", "created_at", TerminalCommandStatuses),
-                utcNow.AddDays(-CommandHistoryRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-CommandHistoryRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             if (commandsDeleted is not null)
             {
                 tablesPurged++;
@@ -675,7 +897,8 @@ public static class DarlingRetention
             var forceLedgerDeleted = await PurgeOneAsync(
                 postgres, "collect.plan_force_actions",
                 TimeSlicedDeleteSql("collect.plan_force_actions", "action_time"),
-                utcNow.AddDays(-PlanForceLedgerRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-PlanForceLedgerRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             if (forceLedgerDeleted is not null)
             {
                 tablesPurged++;
@@ -702,7 +925,8 @@ public static class DarlingRetention
             var backlogDeleted = await PurgeOneAsync(
                 postgres, OversizedPlanBacklog.TableName,
                 TimeSlicedDeleteSql(OversizedPlanBacklog.TableName, "last_seen_at"),
-                utcNow.AddDays(-OversizedPlanBacklogRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-OversizedPlanBacklogRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             if (backlogDeleted is not null)
             {
                 tablesPurged++;
@@ -712,6 +936,19 @@ public static class DarlingRetention
             {
                 tablesFailed++;
             }
+
+            /* collect.analysis_collection_caveats (#3691 part a1, V141): pruned on last_seen_utc at
+               CollectionCaveatStore.PruneAfterDays, same cadence as the backlog purge just above rather than
+               the catalog loop, for the same reason — the table is written by the analysis pass's own
+               best-effort caveat writer, not by a collector definition, so it is absent from
+               CollectorCatalog.All and nothing else prunes it. PruneAsync never throws (it logs + swallows and
+               returns 0 on a failed prune, exactly like OversizedPlanBacklog's own writer path), so there is
+               no tablesFailed arm here: a 0 either means nothing was stale or means the prune failed, and
+               either way the sweep goes on. */
+            var caveatsDeleted = await CollectionCaveatStore.PruneAsync(
+                postgres, utcNow.AddDays(-CollectionCaveatStore.PruneAfterDays), logger, cancellationToken);
+            tablesPurged++;
+            totalRowsDeleted += caveatsDeleted;
 
             /* #3466: the fleet-sweep tables (V123), written by FleetSweepEngine and pruned at
                FleetSweepRetentionDays — see that constant for the horizon's reasoning. NOT in
@@ -753,7 +990,8 @@ public static class DarlingRetention
                 var sweepRowsDeleted = await PurgeOneAsync(
                     postgres, table, sql,
                     utcNow.AddDays(-FleetSweepRetentionDays), logger, cancellationToken,
-                    batchSize: batch);
+                    batchSize: batch,
+                    pacer: walPacer);
                 if (sweepRowsDeleted is not null)
                 {
                     tablesPurged++;
@@ -766,15 +1004,30 @@ public static class DarlingRetention
             }
 
             var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
-            logger?.LogInformation(
-                "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms",
-                tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed, sw.ElapsedMilliseconds);
+            if (walPacer is null)
+            {
+                logger?.LogInformation(
+                    "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms",
+                    tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed, sw.ElapsedMilliseconds);
+            }
+            else
+            {
+                logger?.LogInformation(
+                    "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms; store WAL during the purge's batches: {WalMb:F0} MB, paced {PacedSeconds:F0}s at {RateMb:F1} MB/s",
+                    tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed, sw.ElapsedMilliseconds,
+                    walPacer.TotalWalBytes / 1_048_576.0, walPacer.TotalWaitSeconds, walPacer.RateBytesPerSecond / 1_048_576.0);
+            }
 
             /* Auditable run-record: a clean sweep writes SUCCESS, a sweep where one or more tables failed
                their statement writes WARNING (the per-table failures were already logged + isolated above).
                Fleet-wide, so it lands under the sentinel server_id (DarlingObservability.LogRetentionRunAsync),
                which is failure-isolated and never breaks the loop. */
-            var (status, message) = BuildRunRecordSummary(tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed);
+            var (status, message) = BuildRunRecordSummary(
+                tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed,
+                paced: walPacer is not null,
+                walBytes: walPacer?.TotalWalBytes ?? 0,
+                pacedSeconds: walPacer?.TotalWaitSeconds ?? 0,
+                runLabel: runLabel);
             await DarlingObservability.LogRetentionRunAsync(
                 postgres, status, summary.TotalPurged, sw.ElapsedMilliseconds, message, logger, cancellationToken);
 
@@ -794,7 +1047,8 @@ public static class DarlingRetention
                purge surfaces as an auditable ERROR row, not a crashed collection loop. */
             logger?.LogError("Retention purge failed: {Message}", ex.Message);
             await DarlingObservability.LogRetentionRunAsync(
-                postgres, "ERROR", totalRowsDeleted + totalChunksDropped, sw.ElapsedMilliseconds, ex.Message, logger, cancellationToken);
+                postgres, "ERROR", totalRowsDeleted + totalChunksDropped, sw.ElapsedMilliseconds,
+                runLabel is null ? ex.Message : $"{runLabel}: {ex.Message}", logger, cancellationToken);
             return new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
         }
     }
@@ -804,16 +1058,43 @@ public static class DarlingRetention
     /// which writes a literal ERROR): SUCCESS when every table purged cleanly, WARNING when
     /// <paramref name="tablesFailed"/> &gt; 0 (some table's statement failed — already logged + isolated).
     /// Pure so the SUCCESS/WARNING branch and the message text are unit-testable without a live store.
+    /// A non-null <paramref name="runLabel"/> (the manual <c>purge_now</c>, #4825) leads the message, so the
+    /// record says which run it describes; null leaves the text exactly as the daily sweep has always written it.
     /// </summary>
     internal static (string Status, string Message) BuildRunRecordSummary(
-        int tablesPurged, int totalRowsDeleted, int totalChunksDropped, int tablesFailed)
+        int tablesPurged, int totalRowsDeleted, int totalChunksDropped, int tablesFailed,
+        bool paced = false, long walBytes = 0, double pacedSeconds = 0, string? runLabel = null)
     {
         var status = tablesFailed == 0 ? "SUCCESS" : "WARNING";
         var message = tablesFailed == 0
             ? $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped"
             : $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s), {tablesFailed.ToString(CultureInfo.InvariantCulture)} failed (see prior warnings): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped";
+
+        /* #4823: a paced run says how much WAL the store wrote during its batches and how long it waited, so a
+           long purge reads as pacing rather than as a stall. The figure is the WHOLE store's WAL across those
+           batches, collection included (RetentionWalPacer.WalWrittenSinceAsync), not the purge's own. */
+        if (paced)
+        {
+            message += $"; store WAL during the purge's batches: {(walBytes / 1_048_576.0).ToString("F0", CultureInfo.InvariantCulture)} MB, paced {pacedSeconds.ToString("F0", CultureInfo.InvariantCulture)} s";
+        }
+
+        if (!string.IsNullOrEmpty(runLabel))
+        {
+            message = $"{runLabel}: {message}";
+        }
+
         return (status, message);
     }
+
+    /// <summary>
+    /// The label the on-demand <c>purge_now</c> run carries in its collection_log records (#4825), so a manual
+    /// purge reads as one beside the daily sweep's records, and a custom horizon is named rather than lost with
+    /// the command's result. The service log carries the same words.
+    /// </summary>
+    internal static string BuildManualPurgeLabel(int? customRetentionDays)
+        => customRetentionDays is int days
+            ? $"Manual purge (purge_now, custom retention {days.ToString(CultureInfo.InvariantCulture)} day(s))"
+            : "Manual purge (purge_now)";
 
     /// <summary>
     /// The batched purge statement for one collector table — deletes expired rows one time slice at a time
@@ -865,12 +1146,20 @@ public static class DarlingRetention
     }
 
     /// <summary>
-    /// Rows per statement for the plan dimension's purge (#2386). Measured on the use2 store, whose
-    /// <c>query_plan_dim</c> is 133 GB over 12.4 M rows: deletes run at <b>~1,000 rows/sec</b>, linear
-    /// from 10 k to 50 k, worst observed 834 rows/sec. 50 k therefore costs ~50 s against
-    /// <see cref="DeleteTimeoutSeconds"/>'s 300 s — about 5x margin, which is the point: a loaded box is
-    /// slower than the idle one this was measured on, and 100 k (~97 s nominal) would sit at ~291 s under
-    /// a 3x slowdown, i.e. against the wall.
+    /// The CEILING on rows per statement for the plan dimension's purge (#2386, reframed by #4130) — not a
+    /// fixed batch size any more. <see cref="NextPlanDimBatchCap"/> adapts the actual cap toward
+    /// <see cref="PlanDimBatchTargetSeconds"/> between <see cref="PlanDimDeleteRowFloor"/> and this value,
+    /// every run starting back here.
+    ///
+    /// <para><b>Why a constant ceiling wasn't enough (#4130).</b> Originally measured on the use2 store
+    /// (133 GB / 12.4 M rows) at ~1,000 rows/sec, worst observed 834 rows/sec — 50 k costing ~50 s against
+    /// the 300 s timeout, "about 5x margin". A large field store's first-start purge instead averaged
+    /// 152.7 s per batch (max 195.8 s, ~330 rows/sec) — a ~2x margin, not 5x — and its sixth batch passed
+    /// 300 s, was cancelled by the client, and failed the whole table for the day. That store's
+    /// <c>query_plan_dim</c> is 67 GB, 63 GB of it TOAST, with autovacuum debt on the TOAST relation at the
+    /// time. A different field store, by contrast, averaged 30.7 s per 50 k batch (max 43.2 s) — comfortably
+    /// under target, needing no shrink at all. The ceiling stays sized for that fast case; the adaptive
+    /// floor below protects the slow one.</para>
     /// </summary>
     internal const int PlanDimDeleteRowCap = 50_000;
 
@@ -905,15 +1194,60 @@ public static class DarlingRetention
       + $"ORDER BY {timeColumn} LIMIT {cap})";
 
     /// <summary>
+    /// A row-capped purge with NO <c>ORDER BY</c> (#4250 item 3) — the sibling of
+    /// <see cref="RowCappedDeleteSql"/> for the two tables whose V149 migration dropped their
+    /// <c>last_seen</c> btree (<see cref="QueryStorePlanMap"/>, <see cref="QueryStoreTextStore"/>): with no
+    /// index, <c>ORDER BY {timeColumn}</c> forces a sort of every row under the cutoff before the
+    /// <c>LIMIT</c> can apply, which is a second full pass over exactly the rows the seq scan already read.
+    /// Dropping it removes that pass; the row cap and the drain contract are unchanged.
+    ///
+    /// <para><b>Why dropping the ordering is still correct here, unlike the case
+    /// <see cref="RowCappedDeleteSql"/>'s own doc warns against.</b> That doc's "an unordered cap would
+    /// nibble arbitrary rows and leave the floor where it was" describes a MOVING cutoff recomputed from
+    /// the table's own remaining minimum each call — nibbling from the middle there really can strand old
+    /// rows below a floor that never advances. This builder's cutoff is FIXED: it is the caller's own
+    /// <c>$1</c>, computed once from wall time before the drain starts (<see cref="ComputeMapCutoff"/> for
+    /// the map, the fact-horizon-plus-margin sum for text), not from what happened to survive the last
+    /// batch. Every row the predicate matches is expired by that same fixed cutoff regardless of which ones
+    /// a given batch happens to take, and each batch deletes rows the predicate matched, so the matching set
+    /// strictly shrinks every round. A drain that keeps taking rows from a strictly shrinking set reaches
+    /// empty in a bounded number of rounds — arbitrary selection changes WHICH rows go in which round, never
+    /// WHETHER the drain terminates or converges on the same fixed floor. "Leave the floor where it was" is
+    /// exactly what cannot happen: there is no floor to leave behind, only a set that only ever gets
+    /// smaller.</para>
+    ///
+    /// <para>The #2316 margin ordering (<see cref="ComputeMapCutoff"/>, the text-outlives-facts margin on
+    /// <see cref="QueryStoreTextStore.PruneMarginDays"/>) is about which CUTOFF each table's caller computes
+    /// relative to the others — map's cutoff stays strictly newer than the plan dim's, text's stays older
+    /// than the facts that reference it — never about the order rows are removed WITHIN one table's own
+    /// delete. Dropping the intra-table ordering touches none of that: the cutoffs the callers pass in are
+    /// unchanged, and every row this builder can touch in either table is already past its own table's
+    /// cutoff no matter which order the batch takes them in.</para>
+    ///
+    /// <para>The <c>ctid</c> idiom itself requires a plain table — reading <c>ctid</c> through
+    /// TimescaleDB's transparent decompression is unsupported (#1564) — and both
+    /// <see cref="QueryStorePlanMap.TableName"/> and <see cref="QueryStoreTextStore.TableName"/> are plain
+    /// tables, never hypertables (no <c>create_hypertable</c> call anywhere in their migrations), so that
+    /// constraint never applies to either.</para>
+    /// </summary>
+    internal static string UnorderedRowCappedDeleteSql(string table, string timeColumn, int cap) =>
+        $"DELETE FROM {table} WHERE ctid IN ("
+      + $"SELECT ctid FROM {table} WHERE {timeColumn} < $1 "
+      + $"LIMIT {cap})";
+
+    /// <summary>
     /// The dimension GC's cutoff (#1795): the ASSUMED horizon (widest dim-feeding fact retention +
     /// <see cref="TimescaleSupport.ChunkIntervalDays"/> drop_chunks granularity + 1 day for the
     /// <c>last_seen</c> refresh guard), CLAMPED to one day before the oldest surviving digest-carrying
     /// fact row when that measured floor reaches further back — held history bounds the GC instead of
     /// deferring it. The measured side carries the SAME one-day margin, for the same reason: a dim row's
-    /// <c>last_seen</c> can trail its newest referencing fact by up to the refresh guard's width
-    /// (<see cref="QueryStoreLivenessTouchGuard.GuardHours"/> hours, which is a stated share of this very
-    /// margin — see <see cref="QueryStoreLivenessTouchGuard"/>), so pruning right AT the floor could take
-    /// content the floor row still references. A null floor (no
+    /// <c>last_seen</c> can trail its newest referencing fact by up to the WIDER of the two guards that
+    /// write it — <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/> hours (the dim upsert's own
+    /// conflict guard) or <see cref="QueryStoreLivenessTouchGuard.GuardHours"/> hours (the Query Store
+    /// liveness touch, a stated share of this very margin — see <see cref="QueryStoreLivenessTouchGuard"/>)
+    /// — so pruning right AT the floor could take content the floor row still references. Both guards stay
+    /// well inside the one-day margin (<c>PayloadDimensionGuardMarginTests</c> pins it), so neither
+    /// can outgrow it silently. A null floor (no
     /// digest-carrying facts anywhere — a fresh or fully-aged store) leaves the assumed horizon alone:
     /// with no facts, nothing can dangle, and last_seen still bounds what is old enough to take.
     /// </summary>
@@ -1078,6 +1412,35 @@ public static class DarlingRetention
     }
 
     /// <summary>
+    /// #4427 item 7: whether the three raw relations should be skipped from THIS sweep's drop path, decided
+    /// on whether the TimescaleDB extension is ACTUALLY installed in this store (<c>pg_extension</c>) rather
+    /// than on the worker's <c>_timescaleAvailable</c> latch. The latch can read false while the extension is
+    /// present — a failed setup pass, or a transient failure on a store the extension WAS created in earlier —
+    /// and the old code treated that store as plain PostgreSQL, DELETEing raw rows the service-triggered gated
+    /// purge (#4299) is holding for exactly the reason the gate exists.
+    ///
+    /// <para><c>true</c> (skip raw from this sweep) when the extension is present, AND when the probe itself
+    /// cannot answer — fail toward keeping rows, logged once at Warning rather than once per raw table.
+    /// <c>false</c> (true plain PostgreSQL, no extension row) leaves the DELETE fallback below byte-identical
+    /// to how it always ran.</para>
+    /// </summary>
+    internal static async Task<bool> ProbeRawSkipSafeAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            return await TimescaleSupport.DetectAsync(connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not read this store's TimescaleDB state ({Message}) — keeping the three raw tables out of this sweep's drop path rather than deleting on a guess.",
+                ex.Message);
+            return true;
+        }
+    }
+
+    /// <summary>
     /// May this table's expired chunks be dropped, per the #1680 coverage gate (#1784)? Delegates to
     /// <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> so the sweep and the tiered policy cannot judge
     /// the same drop differently; non-tiered tables are always safe.
@@ -1116,12 +1479,20 @@ public static class DarlingRetention
     }
 
     /// <summary>
-    /// One table's batched DELETE: re-executes <paramref name="deleteSql"/> (a <see cref="TimeSlicedDeleteSql"/>
-    /// statement clearing the oldest one-day slice of expired rows) until a slice deletes nothing — i.e. the
-    /// table is drained. Returns the total rows deleted across all slices, or null when it failed (warned,
-    /// sweep continues). Slicing bounds lock/WAL/dead-tuple growth on a large first purge; a small
-    /// steady-state purge finishes in one slice. The connection and command (with its single bound cutoff
-    /// parameter) are reused across the loop.
+    /// One table's batched DELETE, re-executed until a batch deletes nothing — i.e. the table is drained.
+    /// Returns the total rows deleted across all batches, or null when it failed (warned, sweep continues).
+    /// Batching bounds lock/WAL/dead-tuple growth on a large first purge; a small steady-state purge
+    /// finishes in one batch.
+    ///
+    /// <para>Two shapes, chosen by <paramref name="adaptiveRowCapTimeColumn"/>. Null — every table but the
+    /// plan dimension — runs <paramref name="deleteSql"/> (a <see cref="TimeSlicedDeleteSql"/> or
+    /// single-shot statement) unchanged, with the connection and command — a single bound cutoff parameter
+    /// — reused across the whole drain. Set (the plan dimension, #4130) ignores <paramref name="deleteSql"/>
+    /// and rebuilds each batch from <see cref="RowCappedDeleteSql"/> at whatever cap
+    /// <see cref="NextPlanDimBatchCap"/> has chosen, with <see cref="RunPlanDimBatchAsync"/> retrying a
+    /// COMMAND-TIMEOUT batch at half its cap instead of failing the table outright — the field failure this
+    /// exists for was one 50k-row batch passing the 300 s command timeout under first-start load, on a
+    /// store whose steady-state margin was ~2x rather than the cap's designed 5x.</para>
     /// </summary>
     private static async Task<int?> PurgeOneAsync(
         NpgsqlDataSource postgres,
@@ -1130,7 +1501,9 @@ public static class DarlingRetention
         DateTime cutoff,
         ILogger? logger,
         CancellationToken cancellationToken,
-        int batchSize = 1)
+        int batchSize = 1,
+        string? adaptiveRowCapTimeColumn = null,
+        RetentionWalPacer? pacer = null)
     {
         /* Accumulated OUTSIDE the try so the catch can report progress (#2386). Each statement
            autocommits, so a timeout on the fifth batch does not undo the first four — but the old
@@ -1156,8 +1529,15 @@ public static class DarlingRetention
                 await lift.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
-            command.Parameters.AddWithValue(cutoff);
+            /* #4823: each batch's WAL is measured on THIS connection, from the position before to the position
+               after. That counts the whole store's WAL across the batch, collection included, which is what
+               the running checkpoint sees. The wait that follows a batch is never inside the measurement, so
+               the purge always progresses. Null pacer (tests) reads nothing and waits for nothing. */
+            async Task<long?> ReadWalAsync(CancellationToken ct) =>
+                pacer is null ? null : await pacer.ReadWalPositionAsync(connection, ct);
+
+            async Task<long> WalSinceAsync(long? before, CancellationToken ct) =>
+                pacer is null ? 0 : await pacer.WalWrittenSinceAsync(connection, before, ct);
 
             /* batchSize 1 for the TIME-SLICED statement: it has no row cap, so "fewer than the cap"
                degenerates to "deleted zero rows" — a slice that clears anything means older slices may
@@ -1166,16 +1546,63 @@ public static class DarlingRetention
                that IS the whole purge — passes SingleShotStatement, under which no real row count can
                reach the cap and the one execution is terminal. */
             var batches = 0;
-            var drained = await DrainBatchesAsync(
-                async ct =>
-                {
-                    batches++;
-                    var rows = await command.ExecuteNonQueryAsync(ct);
-                    deleted += rows;
-                    return rows;
-                },
-                batchSize,
-                cancellationToken);
+            int drained;
+
+            if (adaptiveRowCapTimeColumn is null)
+            {
+                using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+                command.Parameters.AddWithValue(cutoff);
+
+                drained = await DrainBatchesAsync(
+                    async ct =>
+                    {
+                        batches++;
+                        var walBefore = await ReadWalAsync(ct);
+                        var rows = await command.ExecuteNonQueryAsync(ct);
+                        deleted += rows;
+                        return (rows, batchSize, await WalSinceAsync(walBefore, ct));
+                    },
+                    pacer,
+                    cancellationToken);
+            }
+            else
+            {
+                /* batchSize doubles as the CEILING here — the call site passes PlanDimDeleteRowCap, same
+                   as always. Each run starts back at the ceiling (#4130): throughput is tonight's load,
+                   not a stored fact about the table, so nothing carries a shrunk cap into tomorrow. */
+                var cap = batchSize;
+
+                drained = await DrainBatchesAsync(
+                    async ct =>
+                    {
+                        var walBefore = await ReadWalAsync(ct);
+                        var (rows, usedCap, elapsed) = await RunPlanDimBatchAsync(
+                            async (attemptCap, attemptCt) =>
+                            {
+                                batches++;
+                                using var attempt = new NpgsqlCommand(
+                                    RowCappedDeleteSql(tableName, adaptiveRowCapTimeColumn, attemptCap),
+                                    connection)
+                                { CommandTimeout = DeleteTimeoutSeconds };
+                                attempt.Parameters.AddWithValue(cutoff);
+                                var affected = await attempt.ExecuteNonQueryAsync(attemptCt);
+                                deleted += affected;
+                                return affected;
+                            },
+                            cap,
+                            PlanDimDeleteRowFloor,
+                            ct,
+                            logger);
+
+                        var walBytes = await WalSinceAsync(walBefore, ct);
+                        cap = NextPlanDimBatchCap(
+                            usedCap, elapsed.TotalSeconds, PlanDimDeleteRowFloor, batchSize,
+                            walBytes, pacer?.BatchWalTargetBytes ?? 0);
+                        return (rows, usedCap, walBytes);
+                    },
+                    pacer,
+                    cancellationToken);
+            }
 
             /* A row-capped drain reports the two facts the sweep summary cannot carry, because both are
                per-table and the summary is fleet-wide.
@@ -1204,37 +1631,228 @@ public static class DarlingRetention
         {
             /* Failure-isolated per table — one stuck DELETE must not stop the sweep. Reports what DID
                land, because those batches are committed and saying otherwise sends an operator looking
-               for a stall that is really a throughput limit. */
+               for a stall that is really a throughput limit. The INNER exception is included (#4130): the
+               field failure this fix exists for logged only the outer "Exception while reading from
+               stream" — Npgsql's wrapper message for every read-side fault alike — which said nothing
+               about which one this was; the inner TimeoutException is what actually names it. */
             logger?.LogWarning(
-                "Retention purge failed for {Table} after removing {Rows} row(s): {Message}",
-                tableName, deleted, ex.Message);
+                "Retention purge failed for {Table} after removing {Rows} row(s): {Failure}",
+                tableName, deleted, DescribePurgeFailure(ex));
             return null;
         }
     }
 
     /// <summary>
-    /// Repeatedly runs <paramref name="executeBatch"/> (one capped batched-DELETE execution, returning its
-    /// rows-affected) and sums the total, stopping when a batch clears fewer than <paramref name="batchSize"/>
-    /// rows — i.e. no expired rows remain and the table is drained. A full-cap batch means there may be more,
-    /// so it goes again; an exact multiple of the cap terminates on the following empty batch. Pure over the
-    /// injected executor so the loop-again + termination is unit-testable without a live store.
+    /// Repeatedly runs <paramref name="executeBatch"/> (one capped batched-DELETE execution, returning both
+    /// its rows-affected AND the cap THAT EXECUTION used) and sums the rows, stopping when a batch clears
+    /// fewer rows than its OWN cap — i.e. no expired rows remain and the table is drained. A full-cap batch
+    /// means there may be more, so it goes again; an exact multiple of the cap terminates on the following
+    /// empty batch.
+    ///
+    /// <para>The cap is read back from each execution rather than fixed once for the whole drain (#4130): the
+    /// plan-dim purge resizes its cap between batches to hold near a time target, so a batch's take can be
+    /// full at a SMALLER cap than the drain started with. Comparing against the starting cap instead would
+    /// stop the drain the moment a batch shrinks — a shrunk batch's full take is, by construction, below the
+    /// original cap even when the table is nowhere near drained. A fixed-size caller (the time-sliced and
+    /// single-shot statements) reports the same cap every time, so this is exactly the old behavior for
+    /// them.</para>
+    ///
+    /// <para>Pure over the injected executor so the loop-again + termination is unit-testable without a live
+    /// store.</para>
+    /// </summary>
+    internal static Task<int> DrainBatchesAsync(
+        Func<CancellationToken, Task<(int Deleted, int Cap)>> executeBatch, CancellationToken cancellationToken)
+    {
+        return DrainBatchesAsync(
+            async ct =>
+            {
+                var (deleted, cap) = await executeBatch(ct);
+                return (deleted, cap, 0L);
+            },
+            pacer: null,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// The drain loop with pacing (#4823): the executor also reports the store's WAL during its batch, and
+    /// <paramref name="pacer"/> waits after EVERY batch, the last one of a table included, so the debt of a
+    /// table's final batch is paid before the next table starts writing. A null pacer never waits. The wait
+    /// comes after the executor returns, so the WAL the executor measured never includes it.
     /// </summary>
     internal static async Task<int> DrainBatchesAsync(
-        Func<CancellationToken, Task<int>> executeBatch, int batchSize, CancellationToken cancellationToken)
+        Func<CancellationToken, Task<(int Deleted, int Cap, long WalBytes)>> executeBatch,
+        RetentionWalPacer? pacer,
+        CancellationToken cancellationToken)
     {
         var totalDeleted = 0;
         while (true)
         {
-            var deleted = await executeBatch(cancellationToken);
+            var (deleted, cap, walBytes) = await executeBatch(cancellationToken);
             totalDeleted += deleted;
 
-            if (deleted < batchSize)
+            if (pacer is not null)
+            {
+                await pacer.AfterBatchAsync(walBytes, cancellationToken);
+            }
+
+            if (deleted < cap)
             {
                 break;
             }
         }
 
         return totalDeleted;
+    }
+
+    /// <summary>
+    /// Floor for the plan dimension's adaptive batch cap (#4130): a batch that still times out at this cap
+    /// stops being retried and fails the table for the day, exactly as every batch did before this fix. At
+    /// the slowest rate the field failure measured (~330 rows/sec, see <see cref="PlanDimDeleteRowCap"/>'s
+    /// remarks), 1,000 rows costs ~3 s — nowhere near <see cref="DeleteTimeoutSeconds"/>, so a table that
+    /// cannot clear even the floor inside the timeout has stopped being a batch-sizing problem.
+    /// </summary>
+    internal const int PlanDimDeleteRowFloor = 1_000;
+
+    /// <summary>
+    /// What the plan-dim adaptive sizing (#4130) aims each batch's duration at: comfortably inside
+    /// <see cref="DeleteTimeoutSeconds"/>'s 300 s even under load well past the field failure's ~2x margin,
+    /// and short enough that a timed-out batch's retry-at-half-cap converges in a couple of rounds rather
+    /// than creeping down one shrink at a time.
+    /// </summary>
+    internal const double PlanDimBatchTargetSeconds = 60;
+
+    /// <summary>
+    /// The plan-dim purge's next batch cap (#4130): a batch slower than <see cref="PlanDimBatchTargetSeconds"/>
+    /// halves (floored at <paramref name="floorCap"/>), a batch faster than half that target doubles
+    /// (ceilinged at <paramref name="ceilingCap"/>), and a batch inside that band holds. Nothing persists
+    /// between purge runs — each run starts back at the ceiling — because throughput is a property of
+    /// TONIGHT's load, not a fact about the table: the field failure's store ran at ~2x the cap's designed
+    /// 5x margin under first-start catch-up load, while a store's own steady state (measured: 30.7 s mean at
+    /// the 50k ceiling) never needs to shrink at all. Pure so the shrink/grow/hold arithmetic is testable
+    /// without a timer or a store.
+    ///
+    /// <para>#4823 adds the batch's WAL (<paramref name="lastBatchWalBytes"/>) against
+    /// <paramref name="walTargetBytes"/>, 30 s of the pacer's rate: the next cap is the smaller of the time
+    /// rule's and <c>lastCap * walTargetBytes / lastBatchWalBytes</c>, both within the floor and ceiling.
+    /// Zero for either leaves the time rule alone.</para>
+    /// </summary>
+    internal static int NextPlanDimBatchCap(
+        int lastCap, double lastBatchSeconds, int floorCap, int ceilingCap,
+        long lastBatchWalBytes = 0, long walTargetBytes = 0)
+    {
+        int timeCap;
+        if (lastBatchSeconds > PlanDimBatchTargetSeconds)
+        {
+            timeCap = Math.Clamp(lastCap / 2, floorCap, ceilingCap);
+        }
+        else if (lastBatchSeconds < PlanDimBatchTargetSeconds / 2.0)
+        {
+            timeCap = Math.Clamp(lastCap * 2, floorCap, ceilingCap);
+        }
+        else
+        {
+            timeCap = Math.Clamp(lastCap, floorCap, ceilingCap);
+        }
+
+        /* #4823: one statement's WAL cannot be paced from inside it, so the batch size bounds the burst the
+           checkpoint sees. A batch that wrote WAL scales the cap to what would have written exactly the
+           target (the pacer's rate times RetentionWalPacer.BatchTargetSeconds), so a batch over the target
+           shrinks the next one in proportion and a batch under it can grow only up to the target. The time
+           rule above still applies; the smaller of the two wins. No measured WAL (an unpaced run, or a
+           batch that wrote none) leaves the time rule alone. */
+        if (lastBatchWalBytes > 0 && walTargetBytes > 0)
+        {
+            var walCap = (int)Math.Clamp(lastCap * (double)walTargetBytes / lastBatchWalBytes, floorCap, ceilingCap);
+            return Math.Min(timeCap, walCap);
+        }
+
+        return timeCap;
+    }
+
+    /// <summary>
+    /// True when <paramref name="exception"/> is the plan-dim batch's OWN command timeout expiring, rather
+    /// than a service shutdown's cancel or some unrelated fault (#4130's field failure). The field evidence
+    /// surfaced as a bare <see cref="NpgsqlException"/> ("Exception while reading from stream") wrapping a
+    /// <see cref="TimeoutException"/> — Npgsql giving up on the socket read before the server's cancel
+    /// acknowledgement arrived — which is the first arm. The second covers the race where that
+    /// acknowledgement DOES arrive first: a <see cref="PostgresException"/> at SQLSTATE 57014 ("canceling
+    /// statement due to user request") is what the client's own <see cref="DeleteTimeoutSeconds"/> cancel
+    /// looks like when the server answers before the client's read gives up — but ONLY when
+    /// <paramref name="cancellationToken"/> was not itself the reason: a service shutdown cancels the same
+    /// statement the same way, and that must propagate untouched rather than be read as "shrink and retry",
+    /// or a stop would sit shrinking batches instead of exiting. An
+    /// <see cref="OperationCanceledException"/> is never in this predicate's domain — the caller retries in
+    /// a loop rather than a single catch filter, so the check is repeated here rather than trusted to the
+    /// filter alone.
+    /// </summary>
+    internal static bool IsPlanDimBatchTimeout(Exception exception, CancellationToken cancellationToken)
+    {
+        if (exception is OperationCanceledException)
+        {
+            return false;
+        }
+
+        if (exception is NpgsqlException { InnerException: TimeoutException })
+        {
+            return true;
+        }
+
+        return exception is PostgresException { SqlState: CollectorFaultCancelOrigin.QueryCanceled }
+            && !cancellationToken.IsCancellationRequested;
+    }
+
+    /// <summary>
+    /// Outer type and message, plus the INNER exception's type and message when there is one (#4130). The
+    /// field failure that motivated this logged only "Exception while reading from stream" — Npgsql's own
+    /// wrapper message for a command-timeout read abort — indistinguishable in the log from a dropped
+    /// connection or any other read fault. The inner <see cref="TimeoutException"/> is the one exception in
+    /// the chain that actually says what happened, and the old catch never logged it.
+    /// </summary>
+    private static string DescribePurgeFailure(Exception ex)
+    {
+        var description = $"{ex.GetType().Name}: {ex.Message}";
+        return ex.InnerException is { } inner
+            ? $"{description} ({inner.GetType().Name}: {inner.Message})"
+            : description;
+    }
+
+    /// <summary>
+    /// One plan-dim purge batch (#4130): runs <paramref name="executeAttempt"/> at <paramref name="cap"/>,
+    /// and on a COMMAND TIMEOUT specifically (<see cref="IsPlanDimBatchTimeout"/>) retries the SAME slice at
+    /// half the cap, floored at <paramref name="floorCap"/>, instead of failing the whole table for the day
+    /// the way every batch did before this fix. A batch that still times out AT the floor is not retried
+    /// again — that failure propagates unchanged, and <see cref="PurgeOneAsync"/>'s catch fails the table
+    /// exactly as before.
+    ///
+    /// <para>Returns the cap and elapsed time of the SUCCESSFUL attempt, not the batch's total wall time —
+    /// a timed-out first attempt's ~300 s is dead time at a cap that just proved too large, and folding it
+    /// into the next cap's sizing would shrink the batch a second time for the same slow stretch. The caller
+    /// adapts the NEXT cap from the successful attempt's own throughput only.</para>
+    /// </summary>
+    internal static async Task<(int Deleted, int Cap, TimeSpan Elapsed)> RunPlanDimBatchAsync(
+        Func<int, CancellationToken, Task<int>> executeAttempt,
+        int cap,
+        int floorCap,
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
+    {
+        while (true)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var rows = await executeAttempt(cap, cancellationToken);
+                return (rows, cap, stopwatch.Elapsed);
+            }
+            catch (Exception ex) when (cap > floorCap && IsPlanDimBatchTimeout(ex, cancellationToken))
+            {
+                var retryCap = Math.Max(floorCap, cap / 2);
+                logger?.LogWarning(
+                    "Plan-dim purge batch at cap {Cap} hit the command timeout after {Elapsed:F0}s ({Failure}); retrying at {RetryCap}",
+                    cap, stopwatch.Elapsed.TotalSeconds, DescribePurgeFailure(ex), retryCap);
+                cap = retryCap;
+            }
+        }
     }
 }
 
@@ -1243,7 +1861,7 @@ public static class DarlingRetention
 /// (<paramref name="TablesPurged"/>) and the coarse activity count split into DELETE rows
 /// (<paramref name="RowsDeleted"/>) and dropped Timescale chunks (<paramref name="ChunksDropped"/> —
 /// drop_chunks doesn't report per-row counts). <see cref="TotalPurged"/> is the single headline number the
-/// daily log and the on-demand <c>purge_now</c> result report.
+/// daily log and the on-demand <c>purge_now</c> log line report.
 /// </summary>
 public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, int ChunksDropped)
 {

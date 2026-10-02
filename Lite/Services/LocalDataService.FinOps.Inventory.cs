@@ -36,7 +36,8 @@ SELECT
     auto_growth_mb,
     is_percent_growth,
     growth_pct,
-    vlf_count
+    vlf_count,
+    file_id
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -57,7 +58,9 @@ ORDER BY database_name, file_type_desc, file_name";
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 FileTypeDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 FileName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                TotalSizeMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                /* NULL is the Hyperscale log file (the log service): it stays null, never 0, so the grid shows
+                   n/a (log service) instead of a size and the allocated totals leave it out. */
+                TotalSizeMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
                 UsedSizeMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
                 VolumeMountPoint = reader.IsDBNull(5) ? null : reader.GetString(5),
                 VolumeTotalMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
@@ -66,7 +69,9 @@ ORDER BY database_name, file_type_desc, file_name";
                 AutoGrowthMb = reader.IsDBNull(9) ? null : Convert.ToDecimal(reader.GetValue(9)),
                 IsPercentGrowth = reader.IsDBNull(10) ? null : (bool?)(Convert.ToInt32(reader.GetValue(10)) == 1),
                 GrowthPct = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
-                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))
+                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+                /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
+                FileId = reader.IsDBNull(13) ? null : Convert.ToInt32(reader.GetValue(13))
             });
         }
 
@@ -86,7 +91,9 @@ ORDER BY database_name, file_type_desc, file_name";
 SELECT
     database_name,
     SUM(total_size_mb) AS total_mb,
-    SUM(used_size_mb) AS used_mb
+    /* Used is summed only over the files whose size counts, so used and allocated stay on one footing: the
+       Hyperscale log file (NULL size, the log service) is in neither. */
+    SUM(CASE WHEN total_size_mb IS NOT NULL THEN used_size_mb END) AS used_mb
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (

@@ -9,7 +9,9 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -18,6 +20,38 @@ namespace PerformanceMonitorLite.Services;
 /// </summary>
 public class RetentionService
 {
+    /// <summary>
+    /// How long an archived Parquet file is kept, in months — Lite's ONE retention horizon (#3541 A9).
+    ///
+    /// <para>Lite does not purge per collector: hot rows leave DuckDB for Parquet after the archive service's
+    /// hot-data week, the <c>v_*</c> views union live and archive so every read sees both, and this is the
+    /// age at which an archive file is deleted. Because every table — the signal tables, the collection log
+    /// and the alert log alike — shares it, a day older than this is gone from every source at once, which is
+    /// why the daily summary's retention horizon on Lite is this single number rather than the shortest of
+    /// several. Named so the horizon the daily-summary reader publishes and the horizon the cleanup enforces
+    /// are the same constant, not two literals that happen to agree.</para>
+    /// </summary>
+    public const int ArchiveRetentionMonths = 3;
+
+    /// <summary>
+    /// The oldest instant whose rows Lite is certain to still hold at <paramref name="utcNow"/>: what a read
+    /// with no window can still see, and the <c>searchedFromUtc</c> the Overview card's freshness band is
+    /// handed so a server whose whole history has aged out reads Offline rather than never collected (#3967).
+    ///
+    /// <para><b>Why a month start and not the cutoff itself.</b> An archive file is named for the month (or
+    /// the day) it was WRITTEN, and <see cref="CleanupOldArchives"/> deletes a file once that date is before
+    /// the cutoff, <see cref="ArchiveRetentionMonths"/> back. A month's file therefore goes whole, holding rows
+    /// up to a month younger than the cutoff. A row is written into a file of its own month or a later one,
+    /// because archival never runs before the row is collected, so it is certain to survive only from the
+    /// first month start at or after the cutoff.</para>
+    /// </summary>
+    public static DateTime OldestRetainedInstant(DateTime utcNow)
+    {
+        var cutoff = DateTime.SpecifyKind(utcNow.AddMonths(-ArchiveRetentionMonths), DateTimeKind.Unspecified);
+        var monthStart = new DateTime(cutoff.Year, cutoff.Month, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        return monthStart == cutoff ? monthStart : monthStart.AddMonths(1);
+    }
+
     private readonly string _archivePath;
     private readonly ILogger<RetentionService>? _logger;
 
@@ -34,21 +68,32 @@ public class RetentionService
     ///   - Timestamped: "20260221_1328_wait_stats.parquet" (yyyyMMdd prefix)
     ///   - Consolidated daily: "20260221_wait_stats.parquet" (yyyyMMdd prefix)
     ///   - Legacy monthly: "2026-02_wait_stats.parquet" (yyyy-MM prefix)
+    ///   - Any of the above copied from a previous install: "imported_202602_wait_stats.parquet"
     /// </summary>
-    public void CleanupOldArchives(int retentionMonths = 3)
+    public int CleanupOldArchives(int retentionMonths = ArchiveRetentionMonths)
     {
         if (!Directory.Exists(_archivePath))
         {
-            return;
+            return 0;
         }
 
         var cutoffDate = DateTime.UtcNow.AddMonths(-retentionMonths);
+        var deleted = 0;
 
         foreach (var file in Directory.GetFiles(_archivePath, "*.parquet"))
         {
             try
             {
                 var fileName = Path.GetFileNameWithoutExtension(file);
+
+                /* A file copied in from a previous install carries an imported_ prefix in front of one of the
+                   date forms below. Unstripped, none of the parses matched and such files never expired;
+                   imported query_snapshots, the largest table, stayed on disk for good. */
+                if (fileName.StartsWith("imported_", StringComparison.OrdinalIgnoreCase))
+                {
+                    fileName = fileName["imported_".Length..];
+                }
+
                 DateTime? fileDate = null;
 
                 /* Monthly compacted format: "202602_wait_stats" -> "202602" */
@@ -89,6 +134,7 @@ public class RetentionService
                 if (fileDate.HasValue && fileDate.Value < cutoffDate)
                 {
                     File.Delete(file);
+                    deleted++;
                     _logger?.LogInformation("Deleted expired archive: {File}", file);
                 }
             }
@@ -96,6 +142,32 @@ public class RetentionService
             {
                 _logger?.LogError(ex, "Failed to evaluate/delete archive file: {File}", file);
             }
+        }
+
+        return deleted;
+    }
+
+    /// <summary>
+    /// <see cref="CleanupOldArchives"/>, then a rebuild of the archive views when it deleted anything. A view
+    /// reads each table's files through globs baked in when the view was built, and DuckDB fails the whole read
+    /// at bind when one of them matches nothing. So deleting the last file behind a glob (a table's last
+    /// multi-part month, or its last single-file month while part files remain) left every read of that table's
+    /// <c>v_</c> view failing until the next archival refresh, up to an hour later. Both steps run under the
+    /// write lock, so a reader that respects it never sees the gap between the delete and the rebuild.
+    /// Returns the number of files deleted.
+    /// </summary>
+    public async Task<int> CleanupOldArchivesAndRefreshViewsAsync(DuckDbInitializer duckDb, int retentionMonths = ArchiveRetentionMonths)
+    {
+        using (duckDb.AcquireWriteLock())
+        {
+            var deleted = CleanupOldArchives(retentionMonths);
+            if (deleted > 0)
+            {
+                /* Core, not CreateArchiveViewsAsync: this thread holds the write lock, and the lock does not nest. */
+                await duckDb.CreateArchiveViewsCoreAsync();
+            }
+
+            return deleted;
         }
     }
 }

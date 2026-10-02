@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -39,15 +40,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgReplicationStatsTools
 {
-    [McpServerTool(Name = "get_pg_replication_stats"), Description("Gets the health of CONNECTED PostgreSQL replicas from pg_stat_replication: which replicas are attached, their state and sync state, how many bytes behind they are on send and on replay, and replay lag in milliseconds - with the WORST value seen in the window beside the latest, because lag is spiky and the peak is the fact that matters. This is the counterpart of get_pg_replication_slots and answers a different question: a slot describes what the primary RETAINS for a replica and exists even when nothing is attached, which is the disk-filling case; this describes replicas that are actually connected. A replica that disappears from this tool while its slot persists is the dangerous combination. sync_state distinguishes synchronous replicas, where lag is also commit latency on the primary, from asynchronous ones where it is not. Rows are SAMPLED, so a replica that connected and left between captures may not appear.")]
+    [McpServerTool(Name = "get_pg_replication_stats"), Description("Gets CONNECTED PostgreSQL replica health from pg_stat_replication: attach state, sync_state, bytes behind on send/replay, and replay lag ms. Read the WORST value beside the latest; lag is spiky and the peak is what matters. sync_state: synchronous lag is also commit latency on the primary; asynchronous is not. Rows are SAMPLED, so empty is not proof no replica ever attached - check get_pg_replication_slots, whose slot retains WAL even with nothing connected. <<GUIDE>> Gets the health of CONNECTED PostgreSQL replicas from pg_stat_replication: which replicas are attached, their state and sync state, how many bytes behind they are on send and on replay, and replay lag in milliseconds - with the WORST value seen in the window beside the latest, because lag is spiky and the peak is the fact that matters. This is the counterpart of get_pg_replication_slots and answers a different question: a slot describes what the primary RETAINS for a replica and exists even when nothing is attached, which is the disk-filling case; this describes replicas that are actually connected. A replica that disappears from this tool while its slot persists is the dangerous combination. sync_state distinguishes synchronous replicas, where lag is also commit latency on the primary, from asynchronous ones where it is not. Rows are SAMPLED, so a replica that connected and left between captures may not appear.")]
     public static async Task<string> GetPgReplicationStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -58,12 +60,12 @@ public sealed class DarlingMcpPgReplicationStatsTools
         try
         {
             var rows = await DarlingPgReplicationStatsReader.GetPgReplicationStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit, cancellationToken);
 
             if (rows.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No replica was connected to {resolved.ServerName} in the last {hours_back} "
@@ -104,9 +106,9 @@ public sealed class DarlingMcpPgReplicationStatsTools
                 replicas,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL replication stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_replication_stats", ex);
         }
     }
 }

@@ -1,0 +1,189 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// The deadlock telemetry cursor through the host's REAL state path: land what the definition staged, save it
+/// with <see cref="DarlingCollectorRunner.SaveCollectorStateAsync"/>, reload it with
+/// <see cref="DarlingCollectorRunner.GetCollectorStateAsync"/>, and check the next <c>BuildQuery</c> binds it.
+/// A mocked store cannot show a key that is written under one name and read under another.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class DeadlocksTelemetryCursorStateLiveTests
+{
+    private const int LiveServerId = -490001;
+    private static readonly DateTime Now = new(2026, 8, 26, 12, 5, 0, DateTimeKind.Utc);
+
+    private static CollectorContext Ctx(IReadOnlyDictionary<string, string>? state = null, bool azure = true) => new()
+    {
+        ServerId = LiveServerId,
+        ServerName = "s",
+        CollectionTime = Now,
+        Deltas = null!,
+        Target = new CollectorTargetInfo { IsAzureSqlDb = azure },
+        CurrentDatabaseName = azure ? "master" : null,
+        State = state ?? CollectorContext.NoState,
+    };
+
+    [Fact]
+    public async Task LandedCursor_SurvivesTheStoreRoundTrip_AndTheNextQueryBindsIt()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live telemetry cursor state test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        /* #1776 own-store: the rows are keyed by a distinctive fake server id and removed in the cleanup. */
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var name = DeadlocksCollector.Instance.Name;
+
+        var bodySucceeded = false;
+        try
+        {
+            var cursor = new DateTime(2026, 8, 26, 12, 0, 20, DateTimeKind.Utc);
+            var ctx = Ctx();
+            ctx.StagedItemState[DeadlocksCollector.TelemetryCursorStateKey] = cursor.ToString("o", CultureInfo.InvariantCulture);
+
+            /* Staged only: nothing reaches the store until the host lands it after the item's write. */
+            await runner.SaveCollectorStateAsync(LiveServerId, name, ctx.PendingState, ct);
+            Assert.Empty(await runner.GetCollectorStateAsync(LiveServerId, name, ct));
+
+            ctx.LandStagedItemState();
+            await runner.SaveCollectorStateAsync(LiveServerId, name, ctx.PendingState, ct);
+
+            var reloaded = await runner.GetCollectorStateAsync(LiveServerId, name, ct);
+            Assert.Equal(cursor.ToString("o", CultureInfo.InvariantCulture), reloaded[DeadlocksCollector.TelemetryCursorStateKey]);
+            Assert.Contains(DeadlocksCollector.TelemetryCursorStateKey, DeadlocksCollector.Instance.StateKeys);
+
+            var next = DeadlocksCollector.Instance.BuildQuery(Ctx(reloaded));
+            Assert.Equal(cursor.AddMinutes(-10), next.Parameters.First(p => p.Name == "@telemetry_cutoff_time").Value);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task LandedRingCursor_SurvivesTheStoreRoundTrip_AndTheNextQueryBindsItMinusTheOverlap()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live ring cursor state test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        /* #1776 own-store: the rows are keyed by a distinctive fake server id and removed in the cleanup. */
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var name = DeadlocksCollector.Instance.Name;
+
+        var bodySucceeded = false;
+        try
+        {
+            var cursor = new DateTime(2026, 8, 26, 12, 0, 30, DateTimeKind.Utc);
+            var key = DeadlocksCollector.RingCursorKey("zeta");
+            var ctx = Ctx();
+            ctx.StagedItemState[key] = cursor.ToString("o", CultureInfo.InvariantCulture);
+
+            await runner.SaveCollectorStateAsync(LiveServerId, name, ctx.PendingState, ct);
+            Assert.Empty(await runner.GetCollectorStateAsync(LiveServerId, name, ct));
+
+            ctx.LandStagedItemState();
+            await runner.SaveCollectorStateAsync(LiveServerId, name, ctx.PendingState, ct);
+
+            var reloaded = await runner.GetCollectorStateAsync(LiveServerId, name, ct);
+            Assert.Equal(cursor.ToString("o", CultureInfo.InvariantCulture), reloaded[key]);
+
+            var zeta = new CollectorContext
+            {
+                ServerId = LiveServerId,
+                ServerName = "s",
+                CollectionTime = Now,
+                Deltas = null!,
+                Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+                CurrentDatabaseName = "zeta",
+                State = reloaded,
+            };
+            var next = DeadlocksCollector.Instance.BuildQuery(zeta);
+            Assert.Equal(cursor.AddMinutes(-10), next.Parameters.First(p => p.Name == "@cutoff_time").Value);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// The SQL Server and Managed Instance text and parameter list are untouched by the telemetry cursor, byte for
+    /// byte: the telemetry arm is Azure SQL Database only, and this change must not move a character of the rest.
+    /// The hash is the text with the time filter inside the XQuery (#4912).
+    /// </summary>
+    [Theory]
+    [InlineData(false, "BE696C0C924330E38F2B989A7DDC541A24586EA52874EFD838228DA7559CAF39")]
+    [InlineData(true, "BE696C0C924330E38F2B989A7DDC541A24586EA52874EFD838228DA7559CAF39")]
+    public void OnPremAndManagedInstance_QueryText_IsByteIdentical(bool managedInstance, string expectedSha256)
+    {
+        var context = Ctx(azure: false);
+        var withTarget = new CollectorContext
+        {
+            ServerId = context.ServerId,
+            ServerName = context.ServerName,
+            CollectionTime = Now,
+            Deltas = null!,
+            Target = new CollectorTargetInfo { IsAzureSqlDb = false, IsAzureManagedInstance = managedInstance },
+            Watermark = null,
+        };
+
+        var query = DeadlocksCollector.Instance.BuildQuery(withTarget);
+        var sha = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(query.Text)));
+
+        Assert.False(query.Text.Contains("@telemetry_cutoff_time", StringComparison.Ordinal));
+        Assert.True(expectedSha256 == sha, sha);
+    }
+
+    private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            $"DELETE FROM collect.collector_state WHERE server_id = {LiveServerId.ToString(CultureInfo.InvariantCulture)}", connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+}

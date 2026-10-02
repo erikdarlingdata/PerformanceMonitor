@@ -63,7 +63,9 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack), cancellationToken);
+        /* On collection_time, unlike the grids: the alert read is a delivery cursor ("rows collected since the
+           last sweep"), so a report collected late still alerts once it lands. */
+        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
         return new List<BlockedProcessAlertRow>(rows);
     }
 
@@ -83,29 +85,32 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
 
         var cadence = ResolveCadence(_blockingSnapshotCadenceMinutes, serverId, "dmv_blocking_snapshot");
         bool isFresh = DateTime.UtcNow - snapshot.Value.SnapshotTime <= CurrentBlockingWaitResult.MaxSnapshotAge(cadence);
+        /* #3653 (A5): the cadence rides along so the engine's persistence gate can tell a skipped quiet
+           collection from an adjacent one — the same resolved number the freshness bound was taken at. */
         return new CurrentBlockingWaitResult(
-            snapshot.Value.SnapshotTime, snapshot.Value.TotalWaitMs, snapshot.Value.BlockedSessionCount, isFresh);
+            snapshot.Value.SnapshotTime, snapshot.Value.TotalWaitMs, snapshot.Value.BlockedSessionCount, isFresh, cadence);
     }
 
     public async Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var rows = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(serverId, hoursBack), cancellationToken);
+        /* On collection_time, as the blocked-process read above: a delivery cursor, so a late-collected deadlock
+           still alerts. */
+        var rows = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
         return new List<DeadlockAlertRow>(rows);
     }
 
-    public async Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(
-        string serverKey, double thresholdMs, CancellationToken cancellationToken = default)
+    /// <summary>#3539 A4: the accumulation read, delegated like every other member so the engine stays free
+    /// of DuckDB. No client-side threshold — the contract is a dumb sum; the engine grades it.</summary>
+    public async Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(
+        string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var poisonWaits = await Task.Run(() => _dataService.GetLatestPoisonWaitAvgsAsync(serverId), cancellationToken);
-        /* Fetch-then-filter, exactly like the pre-slice-B loop: the 3-row window is selected
-           before thresholding (see the IAlertReadAdapter contract). */
-        return poisonWaits.FindAll(w => w.AvgMsPerWait >= thresholdMs);
+        return await Task.Run(() => _dataService.GetPoisonWaitAccumulationAsync(serverId, windowMinutes), cancellationToken);
     }
 
-    public async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+    public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,
         int maxResults,
@@ -115,23 +120,19 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         bool excludeMiscWaits,
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
+        LongRunningQueryExclusions exclusions,
         CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var longRunning = await Task.Run(() => _dataService.GetLongRunningQueriesAsync(
+        /* #3653 (A5, Q5): the opt-out knob goes INTO the DuckDB read, ahead of its LIMIT — see
+           LongRunningQueryExclusions for why a client-side drop would let the excluded sessions fill the cap.
+           #3742: excludedDatabases goes in the same way. This adapter used to drop the excluded databases'
+           rows HERE, after the read's LIMIT had already been spent on them, so a page of five could be five
+           excluded rows and the alert came back empty while matches existed. The read now applies the list
+           as its third CTE flag and counts what it removed; nothing is filtered on this side of the seam. */
+        return await Task.Run(() => _dataService.GetLongRunningQueriesAsync(
             serverId, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor,
-            excludeBackups, excludeMiscWaits, excludeCdc), cancellationToken);
-
-        if (excludedDatabases is { Count: > 0 })
-        {
-            longRunning = longRunning
-                .Where(q => string.IsNullOrEmpty(q.DatabaseName) ||
-                    !excludedDatabases.Any(e =>
-                        string.Equals(e, q.DatabaseName, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-        }
-
-        return longRunning;
+            excludeBackups, excludeMiscWaits, excludeCdc, exclusions, excludedDatabases), cancellationToken);
     }
 
     public async Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(
@@ -189,9 +190,10 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
     /// Databases deviating from their expected (baseline/override) state — delegates to
     /// <see cref="LocalDataService.GetDatabaseStateDeviationsAsync"/>, which also auto-seeds the
     /// first-observation baseline. Task.Run-wrapped like the other reads to keep DuckDB's synchronous
-    /// I/O off the WPF dispatcher (#1202).
+    /// I/O off the WPF dispatcher (#1202). Null passes through unchanged: it is "no verdict this pass" (see
+    /// <see cref="IAlertReadAdapter.GetDatabaseStatesAsync"/>).
     /// </summary>
-    public async Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
+    public async Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);

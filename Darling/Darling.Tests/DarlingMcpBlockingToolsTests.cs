@@ -99,7 +99,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     [InlineData("get_blocked_process_xml", "server_name,hours_back,limit,as_of")]
     [InlineData("get_blocking_trend", "server_name,hours_back,as_of")]
     [InlineData("get_deadlock_trend", "server_name,hours_back,as_of")]
-    [InlineData("get_lock_wait_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_lock_wait_trend", "server_name,hours_back,as_of,bucket_minutes")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         var expected = expectedCsv.Split(',');
@@ -151,23 +151,25 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// The instructions have to ADVERTISE <c>dedup_key</c>, or the feature is unreachable in practice: an agent
-    /// picks tools and arguments from this text, and a parameter it never reads is one it never passes. Same
-    /// reason the store-metrics and AG tools pin their own mentions.
-    ///
-    /// <para>Also pins the two caveats that turn an empty result into a diagnosable one — the display-name
-    /// scoping and that <c>hours_back</c> still bounds the search — because those are the failure modes an agent
-    /// would otherwise report as "no such incident".</para>
+    /// The parameter's OWN description has to ADVERTISE <c>dedup_key</c>'s scoping, or the feature is
+    /// unreachable in practice: an agent picks tools and arguments from a tool's own description, and a
+    /// caveat it never reads is one it never accounts for. #3898 Phase 2 (D5) moved this pin off the
+    /// instructions (which used to carry a second, shorter mention) onto the parameter description that was
+    /// always the primary surface — the display-name scoping is the failure mode an agent would otherwise
+    /// report as "no such incident".
     /// </summary>
-    [Fact]
-    public void Instructions_AdvertiseDedupKeyAndItsScoping()
+    [Theory]
+    [InlineData("get_blocking")]
+    [InlineData("get_deadlocks")]
+    [InlineData("get_deadlock_detail")]
+    public void ParamContract_DedupKeyDescription_AdvertisesItsScoping(string tool)
     {
-        var text = DarlingMcpInstructions.Text;
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == tool);
+        var description = method.GetParameters().Single(p => p.Name == "dedup_key")
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        Assert.Contains("dedup_key", text, StringComparison.Ordinal);
-        Assert.Contains("Dedup Key", text, StringComparison.Ordinal);
-        Assert.Contains("DISPLAY name", text, StringComparison.Ordinal);
-        Assert.Contains("hours_back` still bounds the search", text, StringComparison.Ordinal);
+        Assert.Contains("Dedup Key", description, StringComparison.Ordinal);
+        Assert.Contains("display name", description, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -178,7 +180,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void BlockedProcessReportsSql_ReadsBaseTable_XmlAndPairColumns_WindowsOnCollectionTime()
+    public void BlockedProcessReportsSql_ReadsBaseTable_XmlAndPairColumns_WindowsOnEventTime()
     {
         var sql = DarlingBlockingReader.BlockedProcessReportsSql;
         Assert.Contains("FROM blocked_process_reports", sql, StringComparison.Ordinal);  /* base table for the V7 plan-column safety */
@@ -187,8 +189,37 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.Contains("contentious_object", sql, StringComparison.Ordinal);
         Assert.Contains("blocked_spid", sql, StringComparison.Ordinal);
         Assert.Contains("blocking_spid", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("event_time <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);
+        /* #3541 A3: the cap is the CALLER'S ($4), not the 200 the reader used to hide under a tool that
+           advertised `limit`. */
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 200", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3541 A3: <c>get_blocked_process_xml</c> pages over rows that CARRY a report, and the predicate is in
+    /// the SQL — filtering for XML in C# after a capped fetch was the defect (a run of graph-less rows at the
+    /// newest end read as "no XML in the window"). Pinned as the SAME projection as the unfiltered read plus
+    /// exactly the predicate, so the two consts cannot drift a column apart.
+    /// </summary>
+    [Fact]
+    public void BlockedProcessReportsWithXmlSql_IsTheUnfilteredRead_PlusTheXmlPredicate_InSql()
+    {
+        var plain = DarlingBlockingReader.BlockedProcessReportsSql;
+        var withXml = DarlingBlockingReader.BlockedProcessReportsWithXmlSql;
+
+        Assert.Contains("AND   blocked_process_report_xml IS NOT NULL", withXml, StringComparison.Ordinal);
+        Assert.Contains("AND   blocked_process_report_xml <> ''", withXml, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocked_process_report_xml IS NOT NULL", plain, StringComparison.Ordinal);
+
+        /* Everything up to the window predicate is byte-identical. */
+        const string Cut = "AND   collection_time <= $3";
+        Assert.Equal(plain[..(plain.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)],
+                     withXml[..(withXml.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)]);
+        Assert.EndsWith("ORDER BY event_time DESC\nLIMIT $4", withXml.Replace("\r\n", "\n"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -199,6 +230,8 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.DoesNotContain("blocked_process_report_xml", sql, StringComparison.Ordinal);  /* the DMV snapshot has no report XML */
         Assert.Contains("contentious_object", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 200", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -209,7 +242,42 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.DoesNotContain("v_deadlocks", sql, StringComparison.Ordinal);
         Assert.Contains("deadlock_graph_xml", sql, StringComparison.Ordinal);
         Assert.Contains("victim_process_id", sql, StringComparison.Ordinal);
+        Assert.Contains("database_name", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY deadlock_time DESC", sql, StringComparison.Ordinal);
+        /* #3541 A3: the cap is the caller's, not the 50 a caller asking for 100 deadlocks never saw. */
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 50", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>Same shape as the blocked-process pair: <c>get_deadlock_detail</c>'s <c>limit</c> counts graphs
+    /// because the graph predicate is in the SQL, and the two consts share one body.</summary>
+    [Fact]
+    public void RecentDeadlocksWithGraphSql_IsTheUnfilteredRead_PlusTheGraphPredicate_InSql()
+    {
+        var plain = DarlingBlockingReader.RecentDeadlocksSql;
+        var withGraph = DarlingBlockingReader.RecentDeadlocksWithGraphSql;
+
+        Assert.Contains("AND   deadlock_graph_xml IS NOT NULL", withGraph, StringComparison.Ordinal);
+        Assert.Contains("AND   deadlock_graph_xml <> ''", withGraph, StringComparison.Ordinal);
+        Assert.DoesNotContain("deadlock_graph_xml IS NOT NULL", plain, StringComparison.Ordinal);
+
+        const string Cut = "AND   collection_time <= $3";
+        Assert.Equal(plain[..(plain.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)],
+                     withGraph[..(withGraph.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)]);
+        Assert.EndsWith("ORDER BY deadlock_time DESC\nLIMIT $4", withGraph.Replace("\r\n", "\n"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The fingerprint scan ceiling (#3541 A3): #2159 promised the dedup_key filter runs over the window
+    /// BEFORE limit, and a hidden 200-row cap was quietly breaking it. The ceiling has to be materially
+    /// wider than that cap or the promise is still hollow, and bounded because a scan row carries the graph
+    /// or both SQL texts; 5,000 is what the analysis pair-row readers fetch WITHOUT the XML.
+    /// </summary>
+    [Fact]
+    public void FingerprintScanCeiling_IsWiderThanTheOldHiddenCap_AndBounded()
+    {
+        Assert.True(DarlingBlockingReader.FingerprintScanCeiling >= 1000, "the scan ceiling is not materially wider than the 200-row cap #2159's promise was hollow under");
+        Assert.True(DarlingBlockingReader.FingerprintScanCeiling <= 5000, "the scan carries XML per row; the analysis readers fetch 5,000 WITHOUT it");
     }
 
     [Fact]
@@ -236,32 +304,58 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// The lock-wait lane (#2484), pinned as the VIEWER'S query rather than as a query that happens to work.
+    /// The lock-wait lane (#2484), pinned on the viewer's per-row read it still starts from, and (#3897) on the
+    /// family bucketing and per-type legend built over it.
     ///
-    /// <para>Three properties, each of which is a real defect if it drifts. The LCK filter, or the read stops
-    /// being about locks. The LAG partitioned BY WAIT TYPE, without which one wait type's cadence is used to
-    /// divide another's delta. And the CAST to double precision before the division — integer division would
-    /// report a 3 ms delta over a 60-second interval as ZERO, which is #2507's defect (a quiet server reading
-    /// as an idle one) one read over.</para>
+    /// <para>The viewer's properties, each a real defect if it drifts: the LCK filter, or the read stops being
+    /// about locks; the LAG partitioned BY WAIT TYPE, without which one wait type's cadence divides another's
+    /// delta; the CAST to double precision before any division — integer division would report a 3 ms delta
+    /// over a 60-second interval as ZERO, #2507's defect one read over. #3897's: the family sums the types PER
+    /// COLLECTION over that collection's ONE interval (MAX, never a sum of the types' intervals, which would
+    /// divide by the number of types), then time-weights across the bucket as summed wait over summed seconds;
+    /// the peak is the worst collection's family rate; and the two statements share the rated rows, so the
+    /// legend and the series count the same waits.</para>
     /// </summary>
     [Fact]
     public void LockWaitTrendSql_FiltersLockWaits_LagsPerWaitType_AndDividesAsDouble()
     {
-        var sql = DarlingBlockingTrendReader.LockWaitTrendSql;
+        foreach (var sql in new[] { DarlingBlockingTrendReader.LockWaitTrendSql, DarlingBlockingTrendReader.LockWaitTypesSql })
+        {
+            Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
+            Assert.Contains("wait_type LIKE 'LCK%'", sql, StringComparison.Ordinal);
+            Assert.Contains("LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)", sql, StringComparison.Ordinal);
+            Assert.Contains("CAST(delta_wait_time_ms AS double precision) AS wait_ms", sql, StringComparison.Ordinal);
+            /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
+               pre-V127 rows; an unknowable interval leaves the row out rather than reading 0.00. */
+            Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
+            Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
+            Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("ELSE 0 END", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE interval_seconds > 0", sql, StringComparison.Ordinal);
 
-        Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("wait_type LIKE 'LCK%'", sql, StringComparison.Ordinal);
-        Assert.Contains("LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds", sql, StringComparison.Ordinal);
+            /* A negative delta is the counter reset across a restart, not a negative wait. */
+            Assert.Contains("AND   delta_wait_time_ms >= 0", sql, StringComparison.Ordinal);
 
-        /* A negative delta is the counter reset across a restart, not a negative wait. */
-        Assert.Contains("WHERE delta_wait_time_ms >= 0", sql, StringComparison.Ordinal);
+            var lower = sql.ToLowerInvariant();
+            Assert.DoesNotContain("getdate", lower);
+            Assert.DoesNotContain("top (", lower);
+            Assert.DoesNotContain("isnull(", lower);
+            Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("AVG(", sql, StringComparison.OrdinalIgnoreCase);
+        }
 
-        var lower = sql.ToLowerInvariant();
-        Assert.DoesNotContain("getdate", lower);
-        Assert.DoesNotContain("top (", lower);
-        Assert.DoesNotContain("isnull(", lower);
-        Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
+        var family = DarlingBlockingTrendReader.LockWaitTrendSql;
+        Assert.Contains("MAX(interval_seconds) AS interval_seconds", family, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY collection_time", family, StringComparison.Ordinal);
+        Assert.Contains("SUM(wait_ms) / SUM(interval_seconds) AS wait_time_ms_per_second", family, StringComparison.Ordinal);
+        Assert.Contains("MAX(CASE WHEN interval_seconds > 0 THEN wait_ms / interval_seconds END) AS peak_wait_time_ms_per_second", family, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, " + TrendBucketSql.OriginSql + "), $2) AS bucket_start", family, StringComparison.Ordinal);
+
+        var legend = DarlingBlockingTrendReader.LockWaitTypesSql;
+        Assert.Contains("GROUP BY wait_type", legend, StringComparison.Ordinal);
+        Assert.Contains("SUM(wait_ms) AS total_wait_ms", legend, StringComparison.Ordinal);
+        Assert.Contains("SUM(interval_seconds) AS rated_seconds", legend, StringComparison.Ordinal);
+        Assert.Contains("MAX(CASE WHEN interval_seconds > 0 THEN wait_ms / interval_seconds END) AS peak_wait_time_ms_per_second", legend, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -280,14 +374,18 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData(nameof(DarlingBlockingReader.BlockedProcessReportsSql))]
+    [InlineData(nameof(DarlingBlockingReader.BlockedProcessReportsWithXmlSql))]
     [InlineData(nameof(DarlingBlockingReader.DmvBlockingSnapshotsSql))]
     [InlineData(nameof(DarlingBlockingReader.RecentDeadlocksSql))]
+    [InlineData(nameof(DarlingBlockingReader.RecentDeadlocksWithGraphSql))]
     public void Reads_ArePostgresDialect_NoTsqlIsms(string sqlName)
     {
         var sql = sqlName switch
         {
             nameof(DarlingBlockingReader.BlockedProcessReportsSql) => DarlingBlockingReader.BlockedProcessReportsSql,
+            nameof(DarlingBlockingReader.BlockedProcessReportsWithXmlSql) => DarlingBlockingReader.BlockedProcessReportsWithXmlSql,
             nameof(DarlingBlockingReader.DmvBlockingSnapshotsSql) => DarlingBlockingReader.DmvBlockingSnapshotsSql,
+            nameof(DarlingBlockingReader.RecentDeadlocksWithGraphSql) => DarlingBlockingReader.RecentDeadlocksWithGraphSql,
             _ => DarlingBlockingReader.RecentDeadlocksSql,
         };
         var lower = sql.ToLowerInvariant();
@@ -361,6 +459,50 @@ public sealed class DarlingMcpBlockingToolsLivePostgresTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
+    public async Task GetDeadlocks_NamesTheDatabase_AndNullStaysNull_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live blocking-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                CollectionIdGenerator.Next(), t, ServerId, ServerName, "GP", t, "process1", "DELETE FROM Posts");
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                CollectionIdGenerator.Next(), t.AddMinutes(-10), ServerId, ServerName, DBNull.Value, t.AddMinutes(-10), "process2", "DELETE FROM Posts");
+
+            using var doc = System.Text.Json.JsonDocument.Parse(await DarlingMcpBlockingTools.GetDeadlocks(postgres, ServerName, 24, 10));
+            var rows = doc.RootElement.GetProperty("deadlocks").EnumerateArray().ToList();
+
+            Assert.Equal(2, rows.Count);
+            Assert.Equal("GP", rows[0].GetProperty("database_name").GetString());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, rows[1].GetProperty("database_name").ValueKind);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
     public async Task BlockingTools_ReadPlantedRows_AgainstDevPostgres()
     {
         var cs = ConnectionString;
@@ -397,6 +539,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             var blocking = await DarlingMcpBlockingTools.GetBlocking(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(blocking, ServerName, "events");
             Assert.Contains("dbo.Posts", blocking, StringComparison.Ordinal);
+            /* #3541 A3: two planted rows (one XE, one DMV on a different pair) merge to a two-row page well
+               under the default limit, so the page says so — and no `total_` key is on it. */
+            JsonAssert.Contains("\"events_returned\": 2", blocking);
+            JsonAssert.Contains("\"truncated\": false", blocking);
+            Assert.DoesNotContain("total_events", blocking, StringComparison.Ordinal);
 
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpBlockingTools.GetDeadlocks(postgres, ServerName), ServerName, "deadlocks");
             var detail = await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName);
@@ -409,7 +556,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpBlockingTools.GetDeadlockTrend(postgres, ServerName), ServerName, "trend");
 
             /* Unknown server resolves to the listing error. */
-            Assert.StartsWith("Could not resolve server.", await DarlingMcpBlockingTools.GetDeadlocks(postgres, "darling-no-such-server"), StringComparison.Ordinal);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(await DarlingMcpBlockingTools.GetDeadlocks(postgres, "darling-no-such-server")), StringComparison.Ordinal);
 
             /* Empty store → the "empty" miss. */
             await DeleteRowsAsync(connection, ct, keepServer: true);

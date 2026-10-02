@@ -12,6 +12,7 @@ using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Analysis;
 
 public partial class DrillDownCollector
@@ -73,11 +74,20 @@ LIMIT 1";
 
         try
         {
-            var plan = ShowPlanParser.Parse(planXml);
-            PlanAnalyzer.Analyze(plan);
+            var plan = ShowPlanParser.Parse(planXml, context.CancellationToken);
+            // #4551: a parse-error plan still carries parser-extracted content (SQL Server's own
+            // plan warnings and missing-index suggestions), so it can't be treated as empty; return
+            // before that content is read. PlanAnalysisPipeline.Run separately skips analysis on it.
+            if (!string.IsNullOrWhiteSpace(plan.ParseError))
+                return;
 
-            var allWarnings = plan.Batches
-                .SelectMany(b => b.Statements)
+            // #4530: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.CancellationToken);
+            PlanAnalysisPipeline.Run(plan, App.AnalyzerConfig, metadata, context.CancellationToken);
+
+            // #4514: includes statements nested inside a stored procedure or UDF body, so a
+            // finding inside an EXEC <procedure> plan's body reaches the drill-down.
+            var allWarnings = PlanStatements.EnumerateAll(plan)
                 .Where(s => s.RootNode != null)
                 .SelectMany(s =>
                 {
@@ -114,9 +124,69 @@ LIMIT 1";
                 })
             };
         }
-        catch
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            // Plan parsing can fail on malformed XML — skip silently
+            // Plan parsing can fail on malformed XML — skip silently. An abandonment is NOT
+            // swallowed here (#2443).
+        }
+    }
+
+    /// <summary>
+    /// #4530: the drill-down's own store read for rule 38 (edition/MAXDOP), against the same DuckDB
+    /// connection pattern the collector's other reads here use. Mirrors
+    /// <c>DarlingServerMetadataReader.ReadAsync</c>; a failure or no rows returns <c>null</c>.
+    /// </summary>
+    private async Task<PerformanceMonitor.PlanAnalysis.ServerMetadata?> ReadServerMetadataForPlanAnalysisAsync(int serverId, System.Threading.CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT p.edition, p.product_version, p.product_level, p.cpu_count, p.physical_memory_mb,
+       (SELECT c.value_in_use
+        FROM v_server_config AS c
+        WHERE c.server_id = $1
+        AND   c.configuration_name = 'max degree of parallelism'
+        AND   c.capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
+        LIMIT 1) AS max_dop,
+       p.engine_edition,
+       p.vcore_count
+FROM v_server_properties AS p
+WHERE p.server_id = $1
+ORDER BY p.collection_time DESC
+LIMIT 1";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return null;
+
+            /* Same rule as LocalDataService.GetServerMetadataForPlanAnalysisAsync: an Azure SQL Database's stored
+               physical_memory_mb is the HOST's, so the drill-down's server context carries no RAM figure, and its Hardware row
+               names the vCores. */
+            int? engineEdition = reader.IsDBNull(6) ? null : Convert.ToInt32(reader.GetValue(6));
+            int? vcoreCount = reader.IsDBNull(7) ? null : Convert.ToInt32(reader.GetValue(7));
+            int? storedCpuCount = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+            long? storedPhysicalMemoryMb = reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4));
+
+            return new PerformanceMonitor.PlanAnalysis.ServerMetadata
+            {
+                Edition = reader.IsDBNull(0) ? null : reader.GetString(0),
+                ProductVersion = reader.IsDBNull(1) ? null : reader.GetString(1),
+                ProductLevel = reader.IsDBNull(2) ? null : reader.GetString(2),
+                CpuCount = storedCpuCount ?? 0,
+                PhysicalMemoryMB = ServerHardwareScope.OwnPhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb) ?? 0L,
+                EngineEdition = engineEdition,
+                VcoreCount = vcoreCount,
+                MaxDop = reader.IsDBNull(5) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(5))),
+            };
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
+        {
+            return null;
         }
     }
 
@@ -163,7 +233,9 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var details = PlanAdvisoryAggregator.Extract(planXmls);
+            // #4530: one store read per collector call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.CancellationToken);
+            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, App.AnalyzerConfig, metadata, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)
             {

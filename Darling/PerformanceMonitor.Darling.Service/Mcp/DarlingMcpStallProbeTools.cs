@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -45,16 +46,20 @@ public sealed class DarlingMcpStallProbeTools
     public const int MaxDaysBack = StallWaitProbeRunner.RetentionDays;
 
     [McpServerTool(Name = "get_collector_stall_probes"), Description(
-        "Gets the out-of-band, server-wide wait samples this tool took while one of its OWN collectors was stalled mid-read on a monitored server. This is the answer to a question nothing else here can reach: collectors run strictly sequentially per server, so a collector stalled in its result-set drain is itself holding the sequence that waiting_tasks, dmv_blocking_snapshot and query_snapshots would run in — measured on one real stall, nothing was observed for four minutes, waiting_tasks ran 2.3 seconds after it cleared and returned zero rows, and about 20 collectors then completed inside 20 seconds as the backlog drained. When a server-scoped collector that declares a wall-clock budget is a quarter of the way through it and delivering under 1 MB/s, the service opens ONE additional connection, takes one sample of sys.dm_os_waiting_tasks and sys.dm_os_schedulers, stores it, and never retries. Each row carries BOTH halves: the client-side trigger evidence (how far into the budget it fired, how many rows and bytes had arrived, and the terminal silence — trigger_elapsed_ms minus trigger_last_read_ms, which was 0-3 ms on every stall measured, i.e. the stream was streaming SLOWLY and never went quiet) and the server-wide sample (waiting task count and distinct wait types across the WHOLE instance, the heaviest wait type with its totals, a summary line of the top five, and the scheduler aggregate: runnable tasks, work-queue length, pending disk IO, and the busiest single scheduler). Read the scheduler figures beside the waits: an instance producing rows 50x slowly with high runnable_tasks is scheduler pressure, with high pending_disk_io is storage, with a leading LCK_ wait is blocking, and with everything quiet is none of those and points off the instance entirely. waiting_task_count is the whole instance before the top-five cut, and scheduler_count is the sample's own DENOMINATOR — every live SQL Server reports at least one VISIBLE ONLINE scheduler, so a zero waiting_task_count beside a positive scheduler_count is a real all-clear rather than a probe that read nothing. The outcome census is always returned and is NOT filtered to successful samples, on purpose: whether a fresh connection can be obtained mid-stall has never been established, so CONNECT_FAILED and CONNECT_TIMED_OUT are findings in their own right and connect_ms on a SAMPLED row is the first measurement of it. connect_ms is time-to-usable-connection and not a claim about a login. Deliberately UNBANDED and untrended — a probe row is evidence about one moment, not a series with a healthy range. Takes no band, no thresholds; pass server_name to scope it, or leave it off for the fleet.")]
+        "Out-of-band DMV samples taken when this service's own collector stalls reading a monitored server: waits/schedulers plus client-side trigger evidence. Sampled only when a collector's wall-clock budget is a quarter elapsed and throughput is under 1 MB/s; rare, so a not_collected empty answer is EXPECTED and healthy. scheduler_count is the sample's denominator: waiting_task_count 0 beside it is a real all-clear. outcome_census is never filtered to successes: CONNECT_FAILED/CONNECT_TIMED_OUT are findings. Unbanded, untrended: one row is evidence about a moment. <<GUIDE>> Gets the out-of-band, server-wide wait samples this tool took while one of its OWN collectors was stalled mid-read on a monitored server. This is the answer to a question nothing else here can reach: collectors run strictly sequentially per server, so a collector stalled in its result-set drain is itself holding the sequence that waiting_tasks, dmv_blocking_snapshot and query_snapshots would run in. When a server-scoped collector that declares a wall-clock budget is a quarter of the way through it and delivering under 1 MB/s, the service opens ONE additional connection, takes one sample of sys.dm_os_waiting_tasks and sys.dm_os_schedulers, stores it, and never retries. Each row carries BOTH halves: the client-side trigger evidence (how far into the budget it fired, how many rows and bytes had arrived, and the terminal silence — trigger_elapsed_ms minus trigger_last_read_ms, which was 0-3 ms on every stall measured, i.e. the stream was streaming SLOWLY and never went quiet) and the server-wide sample (waiting task count and distinct wait types across the WHOLE instance, the heaviest wait type with its totals, a summary line of the top five, and the scheduler aggregate: runnable tasks, work-queue length, pending disk IO, and the busiest single scheduler). Read the scheduler figures beside the waits: an instance producing rows 50x slowly with high runnable_tasks is scheduler pressure, with high pending_disk_io is storage, with a leading LCK_ wait is blocking, and with everything quiet is none of those and points off the instance entirely. waiting_task_count is the whole instance before the top-five cut, and scheduler_count is the sample's own DENOMINATOR — every live SQL Server reports at least one VISIBLE ONLINE scheduler, so a zero waiting_task_count beside a positive scheduler_count is a real all-clear rather than a probe that read nothing. The outcome census is always returned and is NOT filtered to successful samples, on purpose: whether a fresh connection can be obtained mid-stall has never been established, so CONNECT_FAILED and CONNECT_TIMED_OUT are findings in their own right and connect_ms on a SAMPLED row is the first measurement of it. connect_ms is time-to-usable-connection and not a claim about a login. Deliberately UNBANDED and untrended — a probe row is evidence about one moment, not a series with a healthy range. Takes no band, no thresholds; pass server_name to scope it, or leave it off for the fleet.")]
     public static async Task<string> GetCollectorStallProbes(
         NpgsqlDataSource postgres,
         [Description("Optional: server name or display name. Omit for the whole fleet.")] string? server_name = null,
         [Description("Days of history. Default 7; max 60 (the samples' own retention).")] int days_back = 7,
-        [Description("Maximum sample rows to return. Default 50.")] int limit = DefaultLimit)
+        [Description("Maximum sample rows to return. Default 50.")] int limit = DefaultLimit,
+        CancellationToken cancellationToken = default)
     {
-        if (days_back <= 0 || days_back > MaxDaysBack)
+        /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
+           tool's (the samples' own retention). */
+        var daysError = McpHelpers.ValidateDaysBack(days_back, MaxDaysBack);
+        if (daysError != null)
         {
-            return $"Invalid days_back value '{days_back}'. Must be a positive integer (1-{MaxDaysBack}).";
+            return daysError;
         }
 
         var validation = McpHelpers.ValidateTop(limit);
@@ -68,7 +73,7 @@ public sealed class DarlingMcpStallProbeTools
 
         if (!string.IsNullOrWhiteSpace(server_name))
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
             if (error != null)
             {
                 return error;
@@ -84,7 +89,7 @@ public sealed class DarlingMcpStallProbeTools
 
             /* The census FIRST, because it is what makes an empty answer honest — get_pg_blocking's
                ordering, for its reason. */
-            var census = await DarlingStallProbeReader.GetOutcomeCensusAsync(postgres, since, serverId);
+            var census = await DarlingStallProbeReader.GetOutcomeCensusAsync(postgres, since, serverId, cancellationToken);
 
             if (census.Count == 0)
             {
@@ -100,7 +105,7 @@ public sealed class DarlingMcpStallProbeTools
                     + "service build that carries the probe.");
             }
 
-            var probes = await DarlingStallProbeReader.GetProbesAsync(postgres, since, serverId, limit);
+            var probes = await DarlingStallProbeReader.GetProbesAsync(postgres, since, serverId, limit, cancellationToken);
 
             return JsonSerializer.Serialize(
                 new
@@ -153,7 +158,7 @@ public sealed class DarlingMcpStallProbeTools
                 },
                 McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_collector_stall_probes", ex);
         }

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
@@ -25,8 +26,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// the 7-day per-collector aggregate (double-click opens the per-collector CollectionLogWindow drill);
 /// Collection Log = the recent run log; Duration Trends = the per-collector success-duration scatter.
 /// The chart's only render-body change from Lite is the time axis: where Lite shifts the raw stored
-/// time by its per-server <c>UtcOffsetMinutes</c>, the viewer runs every point through
-/// <see cref="ViewerTimeHelper.ForDisplay"/> (the naive-UTC-to-viewer-local convention every Darling
+/// time by its per-server <c>UtcOffsetMinutes</c>, the viewer plots every point at its naive-UTC instant
+/// and draws the labels in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (the convention every Darling
 /// chart uses), and line polish flows through the shared <see cref="ChartStyle"/> like the other viewer
 /// charts. Lite's per-chart context menu / "Open Log File" button are intentionally not ported.
 /// </summary>
@@ -43,7 +44,7 @@ public partial class ViewerServerTab
     {
         ApplyTheme(CollectorDurationChart);
         CollectorDurationChart.Refresh();
-        _collectorDurationHover = new ChartHoverHelper(CollectorDurationChart, "ms");
+        _collectorDurationHover = new ChartHoverHelper(CollectorDurationChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -61,14 +62,21 @@ public partial class ViewerServerTab
            settable window EXACTLY — a preset or a custom From/To — via GetWindowUtc(), matching the Wait
            Stats / Blocking tabs (the old GetWindowHoursBack() rounded a custom range to a now-relative span). */
         var (startUtc, endUtc) = GetWindowUtc();
-        using var readFanOut = ViewerReadFanOut.Of(2);
+        using var readFanOut = ViewerReadFanOut.Of(3);
         var healthTask = _dataService.GetCollectionHealthAsync(_server.ServerId);
         var logTask = _dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc);
-        await Task.WhenAll(healthTask, logTask);
+        var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
+        await Task.WhenAll(healthTask, logTask, caveatsTask);
 
         _collectionHealthFilterMgr!.UpdateData(healthTask.Result);
         _collectionLogFilterMgr!.UpdateData(logTask.Result);
         RenderCollectorDurationChart(logTask.Result);
+
+        /* #3691 part a2: collapse the section entirely when there is nothing to report — the common case
+           (a healthy analysis pass, or a store below V141) — rather than showing an empty grid. */
+        var caveats = caveatsTask.Result;
+        CollectionCaveatsGrid.ItemsSource = caveats;
+        CollectionCaveatsExpander.Visibility = caveats.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>
@@ -76,8 +84,11 @@ public partial class ViewerServerTab
     /// <c>purge_now</c> control command, after a confirm — it permanently deletes collected data older than the
     /// configured retention horizons across ALL monitored servers (the purge is fleet-wide over the shared
     /// store). A read-only viewer seat can't enqueue commands, so it shows an explanation instead (same rule as
-    /// Pause / live-plan fetch). On success it shows the purged summary and reloads the tab so the grids/chart
-    /// reflect the purge.
+    /// Pause / live-plan fetch). #4825: a current service starts the purge in the background, paced, and answers
+    /// at once, with the time it started; this then watches the collection log for the purge's totals
+    /// (<see cref="StartPurgeWatch"/>) and reloads the tab when they turn up. "Already running" shows as it is and
+    /// starts no watch. An older service still runs the purge inline and answers with its totals, which are shown,
+    /// and the tab is reloaded so the grids/chart reflect the purge.
     /// </summary>
     private async void PurgeNow_Click(object sender, RoutedEventArgs e)
     {
@@ -110,7 +121,7 @@ public partial class ViewerServerTab
             var result = await _dataService.RequestPurgeNowAsync();
             if (result is null)
             {
-                PurgeNowIndicator.Text = "Purge still running — re-open Collection Health to see the result";
+                PurgeNowIndicator.Text = "The service has not answered yet — the purge may not have started. Try again in a moment";
             }
             else if (result.Status != ViewerDataService.StatusSucceeded)
             {
@@ -118,9 +129,17 @@ public partial class ViewerServerTab
             }
             else
             {
-                PurgeNowIndicator.Text = FormatPurgeSummary(result.ResultJson);
-                /* Reflect the purge in the grids + duration chart. */
-                await LoadHealthAsync();
+                PurgeNowIndicator.Text = FormatPurgeSummary(result.ResultJson, out var purgeFinished);
+                if (purgeFinished)
+                {
+                    /* An older service ran the whole purge before answering: reflect it in the grids + chart. */
+                    await LoadHealthAsync();
+                }
+                else if (PurgeNowWatch.TryReadStartedAtUtc(result.ResultJson, out var startedAtUtc))
+                {
+                    /* #4825: the purge runs in the background; its totals reach the collection log when it ends. */
+                    StartPurgeWatch(startedAtUtc);
+                }
             }
         }
         catch (ViewerReadOnlyException)
@@ -139,12 +158,102 @@ public partial class ViewerServerTab
         }
     }
 
+    /* #4825: the watch on a purge the service started in the background (PurgeNowWatch). At most one runs at a
+       time; the tab closing or unloading ends it. */
+    private CancellationTokenSource? _purgeWatchCts;
+
+    private const string PurgeStartedText =
+        "Purge started. It runs in the background, paced; when it finishes, its totals are written to the collection log under (fleet)";
+
     /// <summary>
-    /// Formats the <c>purge_now</c> result_json (<c>{ tablesPurged, rowsPurged, ... }</c>) into the one-line
-    /// summary the indicator shows. Degrades to a plain "Purge complete" if the JSON is missing/unparseable.
+    /// Starts watching the collection log for the totals of the purge the service started at
+    /// <paramref name="startedAtUtc"/>. Never two at once: a purge started while an earlier one is still being
+    /// watched (the earlier one's wait for its raw-table record can outlive the purge itself) takes the indicator
+    /// over, so the earlier watch is cancelled first and, having been cancelled, writes nothing more. The
+    /// watch ends when the tab is closed (<see cref="DisposeCollectionHealthHelpers"/>) or unloaded
+    /// (<see cref="OnPurgeWatchTabUnloaded"/>).
     /// </summary>
-    private static string FormatPurgeSummary(string? resultJson)
+    private void StartPurgeWatch(DateTime startedAtUtc)
     {
+        _purgeWatchCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _purgeWatchCts = cts;
+
+        Unloaded -= OnPurgeWatchTabUnloaded;
+        Unloaded += OnPurgeWatchTabUnloaded;
+
+        _ = RunPurgeWatchAsync(startedAtUtc, cts);
+    }
+
+    /// <summary>
+    /// Runs <see cref="PurgeNowWatch.WatchAsync"/> against the real read, delay and clock, and owns its
+    /// <paramref name="cts"/>. The viewer's clock is only used for how long the watch has been going; the read's
+    /// lower bound is the service's own <paramref name="startedAtUtc"/>. Nothing awaits this task, so nothing is
+    /// allowed to escape it.
+    /// </summary>
+    private async Task RunPurgeWatchAsync(DateTime startedAtUtc, CancellationTokenSource cts)
+    {
+        try
+        {
+            await PurgeNowWatch.WatchAsync(
+                startedAtUtc,
+                (since, token) => _dataService.GetManualPurgeRunRecordsAsync(since, token),
+                (span, token) => Task.Delay(span, token),
+                () => DateTime.UtcNow,
+                text => PurgeNowIndicator.Text = text,
+                async () =>
+                {
+                    try
+                    {
+                        await LoadHealthAsync();
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        StatusChanged?.Invoke($"reloading Collection Health after the purge failed: {ex.Message}");
+                    }
+                },
+                cts.Token);
+        }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"watching the purge failed: {ex.Message}");
+        }
+        finally
+        {
+            if (ReferenceEquals(_purgeWatchCts, cts))
+            {
+                _purgeWatchCts = null;
+            }
+
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The tab left the visual tree (another server's tab was selected, or it was closed): stop watching. The
+    /// indicator goes back to the plain "started" line, which stays true wherever the run has got to.
+    /// </summary>
+    private void OnPurgeWatchTabUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (_purgeWatchCts is null)
+        {
+            return;
+        }
+
+        _purgeWatchCts.Cancel();
+        PurgeNowIndicator.Text = PurgeStartedText;
+    }
+
+    /// <summary>
+    /// Formats the <c>purge_now</c> result_json into the one-line summary the indicator shows. #4825: a current
+    /// service answers <c>{ started: true }</c> (the purge is running in the background, so
+    /// <paramref name="purgeFinished"/> is false) or <c>{ started: false, alreadyRunning: true }</c>; an older
+    /// service answers the totals, <c>{ tablesPurged, rowsPurged, ... }</c>, once the purge is done. Degrades to a
+    /// plain "Purge complete" if the JSON is missing/unparseable.
+    /// </summary>
+    internal static string FormatPurgeSummary(string? resultJson, out bool purgeFinished)
+    {
+        purgeFinished = true;
         if (string.IsNullOrWhiteSpace(resultJson))
         {
             return "Purge complete";
@@ -154,6 +263,18 @@ public partial class ViewerServerTab
         {
             using var doc = JsonDocument.Parse(resultJson);
             var root = doc.RootElement;
+            if (root.TryGetProperty("alreadyRunning", out var running) && running.ValueKind == JsonValueKind.True)
+            {
+                purgeFinished = false;
+                return "A purge is already running in the background; nothing new was started";
+            }
+
+            if (root.TryGetProperty("started", out var started) && started.ValueKind == JsonValueKind.True)
+            {
+                purgeFinished = false;
+                return PurgeStartedText;
+            }
+
             var tables = root.TryGetProperty("tablesPurged", out var t) && t.TryGetInt32(out var ti) ? ti : 0;
             var rows = root.TryGetProperty("rowsPurged", out var r) && r.TryGetInt32(out var ri) ? ri : 0;
             return $"Purged {rows:N0} row(s)/chunk(s) across {tables:N0} table(s)";
@@ -182,9 +303,9 @@ public partial class ViewerServerTab
     /// <summary>
     /// Per-collector success-duration scatter over the window. Copied from Lite's
     /// <c>UpdateCollectorDurationChart</c>: one line per collector (SUCCESS runs with a duration, needing
-    /// at least two points), cycling the shared palette. The one change is the time axis — every point
-    /// runs through <see cref="ViewerTimeHelper.ForDisplay"/> (Lite shifts by its per-server
-    /// UtcOffsetMinutes) — and line polish uses the shared <see cref="ChartStyle.StyleScatter"/>.
+    /// at least two points), cycling the shared palette. The one change is the time axis — every point's X
+    /// is the naive-UTC instant itself, drawn in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (Lite
+    /// shifts by its per-server UtcOffsetMinutes) — and line polish uses the shared <see cref="ChartStyle.StyleScatter"/>.
     /// </summary>
     private void RenderCollectorDurationChart(List<CollectionLogRow> data)
     {
@@ -194,14 +315,14 @@ public partial class ViewerServerTab
         /* Pin the X axis to the toolbar's settable window (the same idiom as the wait / tempdb-size charts)
            rather than AutoScale()'ing to the data — an AutoScale fits X to the data plus ScottPlot's ~10%
            side margins, which reads as symmetric dead space. This is the one chart the #1483/#1484/#1487
-           window-pin campaign missed. The store is naive-UTC; display converts through ViewerTimeHelper.ForDisplay. */
+           window-pin campaign missed. The store is naive-UTC and the chart plots it as is; the labels are drawn in ViewerTimeHelper.CurrentDisplayZone. */
         var (startUtc, endUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
-            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             CollectorDurationChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
             ReapplyAxisColors(CollectorDurationChart);
             CollectorDurationChart.Refresh();
@@ -222,7 +343,7 @@ public partial class ViewerServerTab
             var points = group.OrderBy(d => d.CollectionTime).ToList();
             if (points.Count < 2) continue;
 
-            var times = points.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
             var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
 
             var scatter = CollectorDurationChart.Plot.Add.TimeSeries(times, durations);
@@ -233,7 +354,7 @@ public partial class ViewerServerTab
             colorIdx++;
         }
 
-        CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ReapplyAxisColors(CollectorDurationChart);
         CollectorDurationChart.Plot.YLabel("Duration (ms)");
         CollectorDurationChart.Plot.Axes.AutoScaleY();
@@ -242,9 +363,13 @@ public partial class ViewerServerTab
         CollectorDurationChart.Refresh();
     }
 
-    /// <summary>Tears down the Duration Trends hover helper. Forwarded to from the tab's single Dispose().</summary>
+    /// <summary>Tears down the Duration Trends hover helper and ends any purge watch. Forwarded to from the tab's single Dispose().</summary>
     private void DisposeCollectionHealthHelpers()
     {
         _collectorDurationHover?.Dispose();
+
+        /* #4825: a closed tab must not keep polling. RunPurgeWatchAsync disposes the source when the watch ends. */
+        Unloaded -= OnPurgeWatchTabUnloaded;
+        _purgeWatchCts?.Cancel();
     }
 }

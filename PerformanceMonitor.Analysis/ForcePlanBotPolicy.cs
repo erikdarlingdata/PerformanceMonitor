@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -43,6 +45,15 @@ public sealed record ForcePlanBotSettings
     /// blast-radius cap, and what keeps shadow mode from re-journaling the same verdict on every
     /// analysis pass.</summary>
     public int QueryCooldownHours { get; init; } = 24;
+
+    /// <summary>
+    /// #4769: how long a journaled row whose blocker is <c>state_unavailable</c> holds its candidate, instead
+    /// of <see cref="QueryCooldownHours"/>. That row says the bot could not SEE the engine state, not that it
+    /// judged the plan, so holding the candidate for a day would hide the real verdict long after the state
+    /// read recovers. One hour still journals a long outage once an hour, not once per pass. A constant, not a
+    /// setting: every other blocked or forced row keeps the configured cooldown.
+    /// </summary>
+    public const int StateUnavailableCooldownHours = 1;
 
     /// <summary>Rolling 24h cap on actionable decisions per server (would-force rows count too, so
     /// the dry run rehearses the same budget the live bot spends).</summary>
@@ -170,10 +181,14 @@ public sealed record ForcePlanBotDecision(
 /// <param name="RecentFailedForces">Failed forces for this query inside
 /// <see cref="ForcePlanBotSettings.FailedForceCooldownHours"/>: forces that would not stick, plus
 /// forces the self-review unforced as not-a-net-benefit.</param>
+/// <param name="LastJournalWasStateUnavailable">True when the newest journaled row for the query is a blocked
+/// row that carries the <c>state_unavailable</c> blocker (#4769); the cooldown then runs for
+/// <see cref="ForcePlanBotSettings.StateUnavailableCooldownHours"/> instead of the configured hours.</param>
 public sealed record ForcePlanBotHistory(
     DateTime? LastJournaledForQueryUtc,
     int ServerActionsLast24h,
-    int RecentFailedForces)
+    int RecentFailedForces,
+    bool LastJournalWasStateUnavailable = false)
 {
     public static ForcePlanBotHistory Empty { get; } = new(null, 0, 0);
 }
@@ -201,6 +216,209 @@ public static class ForcePlanBotPolicy
     public const string ReasonServerDailyBudgetExhausted = "server_daily_budget_exhausted";
     public const string ReasonDryRun = "dry_run";
     public const string ReasonServerNotOptedIn = "server_not_opted_in";
+
+    /// <summary>
+    /// #3953: the target's best plan last ran more than <see cref="MaxBestPlanAgeDays"/> before the pass. The
+    /// interval table makes PLAN_REGRESSION's 14-day window real, so a best plan can now be up to two weeks old;
+    /// the advisory surface shows such a plan with its age, and the unattended bot does not act on it.
+    /// </summary>
+    public const string ReasonBestPlanStale = "best_plan_stale";
+
+    /// <summary>
+    /// #3953: the oldest best plan the unattended bot will consider, in days before the pass. Four is raw Query
+    /// Store's retention (<c>TimescaleSupport.RawRetentionInterval</c>): the regime the would-force journal on an
+    /// armed store has been scored in, so the ledger the owner scores before arming #2138's write path does not
+    /// silently mix two regimes. It narrows automation only, and widening it is a decision on the scored ledger.
+    /// </summary>
+    public const int MaxBestPlanAgeDays = 4;
+
+    /* The bot's OWN two blockers (#3654) — on the policy, not in FactRemediation's shared vocabulary,
+       because only an unattended actor needs them. The advisory surface can say "unknown" and hand
+       the decision to a human who will cross-reference; a bot has no one to hand it to. */
+
+    /// <summary>The store's forcing and automatic-plan-correction state for the target could not be
+    /// read, or was read and held nothing. For the bot that is a blocker, not a note: see
+    /// <see cref="Blockers"/>.</summary>
+    public const string ReasonStateUnavailable = "state_unavailable";
+
+    /// <summary>FORCE_LAST_GOOD_PLAN is ON for the target's database — the engine's own bot is the
+    /// forcer there, and this one stands down for the whole database. See <see cref="Blockers"/>.</summary>
+    public const string ReasonApcEnabledForDatabase = "apc_enabled_for_database";
+
+    /// <summary>
+    /// #4736: the engine's own open (<c>Active</c>) recommendation for the query names the target's plan as the
+    /// regressed, worse one. The advisory surface says so in the target's guidance and leaves the decision to
+    /// the person; the unattended bot has no one to hand it to, so it does not force the plan automatic plan
+    /// correction wants replaced. Reverted and Expired do not block: there the engine withdrew the claim or
+    /// found no gain. See <see cref="Blockers"/>.
+    /// </summary>
+    public const string ReasonApcNamesPlanAsRegressed = "apc_names_this_plan_as_regressed";
+
+    /// <summary>
+    /// #4770: the target's database has no <c>plan_correction</c> row inside the state read's lookback, on a
+    /// server where the plan_correction collector runs, so whether automatic plan correction owns plan
+    /// forcing there is unknown. A database can be missing for ordinary reasons (a capture lands one database
+    /// at a time and skips one that fails or runs over budget; the collector is off), and reading that as
+    /// "off" would let an unattended force through on a database APC may own.
+    /// </summary>
+    public const string ReasonApcEnablementUnknown = "apc_enablement_unknown";
+
+    /// <summary>
+    /// The bot's whole blocker list for one target (#3654): the shared gate's verdict, BOTH halves
+    /// (<see cref="FactRemediation.ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/> — the two
+    /// target-carried blockers and the five #3652 added from the store's forcing and automatic-plan-
+    /// correction state), then the two only an unattended actor needs. Pure: the caller reads the state
+    /// (<c>DarlingForcePlanTargetStateReader</c>, one batched statement per bot pass) and passes what it
+    /// got; every arm is pinnable without a store.
+    ///
+    /// <para><b>Why the bot reads the whole gate and not the one-argument overload.</b> #3652's live
+    /// cross-reference found five <c>eligible: true, blockers: []</c> targets that were five-for-five
+    /// contraindicated by facts the store already held — two mid-verification under APC on exactly the
+    /// proposed plan, one a known forcing failure, one withdrawn by the engine, one already resolved
+    /// through another plan. The advisory surface learned to read them; a bot that still consulted the
+    /// state-less overload would have judged all five unblocked and, with every gate open, forced them.
+    /// Same function, same evidence strings — what an agent reads in <c>structured_remediation</c> is what
+    /// the bot enforces (#2146), and the journal row carries the evidence so a <c>blocked</c> decision is
+    /// auditable against the snapshot it was made on.</para>
+    ///
+    /// <para><b><c>apc_enabled_for_database</c> — the engine is the forcer here.</b> When
+    /// <c>force_last_good_plan_actual_state</c> is ON for the target's database, automatic plan
+    /// correction forces regressed queries' last good plans on its own, verifies them, and reverts the
+    /// ones that do not pay. A second forcer on the same database is exactly the failure #3652
+    /// documented: a manual force on a plan APC is verifying converts <c>AUTO</c> to <c>MANUAL</c> and
+    /// deletes the engine's revert path, and a plan APC has not touched yet may be the one it is about to.
+    /// So the bot does not compete for the database at all — every target in it is blocked with this
+    /// name and the enablement snapshot as evidence, whatever the rest of the gate says. The advisory
+    /// surface, by contrast, only changes its VERB there (<c>apc_mode: on</c> plus guidance) and leaves
+    /// <c>force_sql</c> for the operator who has read it; a human can decide to intervene in an APC
+    /// database on purpose, and the bot must not. A database-level fact evaluated per target rather than
+    /// once per pass so the journal names it on every target it stopped and the cooldown dedups the
+    /// repeats, the same way the other blockers are recorded.</para>
+    ///
+    /// <para><b><c>apc_names_this_plan_as_regressed</c> — the engine calls the proposed plan the worse one.</b>
+    /// When the query's newest automatic-plan-correction row is <c>Active</c> and its
+    /// <c>regressedPlanId</c> is the target's plan (#4736), the engine has an open claim that the plan this
+    /// pass would force is the regressed one. The shared gate deliberately leaves that to the person reading
+    /// the guidance; the bot stands down and its journal row quotes both plan ids and the snapshot time.
+    /// Only <c>Active</c>: a <c>Reverted</c> or <c>Expired</c> row is the engine withdrawing the claim, and
+    /// <c>Verifying</c>/<c>Success</c> already block through the shared gate.</para>
+    ///
+    /// <para><b><c>state_unavailable</c> — unknown fails closed.</b> Two shapes, one blocker, evidence
+    /// distinguishing them. A null state (the read failed, or returned no row for this key) is the plain
+    /// case: the bot has no idea what the engine is doing. An EMPTY state (the read ran and observed
+    /// nothing inside <see cref="ForcePlanTargetState.Lookback"/>) is the subtler one: no
+    /// <c>query_store_stats</c> row for the plan is ordinary for a best plan that is not executing, and
+    /// no recommendation is ordinary for a query APC has not judged — but the enablement half comes from
+    /// a row <c>PlanCorrectionCollector</c> writes for EVERY database it enumerates, recommendation or not,
+    /// as of the database's own newest row inside the lookback. All four halves absent means the store
+    /// cannot see this database's FORCE_LAST_GOOD_PLAN state, so the arm above cannot be evaluated, and
+    /// an unattended forcer on a database whose APC enablement is unknown is the one place "unknown"
+    /// must mean "no". The advisory surface says <c>state_note: unknown</c> for both shapes and lets the
+    /// reader cross-reference (<c>get_plan_corrections</c>, <c>sys.query_store_plan</c>); the bot's
+    /// journal row says <c>state_unavailable</c> with the reason and forces nothing. The cost is a bot
+    /// that stays its hand on a target the store has not observed in a day — a best plan nobody has run
+    /// for 24 hours is thin evidence for an unattended force anyway.</para>
+    ///
+    /// <para>Order: the shared gate's blockers first (the names an agent already sees), then the bot's
+    /// own. A target can carry several — <c>apc_owns_it</c> and <c>apc_enabled_for_database</c> together
+    /// is the expected shape for a plan APC is verifying on an APC database — and the journal keeps all
+    /// of them; the decision is the same whichever fired first.</para>
+    /// </summary>
+    /// <param name="state">What the store knows about this target now, or null when the read failed or
+    /// returned nothing for it.</param>
+    /// <param name="enablementIsCollected">True when the plan_correction collector runs for this server (the
+    /// caller asks the collector's own <c>AppliesTo</c>), so a database with no enablement row in the lookback is
+    /// unknown and blocked (#4770). False (the default) leaves that case unblocked, as on a server the collector
+    /// never runs on.</param>
+    /// <param name="stateUnavailableReason">The reader's stated reason when the whole read failed; quoted
+    /// into the <c>state_unavailable</c> evidence so the journal says WHY the bot could not see.</param>
+    public static IReadOnlyList<ForcePlanBlocker> Blockers(
+        ForcePlanTarget target,
+        ForcePlanTargetState? state,
+        string? stateUnavailableReason,
+        bool enablementIsCollected = false)
+    {
+        if (target is null)
+        {
+            throw new ArgumentNullException(nameof(target));
+        }
+
+        var blockers = new List<ForcePlanBlocker>(FactRemediation.ForcePlanBlockers(target, state));
+
+        if (state is { ApcIsOn: true })
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ReasonApcEnabledForDatabase,
+                $"plan_correction: force_last_good_plan_actual_state = {state.ForceLastGoodPlanActualState} for {target.Database} at {FactRemediation.Stamp(state.EnablementObservedAtUtc)} — automatic plan correction owns plan forcing on this database; the bot stands down rather than be the second forcer (#3652: a manual force on a plan the engine is verifying replaces AUTO forcing and removes its revert path)"));
+        }
+
+        if (state is not null && FactRemediation.ApcNamesPlanAsRegressed(target, state))
+        {
+            var lastGood = state.ApcLastGoodPlanId is long good ? good.ToString(CultureInfo.InvariantCulture) : "(none recorded)";
+            var reason = string.IsNullOrEmpty(state.ApcStateReason) ? string.Empty : $" / {state.ApcStateReason}";
+            blockers.Add(new ForcePlanBlocker(
+                ReasonApcNamesPlanAsRegressed,
+                $"plan_correction: recommendation state {state.ApcState}{reason} with regressed_plan_id = {state.ApcRegressedPlanId} (the plan proposed here, {target.PlanId}) and last_good_plan_id = {lastGood} at {FactRemediation.Stamp(state.ApcObservedAtUtc)} — the engine's own open recommendation calls this plan the worse one; an unattended force would pin the plan automatic plan correction wants replaced"));
+        }
+
+        if (state is null)
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ReasonStateUnavailable,
+                string.IsNullOrWhiteSpace(stateUnavailableReason)
+                    ? $"the forcing and automatic-plan-correction state read returned no row for plan {target.PlanId} of query {target.QueryId} in {target.Database}; an unattended force cannot proceed on an unknown engine state"
+                    : $"{stateUnavailableReason.Trim()} — an unattended force cannot proceed on an unknown engine state"));
+        }
+        else if (state.IsEmpty)
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ReasonStateUnavailable,
+                $"the forcing and automatic-plan-correction state read ran and observed nothing for this target inside the last {ForcePlanTargetState.Lookback.TotalHours:0} hours: no query_store_stats row for plan {target.PlanId}, no forced sibling plan of query {target.QueryId}, no plan_correction recommendation, and no plan_correction capture for {target.Database} at all — FORCE_LAST_GOOD_PLAN enablement is unknown for this database, and an unattended force cannot proceed on unknown"));
+        }
+        else if (enablementIsCollected && state.EnablementObservedAtUtc is null)
+        {
+            /* #4770: the state has other halves, so it is not empty, but the database has no plan_correction row
+               inside the lookback. The collector writes one for EVERY database it enumerates on every capture, so
+               the row is missing because a capture skipped the database or the collector is off, not because
+               automatic plan correction is off. Only where the collector runs (the caller decides, with the
+               collector's own AppliesTo): on a server it never collects from, nothing was ever going to be there. */
+            blockers.Add(new ForcePlanBlocker(
+                ReasonApcEnablementUnknown,
+                $"plan_correction: no force_last_good_plan_actual_state row for {target.Database} in the last {ForcePlanTargetState.Lookback.TotalHours:0} hours — whether automatic plan correction owns plan forcing on this database is unknown (its captures skipped it, or the collector is off), and an unattended force cannot proceed on unknown"));
+        }
+
+        return blockers;
+    }
+
+    /// <summary>The blocker names, in order, for <see cref="Evaluate"/>'s <c>policyBlockers</c> — and
+    /// the journal's <c>reasons</c> column. The evidence travels separately (<see cref="Evidence"/>) so
+    /// the names stay the comma-joinable consumer API they have always been.</summary>
+    public static IReadOnlyList<string> Names(IReadOnlyList<ForcePlanBlocker> blockers)
+    {
+        /* Block-bodied, not an expression body: the T-SQL convention guard's member walk mis-reads the
+           range of an expression-bodied member whose body holds a `{ }` property pattern (the #3607
+           precedent), and a member the walk reads short is a member no census can see into. */
+        if (blockers is not { Count: > 0 })
+        {
+            return Array.Empty<string>();
+        }
+
+        return blockers.Select(b => b.Name).ToList();
+    }
+
+    /// <summary>The journal's <c>detail</c> for a blocked decision: one line per blocker,
+    /// <c>name: evidence</c>, so the row can be read against the snapshot it was judged on without a
+    /// second query. Null when there is nothing to quote.</summary>
+    public static string? Evidence(IReadOnlyList<ForcePlanBlocker> blockers)
+    {
+        /* Block-bodied for the same reason as Names. */
+        if (blockers is not { Count: > 0 })
+        {
+            return null;
+        }
+
+        return string.Join("\n", blockers.Select(b => $"{b.Name}: {b.Evidence}"));
+    }
 
     public static ForcePlanBotDecision Evaluate(
         ForcePlanTarget target,
@@ -238,9 +456,14 @@ public static class ForcePlanBotPolicy
         /* The cooldown is checked BEFORE the blockers, deliberately: a blocked target is journaled
            once per window too. Analysis runs every few minutes, and a PSP-flagged query that stays
            regressed would otherwise write an identical 'blocked' row on every pass — an audit trail
-           that repeats itself into noise stops being read. */
+           that repeats itself into noise stops being read. The order stays; only the window differs (#4769):
+           a state_unavailable row holds for an hour, not the configured cooldown, so a failed state read does
+           not hide the real verdict for a day. */
+        var cooldownHours = history.LastJournalWasStateUnavailable
+            ? ForcePlanBotSettings.StateUnavailableCooldownHours
+            : settings.QueryCooldownHours;
         if (history.LastJournaledForQueryUtc is DateTime last &&
-            last > nowUtc.AddHours(-settings.QueryCooldownHours))
+            last > nowUtc.AddHours(-cooldownHours))
         {
             return new ForcePlanBotDecision(ForcePlanBotDecisionKind.Suppressed, new[] { ReasonQueryCooldownActive });
         }
@@ -248,6 +471,14 @@ public static class ForcePlanBotPolicy
         if (policyBlockers is { Count: > 0 })
         {
             return new ForcePlanBotDecision(ForcePlanBotDecisionKind.Blocked, policyBlockers);
+        }
+
+        /* #3953: after the cooldown (a stale target is journaled once per window, like any blocked one) and the
+           shared blockers. A null age is a finding from before the column existed, when raw's 4-day retention
+           already bounded it, so it is not gated. */
+        if (target.BestPlanLastSeenUtc is DateTime bestLastSeen && bestLastSeen < nowUtc.AddDays(-MaxBestPlanAgeDays))
+        {
+            return new ForcePlanBotDecision(ForcePlanBotDecisionKind.Blocked, new[] { ReasonBestPlanStale });
         }
 
         /* Failure memory. RecentFailedForces is already windowed by the caller's read (see

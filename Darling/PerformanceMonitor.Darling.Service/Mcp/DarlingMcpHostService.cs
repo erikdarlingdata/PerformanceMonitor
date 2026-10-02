@@ -19,9 +19,12 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -61,7 +64,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// stays config-free.</para>
 ///
 /// <para>The MCP surface gets its OWN <see cref="NpgsqlDataSource"/> over the store, connecting as the
-/// dedicated least-privilege <c>mcp</c> role (D3-role) — NOT the superuser owner — so a token-holder (or a
+/// dedicated least-privilege <c>mcp</c> role (D3-role) on a managed store and on the compose distribution's own
+/// store; on any other store as <c>postgres.mcpConnectionString</c>, or as the owner with a startup warning when
+/// that is unset (<see cref="DarlingStoreLogins"/>, #3914). As mcp it is NOT the superuser owner, so a token-holder (or a
 /// future/buggy tool) reaches only the viewer read surface plus the <c>analysis_findings</c> /
 /// <c>analysis_muted</c> INSERTs the tools persist, never the <c>config_command</c> service-credential
 /// pivot or the carved secret columns. It also gets its own <see cref="DarlingAnalysisService"/>. Store
@@ -94,11 +99,24 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// failure logs on a calm cadence instead of every poll tick.</summary>
     internal static readonly TimeSpan FailedStartBackoff = TimeSpan.FromSeconds(30);
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState)
+    /* #3941: the process's shared baseline tier (the worker's passes fill it), so analyze_server and compare_analysis
+       inside an analysis hour a scheduled pass already computed read no 30-day baseline. Optional so a host built
+       outside the service's DI (a test) keeps a private one. */
+    private readonly BaselineCache _baselineCache;
+
+    /* #4442 scope 2: the process-wide read-latency accumulator, the SAME singleton Program.cs hands the web
+       host and the worker's flush (DI, one AddSingleton<ReadLatencyAccumulator> registration) -- optional so a
+       test-constructed host (which passes none) keeps a private, throwaway accumulator rather than a
+       null-reference, exactly like BaselineCache above. */
+    private readonly ReadLatencyAccumulator _readLatency;
+
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null)
     {
         _logger = logger;
         _state = state;
         _registryState = registryState;
+        _baselineCache = baselineCache ?? new BaselineCache();
+        _readLatency = readLatency ?? new ReadLatencyAccumulator();
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort)
@@ -142,7 +160,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         string? lastOverrideReport = null;
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
+            if (config is null && CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff))
             {
                 try
                 {
@@ -193,7 +211,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             switch (DecideMcpAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
             {
-                case McpSupervisorAction.Start when DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff:
+                case McpSupervisorAction.Start when CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff):
                     if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
@@ -383,12 +401,24 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
             else
             {
-                storeConnectionString = config.Postgres.ConnectionString;
+                /* #3914: not the owner by default any more — postgres.mcpConnectionString, the mcp role the
+                   service provisioned on the compose store, or the owner with a warning, in that order. */
+                storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
+                    DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken);
+                if (storeConnectionString is null)
+                {
+                    return false;
+                }
             }
 
             /* Lifetime tied to the running app (#1560): disposed by StopServerAsync, not this method's
-               scope — the supervisor may keep the app running across many poll ticks. */
-            var postgres = NpgsqlDataSource.Create(storeConnectionString);
+               scope — the supervisor may keep the app running across many poll ticks. #4479: the mcp-role
+               connection string built by DarlingManagedPostgres already carries McpApplicationName, but a
+               CONFIGURED (postgres.mcpConnectionString) or owner-fallback login never runs through that
+               builder — set-if-absent here so every path this string can take still names the surface. */
+            var postgres = NpgsqlDataSource.Create(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.McpApplicationName)));
             _appDataSource = postgres;
 
             /* serverId → connection string, keyed by the STORE's identity (review catch on #2218).
@@ -439,7 +469,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                 },
                 _logger);
 
-            var builder = WebApplication.CreateBuilder();
+            /* #4286 review, Low 1: with no EnvironmentName set here, an ASPNETCORE_ENVIRONMENT or
+               DOTNET_ENVIRONMENT of "Development" left set anywhere on the machine would add the developer
+               exception page ahead of the Host guard and the bearer check -- a throw that escapes then answers
+               with the exception message and stack trace on the loopback bind, which has no token. Same pin as
+               the web host (DarlingWebHostService, #4281 review finding 4). */
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+            {
+                EnvironmentName = Environments.Production,
+            });
 
             builder.WebHost.ConfigureKestrel(options =>
             {
@@ -468,15 +506,41 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* Register services that MCP tools need via dependency injection. */
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
-            builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger));
+            /* get_fleet_overview scopes an Azure master's counts by the live registry, the way the analysis service is. */
+            builder.Services.AddSingleton<MonitoredServerRegistryState>(_registryState);
+            /* #4214 part 2: get_store_host's config seat — the same config this host loaded to reach this
+               point, so it cannot disagree with what actually connected. Read-only: GatherAsync only ever
+               reads dataDirectory/Managed off it, never writes.
+               Trimmed copy, not config.Postgres itself (round-1 review, Low 3): the full PostgresConfig
+               also carries the owner connection string. Nothing serializes this DI registration today,
+               but injecting only the two fields GatherAsync reads means a future [McpServerTool] that
+               takes a PostgresConfig parameter cannot receive the owner secret through this seat. */
+            builder.Services.AddSingleton(new PostgresConfig { Managed = config.Postgres.Managed, DataDirectory = config.Postgres.DataDirectory });
+            /* #4535: the plan analyzer's per-rule config, read from darling.json's optional "analyzer"
+               section. Null (section omitted) is AnalyzerConfig.Default; DarlingMcpPlanTools takes this
+               as an [McpServerTool] method parameter the same way it takes NpgsqlDataSource above. */
+            builder.Services.AddSingleton<AnalyzerConfig>(config.Analyzer ?? AnalyzerConfig.Default);
+            /* #4214 round-1 review, Medium 2: get_store_host's 5-minute shared cache — the process-wide
+               Shared instance, not a fresh one per request, so every caller (MCP and the direct-call web
+               path below) actually shares the one cache window. Typed-generic AddSingleton<T>, not the
+               untyped AddSingleton(instance) overload: McpServiceParameterDiSeatCensusTests greps this
+               file's source text for AddSingleton<StoreHostProfileCache> specifically. */
+            builder.Services.AddSingleton<StoreHostProfileCache>(StoreHostProfileCache.Shared);
+            /* #4602: the same analyzer config just registered above, so MCP's plan advisories (get_analysis_facts,
+               analyze_server, drill-down) honor a user's disabled/overridden rules the same way the worker
+               (DarlingWorker.cs) and the web endpoints (DarlingWebEndpoints.cs) already do. Before this fix the
+               MCP path silently fell back to AnalyzerConfig.Default. */
+            /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
+            RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer, _registryState);
             /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
                (the postgres pattern one line up — service-typed params are resolved per request and never
                reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder
                clears its logging providers two blocks up, so anything resolved from the app's logging
                would be a logger with nowhere to write — the host's is the one wired to the service's
                real providers, the same instance DarlingAnalysisService already receives. Closes the
-               #3473 review's observation: get_sweep_reports' child reads log-and-degrade, and before
-               this they degraded with no log trace anywhere on the MCP path. */
+               #3473 review's observation: get_sweep_reports' child reads throw on a store fault
+               (#4315) and the tool's own catch logs the exception once, where before this they
+               degraded with no log trace anywhere on the MCP path. */
             builder.Services.AddSingleton<ILogger>(_logger);
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
@@ -494,6 +558,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                because it is a configuration defect that silently costs the operator their disclosure. */
             var peerPublish = DarlingPeerDirectory.Publish(config.Peers);
             var declaredPeers = peerPublish.Snapshot;
+
+            /* #3712: the FILE half of the analysis routing knob (the store half is a settings-row column since
+               V137, read off the row by the tool itself) — the peers precedent: either host may load its config
+               first, and get_alert_settings must have the file's value from whichever did, to say what a NULL
+               store column defers to. */
+            DarlingFileLevelAlertSettings.Publish(config.Analysis);
 
             if (peerPublish.Refused)
             {
@@ -513,375 +583,11 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* Register MCP server with the analysis tool class. */
-            builder.Services
-                .AddMcpServer(options =>
-                {
-                    options.ServerInfo = new()
-                    {
-                        Name = "PerformanceMonitorDarling",
-                        Version = "1.0.0"
-                    };
-                    options.ServerInstructions = DarlingMcpInstructions.Build(declaredPeers);
-                })
-                /* Stateless mode: each request is self-contained (no Mcp-Session-Id round-trip).
-                   Required for clients like Google Antigravity that don't echo the session id,
-                   which otherwise connect but list zero tools (issue #1074). */
-                .WithHttpTransport(options => options.Stateless = true)
-                /* WithGeminiCompatibleTools (not the SDK's WithTools) rewrites parameter schemas into
-                   the subset Gemini/Antigravity accepts — collapsing nullable type unions and
-                   dropping the default keyword. The companion to stateless transport for issue #1074. */
-                .WithGeminiCompatibleTools<DarlingMcpTools>()
-                /* The five plan-analysis tools (analyze_query_plan / analyze_procedure_plan /
-                   analyze_query_store_plan / analyze_plan_xml / get_plan_xml) — the same names the
-                   Dashboard and Lite expose, fetching the collectors' STORED plan XML from Postgres
-                   (no live monitored-server hit) and running the SHARED PlanAnalysis engine. */
-                .WithGeminiCompatibleTools<DarlingMcpPlanTools>()
-                /* The core data-read tools (resource metrics, query performance, discovery/health —
-                   get_cpu_utilization / get_wait_stats / get_wait_trend / get_memory_stats /
-                   get_memory_clerks / get_file_io_stats / get_tempdb_trend / get_perfmon_stats /
-                   get_top_queries_by_cpu / get_top_procedures_by_cpu / get_query_store_top /
-                   list_servers / get_collection_health / get_server_properties), the same names Lite
-                   and the Dashboard expose, over Darling's Postgres store (STORED reads, no live hit).
-                   These are the tools the analysis findings' next_tools recommendations point at. */
-                .WithGeminiCompatibleTools<DarlingMcpDataTools>()
-                /* get_query_store_regressions (#2484) — the viewer's Query Store Regressions tab. Every
-                   other Query Store read answers what is EXPENSIVE; this answers what got WORSE, which is
-                   not derivable from the first (the costliest query is usually the one that always was).
-                   A STORED read over the same query_store_stats the tools above read. */
-                .WithGeminiCompatibleTools<DarlingMcpQueryStoreRegressionTools>()
-                /* get_query_heatmap (#2484) — the viewer's Query Heatmap tab. The interactive plot is
-                   desktop-only by design; the READ behind it is not, and a bucketed table is the same
-                   answer. It is the only query read with a TIME axis: the rankings above cannot show that
-                   a window had a quiet half and a bad half. A STORED read over the same query_stats. */
-                .WithGeminiCompatibleTools<DarlingMcpQueryHeatmapTools>()
-                /* The diagnostic-depth data-read tools (blocking/deadlocks, sessions, config-history,
-                   index/object) — get_blocking / get_deadlocks / get_deadlock_detail /
-                   get_blocked_process_xml, get_session_stats / get_active_queries / get_waiting_tasks,
-                   get_server_config_changes / get_database_config_changes / get_trace_flag_changes /
-                   get_database_scoped_config, get_table_index_sizes / get_index_usage / get_object_locking /
-                   get_database_sizes — the same names Lite and the Dashboard expose, over Darling's Postgres
-                   store (STORED reads, no live hit). Result shapes follow Lite where the two SKUs diverge. */
-                .WithGeminiCompatibleTools<DarlingMcpBlockingTools>()
-                /* #2028 get_plan_corrections — automatic plan correction activity + per-database
-                   FORCE_LAST_GOOD_PLAN enablement, the one collected table that previously had no
-                   agent-readable path at all. Twin registered in Lite's host. */
-                .WithGeminiCompatibleTools<DarlingMcpPlanCorrectionTools>()
-                /* #2029 get_pvs_stats — the ADR persistent version store, previously reachable only
-                   indirectly (alert knobs + compose measures). Twin registered in Lite's host. */
-                .WithGeminiCompatibleTools<DarlingMcpPvsTools>()
-                /* #2068 get_store_metrics — the monitoring store's OWN hourly self-metrics series
-                   (per-hypertable size/compression, payload-dimension sizes + row counts, whole-store
-                   size + enabled-server count) for capacity forecasting. Darling-only: a single-server
-                   edition has no central store to measure, so no Lite twin. */
-                .WithGeminiCompatibleTools<DarlingMcpStoreMetricsTools>()
-                /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
-                   surface beside get_store_metrics. */
-                .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
-                .WithGeminiCompatibleTools<DarlingMcpCollectorCostTools>()
-                /* #2880 get_collector_stall_probes - the out-of-band server-wide wait samples taken
-                   while one of OUR collectors was stalled mid-read. Darling-only: the arm is installed by
-                   DarlingCollectorRunner's server-scoped path, which Lite's runner does not have. */
-                .WithGeminiCompatibleTools<DarlingMcpStallProbeTools>()
-                /* #3398 get_oversized_plan_backlog - the V121 worklist of cached plans the capture cap
-                   declined, and what the out-of-band sweep has done about each one. Darling-only: the
-                   sweep is a fleet-level errand on the headless worker's own cadence, which Lite's
-                   single-instance runner has no counterpart of. */
-                .WithGeminiCompatibleTools<DarlingMcpOversizedPlanBacklogTools>()
-                /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
-                   the duration threshold + attentions), over Darling's Postgres store (STORED read). */
-                .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()
-                .WithGeminiCompatibleTools<DarlingMcpSessionTools>()
-                .WithGeminiCompatibleTools<DarlingMcpConfigHistoryTools>()
-                .WithGeminiCompatibleTools<DarlingMcpObjectStatsTools>()
-                /* The resource-contention + jobs data-read tools — get_latch_stats / get_spinlock_stats,
-                   get_resource_semaphore / get_memory_grants, get_plan_cache_bloat / get_cpu_scheduler_pressure,
-                   get_running_jobs — the same names Lite and the Dashboard expose, over Darling's Postgres store
-                   (STORED reads of the collected latch/spinlock/memory-grant/plan-cache/cpu-scheduler/running-job
-                   snapshots, no live hit). The Dashboard-only CASE enrichment (latch severity/description/
-                   recommendation, spinlock description) and the #1410 client-side classifications (plan-cache
-                   bloat_level, cpu-scheduler pressure_level) are reproduced service-side so the full result shape
-                   is served; Darling's delta collectors store no sample_interval_seconds, so per-second rates are
-                   derived from the LAG interval. */
-                .WithGeminiCompatibleTools<DarlingMcpLatchSpinlockTools>()
-                /* get_pg_wait_stats — PostgreSQL wait events for an Aurora target, paired with the
-                   pg_wait_stats collector. A separate tool from get_wait_stats rather than a widened
-                   one: PostgreSQL's waits are a two-level type/event taxonomy with no signal-wait
-                   concept, reported in microseconds, so the two engines cannot share a result shape
-                   without lying about a unit or emitting mostly-null columns. */
-                .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
-                /* get_pg_cpu_utilization — instance-level CPU for a PostgreSQL/Aurora target (#2719),
-                   paired with the pg_cpu_utilization collector. Sourced from AWS Performance Insights
-                   rather than a database connection, so it sits beside the wait tools rather than the
-                   activity ones: a gauge over time, like SQL Server's own CPU read, not a ranked list. */
-                .WithGeminiCompatibleTools<DarlingMcpPgCpuUtilizationTools>()
-                /* get_pg_top_queries — PostgreSQL query shapes by total time, paired with the
-                   pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
-                   peak memory, neither of which the SQL Server tools have an equivalent for. */
-                .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
-                /* get_pg_plans — the plan itself, not a pointer to one (#2567). Registered beside the
-                   statement tools because that is the join: a plan is read alongside the statement it
-                   belongs to, on query_id. Carries get_pg_plan_capture_readiness too (#3070): whether the
-                   target can capture a plan at all, facet by facet with the remedy for each, which is the
-                   read somebody needs the moment the plans one comes back empty. */
-                .WithGeminiCompatibleTools<DarlingMcpPgPlanTools>()
-                /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
-                   PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
-                .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()
-                /* get_pg_xmin_horizon — why vacuum reclaims nothing, attributed to one of four causes
-                   that are indistinguishable by symptom and need different fixes. */
-                .WithGeminiCompatibleTools<DarlingMcpPgXminTools>()
-                /* get_pg_replication_slots — the other half of the abandoned-slot story. The xmin tool
-                   reports a slot pinning the horizon; this one reports the WAL it is retaining, which is
-                   unbounded by default and fills the volume regardless of what vacuum is doing. */
-                .WithGeminiCompatibleTools<DarlingMcpPgSlotTools>()
-                /* get_pg_autovacuum_health — which tables autovacuum is not keeping up with, ranked by
-                   how far past each table's OWN threshold it is. The ratio is the whole tool: a
-                   dead-tuple count is not comparable between a 50-million-row table and a 10,000-row
-                   one, and the threshold is what makes it so. */
-                .WithGeminiCompatibleTools<DarlingMcpPgAutovacuumTools>()
-                /* get_pg_io_stats — I/O attributed to who/what/why rather than to a file. The context
-                   dimension has no SQL Server counterpart and is what separates a buffer-pool miss that
-                   more memory would fix from a ring-buffered sequential scan that it would not. */
-                .WithGeminiCompatibleTools<DarlingMcpPgIoTools>()
-                /* get_pg_blocking — who is blocked by whom, assembled from the stored edge list into chains
-                   with the ROOT attributed. The one PostgreSQL read whose caveat has to travel WITH the
-                   answer: SQL Server's blocked-process report is engine-recorded, this is periodically
-                   sampled, so "no blocking" here means "none was sampled" and the tool reports its own
-                   capture count so that distinction cannot be lost. */
-                .WithGeminiCompatibleTools<DarlingMcpPgBlockingTools>()
-                /* get_pg_database_stats — four questions off one cluster-wide view: temp-file spills (the
-                   PostgreSQL answer to "why is this query slow" that no other read here can give on a stock
-                   target), the buffer-cache hit ratio, a server-recorded deadlock count, and the
-                   commit/rollback split. The one read whose reset handling is part of its contract: a
-                   statistics reset is reported as a reset rather than surfacing as a negative rate. */
-                .WithGeminiCompatibleTools<DarlingMcpPgDatabaseTools>()
-                /* get_pg_index_usage — per-index scan counts with the catalog facts that decide whether an
-                   index can actually go. The half that is not in pg_stat_user_indexes is the point: a
-                   unique index backing a constraint enforces it without ever registering a scan, so advice
-                   derived from the counter alone tells somebody to drop their primary key. */
-                .WithGeminiCompatibleTools<DarlingMcpPgIndexUsageTools>()
-                /* get_pg_table_bloat — the damage the vacuum reads above measure the cause of. The only
-                   read here whose headline number is an ESTIMATE, and the one whose contract is that it
-                   suppresses that number rather than captioning it when its inputs cannot be trusted. */
-                .WithGeminiCompatibleTools<DarlingMcpPgTableBloatTools>()
-                /* get_pg_session_states — the session side of the xmin horizon, and the one read here whose
-                   job includes REFUSING a causal claim. get_pg_xmin_horizon says a session is holding the
-                   horizon; this says which one, and — measured on a live instance — says when an
-                   idle-in-transaction session that looks identical is holding nothing at all, because a
-                   READ COMMITTED transaction that only read has already released its snapshot. */
-                .WithGeminiCompatibleTools<DarlingMcpPgSessionStatesTools>()
-                /* #2659: these six shipped REGISTERED NOWHERE. They were implemented, documented, dispatched
-                   by the web API and counted in the instructions census, and an agent could not call one of
-                   them — the web dashboard could, which is why it went unnoticed. Registration here is
-                   per-class and explicit, with no assembly scan, so a tools class is reachable only if
-                   someone remembers this line and nothing failed when they did not.
-                   McpToolTypeRegistrationTests now derives the check by reflection instead of trusting it. */
-                .WithGeminiCompatibleTools<DarlingMcpPgServerStateTools>()
-                .WithGeminiCompatibleTools<DarlingMcpPgIndexTools>()
-                .WithGeminiCompatibleTools<DarlingMcpPgKernelStatsTools>()
-                .WithGeminiCompatibleTools<DarlingMcpPgPredicateTools>()
-                .WithGeminiCompatibleTools<DarlingMcpPgReplicationStatsTools>()
-                .WithGeminiCompatibleTools<DarlingMcpPgWaitSamplingTools>()
-                /* get_pg_deadlocks / get_pg_deadlock_detail (#2661) - the reports themselves, out of the
-                   server log, rather than pg_stat_database's count. */
-                .WithGeminiCompatibleTools<DarlingMcpPgDeadlockTools>()
-                /* get_pg_wait_trend / get_pg_query_duration_trend / get_pg_io_trend /
-                   get_pg_database_trend (#2663) - the PostgreSQL time series. Fourteen trend reads shipped
-                   and none worked on this engine. All four live on one tools class, so this line covers
-                   the later two as well - which is the only reason adding them needed no edit here. */
-                .WithGeminiCompatibleTools<DarlingMcpPgTrendTools>()
-                .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
-                .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
-                .WithGeminiCompatibleTools<DarlingMcpJobTools>()
-                /* The windowed-trend siblings of the core data-read tools — get_memory_trend /
-                   get_perfmon_trend / get_file_io_trend / get_query_trend / get_query_duration_trend — the
-                   same names Lite and the Dashboard expose, over Darling's Postgres store (STORED reads of
-                   the collected memory / perfmon / file-io / query-stats series, no live hit). Each mirrors
-                   the viewer's proven chart read; the shape follows Lite where the SKUs diverge. */
-                .WithGeminiCompatibleTools<DarlingMcpTrendTools>()
-                /* The fleet-triage quick-win reads the fleet edition previously lacked — the alerts family
-                   (get_alert_history over config_alert_log, get_alert_settings over config_alert_settings,
-                   get_mute_rules via the service-side PgMuteRuleStore), the CURRENT-config snapshot trio
-                   (get_server_config / get_database_config / get_trace_flags — latest capture, the companion to
-                   the *_changes diff tools), and the health overview (get_server_summary + the daily rollup
-                   get_daily_summary and its #2484 range sibling get_daily_summary_range — the Performance
-                   Calendar's month grid — both folded through the shared DailyHealthBandCalculator). Same
-                   names Lite and the Dashboard expose, all STORED reads over Darling's Postgres store (no live
-                   hit). The blocking-trend / deadlock-trend / lock-wait-trend, memory-pressure-event, and
-                   wait-type siblings ride along on the existing blocking / memory-grant / core data-read
-                   classes above. */
-                .WithGeminiCompatibleTools<DarlingMcpAlertTools>()
-                .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
-                .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
-                /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central
-                   store can serve, over the SHARED DarlingFleetReader that also powers the web /api/fleet and the
-                   WPF viewer's Overview (one reader, one banding). ADDITIVE alongside get_server_summary. */
-                .WithGeminiCompatibleTools<DarlingMcpFleetTools>()
-                /* The Availability Group topology — get_ag_health (#991) — every monitored server's view of the
-                   AGs it hosts, replicas plus per-database secondary state, over the SHARED DarlingAgReader that
-                   also powers the web /api/ag and the Availability Groups page (one reader, one banding). Like
-                   get_fleet_overview this is a cross-server read the central store makes possible. */
-                .WithGeminiCompatibleTools<DarlingMcpAgTools>()
-                /* The fleet sweep reports read — get_sweep_reports (#3466) — the third cross-server read, and
-                   the one WITH MEMORY: the sweep timeline for a window, the newest sweep in full (mute header,
-                   would-have-paged ledger, instrument liveness), and the watch-item worklist, over the SAME
-                   FleetSweepStore presentation reads and FleetSweepPresentation builders the web /api/sweeps
-                   routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
-                   established, applied to the sweep rows. */
-                .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
-                /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
-                   _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
-                   _severe_errors / _significant_waits / _system_health — the same names the Dashboard
-                   exposes. Where the Dashboard reads its server-side-parsed collect.HealthParser_*
-                   tables, these shred the raw
-                   system_health_events on read via the shared SystemHealthParser (Common) and gate with the
-                   service-side twin of the viewer's SystemEventSignificance, exactly as the viewer's System
-                   Events tab does — the same SIGNIFICANT warning set, no live hit. */
-                .WithGeminiCompatibleTools<DarlingMcpHealthParserTools>()
-                /* The Default Trace tool — get_default_trace_events — the same name the Dashboard exposes.
-                   Reads Darling's collected default_trace_events (the base table, no v_* view — like
-                   server_properties) and returns the SIGNIFICANT set via the shared
-                   DefaultTraceEventSignificance, the same significant-set gate the viewer's System Events
-                   surface uses; config-change events are excluded (the config-snapshot diff tools own them). */
-                .WithGeminiCompatibleTools<DarlingMcpDefaultTraceTools>()
-                /* The Custom Views v2 MANAGEMENT tools (#1563) — the one WRITE surface on this server:
-                   list_custom_views / get_custom_view / validate_custom_view / create_custom_view /
-                   update_custom_view / delete_custom_view / run_custom_view_panel. They CRUD the user-authored
-                   views in config.custom_views through the SAME CustomViewStore + ValidateDefinition + compose
-                   runner the web viewer's editor uses (no divergent second impl), and run back a composed panel's
-                   data for a self-test loop. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
-                   config.custom_views (mirroring viewer's) — never the config pivot or the secret columns. */
-                .WithGeminiCompatibleTools<DarlingMcpCustomViewTools>()
-                /* The custom-alert-rule MANAGEMENT tools (#3285) - the second WRITE surface: list_custom_alert_rules
-                   / get_custom_alert_rule / validate_custom_alert_rule / create_custom_alert_rule /
-                   update_custom_alert_rule / delete_custom_alert_rule. They CRUD the user-authored threshold-alert
-                   rules in config.custom_alert_rules through the SAME CustomAlertRuleStore the web editor uses and the
-                   SAME CustomAlertRuleDefinition.TryParse the CustomAlertEvaluator applies when it loads a rule (no
-                   divergent second impl), validating every definition before it stores. The mcp role carries the
-                   narrow INSERT/UPDATE/DELETE grant on ONLY config.custom_alert_rules (granted under V116), never the
-                   config pivot or the secret columns. */
-                .WithGeminiCompatibleTools<DarlingMcpCustomAlertTools>()
-                /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
-                   or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
-                   Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service
-                   holds the network path + credentials, so no test_connect command plane is needed), skips
-                   case-folded duplicates via the shared ServerIdHelper identity, DPAPI-encrypts the SQL password
-                   (the service identity, so it round-trips at collection time), and INSERTs config.config_monitored_
-                   servers mirroring StoreConfigProvider.SeedMonitoredServersAsync; remove_server DELETEs by the same
-                   resolver the read tools use. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
-                   config.config_monitored_servers (the encrypted_password column stays SELECT-carved) — never the
-                   config pivot or a schema-wide write. */
-                .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>()
-                /* Optional GCF (Graph Compact Format) output: a single call-tool filter that,
-                   when DARLING_OUTPUT_FORMAT=gcf, re-encodes each tool's JSON result as a GCF
-                   generic wire. Registered once; covers every tool. Opt-in, lossless, and
-                   never larger than the JSON (see GcfCallToolFilter / GcfOutput). */
-                .WithRequestFilters(filters => filters.AddCallToolFilter(GcfCallToolFilter.Instance));
+            ConfigureMcpServices(builder.Services, declaredPeers, _readLatency, _logger);
 
             _app = builder.Build();
 
-            /* #2479 item 5: every gate below used to refuse silently, so "is my token wrong or my CIDR
-               wrong" was answerable only from the client, which sees one opaque status code. One log per
-               refusal is rate-limited per (gate, source) because this port is LAN-exposed on purpose and
-               an exposed port meets a scanner eventually - see DarlingHttpRefusalLog for the shape and
-               what it deliberately never writes. Created here, per started server, so a rebind starts
-               with a clean budget rather than inheriting the previous listener's scan. */
-            var refusals = new DarlingHttpRefusalLog();
-
-            /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
-               #1576 fix. The loopback bind is tokenless by design (the network gates below install only in
-               network mode), so a browser ON this host that loads attacker content could be rebound to
-               127.0.0.1:5152 and reach the MCP surface same-origin — and that surface is no longer read-only
-               (custom-view CRUD, add_servers/remove_server, alert-config writes). The application/json content
-               type does NOT save us: under a rebind the browser treats the request as same-origin, so no CORS
-               preflight applies. Require the Host header to name an address we actually bind — a loopback
-               name/IP or, in network mode, the configured listen IP. networkListenIp is null in loopback mode,
-               so ONLY loopback Hosts pass there; a rebound foreign hostname is rejected 400 before the bearer
-               check, the CIDR check, MapMcp, or any tool handler. */
-            _app.Use(async (context, next) =>
-            {
-                if (!DarlingHostBinding.IsAllowedHost(context.Request.Host.Host, networkListenIp))
-                {
-                    refusals.Report(
-                        _logger, "MCP", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
-                        context.Connection.RemoteIpAddress,
-                        $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
-                        + " (a loopback name/IP, or mcp.network.listen when LAN-exposed)",
-                        DateTime.UtcNow);
-                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                    return;
-                }
-
-                await next(context);
-            });
-
-            /* Access-control middleware — installed ONLY in network mode (Round-4 #6). The default/degraded
-               loopback-only server stays byte-for-byte today's tokenless local MCP, so existing local clients
-               keep working. Both run BEFORE MapMcp (D3-b: "first ... before any handler/handshake"): the
-               unconditional constant-time bearer token FIRST (NO loopback exemption — in exposed mode even a
-               local client must present the token; that IS the loopback guard against SSRF/sandboxed sockets),
-               then the in-app CIDR check (loopback-exempt so the loopback bind's local clients are not 403'd,
-               Round-4 #2 — it bounds WHO can route to the port, independent of the best-effort firewall). */
-            if (networkMode)
-            {
-                var cidr = allowedCidr;
-                var token = bearerToken;
-
-                _app.Use(async (context, next) =>
-                {
-                    /* Materialized once: StringValues.ToString() allocates, and the refusal path below needs
-                       the same header again to tell "no credential" from "wrong credential" (review catch on
-                       #2479). IsBearerTokenAuthorized keeps taking the raw header rather than returning what
-                       it parsed - its signature is pinned by DarlingMcpHostTests and DarlingHostBindingTests,
-                       and threading a result type through it to save one parse on an ALREADY-REFUSED request
-                       is not a trade worth making. */
-                    var authorization = context.Request.Headers.Authorization.ToString();
-
-                    if (!IsBearerTokenAuthorized(authorization, token))
-                    {
-                        /* THREE client states, never the token's value. Each one is a different next step
-                           for the operator, which is the whole point of logging this at all:
-
-                             no header            -> a client that was never configured with a token
-                             header, not a Bearer -> a client configured wrong (Basic, a bare token, an
-                                                     empty "Bearer ") - it IS sending something
-                             a Bearer that misses -> a token that does not match this endpoint's
-
-                           Review catch on #2479: ExtractBearerToken returns null for the first TWO, so
-                           testing only it reported "nothing was presented" about a client that presented
-                           a malformed header - collapsing precisely the ambiguity this exists to resolve.
-                           None of the three says anything about what the token IS. */
-                        refusals.Report(
-                            _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
-                            context.Connection.RemoteIpAddress,
-                            DescribeBearerRefusal(authorization),
-                            DateTime.UtcNow);
-                        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                        context.Response.Headers.WWWAuthenticate = "Bearer";
-                        return;
-                    }
-
-                    await next(context);
-                });
-
-                _app.Use(async (context, next) =>
-                {
-                    if (!IsRemoteAddressAllowed(context.Connection.RemoteIpAddress, cidr))
-                    {
-                        refusals.Report(
-                            _logger, "MCP", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
-                            context.Connection.RemoteIpAddress,
-                            $"its address is outside mcp.network.allowFrom ({cidr})",
-                            DateTime.UtcNow);
-                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                        return;
-                    }
-
-                    await next(context);
-                });
-            }
-
-            _app.MapMcp();
+            ConfigurePipeline(_app, networkMode, networkListenIp, allowedCidr, bearerToken);
 
             /* #2389: name the authority for each half of what is being started. enabled/port come from
                whichever plane the supervisor resolved; listen/allowFrom/token are always darling.json. */
@@ -935,6 +641,544 @@ public sealed class DarlingMcpHostService : BackgroundService
             await DisposeFailedStartAsync();
             return false;
         }
+    }
+
+    /// <summary>
+    /// #4726: registers the analysis service TRANSIENT, so every MCP call gets its own instance, the way the worker
+    /// builds one per pass. A single shared instance answers a second, overlapping analyze_server call with an empty
+    /// list (its busy check) and the tool then reads the FIRST call's running state, so the second server got
+    /// "No significant findings" for a server it never analyzed. The ONE shared <paramref name="baselineCache"/> is
+    /// still handed to every instance (#3941), so baselines are not recomputed per call. Extracted so a test resolves
+    /// the service from the production registration instead of a hand-copied one that could drift from it.
+    /// </summary>
+    internal static void RegisterAnalysisService(
+        IServiceCollection services,
+        NpgsqlDataSource postgres,
+        PerformanceMonitor.Analysis.IPlanFetcher? planFetcher,
+        ILogger? logger,
+        BaselineCache baselineCache,
+        AnalyzerConfig? analyzer,
+        MonitoredServerRegistryState? registryState = null)
+    {
+        services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(postgres, planFetcher, logger, baselineCache, analyzer ?? AnalyzerConfig.Default)
+        {
+            /* Resolved per call from the live registry, the way the worker fills its per-pass instance, so an
+               analyze_server run (which persists) agrees with the scheduled pass for an Azure master target. */
+            SeparatelyMonitoredResolver = registryState is null
+                ? null
+                : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct)
+        });
+    }
+
+    /// <summary>
+    /// Registers the MCP server, its stateless HTTP transport, every tool class, and the two call-tool
+    /// filters — the same registration <c>TryStartServerAsync</c> used to build inline. Extracted (#4128)
+    /// so a live-HTTP test builds the SAME server (including <c>/core</c>'s <c>ConfigureSessionOptions</c>
+    /// narrowing and its tools/list) against a test-constructed <see cref="IServiceCollection"/>, instead of
+    /// a hand-copied second registration that could silently drift from production. The production call
+    /// site passes exactly this <paramref name="declaredPeers"/> snapshot — see <c>TryStartServerAsync</c>.
+    /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
+    /// there vs. the parameter here) changes.
+    /// </summary>
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null)
+    {
+        /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
+           worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an
+           optional parameter, defaulted to a private instance, so every existing test-constructed call site
+           (which passes none) keeps building and running with its own throwaway accumulator instead of a
+           null-reference. Production's one real call site (TryStartServerAsync) resolves the DI singleton and
+           passes it here explicitly. */
+        var hostReadLatency = readLatency ?? new ReadLatencyAccumulator();
+        var toolLatency = new McpToolLatencyFilter(hostReadLatency, readLatencyLogger);
+
+        /* #4782: run_custom_view_panel records its composed-panel run through the shared runner, which used to
+           find the accumulator in a process-wide static that only the web host set -- so the run was dropped
+           whenever the web host was off, and was tied to whichever web server was mapped last when several
+           were set up in one process. The tool now takes this seat as a DI service parameter, over the SAME
+           accumulator the filter above records into. Typed-generic AddSingleton<T>, as the seat census
+           (McpServiceParameterDiSeatCensusTests) greps this file's source text for it. */
+        services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger));
+
+        services
+            .AddMcpServer(options =>
+            {
+                options.ServerInfo = new()
+                {
+                    Name = "PerformanceMonitorDarling",
+                    Version = "1.0.0"
+                };
+                options.ServerInstructions = DarlingMcpInstructions.Build(declaredPeers);
+            })
+            /* Stateless mode: each request is self-contained (no Mcp-Session-Id round-trip).
+               Required for clients like Google Antigravity that don't echo the session id,
+               which otherwise connect but list zero tools (issue #1074).
+
+               ConfigureSessionOptions is the /core profile's ONLY hook (#3898 D7): in Stateless mode the
+               SDK invokes it on every request with that request's HttpContext, after ToolCollection is
+               already populated from every tool class registered below. A /core request gets
+               ToolCollection replaced with DarlingCoreToolProfile's closure; every other path (in
+               practice, just /) is untouched and keeps the full set. This is a REAL subset, not a listing
+               filter: the SDK's tools/call dispatch checks the same ToolCollection before falling back to
+               any handler, and Darling registers no fallback CallToolHandler, so a tools/call for a tool
+               outside the closure gets the SDK's own "unknown tool" error on /core. Security posture is
+               inherited for free: this callback runs from inside the MCP transport, AFTER every _app.Use
+               middleware below (Host-header guard, bearer token, CIDR) — a /core request is refused there
+               exactly as a / request would be, before this callback, or MapMcp, ever runs.
+               The subset holds only in Stateless mode, where this callback runs on every request. A stateful
+               session is looked up by its id alone, not by route, so one opened on / could call any tool on
+               /core. HostHeaderGuardTests pins Stateless while /core is mapped. The instructions change too:
+               the shared text counts and describes every tool on /, so /core leads with a note saying what
+               it serves. */
+            .WithHttpTransport(options =>
+            {
+                options.Stateless = true;
+                options.ConfigureSessionOptions = (context, sessionOptions, _) =>
+                {
+                    if (DarlingCoreToolProfile.IsCorePath(context.Request.Path))
+                    {
+                        sessionOptions.ToolCollection = DarlingCoreToolProfile.FilterToolCollection(sessionOptions.ToolCollection);
+                        sessionOptions.ServerInstructions = DarlingCoreToolProfile.CoreInstructions(sessionOptions.ServerInstructions);
+                    }
+
+                    return Task.CompletedTask;
+                };
+            })
+            /* WithGeminiCompatibleTools (not the SDK's WithTools) rewrites parameter schemas into
+               the subset Gemini/Antigravity accepts — collapsing nullable type unions and
+               dropping the default keyword. The companion to stateless transport for issue #1074. */
+            .WithGeminiCompatibleTools<DarlingMcpTools>()
+            /* The five plan-analysis tools (analyze_query_plan / analyze_procedure_plan /
+               analyze_query_store_plan / analyze_plan_xml / get_plan_xml) — the same names the
+               Dashboard and Lite expose, fetching the collectors' STORED plan XML from Postgres
+               (no live monitored-server hit) and running the SHARED PlanAnalysis engine. */
+            .WithGeminiCompatibleTools<DarlingMcpPlanTools>()
+            /* The core data-read tools (resource metrics, query performance, discovery/health —
+               get_cpu_utilization / get_wait_stats / get_wait_trend / get_memory_stats /
+               get_memory_clerks / get_file_io_stats / get_tempdb_trend / get_perfmon_stats /
+               get_top_queries_by_cpu / get_top_procedures_by_cpu / get_query_store_top /
+               list_servers / get_collection_health / get_server_properties), the same names Lite
+               and the Dashboard expose, over Darling's Postgres store (STORED reads, no live hit).
+               These are the tools the analysis findings' next_tools recommendations point at. */
+            .WithGeminiCompatibleTools<DarlingMcpDataTools>()
+            /* get_query_store_regressions (#2484) — the viewer's Query Store Regressions tab. Every
+               other Query Store read answers what is EXPENSIVE; this answers what got WORSE, which is
+               not derivable from the first (the costliest query is usually the one that always was).
+               A STORED read over the same query_store_stats the tools above read. */
+            .WithGeminiCompatibleTools<DarlingMcpQueryStoreRegressionTools>()
+            /* get_query_store_clutter (#3797) — the Query Store CLUTTER view: per-database read cost
+               (the collection_log fan-out rollup), plan churn (raw query_store_stats plan identities) and
+               configuration (query_store_health), plus ONE per-server overhead block (the non-sleep QDS_*
+               wait deltas and MEMORYCLERK_QUERYDISKSTORE). Composed from rows the collectors already
+               write — not a new query against the target. Darling-only for now: every input exists on
+               Lite too, so the twin is a port, not a SKU boundary (CrossAppMcpToolInventoryPinTests). */
+            .WithGeminiCompatibleTools<DarlingMcpQueryStoreClutterTools>()
+            /* get_query_heatmap (#2484) — the viewer's Query Heatmap tab. The interactive plot is
+               desktop-only by design; the READ behind it is not, and a bucketed table is the same
+               answer. It is the only query read with a TIME axis: the rankings above cannot show that
+               a window had a quiet half and a bad half. A STORED read over the same query_stats. */
+            .WithGeminiCompatibleTools<DarlingMcpQueryHeatmapTools>()
+            /* The diagnostic-depth data-read tools (blocking/deadlocks, sessions, config-history,
+               index/object) — get_blocking / get_deadlocks / get_deadlock_detail /
+               get_blocked_process_xml, get_session_stats / get_active_queries / get_waiting_tasks,
+               get_server_config_changes / get_database_config_changes / get_trace_flag_changes /
+               get_database_scoped_config, get_table_index_sizes / get_index_usage / get_object_locking /
+               get_database_sizes — the same names Lite and the Dashboard expose, over Darling's Postgres
+               store (STORED reads, no live hit). Result shapes follow Lite where the two SKUs diverge. */
+            .WithGeminiCompatibleTools<DarlingMcpBlockingTools>()
+            /* #2028 get_plan_corrections — automatic plan correction activity + per-database
+               FORCE_LAST_GOOD_PLAN enablement, the one collected table that previously had no
+               agent-readable path at all. Twin registered in Lite's host. */
+            .WithGeminiCompatibleTools<DarlingMcpPlanCorrectionTools>()
+            /* #2029 get_pvs_stats — the ADR persistent version store, previously reachable only
+               indirectly (alert knobs + compose measures). Twin registered in Lite's host. */
+            .WithGeminiCompatibleTools<DarlingMcpPvsTools>()
+            /* #2068 get_store_metrics — the monitoring store's OWN hourly self-metrics series
+               (per-hypertable size/compression, payload-dimension sizes + row counts, whole-store
+               size + enabled-server count) for capacity forecasting. Darling-only: a single-server
+               edition has no central store to measure, so no Lite twin. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreMetricsTools>()
+            /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
+               surface beside get_store_metrics. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
+            .WithGeminiCompatibleTools<DarlingMcpReadLatencyTools>()
+            /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store
+               facts, per-setting verdicts), the read side of part 1's --check-settings verb. Darling-only:
+               Lite has no managed PostgreSQL store to profile. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreHostTools>()
+            .WithGeminiCompatibleTools<DarlingMcpStoreQueryStatsTools>()
+            .WithGeminiCompatibleTools<DarlingMcpCollectorCostTools>()
+            /* #2880 get_collector_stall_probes - the out-of-band server-wide wait samples taken
+               while one of OUR collectors was stalled mid-read. Darling-only: the arm is installed by
+               DarlingCollectorRunner's server-scoped path, which Lite's runner does not have. */
+            .WithGeminiCompatibleTools<DarlingMcpStallProbeTools>()
+            /* #3398 get_oversized_plan_backlog - the V121 worklist of cached plans the capture cap
+               declined, and what the out-of-band sweep has done about each one. Darling-only: the
+               sweep is a fleet-level errand on the headless worker's own cadence, which Lite's
+               single-instance runner has no counterpart of. */
+            .WithGeminiCompatibleTools<DarlingMcpOversizedPlanBacklogTools>()
+            /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
+               the duration threshold + attentions), over Darling's Postgres store (STORED read). */
+            .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()
+            .WithGeminiCompatibleTools<DarlingMcpSessionTools>()
+            .WithGeminiCompatibleTools<DarlingMcpConfigHistoryTools>()
+            .WithGeminiCompatibleTools<DarlingMcpObjectStatsTools>()
+            /* The resource-contention + jobs data-read tools — get_latch_stats / get_spinlock_stats,
+               get_resource_semaphore / get_memory_grants, get_plan_cache_bloat / get_cpu_scheduler_pressure,
+               get_running_jobs — the same names Lite and the Dashboard expose, over Darling's Postgres store
+               (STORED reads of the collected latch/spinlock/memory-grant/plan-cache/cpu-scheduler/running-job
+               snapshots, no live hit). The Dashboard-only CASE enrichment (latch severity/description/
+               recommendation, spinlock description) and the #1410 client-side classifications (plan-cache
+               bloat_level, cpu-scheduler pressure_level) are reproduced service-side so the full result shape
+               is served. Per-second rates divide by each row's stored sample_interval_seconds (V127, #3540),
+               falling back to the LAG interval only for pre-V127 rows, and are null when the latest interval
+               was unknowable rather than 0. */
+            .WithGeminiCompatibleTools<DarlingMcpLatchSpinlockTools>()
+            /* get_pg_wait_stats — PostgreSQL wait events for an Aurora target, paired with the
+               pg_wait_stats collector. A separate tool from get_wait_stats rather than a widened
+               one: PostgreSQL's waits are a two-level type/event taxonomy with no signal-wait
+               concept, reported in microseconds, so the two engines cannot share a result shape
+               without lying about a unit or emitting mostly-null columns. */
+            .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
+            /* get_pg_cpu_utilization — instance-level CPU for a PostgreSQL/Aurora target (#2719),
+               paired with the pg_cpu_utilization collector. Sourced from AWS Performance Insights
+               rather than a database connection, so it sits beside the wait tools rather than the
+               activity ones: a gauge over time, like SQL Server's own CPU read, not a ranked list. */
+            .WithGeminiCompatibleTools<DarlingMcpPgCpuUtilizationTools>()
+            /* get_pg_top_queries — PostgreSQL query shapes by total time, paired with the
+               pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
+               peak memory, neither of which the SQL Server tools have an equivalent for. */
+            .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
+            /* get_pg_plans — the plan itself, not a pointer to one (#2567). Registered beside the
+               statement tools because that is the join: a plan is read alongside the statement it
+               belongs to, on query_id. Carries get_pg_plan_capture_readiness too (#3070): whether the
+               target can capture a plan at all, facet by facet with the remedy for each, which is the
+               read somebody needs the moment the plans one comes back empty. */
+            .WithGeminiCompatibleTools<DarlingMcpPgPlanTools>()
+            /* get_pg_logging_audit (#3607) - the rest of the logging surface, in readiness's shape:
+               log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints,
+               log_connections / log_disconnections and log_min_duration_statement, each judged from
+               the stored pg_server_config snapshot with what it unlocks, the recommended value and its
+               cost, and the remedy in the hosting flavour's syntax. Registered beside the plan tools
+               because it is the other half of one onboarding question - is this target telling us
+               everything it could - and lists plan capture's own settings with a pointer to the
+               readiness read rather than judging them twice. */
+            .WithGeminiCompatibleTools<DarlingMcpPgLoggingAuditTools>()
+            /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
+               PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
+            .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()
+            /* get_pg_xmin_horizon — why vacuum reclaims nothing, attributed to one of four causes
+               that are indistinguishable by symptom and need different fixes. */
+            .WithGeminiCompatibleTools<DarlingMcpPgXminTools>()
+            /* get_pg_replication_slots — the other half of the abandoned-slot story. The xmin tool
+               reports a slot pinning the horizon; this one reports the WAL it is retaining, which is
+               unbounded by default and fills the volume regardless of what vacuum is doing. */
+            .WithGeminiCompatibleTools<DarlingMcpPgSlotTools>()
+            /* get_pg_autovacuum_health — which tables autovacuum is not keeping up with, ranked by
+               how far past each table's OWN threshold it is. The ratio is the whole tool: a
+               dead-tuple count is not comparable between a 50-million-row table and a 10,000-row
+               one, and the threshold is what makes it so. */
+            .WithGeminiCompatibleTools<DarlingMcpPgAutovacuumTools>()
+            /* get_pg_io_stats — I/O attributed to who/what/why rather than to a file. The context
+               dimension has no SQL Server counterpart and is what separates a buffer-pool miss that
+               more memory would fix from a ring-buffered sequential scan that it would not. */
+            .WithGeminiCompatibleTools<DarlingMcpPgIoTools>()
+            /* get_pg_blocking — who is blocked by whom, assembled from the stored edge list into chains
+               with the ROOT attributed. The one PostgreSQL read whose caveat has to travel WITH the
+               answer: SQL Server's blocked-process report is engine-recorded, this is periodically
+               sampled, so "no blocking" here means "none was sampled" and the tool reports its own
+               capture count so that distinction cannot be lost. */
+            .WithGeminiCompatibleTools<DarlingMcpPgBlockingTools>()
+            /* get_pg_database_stats — four questions off one cluster-wide view: temp-file spills (the
+               PostgreSQL answer to "why is this query slow" that no other read here can give on a stock
+               target), the buffer-cache hit ratio, a server-recorded deadlock count, and the
+               commit/rollback split. The one read whose reset handling is part of its contract: a
+               statistics reset is reported as a reset rather than surfacing as a negative rate. */
+            .WithGeminiCompatibleTools<DarlingMcpPgDatabaseTools>()
+            /* get_pg_index_usage — per-index scan counts with the catalog facts that decide whether an
+               index can actually go. The half that is not in pg_stat_user_indexes is the point: a
+               unique index backing a constraint enforces it without ever registering a scan, so advice
+               derived from the counter alone tells somebody to drop their primary key. */
+            .WithGeminiCompatibleTools<DarlingMcpPgIndexUsageTools>()
+            /* get_pg_table_bloat — the damage the vacuum reads above measure the cause of. The only
+               read here whose headline number is an ESTIMATE, and the one whose contract is that it
+               suppresses that number rather than captioning it when its inputs cannot be trusted. */
+            .WithGeminiCompatibleTools<DarlingMcpPgTableBloatTools>()
+            /* get_pg_session_states — the session side of the xmin horizon, and the one read here whose
+               job includes REFUSING a causal claim. get_pg_xmin_horizon says a session is holding the
+               horizon; this says which one, and — measured on a live instance — says when an
+               idle-in-transaction session that looks identical is holding nothing at all, because a
+               READ COMMITTED transaction that only read has already released its snapshot. */
+            .WithGeminiCompatibleTools<DarlingMcpPgSessionStatesTools>()
+            /* #2659: these six shipped REGISTERED NOWHERE. They were implemented, documented, dispatched
+               by the web API and counted in the instructions census, and an agent could not call one of
+               them — the web dashboard could, which is why it went unnoticed. Registration here is
+               per-class and explicit, with no assembly scan, so a tools class is reachable only if
+               someone remembers this line and nothing failed when they did not.
+               McpToolTypeRegistrationTests now derives the check by reflection instead of trusting it. */
+            .WithGeminiCompatibleTools<DarlingMcpPgServerStateTools>()
+            .WithGeminiCompatibleTools<DarlingMcpPgIndexTools>()
+            .WithGeminiCompatibleTools<DarlingMcpPgKernelStatsTools>()
+            .WithGeminiCompatibleTools<DarlingMcpPgPredicateTools>()
+            .WithGeminiCompatibleTools<DarlingMcpPgReplicationStatsTools>()
+            .WithGeminiCompatibleTools<DarlingMcpPgWaitSamplingTools>()
+            /* get_pg_deadlocks / get_pg_deadlock_detail (#2661) - the reports themselves, out of the
+               server log, rather than pg_stat_database's count. */
+            .WithGeminiCompatibleTools<DarlingMcpPgDeadlockTools>()
+            /* get_pg_log_events (#3601) - the classified log-event pipeline's read: errors, connections,
+               lock waits and the recognised-only families, out of the same server log. */
+            .WithGeminiCompatibleTools<DarlingMcpPgLogEventTools>()
+            /* get_pg_wait_trend / get_pg_query_duration_trend / get_pg_io_trend /
+               get_pg_database_trend (#2663) - the PostgreSQL time series. Fourteen trend reads shipped
+               and none worked on this engine. All four live on one tools class, so this line covers
+               the later two as well - which is the only reason adding them needed no edit here. */
+            .WithGeminiCompatibleTools<DarlingMcpPgTrendTools>()
+            .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
+            .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
+            .WithGeminiCompatibleTools<DarlingMcpJobTools>()
+            /* The windowed-trend siblings of the core data-read tools — get_memory_trend /
+               get_perfmon_trend / get_file_io_trend / get_query_trend / get_query_duration_trend — the
+               same names Lite and the Dashboard expose, over Darling's Postgres store (STORED reads of
+               the collected memory / perfmon / file-io / query-stats series, no live hit). Each mirrors
+               the viewer's proven chart read; the shape follows Lite where the SKUs diverge. */
+            .WithGeminiCompatibleTools<DarlingMcpTrendTools>()
+            /* The fleet-triage quick-win reads the fleet edition previously lacked — the alerts family
+               (get_alert_history over config_alert_log, get_alert_settings over config_alert_settings,
+               get_mute_rules via the service-side PgMuteRuleStore), the CURRENT-config snapshot trio
+               (get_server_config / get_database_config / get_trace_flags — latest capture, the companion to
+               the *_changes diff tools), and the health overview (get_server_summary + the daily rollup
+               get_daily_summary and its #2484 range sibling get_daily_summary_range — the Performance
+               Calendar's month grid — both folded through the shared DailyHealthBandCalculator). Same
+               names Lite and the Dashboard expose, all STORED reads over Darling's Postgres store (no live
+               hit). The blocking-trend / deadlock-trend / lock-wait-trend, memory-pressure-event, and
+               wait-type siblings ride along on the existing blocking / memory-grant / core data-read
+               classes above. */
+            .WithGeminiCompatibleTools<DarlingMcpAlertTools>()
+            .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
+            .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
+            /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central
+               store can serve, over the SHARED DarlingFleetReader that also powers the web /api/fleet and the
+               WPF viewer's Overview (one reader, one banding). ADDITIVE alongside get_server_summary. */
+            .WithGeminiCompatibleTools<DarlingMcpFleetTools>()
+            /* The Availability Group topology — get_ag_health (#991) — every monitored server's view of the
+               AGs it hosts, replicas plus per-database secondary state, over the SHARED DarlingAgReader that
+               also powers the web /api/ag and the Availability Groups page (one reader, one banding). Like
+               get_fleet_overview this is a cross-server read the central store makes possible. */
+            .WithGeminiCompatibleTools<DarlingMcpAgTools>()
+            /* The fleet sweep reports read — get_sweep_reports (#3466) — the third cross-server read, and
+               the one WITH MEMORY: the sweep timeline for a window, the newest sweep in full (mute header,
+               would-have-paged ledger, instrument liveness), and the watch-item worklist, over the SAME
+               FleetSweepStore presentation reads and FleetSweepPresentation builders the web /api/sweeps
+               routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
+               established, applied to the sweep rows. */
+            .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
+            /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
+               _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
+               _severe_errors / _significant_waits / _system_health — the same names the Dashboard
+               exposes. Where the Dashboard reads its server-side-parsed collect.HealthParser_*
+               tables, these shred the raw
+               system_health_events on read via the shared SystemHealthParser (Common) and gate with the
+               service-side twin of the viewer's SystemEventSignificance, exactly as the viewer's System
+               Events tab does — the same SIGNIFICANT warning set, no live hit. */
+            .WithGeminiCompatibleTools<DarlingMcpHealthParserTools>()
+            /* The Default Trace tool — get_default_trace_events — the same name the Dashboard exposes.
+               Reads Darling's collected default_trace_events (the base table, no v_* view — like
+               server_properties) and returns the SIGNIFICANT set via the shared
+               DefaultTraceEventSignificance, the same significant-set gate the viewer's System Events
+               surface uses; config-change events are excluded (the config-snapshot diff tools own them). */
+            .WithGeminiCompatibleTools<DarlingMcpDefaultTraceTools>()
+            /* The Custom Views v2 MANAGEMENT tools (#1563) — the one WRITE surface on this server:
+               list_custom_views / get_custom_view / validate_custom_view / create_custom_view /
+               update_custom_view / delete_custom_view / run_custom_view_panel. They CRUD the user-authored
+               views in config.custom_views through the SAME CustomViewStore + ValidateDefinition + compose
+               runner the web viewer's editor uses (no divergent second impl), and run back a composed panel's
+               data for a self-test loop. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
+               config.custom_views (mirroring viewer's) — never the config pivot or the secret columns. */
+            .WithGeminiCompatibleTools<DarlingMcpCustomViewTools>()
+            /* The custom-alert-rule MANAGEMENT tools (#3285) - the second WRITE surface: list_custom_alert_rules
+               / get_custom_alert_rule / validate_custom_alert_rule / create_custom_alert_rule /
+               update_custom_alert_rule / delete_custom_alert_rule. They CRUD the user-authored threshold-alert
+               rules in config.custom_alert_rules through the SAME CustomAlertRuleStore the web editor uses and the
+               SAME CustomAlertRuleDefinition.TryParse the CustomAlertEvaluator applies when it loads a rule (no
+               divergent second impl), validating every definition before it stores. The mcp role carries the
+               narrow INSERT/UPDATE/DELETE grant on ONLY config.custom_alert_rules (granted under V116), never the
+               config pivot or the secret columns. */
+            .WithGeminiCompatibleTools<DarlingMcpCustomAlertTools>()
+            /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
+               or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
+               Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service
+               holds the network path + credentials, so no test_connect command plane is needed), skips
+               case-folded duplicates via the shared ServerIdHelper identity, DPAPI-encrypts the SQL password
+               (the service identity, so it round-trips at collection time), and INSERTs config.config_monitored_
+               servers mirroring StoreConfigProvider.SeedMonitoredServersAsync; remove_server DELETEs by the same
+               resolver the read tools use. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
+               config.config_monitored_servers (the encrypted_password column stays SELECT-carved) — never the
+               config pivot or a schema-wide write. */
+            .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>()
+            /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off
+               at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Lite twin:
+               McpToolGuideTools. */
+            .WithGeminiCompatibleTools<DarlingMcpToolGuideTools>()
+            /* Three call-tool filters, each registered ONCE and each covering every tool with no
+               per-tool change — the seam that exists precisely so a decision about all ~147 reads
+               is made in one place.
+
+               The unknown-argument guard (#3870) runs FIRST and can refuse before dispatch: a call
+               carrying an argument no tool parameter declares is answered with the refusal envelope
+               naming the key and listing what the tool accepts, instead of being run with the key
+               silently dropped. The SDK binds arguments by name and ignores the rest, so
+               get_collection_log with a hallucinated status_filter returned two hundred unfiltered
+               rows and nothing anywhere said a knob had been discarded — for a surface whose callers
+               are language models, a silently dropped key is a confidently wrong answer. Shared with
+               Lite from PerformanceMonitor.Common so both SKUs refuse identically.
+
+               The read-latency filter (#4442 scope 2) times every call and records it into the shared
+               ReadLatencyAccumulator under ReadSurface.Mcp — the same seam the guard above uses (a call-tool
+               filter, registered once, covering every tool without a per-tool change), chosen because the SDK
+               offers exactly this hook (McpServerOptions.AddCallToolFilter) and Darling registers no fallback
+               CallToolHandler, so a filter here sees every dispatched call on BOTH / and /core — a /core
+               request that never reaches dispatch (a name outside the narrowed ToolCollection) never reaches
+               this filter either, which is correct: nothing ran to time. run_custom_view_panel is skipped
+               inside the filter (see McpToolLatencyFilter's own doc): it already records one Compose sample
+               through RunComposedPanelAsync, so recording it again here would double-count every MCP
+               custom-view run.
+
+               Optional GCF (Graph Compact Format) output runs LAST: when DARLING_OUTPUT_FORMAT=gcf
+               it re-encodes each tool's JSON result as a GCF generic wire. Opt-in, lossless, and
+               never larger than the JSON (see GcfCallToolFilter / GcfOutput). #4198 ruled out a
+               post-hoc trim-to-budget filter here (it would make a tool's own truncated/*_returned
+               fields wrong, cut calls that explicitly asked for more rows, and drop the newest rows
+               of anything sorted oldest-first) in favor of sizing each tool's own defaults to fit —
+               see McpResponseBudget.DefaultBytes, which stays as the one shared size target. */
+            .WithRequestFilters(filters => filters
+                .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+                .AddCallToolFilter(toolLatency.AsFilter())
+                .AddCallToolFilter(GcfCallToolFilter.Instance));
+    }
+
+    /// <summary>
+    /// Everything AFTER <c>builder.Build()</c>: the Host-allowlist/DNS-rebinding guard (both modes), the
+    /// network-mode bearer-token + CIDR middleware, then <c>MapMcp()</c> and <c>MapMcp("/core")</c>.
+    /// Extracted (#4128) so a live-HTTP test can build the SAME pipeline against a <c>TestServer</c> instead
+    /// of a second, hand-copied one that could silently drift from production. The production call site
+    /// passes exactly these values, in exactly this order — see <c>TryStartServerAsync</c>. Instance method,
+    /// not static: the gates read <c>_logger</c>, exactly as before the extraction — only the receiver
+    /// (this vs. a test-constructed instance) changes.
+    /// </summary>
+    internal void ConfigurePipeline(
+        WebApplication app,
+        bool networkMode,
+        IPAddress? networkListenIp,
+        IPNetwork allowedCidr,
+        string bearerToken)
+    {
+        /* #2479 item 5: every gate below used to refuse silently, so "is my token wrong or my CIDR
+           wrong" was answerable only from the client, which sees one opaque status code. One log per
+           refusal is rate-limited per (gate, source) because this port is LAN-exposed on purpose and
+           an exposed port meets a scanner eventually - see DarlingHttpRefusalLog for the shape and
+           what it deliberately never writes. Created here, per started server, so a rebind starts
+           with a clean budget rather than inheriting the previous listener's scan. */
+        var refusals = new DarlingHttpRefusalLog();
+
+        /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
+           #1576 fix. The loopback bind is tokenless by design (the network gates below install only in
+           network mode), so a browser ON this host that loads attacker content could be rebound to
+           127.0.0.1:5152 and reach the MCP surface same-origin — and that surface is no longer read-only
+           (custom-view CRUD, add_servers/remove_server, alert-config writes). The application/json content
+           type does NOT save us: under a rebind the browser treats the request as same-origin, so no CORS
+           preflight applies. Require the Host header to name an address we actually bind — a loopback
+           name/IP or, in network mode, the configured listen IP. networkListenIp is null in loopback mode,
+           so ONLY loopback Hosts pass there; a rebound foreign hostname is rejected 400 before the bearer
+           check, the CIDR check, MapMcp, or any tool handler. */
+        app.Use(async (context, next) =>
+        {
+            if (!DarlingHostBinding.IsAllowedHost(context.Request.Host.Host, networkListenIp))
+            {
+                refusals.Report(
+                    _logger, "MCP", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
+                    context.Connection.RemoteIpAddress,
+                    $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
+                    + " (a loopback name/IP, or mcp.network.listen when LAN-exposed)",
+                    DateTime.UtcNow);
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            await next(context);
+        });
+
+        /* Access-control middleware — installed ONLY in network mode (Round-4 #6). The default/degraded
+           loopback-only server stays byte-for-byte today's tokenless local MCP, so existing local clients
+           keep working. Both run BEFORE MapMcp (D3-b: "first ... before any handler/handshake"): the
+           unconditional constant-time bearer token FIRST (NO loopback exemption — in exposed mode even a
+           local client must present the token; that IS the loopback guard against SSRF/sandboxed sockets),
+           then the in-app CIDR check (loopback-exempt so the loopback bind's local clients are not 403'd,
+           Round-4 #2 — it bounds WHO can route to the port, independent of the best-effort firewall). */
+        if (networkMode)
+        {
+            var cidr = allowedCidr;
+            var token = bearerToken;
+
+            app.Use(async (context, next) =>
+            {
+                /* Materialized once: StringValues.ToString() allocates, and the refusal path below needs
+                   the same header again to tell "no credential" from "wrong credential" (review catch on
+                   #2479). IsBearerTokenAuthorized keeps taking the raw header rather than returning what
+                   it parsed - its signature is pinned by DarlingMcpHostTests and DarlingHostBindingTests,
+                   and threading a result type through it to save one parse on an ALREADY-REFUSED request
+                   is not a trade worth making. */
+                var authorization = context.Request.Headers.Authorization.ToString();
+
+                if (!IsBearerTokenAuthorized(authorization, token))
+                {
+                    /* THREE client states, never the token's value. Each one is a different next step
+                       for the operator, which is the whole point of logging this at all:
+
+                         no header            -> a client that was never configured with a token
+                         header, not a Bearer -> a client configured wrong (Basic, a bare token, an
+                                                 empty "Bearer ") - it IS sending something
+                         a Bearer that misses -> a token that does not match this endpoint's
+
+                       Review catch on #2479: ExtractBearerToken returns null for the first TWO, so
+                       testing only it reported "nothing was presented" about a client that presented
+                       a malformed header - collapsing precisely the ambiguity this exists to resolve.
+                       None of the three says anything about what the token IS. */
+                    refusals.Report(
+                        _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
+                        context.Connection.RemoteIpAddress,
+                        DescribeBearerRefusal(authorization),
+                        DateTime.UtcNow);
+                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                    context.Response.Headers.WWWAuthenticate = "Bearer";
+                    return;
+                }
+
+                await next(context);
+            });
+
+            app.Use(async (context, next) =>
+            {
+                if (!IsRemoteAddressAllowed(context.Connection.RemoteIpAddress, cidr))
+                {
+                    refusals.Report(
+                        _logger, "MCP", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
+                        context.Connection.RemoteIpAddress,
+                        $"its address is outside mcp.network.allowFrom ({cidr})",
+                        DateTime.UtcNow);
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    return;
+                }
+
+                await next(context);
+            });
+        }
+
+        app.MapMcp();
+
+        /* #3898 D7: /core, the same endpoint narrowed to DarlingCoreToolProfile's closure via
+           ConfigureSessionOptions above. Mapped on the SAME _app after the SAME middleware (the Host-header
+           guard, and in network mode the bearer-token and CIDR checks) — nothing about this route is
+           exempt from any gate above. / is unchanged and keeps serving every tool, for good. */
+        app.MapMcp("/core");
     }
 
     /* ---------------------------------------------------------------------------------------------------

@@ -32,4 +32,43 @@ Pinning the publish to `win-x64` and bundling the runtime removed that failure e
 
 Monitored SQL Servers need nothing installed on them either way.
 
+## Themes and colors
+
+Lite ships three themes — **Dark** (the default), **Light** and **Cool Breeze** — picked from **Settings → Color theme**, applied live. Every surface in the app is painted from one palette of eighteen named colors per theme, and you can adjust twelve of them yourself (#3577), per theme, with a reset to the shipped values.
+
+Open **Settings**, expand **Colors** beneath the theme drop-down, and you get one row per color for the theme currently showing: a swatch, the hex, a picker (hue / saturation / brightness sliders) and the **measured contrast ratio** against the surface that color renders on — page background against text, accent against the ink that sits on it, each status color against the page. Green is 4.50:1 or better (WCAG AA for text), amber is 3.00–4.49 (fine for a marker, hard as text), red is under 3.00. The readout is a measurement, not a gate: **Apply** always works. **Reset to default** returns the current theme to its shipped palette and leaves your other themes alone. **Open file** opens the JSON in your editor; anything you save there applies live too.
+
+The file is `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\theme-overrides.json`, beside `settings.json`. It is keyed by theme, then by color, and holds only what you changed:
+
+```json
+{
+  "Dark": {
+    "AccentColor": "#3A7BD5",
+    "AccentForegroundColor": "#FFFFFF"
+  },
+  "CoolBreeze": {
+    "WarningColor": "#B45309"
+  }
+}
+```
+
+Values are `#RRGGBB` (`#AARRGGBB` is accepted). A key that is not one of the twelve, a value that is not a color, a theme that is not one of the three, or a file that is not JSON is skipped with a line in the log and never stops Lite from starting. Deleting the file, or a theme's block, is the same as Reset.
+
+| Key | Group | What it paints |
+|---|---|---|
+| `BackgroundColor` | Backgrounds | The window and panel background most text sits on |
+| `BackgroundLightColor` | Backgrounds | Cards, settings sections, buttons at rest, headers — a step lighter than the page |
+| `BackgroundDarkColor` | Backgrounds | The sidebar, grid rows and other recessed areas — a step darker than the page |
+| `ForegroundColor` | Text | Primary text: values, headers, labels |
+| `ForegroundDimColor` | Text | Captions and secondary labels |
+| `AccentColor` | Accent | The selected tab, the selected grid row, highlighted combo items, accent buttons, links |
+| `AccentForegroundColor` | Accent | The ink for text and glyphs on an accent fill |
+| `AlternatingRowColor` | Rows | Every other grid row |
+| `SuccessColor` | Status | Healthy / OK markers and the Done row mark |
+| `WarningColor` | Status | Warning markers and the To Do row mark |
+| `ErrorColor` | Status | Error / critical markers and the Do Not Do row mark |
+| `InfoColor` | Status | Informational markers |
+
+The other six palette colors (`AccentHoverColor`, `AccentPressedColor`, `BackgroundLighterColor`, `ForegroundMutedColor`, `BorderColor`, `BorderLightColor`) are derived tones — a hover is the accent lightened a step, a border is the background lifted a step — and follow the theme author's values; they are not adjustable, and neither is any single control (the selected tab, one button): the knobs are the palette, and every surface built from it follows. A handful of component-specific brushes the themes paint with a fixed value (the plan viewer's panels, the time-range slicer, the deadlock graph) are likewise not derived from the palette and do not move.
+
 See the [root README](../README.md) for full documentation.

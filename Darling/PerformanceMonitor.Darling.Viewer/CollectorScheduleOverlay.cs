@@ -90,6 +90,44 @@ public static class CollectorScheduleOverlay
             .Where(s => s.Length > 0)
             .ToList();
 
+    /// <summary>
+    /// Enforces what the store and the collection pipeline can honor before the write, so a bad value
+    /// surfaces as a friendly message rather than a raw Postgres error or silent bad data: the V17 CHECK
+    /// constraints (frequency &gt;= 0, retention &gt;= 1) plus the delta gap-policy cadence cap (#3532) —
+    /// a delta-family collector past <see cref="CollectorDeltaCalculator.MaxDeltaFrequencyMinutes"/> would
+    /// exceed <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> every cycle and record permanent
+    /// zeros (the service's <c>StoreConfigProvider.ResolveSchedule</c> refuses such a row too, by falling
+    /// through to the default). Pure, so Darling.Tests exercise it without a Window.
+    /// </summary>
+    public static bool ValidateSchedule(IReadOnlyList<CollectorScheduleEditItem> edited, out string error)
+    {
+        ArgumentNullException.ThrowIfNull(edited);
+
+        foreach (var item in edited)
+        {
+            if (item.FrequencyMinutes < 0)
+            {
+                error = $"'{item.Name}': frequency (minutes) can't be negative. Use 0 to collect once on server load.";
+                return false;
+            }
+
+            if (CollectorDeltaCalculator.DeltaFrequencyError(item.Name, item.FrequencyMinutes) is string frequencyError)
+            {
+                error = frequencyError;
+                return false;
+            }
+
+            if (item.RetentionDays < 1)
+            {
+                error = $"'{item.Name}': retention (days) must be at least 1.";
+                return false;
+            }
+        }
+
+        error = "";
+        return true;
+    }
+
     /// <summary>True when the store holds any override row for this server (the editor's "custom vs. use
     /// default" initial state).</summary>
     public static bool ServerHasOverride(IReadOnlyList<CollectorScheduleRow> allOverrides, int serverId)

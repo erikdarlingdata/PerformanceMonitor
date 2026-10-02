@@ -169,6 +169,25 @@ public static class CollectorScheduleDefaults
            every consumer. */
         ["pg_deadlocks"] = new(5, 90),
 
+        /* #3601: the classified log-event pipeline. Five minutes over the 4 MB tail, which is pg_deadlocks'
+           cadence over pg_deadlocks' tail, and for its reason - errors, connections and lock waits are EVENTS, and an
+           event has to still be inside the 4 MB window when the read comes round; the ~14 KB/s overlap
+           arithmetic above applies unchanged, and so does the per-server remedy on a target that logs
+           harder than that.
+
+           THIRTY days of retention, not the deadlock table's ninety, and the difference is volume rather
+           than value. A deadlock is rare by construction; a log event is as common as the target's
+           configuration lets it be. log_connections on a pool that reconnects per statement writes
+           three rows per query, a FATAL storm from a misconfigured client writes thousands an hour, and
+           log_lock_waits on a contended table writes one per waiter per timeout. Ninety days of that on
+           a fleet is the store's largest table for a question - "what did the log say" - that is asked
+           about last night, not last quarter; the retrospective question about deadlocks ("we had a
+           spike last month") does not have a log-event twin, because a spike of errors is an incident
+           somebody already opened. Operator-tunable per store like every entry here; a fleet that wants
+           ninety sets ninety. Repeats are expected on the self-hosted route and cheap: raw_line_hash
+           carries the identity and every read dedupes on it, as the deadlock reads do on theirs. */
+        ["pg_log_events"] = new(5, 30),
+
         /* Per-minute, unlike its wraparound sibling: an xmin holder is the FAST-moving leading
            indicator, and the thing an operator wants is the session or slot that appeared minutes
            ago, before it has cost anything. At most five rows a cycle. 30 days matches the other
@@ -276,13 +295,14 @@ public static class CollectorScheduleDefaults
            pg_stat_statements get installed" and "when did this extension get upgraded" are asked months
            later, usually right after a plan changed shape and nobody can explain why. */
         /* HOURLY, not every five minutes, and the reason is the fleet rather than the collector. All
-           four of these need an extension or a readable server log, and Aurora offers neither - so on a
+           three of these need an extension or a readable server log, and Aurora offers neither - so on a
            managed target they can only ever record a non-fatal skip, and at a five-minute cadence that
            is roughly 900 skip rows per target per day saying the same thing.
 
-           Hourly costs nothing for THREE of them: pg_wait_sampling_profile, pg_stat_kcache and
-           pg_qualstats are cumulative COUNTERS, so a longer interval loses no events - it only widens the
-           window each delta covers. That is the opposite of a sampled collector like pg_blocking, where
+           Hourly costs nothing for the two counter readers still here: pg_stat_kcache and pg_qualstats are
+           cumulative COUNTERS, so a longer interval loses no events - it only widens the window each delta
+           covers. (pg_wait_sampling_profile was the third until #3604 gave that collector a sampled arm and
+           its own five-minute entry below.) That is the opposite of a sampled collector like pg_blocking, where
            the cadence IS the resolution and stretching it genuinely loses sightings.
 
            pg_plan_capture is the fourth and it is neither. It reads a LOG, and "append-only" is not the
@@ -303,7 +323,18 @@ public static class CollectorScheduleDefaults
            the threshold. What is missing is that the collector cannot SAY it happened, and it already
            selects the file's size, so a stored previous size would make the skipped span a measurement
            instead of an absence. Until then a self-hosted operator lowers this per server. */
-        ["pg_wait_sampling"] = new(60, 30),
+        /* #3604: FIVE MINUTES, split off the hourly trio above. Both halves of the hourly argument stopped
+           applying to this collector when it grew its sampler arm. The skip-row half: it is gated off Aurora
+           now and takes the sampler arm everywhere else, so it records EXTENSION_MISSING on no target at all.
+           The loses-nothing half is true of the extension arm's cumulative counters but false of the sampler
+           arm, whose window is thirty one-second snapshots per cycle - there the cadence IS the duty cycle
+           (30 s in 300 s, 10%), and an hour would make it 0.8%. Five minutes rather than one for two reasons
+           the file already states elsewhere: a 30 s single run is half the 60,000 ms body budget
+           SweepPressureClassifier sums single-run costs against, so it must run DETACHED from the sequential
+           body (DarlingWorker, beside query_store and plan_correction), and SweepBodyDetachPolicyTests pins
+           that nothing detached sits on the one-minute tier. The extension arm pays 12x the rows it did
+           hourly (at most 500 per cycle, cumulative) for deltas twelve times finer. */
+        ["pg_wait_sampling"] = new(5, 30),
         ["pg_kernel_stats"] = new(60, 30),
         ["pg_predicate_stats"] = new(60, 30),
         ["pg_plan_capture"] = new(60, 14),
@@ -350,5 +381,59 @@ public static class CollectorScheduleDefaults
            1-minute data points (mirroring the ring buffer's own TOP(60) resilience), so a missed cycle is
            backfilled rather than lost. 30-day retention matches cpu_utilization. */
         ["pg_cpu_utilization"] = new(5, 30),
+        /* #3691 (V136) per-database size. HOURLY: a database's size moves in checkpoint- and
+           autovacuum-sized steps, and the questions the series answers ("how fast is it growing", "when
+           does it cross the volume") are rates over days, not minutes. A YEAR of retention — the existing
+           365-day tier, beside server_properties and the PostgreSQL configuration snapshots — because
+           "how has this grown since last year" is what a size series is for, and the row cost is trivial:
+           ~50 clusters × ~5 databases × 24 rows a day is ~6,000 rows a day fleet-wide, a rounding error
+           beside any per-minute family. One read of a shared catalog per cycle, no per-database fan-out. */
+        ["pg_database_size_stats"] = new(60, 365),
     };
+
+    /// <summary>
+    /// The cadence a collector actually runs at: the per-server override, else the fleet-wide one, else the
+    /// <see cref="All"/> default. An override that cannot be honoured falls through to the next level rather
+    /// than drive the schedule — a negative frequency, or a delta-family cadence past
+    /// <see cref="CollectorDeltaCalculator.MaxDeltaFrequencyMinutes"/> (#3532: past the gap policy every cycle
+    /// re-baselines and stores a zero delta forever). 0 is honoured: on-load only.
+    ///
+    /// <para>One rule for two consumers that must agree (#3896): Darling's scheduler resolves the cadence it
+    /// RUNS a collector at through this, and the analysis pass resolves the cadence it BOUNDS that collector's
+    /// latest-value reads by through it. A pass that read a cadence the scheduler did not honour would bound
+    /// a daily collector's reads to a day and lose its facts every other pass.</para>
+    /// </summary>
+    public static int ResolveFrequencyMinutes(string collectorName, int? perServerOverride, int? fleetOverride) =>
+        HonouredFrequency(collectorName, perServerOverride)
+        ?? HonouredFrequency(collectorName, fleetOverride)
+        ?? All[collectorName].FrequencyMinutes;
+
+    private static int? HonouredFrequency(string collectorName, int? minutes) =>
+        minutes is int v
+            && v >= 0
+            && !(CollectorDeltaCalculator.IsDeltaFamily(collectorName) && v > CollectorDeltaCalculator.MaxDeltaFrequencyMinutes)
+        ? v
+        : null;
+
+    /// <summary>
+    /// #3929/#3930 (Erik, ruled 2026-09-23): an on-load collector (<see cref="ResolveFrequencyMinutes"/> = 0 -
+    /// server_config, database_config, database_scoped_config, trace_flags, server_properties) captures on
+    /// every connect, but nothing re-ran it on a long, healthy connection. A server connected 30+ days lost its
+    /// config snapshot to retention entirely (#3930), and a state that clears — a trace flag turned off — had
+    /// no later row to overwrite the stale ON one until the next reconnect (#3929). Both SKUs now ALSO re-run
+    /// every on-load collector on this cadence, in addition to on connect.
+    /// </summary>
+    public const int OnLoadRecaptureMinutes = 1440;
+
+    /// <summary>
+    /// The one place "on-load" (frequency 0) becomes a concrete periodic interval (#3929/#3930):
+    /// <paramref name="frequencyMinutes"/> itself, or <see cref="OnLoadRecaptureMinutes"/> when it resolved to
+    /// 0. Both Darling's worker (the connect seed, the reload recompute, and the due-collector sweep) and
+    /// Lite's <c>ScheduleManager</c> call this instead of special-casing the five on-load collectors by name,
+    /// so an operator's own override (any frequency &gt; 0) still wins — this only substitutes for the
+    /// unscheduled "0" default, never an explicit choice. The analysis pass uses it too, to bound the
+    /// TRACE_FLAGS read the same way (see <c>PgLatestValueBounds</c> / Lite's <c>LatestValueBounds</c>).
+    /// </summary>
+    public static int EffectiveRecurringIntervalMinutes(int frequencyMinutes) =>
+        frequencyMinutes == 0 ? OnLoadRecaptureMinutes : frequencyMinutes;
 }

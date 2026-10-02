@@ -32,6 +32,16 @@ namespace PerformanceMonitorLite.Tests;
 /// because an omission note that is itself vague recreates the silent-truncation problem one level up.
 /// And a splitter that changed the SMALL case would repaint every ordinary alert's payload, so the
 /// one-section shape is pinned byte-for-byte.</para>
+///
+/// <para><b>#3622: the cuts land on whole characters.</b> Both of this splitter's cuts — the hard split
+/// and the omission line's quoted fragment — were sized in UTF-16 units, so an emoji astride the boundary
+/// was cut in half. <c>JsonSerializer</c> relaxes the unpaired half to U+FFFD rather than emitting a lone
+/// escape (measured in the lane; the issue expected Slack to reject the payload), so the payload delivered
+/// and the reader saw a replacement glyph that was never in the text — the hard split showed TWO of them
+/// and no emoji. The arms below place a surrogate pair and a combining sequence exactly astride each
+/// boundary and assert three things: no text a reader was sent contains U+FFFD, the cut landed one
+/// character earlier, and reassembly still reproduces the original. The pathological single-element
+/// input (a run of combining marks wider than a section) pins that the loop still advances.</para>
 /// </summary>
 public class SlackProseSplitTests
 {
@@ -141,6 +151,17 @@ public class SlackProseSplitTests
     private static string ManyLines(int count, int length) =>
         string.Join('\n', Enumerable.Range(0, count).Select(i => Line(i, length)));
 
+    /* #3622 fixtures: one character each to a reader, two or four UTF-16 units to the index arithmetic. */
+    private const string Fire = "\U0001F525";              // 🔥, a surrogate pair
+    private const string EAcute = "e\u0301";               // e + combining acute, two code points
+    private const string ThumbsUpMedium = "\U0001F44D\U0001F3FD"; // 👍🏽, two pairs in one grapheme
+
+    /// <summary>Every mrkdwn text a reader was sent, parsed — an unpaired surrogate never survives into
+    /// the raw JSON (the serializer relaxes it to \uFFFD), so the only place it can be caught is the
+    /// decoded text.</summary>
+    private static void AssertNoReplacementGlyph(JsonDocument doc) =>
+        Assert.All(AllTextStrings(doc.RootElement), t => Assert.DoesNotContain('\uFFFD', t));
+
     /* ---------------- the shape that must not change ---------------- */
 
     /// <summary>
@@ -248,6 +269,116 @@ public class SlackProseSplitTests
         var reassembled = texts[0][Header.Length..]
             + string.Concat(texts.Skip(1).Select(t => t[marker.Length..]));
         Assert.Equal(line, reassembled);
+    }
+
+    /* ---------------- #3622: the cuts land on whole characters ---------------- */
+
+    /// <summary>
+    /// The helper every Slack cut goes through, on its own: the whole text when it fits; the limit when the
+    /// limit is already a boundary; one unit earlier when the limit falls between the halves of a surrogate
+    /// pair; before the base letter when it falls between a letter and its combining accent; before a
+    /// four-unit emoji at every interior offset; and — the one case a whole-element cut cannot serve — a
+    /// single element wider than the limit falls back to the code-point boundary, so a caller that must
+    /// advance always can. The rows with a long combining run pin the segmenter's window: the helper hands
+    /// it two units past the limit rather than the whole text, and the answer must be the full text's
+    /// whether the element ends inside that window or runs through its end.
+    /// </summary>
+    [Theory]
+    [InlineData("abc", 5, 3)]                       // fits: the whole text
+    [InlineData("abcdef", 3, 3)]                    // ASCII: the limit is a boundary
+    [InlineData("ab\U0001F525cd", 3, 2)]           // pair astride: one earlier
+    [InlineData("ab\U0001F525cd", 4, 4)]           // pair inside: the limit
+    [InlineData("abe\u0301cd", 3, 2)]              // letter + accent astride: before the letter
+    [InlineData("ab\U0001F44D\U0001F3FDcd", 3, 2)] // four-unit emoji, cut after its first unit
+    [InlineData("ab\U0001F44D\U0001F3FDcd", 4, 2)] // ...after its first pair
+    [InlineData("ab\U0001F44D\U0001F3FDcd", 5, 2)] // ...after its third unit
+    [InlineData("ab\U0001F44D\U0001F3FDcd", 6, 6)] // ...after the whole emoji: the limit
+    [InlineData("ab\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301cd", 3, 1)]   // b + eight accents runs through the window: before b
+    [InlineData("ab\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301cd", 9, 1)]   // ...one unit short of fitting: still before b
+    [InlineData("ab\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301cd", 10, 10)] // ...fits exactly: after the last accent
+    [InlineData("a\U0001F44D\U0001F3FDcd", 2, 1)]     // window ends mid-pair inside the emoji: before it
+    [InlineData("\u0301\u0301\u0301\u0301", 2, 2)]  // one element wider than the limit: code point
+    [InlineData("\U0001F525\u0301\u0301\u0301", 3, 3)] // ...the limit itself when it is a code-point boundary
+    [InlineData("\U0001F44D\U0001F3FD\u0301\u0301", 3, 2)] // ...and one earlier when it is mid-pair
+    [InlineData("abc", 0, 0)]
+    public void SlackCutLength_LandsOnTheLastWholeCharacterInsideTheLimit(string text, int limit, int expected)
+    {
+        Assert.Equal(expected, WebhookAlertService.SlackCutLength(text, limit));
+    }
+
+    /// <summary>
+    /// A character astride the hard split's boundary is carried whole into the continuation piece rather
+    /// than cut in half. Before #3622 the first section ended with the pair's high half and the second
+    /// began with its low half after the marker: two replacement glyphs, no emoji, and a reassembly that
+    /// no longer matched the line. Each arm sizes its line so the boundary (the section's capacity, 2,990
+    /// after the header) falls one unit into the character.
+    /// </summary>
+    [Theory]
+    [InlineData(Fire)]
+    [InlineData(EAcute)]
+    [InlineData(ThumbsUpMedium)]
+    public void ACharacterAstrideTheHardSplit_MovesWholeIntoTheContinuation(string character)
+    {
+        const string marker = "(cont.) ";
+        var line = new string('x', Capacity - 1) + character + new string('y', 100);
+
+        using var doc = JsonDocument.Parse(Payload(line));
+        AssertNoReplacementGlyph(doc);
+        var texts = ProseTexts(Blocks(doc));
+
+        Assert.Equal(2, texts.Count);
+        Assert.All(texts, t => Assert.True(t.Length <= 3000));
+        Assert.Equal(Header + new string('x', Capacity - 1), texts[0]);
+        Assert.StartsWith(marker + character, texts[1], StringComparison.Ordinal);
+
+        var reassembled = texts[0][Header.Length..] + string.Concat(texts.Skip(1).Select(t => t[marker.Length..]));
+        Assert.Equal(line, reassembled);
+    }
+
+    /// <summary>
+    /// A single line that is ONE text element wider than a section — combining marks with no base — cannot
+    /// be cut on an element boundary at all. The cut falls back to the code point and the loop advances:
+    /// the line still splits, every piece fits, and the pieces reassemble to the line. Without the fallback
+    /// this input hangs the splitter, which is why it is pinned before any other property of it.
+    /// </summary>
+    [Fact]
+    public void ASingleElementWiderThanASection_StillHardSplits_AndReassembles()
+    {
+        const string marker = "(cont.) ";
+        var line = new string('\u0301', 7000);
+
+        using var doc = JsonDocument.Parse(Payload(line));
+        var texts = ProseTexts(Blocks(doc));
+
+        Assert.True(texts.Count >= 3);
+        Assert.All(texts, t => Assert.True(t.Length <= 3000));
+        var reassembled = texts[0][Header.Length..] + string.Concat(texts.Skip(1).Select(t => t[marker.Length..]));
+        Assert.Equal(line, reassembled);
+    }
+
+    /// <summary>
+    /// The omission line quotes the first dropped line's leading 120 characters; a character astride that
+    /// boundary is left out of the quote rather than cut in half. Every line carries the character at
+    /// units 119–120 (one unit into the 120 cut), so whichever line is the first dropped, the quote ends
+    /// one character earlier and the payload carries no replacement glyph.
+    /// </summary>
+    [Theory]
+    [InlineData(Fire)]
+    [InlineData(EAcute)]
+    public void ACharacterAstrideTheOmissionFragment_IsLeftOutOfTheQuote(string character)
+    {
+        string LineWith(int i) => Line(i, 119) + character + new string('z', 179);
+        var prose = string.Join('\n', Enumerable.Range(0, 600).Select(LineWith));
+
+        using var doc = JsonDocument.Parse(Payload(prose));
+        AssertNoReplacementGlyph(doc);
+        var texts = ProseTexts(Blocks(doc));
+        var lines = Reassemble(texts).Split('\n');
+        var emitted = lines.Length - 1;
+
+        Assert.Contains(
+            $"first omitted: \"{Line(emitted, 119)}...\"", lines[^1], StringComparison.Ordinal);
+        Assert.DoesNotContain(character, lines[^1], StringComparison.Ordinal);
     }
 
     /* ---------------- the block budget and the stated omission ---------------- */

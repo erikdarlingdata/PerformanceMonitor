@@ -16,12 +16,14 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.Versioning;
+using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -71,6 +73,11 @@ public static class DarlingCliCommands
     public static bool IsValidateConfigVerb(string arg) =>
         string.Equals(arg, "--test-connection", StringComparison.OrdinalIgnoreCase)
         || string.Equals(arg, "--validate-config", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="CheckSettingsAsync"/> handles — the store host profile + per-setting
+    /// verdict table (#4214).</summary>
+    public static bool IsCheckSettingsVerb(string arg) =>
+        string.Equals(arg, "--check-settings", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The verb <see cref="PrintViewerConnectionAsync"/> handles (darling-network-endpoints D8).</summary>
     public static bool IsPrintViewerConnectionVerb(string arg) =>
@@ -147,6 +154,27 @@ public static class DarlingCliCommands
         string.Equals(arg, "--add-server", StringComparison.OrdinalIgnoreCase)
         || string.Equals(arg, "--add-servers", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="ToggleCollectorAsync"/> handles with <c>enable: true</c> — turn one collector ON in the
+    /// store's schedule overrides, fleet-wide or for one server (#3752). Until this verb the only writer of that
+    /// flag was the WPF Viewer's Collector Schedules window, which needs an interactive desktop and the
+    /// <c>admin</c> role — and the one collector that ships OFF (<c>long_query_completions</c>) cannot run at all
+    /// without someone flipping it, so a headless install had no supported way to use it.</summary>
+    public static bool IsEnableCollectorVerb(string arg) =>
+        string.Equals(arg, "--enable-collector", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="ToggleCollectorAsync"/> handles with <c>enable: false</c> — the twin of
+    /// <see cref="IsEnableCollectorVerb"/>: turn one collector OFF in the store's schedule overrides (#3752).</summary>
+    public static bool IsDisableCollectorVerb(string arg) =>
+        string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> handles — drop the
+    /// Extended Events sessions Darling created on a server this service still monitors (run it just before the server is
+    /// removed), or with <c>--print-sql</c> print the guarded DROP statements for a server that is no longer configured (#4732).
+    /// The service never drops them when a server is removed: the names are shared with Lite and any other Darling service, and
+    /// an unreachable server cannot be cleaned.</summary>
+    public static bool IsDropXeSessionsVerb(string arg) =>
+        string.Equals(arg, "--drop-xe-sessions", StringComparison.OrdinalIgnoreCase);
+
     /// <summary><c>--version</c>/<c>-v</c> — print the product version and exit.</summary>
     public static bool IsVersionVerb(string arg) =>
         string.Equals(arg, "--version", StringComparison.OrdinalIgnoreCase)
@@ -167,6 +195,7 @@ public static class DarlingCliCommands
     public static bool IsKnownVerb(string arg) =>
         IsEncryptPasswordVerb(arg)
         || IsValidateConfigVerb(arg)
+        || IsCheckSettingsVerb(arg)
         || IsPrintViewerConnectionVerb(arg)
         || IsPrintMcpTokenVerb(arg)
         || IsPrintWebTokenVerb(arg)
@@ -181,7 +210,10 @@ public static class DarlingCliCommands
         || IsBackfillRollupsVerb(arg)
         || IsCollapseLegacySlicesVerb(arg)
         || IsRecompressPlanDimVerb(arg)
-        || IsAddServerVerb(arg);
+        || IsAddServerVerb(arg)
+        || IsEnableCollectorVerb(arg)
+        || IsDisableCollectorVerb(arg)
+        || IsDropXeSessionsVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -241,7 +273,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe                     Run the service (also how the Windows Service Control Manager starts it)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --version, -v       Print the product version and exit." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --help, -h          Print this help and exit." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server (the store's registry when it is reachable, otherwise the file's list)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --check-settings [--json]   Print the store host profile and a verdict per sizing-relevant setting; exits non-zero if any is stale-after-hardware-change." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-mcp-token   Reprint the MCP bearer token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
@@ -249,7 +282,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir] [--config <path>]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json and the store credentials (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials and the log-hash key (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -258,12 +291,26 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist; run it just before you remove the server, because the service never drops them then); --dry-run lists them and drops nothing." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
-    /// Loads + validates darling.json, then probes every server. Prints one PASS/FAIL line per server and a
-    /// summary. Returns 0 only when the config is valid AND every server is reachable; 1 otherwise (so it is
-    /// usable as a deployment gate). Store/collection are never touched — this is a pure config pre-flight.
+    /// Loads + validates darling.json, then probes servers. Prints one PASS/FAIL line per server and a
+    /// summary. Returns 0 only when the config is valid AND every probed server is reachable; 1 otherwise (so
+    /// it is usable as a deployment gate). Store data/collection are never touched — this is a pre-flight.
+    ///
+    /// <para><b>#4214's fix: probes the STORE'S REGISTRY when the store can be reached, not the file's seed
+    /// list.</b> Before this it always probed <c>config.Servers</c> (darling.json), which is authoritative
+    /// only once, at first bootstrap (<see cref="StoreConfigProvider.SeedIfEmptyAsync"/>) — every start after
+    /// that, the store governs, and a field store still carrying two long-removed servers in the file made
+    /// this verb exit 1 forever, on a store monitoring 42 healthy servers with a config that parses cleanly.
+    /// A file-only server (never reached the registry, or removed from it since) is now a WARNING on stdout,
+    /// not a probe failure — it cannot be reached because nothing runs it, which is not what this verb tests.
+    /// When the store itself cannot be reached, this falls back to the file's list and says so plainly, which
+    /// is the one case where the file genuinely is the best available answer.</para>
     /// </summary>
     public static async Task<int> ValidateConfigAsync(
         string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken)
@@ -291,10 +338,16 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        output.WriteLine($"Validating connectivity to {config.Servers.Count} server(s)...");
+        var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken);
+        if (targets is null)
+        {
+            return 1;
+        }
+
+        output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 
         var allReachable = true;
-        foreach (var server in config.Servers)
+        foreach (var server in targets)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var probe = await DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
@@ -309,6 +362,297 @@ public static class DarlingCliCommands
             ? "All servers reachable."
             : "One or more servers failed the connection pre-flight (see above).");
         return allReachable ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The probe target list for <see cref="ValidateConfigAsync"/> (#4214): the store's registry
+    /// (<c>config_monitored_servers</c>) when the store can be reached, with a warning per file-only server;
+    /// darling.json's own list, with a stated reason, when it cannot. Never throws — a store connection
+    /// failure here is the "store unreachable" case, not a fatal error for this verb. The one thing that is not
+    /// that case is a store SETTING that cannot be used at all (#4744): that is printed on <paramref name="error"/>
+    /// and comes back as null, and the verb exits 1 on it like any other invalid configuration. The notes name what the
+    /// calling verb does with the list, so <paramref name="wording"/> defaults to <c>--validate-config</c>'s, whose text
+    /// tests pin.
+    /// </summary>
+    private static async Task<IReadOnlyList<MonitoredServer>?> ResolveValidationTargetsAsync(
+        DarlingConfig config, TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        RegistryListWording? wording = null)
+    {
+        wording ??= ValidateConfigRegistryWording;
+        var postgres = config.Postgres;
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            output.WriteLine($"NOTE: the store's registry is not reachable (no store connection configured), so {wording.WhenFileListIsUsed}");
+            return config.Servers;
+        }
+
+        await using var connection = new NpgsqlConnection(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            output.WriteLine($"NOTE: the store's registry is not reachable ({ex.Message}), so {wording.WhenFileListIsUsed}");
+            return config.Servers;
+        }
+
+        IReadOnlyList<MonitoredServer> registryServers;
+        try
+        {
+            registryServers = await StoreConfigProvider.ReadMonitoredServersAsync(connection, config, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            output.WriteLine($"NOTE: could not read the store's registry ({ex.Message}), so {wording.WhenFileListIsUsed}");
+            return config.Servers;
+        }
+
+        var registryNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var server in registryServers)
+        {
+            if (!string.IsNullOrEmpty(server.Name))
+            {
+                registryNames.Add(server.Name);
+            }
+        }
+
+        var fileOnly = config.Servers.Where(s => !registryNames.Contains(s.Name)).Select(s => s.DisplayName).ToList();
+        if (fileOnly.Count > 0)
+        {
+            output.WriteLine(
+                $"WARNING: darling.json lists {fileOnly.Count} server(s) not in the store's registry (never registered, or since removed): {string.Join(", ", fileOnly)}. "
+                + wording.WhenServersAreFileOnly);
+        }
+
+        return registryServers;
+    }
+
+    /// <summary>What <see cref="ResolveValidationTargetsAsync"/> tells the operator about the list it settled on, worded for the
+    /// verb that asked: <see cref="WhenFileListIsUsed"/> finishes "so ..." when the store's registry cannot be read and
+    /// darling.json's own list stands in, and <see cref="WhenServersAreFileOnly"/> finishes the warning about servers only the
+    /// file lists (#4732).</summary>
+    private sealed record RegistryListWording(string WhenFileListIsUsed, string WhenServersAreFileOnly);
+
+    /// <summary><c>--validate-config</c>'s wording. Tests pin the "validating darling.json's own server list instead" text, so it
+    /// stays as it was.</summary>
+    private static readonly RegistryListWording ValidateConfigRegistryWording = new(
+        "validating darling.json's own server list instead.",
+        "They are not part of this validation — the store governs which servers actually run.");
+
+    /// <summary><c>--drop-xe-sessions</c>'s wording: it matches the typed name against the list, and validates nothing.</summary>
+    private static readonly RegistryListWording DropXeSessionsRegistryWording = new(
+        "matching the server name against darling.json's own server list instead.",
+        "They are not matched against the server name you typed; the store governs which servers actually run.");
+
+    /// <summary>
+    /// The ONE place a CLI verb turns darling.json's <c>postgres</c> section into the string it opens the store with
+    /// (#4744). Building it can throw in two ways, and a verb that let either escape ended in an unhandled exception
+    /// instead of an exit code: a managed store's credential file that cannot be read or unprotected, and a
+    /// bring-your-own <c>postgres.connectionString</c> that Npgsql cannot parse (<c>sslmode=NotARealSslMode</c>, say).
+    /// Both are caught HERE, and the message that says so is written HERE; a verb prints <paramref name="unusable"/>
+    /// and exits with its own configuration code, so no verb keeps a copy of the catch.
+    ///
+    /// <para><b>What a <c>true</c> return means.</b> Nothing threw. The string may still be null or blank — a
+    /// bring-your-own string that is not set, or a managed credential the service has not written yet — and every
+    /// verb words that its own way (<c>--check-settings</c> and <c>--validate-config</c> give it their own exit, or
+    /// none), so it is not judged here. A non-blank string is proved by building it the way the verb is about to: with
+    /// the session time zone pinned and the application name set, Npgsql parses it, and the verb's own build a few
+    /// lines later cannot throw on it. The build is repeated here rather than handed back because the connection
+    /// census tests want the pin and the name on the very call that constructs each verb's connection.</para>
+    ///
+    /// <para><paramref name="ensureStoreSearchPath"/> is for a verb that names store tables bare: it gives a
+    /// bring-your-own string the worker's collect/config search path (a managed string already carries it) BEFORE the
+    /// proof, so the string that is proved is the string that is used.</para>
+    /// </summary>
+    private static bool TryBuildStoreConnectionString(
+        PostgresConfig? postgres, out string? connectionString, out string? unusable, bool ensureStoreSearchPath = false)
+    {
+        connectionString = null;
+        unusable = null;
+        var readingCredential = false;
+        try
+        {
+            if (postgres is null)
+            {
+                return true;
+            }
+
+            var managedCredential = false;
+            if (postgres.Managed && OperatingSystem.IsWindows())
+            {
+                managedCredential = true;
+                readingCredential = true;
+                connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
+                readingCredential = false;
+            }
+            else
+            {
+                connectionString = postgres.ConnectionString;
+            }
+
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                return true;
+            }
+
+            if (ensureStoreSearchPath && !managedCredential)
+            {
+                connectionString = DarlingWorker.EnsureStoreSearchPath(connectionString);
+            }
+
+            using var proof = new NpgsqlConnection(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            connectionString = null;
+
+            /* A managed store has no connection string setting to blame: what failed is its stored credential (#4744),
+               and a DPAPI failure gets the store credential's own explanation instead of the raw
+               CryptographicException text. The IsWindows call repeats what readingCredential already implies, for the
+               platform analyzer, which cannot follow a bool. */
+            unusable = readingCredential && OperatingSystem.IsWindows()
+                ? "The stored store credential could not be read: " + StoreCredentialFailureDetail(ex)
+                : "postgres.connectionString could not be used: " + ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Why a managed store's stored credential could not be read, in the operator's terms (#4744): a Windows Data
+    /// Protection failure is <see cref="DarlingSecrets.DescribeStoreCredentialDecryptFailure"/>'s explanation, not
+    /// <c>CryptographicException</c>'s "Key not valid for use in specified state", which reads as the store rejecting
+    /// a login, and not <see cref="DarlingSecrets.DescribeDecryptFailure"/>'s, whose remedies are for a monitored
+    /// server's saved password and do nothing for the store's own credential. Anything else — a file that is not a
+    /// credential, a permission error — keeps its own message, which already says what it is.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static string StoreCredentialFailureDetail(Exception ex) =>
+        ex is CryptographicException
+            ? DarlingSecrets.DescribeStoreCredentialDecryptFailure(DarlingManagedPostgres.CredentialFileName)
+            : ex.Message;
+
+    /// <summary>Exit codes <see cref="CheckSettingsAsync"/> returns — separate codes for a config problem, an
+    /// unreachable store, and a settings result that needs attention, so a caller can tell them apart (#4214's
+    /// ruling 7) instead of collapsing every failure into a bare non-zero.</summary>
+    public static class CheckSettingsExitCode
+    {
+        public const int Ok = 0;
+        public const int ConfigError = 1;
+        public const int StoreUnreachable = 2;
+        public const int StaleSettings = 3;
+    }
+
+    /// <summary>
+    /// <c>--check-settings</c> (#4214, part 1): prints the store host profile and a verdict per
+    /// sizing-relevant setting (text, or <c>--json</c> for automation). Exits
+    /// <see cref="CheckSettingsExitCode.StaleSettings"/> when any verdict is <c>stale-after-hardware-change</c>,
+    /// so an install/upgrade script can gate on it. A config parse error and an unreachable store each get
+    /// their own exit code, separate from the settings result — a parse error is not a sizing problem, and an
+    /// unreachable store never produced a settings result to judge.
+    /// </summary>
+    public static async Task<int> CheckSettingsAsync(
+        string? configPath, bool json, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return CheckSettingsExitCode.ConfigError;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return CheckSettingsExitCode.ConfigError;
+        }
+
+        var problems = config.Validate();
+        if (problems.Count > 0)
+        {
+            error.WriteLine("Configuration is invalid:");
+            foreach (var problem in problems)
+            {
+                error.WriteLine("  - " + problem);
+            }
+
+            return CheckSettingsExitCode.ConfigError;
+        }
+
+        /* A managed credential file that cannot be read or unprotected, and a connection string Npgsql cannot parse
+           (sslmode=NotARealSslMode, say), are problems with the setup: not a crash and not an unreachable store, so
+           they exit with the config code. */
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return CheckSettingsExitCode.ConfigError;
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
+                : "postgres.connectionString is empty, so there is no store to check.");
+            return CheckSettingsExitCode.StoreUnreachable;
+        }
+
+        await using var connection = new NpgsqlConnection(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not connect to the store: {ex.Message}");
+            return CheckSettingsExitCode.StoreUnreachable;
+        }
+
+        HostProfile profile;
+        try
+        {
+            profile = await DarlingStoreHostProfile.GatherAsync(postgres, connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not read the store host profile: {ex.Message}");
+            return CheckSettingsExitCode.StoreUnreachable;
+        }
+
+        output.WriteLine(json ? DarlingStoreHostProfile.FormatProfileJson(profile) : DarlingStoreHostProfile.FormatProfileText(profile));
+
+        /* #4215: every reader reads the stored rows, --check-settings included, which is why this
+           prints computed_at rather than a fresh recomputation the mcp/viewer roles could never produce
+           themselves (no file access, no pg_file_settings visibility). BYO stores never populate the table. */
+        if (postgres.Managed)
+        {
+            var stored = await DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync(connection, cancellationToken);
+            output.WriteLine();
+            output.WriteLine(json
+                ? DarlingStoreHostProfile.FormatStoredVerdictsJson(stored)
+                : DarlingStoreHostProfile.FormatStoredVerdictsText(stored));
+        }
+
+        return profile.Settings.Any(s => s.Verdict == HostSettingVerdict.StaleAfterHardwareChange)
+            ? CheckSettingsExitCode.StaleSettings
+            : CheckSettingsExitCode.Ok;
     }
 
     /// <summary>Formats one server's probe outcome as a PASS/FAIL line (pure — unit-testable).</summary>
@@ -1761,25 +2105,36 @@ public static class DarlingCliCommands
 
         /* Build the edit through the comment-preserving surgeon. */
         var newText = originalText;
+
+        /* #4743: replacing a live network block keeps every member the wizard does not ask about (the web
+           block's tls and oidc among them); the paths of what was kept are collected here and named after
+           the write, so a refusal below never claims anything was kept. */
+        var kept = new List<string>();
         if (store is not null)
         {
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "postgres",
-                DarlingNetworkConfigEditor.BuildStoreNetworkBlock(store.Value.Listen, store.Value.AllowFrom, store.Value.Role));
+                DarlingNetworkConfigEditor.BuildStoreNetworkBlock(store.Value.Listen, store.Value.AllowFrom, store.Value.Role),
+                DarlingNetworkConfigEditor.StoreNetworkOwnedKeys, out var keptStore);
+            kept.AddRange(keptStore.Select(key => $"postgres.network.{key}"));
         }
 
         if (mcp is not null)
         {
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "mcp",
-                DarlingNetworkConfigEditor.BuildMcpNetworkBlock(mcp.Value.Listen, mcp.Value.AllowFrom, mcp.Value.EncryptedToken, mcp.Value.PlainToken));
+                DarlingNetworkConfigEditor.BuildMcpNetworkBlock(mcp.Value.Listen, mcp.Value.AllowFrom, mcp.Value.EncryptedToken, mcp.Value.PlainToken),
+                DarlingNetworkConfigEditor.McpNetworkOwnedKeys, out var keptMcp);
+            kept.AddRange(keptMcp.Select(key => $"mcp.network.{key}"));
         }
 
         if (web is not null)
         {
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "web",
-                DarlingNetworkConfigEditor.BuildWebNetworkBlock(web.Value.Listen, web.Value.AllowFrom, web.Value.EncryptedToken, web.Value.PlainToken));
+                DarlingNetworkConfigEditor.BuildWebNetworkBlock(web.Value.Listen, web.Value.AllowFrom, web.Value.EncryptedToken, web.Value.PlainToken),
+                DarlingNetworkConfigEditor.WebNetworkOwnedKeys, out var keptWeb);
+            kept.AddRange(keptWeb.Select(key => $"web.network.{key}"));
         }
 
         /* Guard 1: the edited text must PARSE (comments/trailing-commas tolerated). */
@@ -1830,6 +2185,13 @@ public static class DarlingCliCommands
         if (!await WriteWithBackupAsync(resolvedPath, newText, output, error, cancellationToken))
         {
             return 1;
+        }
+
+        /* #4743: one line naming what the rebuilt blocks kept; nothing at all when nothing was kept. */
+        var keptLine = DarlingNetworkConfigEditor.FormatKeptLine(kept);
+        if (keptLine is not null)
+        {
+            output.WriteLine(keptLine);
         }
 
         /* The generated token plaintexts — STDOUT exactly once each; the save-this warning on STDERR so a
@@ -2791,9 +3153,15 @@ public static class DarlingCliCommands
         }
 
         /* The OWNER connection (the service's own superuser credential) — null until the worker's first run has
-           written the DPAPI-protected credential (i.e. the service has never initialized the store). */
-        var connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
-        if (connectionString is null)
+           written the DPAPI-protected credential (i.e. the service has never initialized the store). A credential
+           file that is there but cannot be read or unprotected is a setup problem, not a crash (#4744). */
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return 1;
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionString))
         {
             error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
             return 1;
@@ -2812,7 +3180,9 @@ public static class DarlingCliCommands
         object? returnedPort;
         try
         {
-            await using var connection = new NpgsqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
             returnedPort = await command.ExecuteScalarAsync(cancellationToken);
@@ -3290,10 +3660,10 @@ public static class DarlingCliCommands
         };
 
     /// <summary>
-    /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it,
-    /// and what it is called in the report. Kept as data so the list is readable as a policy rather than as
-    /// control flow — which file gets INTERACTIVE read is the only judgement in this verb, and it should be
-    /// visible at a glance.
+    /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it
+    /// (for a directory: walks through it, never reads it), and what it is called in the report. Kept as data so
+    /// the list is readable as a policy rather than as control flow — which file gets INTERACTIVE read is the
+    /// only judgement in this verb, and it should be visible at a glance.
     /// </summary>
     private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
 
@@ -3327,10 +3697,12 @@ public static class DarlingCliCommands
            will not load is a warning, not a stop: the config file itself is still hardened, and the store
            targets fall back to the documented default location. */
         string? dataDirectory = null;
+        string? keyDirectory = null;
         try
         {
             var config = DarlingConfig.Load(configPath);
             dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+            keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, resolvedConfig);
         }
         catch (Exception ex)
         {
@@ -3345,8 +3717,8 @@ public static class DarlingCliCommands
         var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
         var targets = new List<HardenTarget>
         {
-            /* INTERACTIVE read, alone in this list: the Viewer (ViewerSettings.ResolveConfigPath) and the CLI
-               verbs run as the operator and must still read the live config. Nothing reads a backup (#1769). */
+            /* INTERACTIVE read, the only file in this list that keeps it: the Viewer (ViewerSettings.ResolveConfigPath)
+               and the CLI verbs run as the operator and must still read the live config. Nothing reads a backup (#1769). */
             new(resolvedConfig, AllowInteractive: true, IsDirectory: false, "the live config"),
         };
 
@@ -3357,9 +3729,32 @@ public static class DarlingCliCommands
 
         if (!string.IsNullOrEmpty(storeRoot))
         {
-            targets.Add(new(storeRoot, AllowInteractive: false, IsDirectory: true, "the store directory"));
+            /* INTERACTIVE traverse, never read: the operator walks through it to the config, never to the credential
+               blobs in it. Mirrors DarlingManagedPostgres' own call. */
+            targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
             targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), false, false, "the admin credential"));
+            targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
+            /* #4253/#4280 Low 2: the last major upgrade's pre-upgrade postgresql.auto.conf, which File.Copy does
+               not ACL on its own. Kept until the NEXT major upgrade replaces it (DarlingStoreUpgrade.CarryAutoConfAsync). */
+            targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeAutoConfFileName), false, false, "the pre-upgrade postgresql.auto.conf"));
+            /* The same for the last major upgrade's pre-upgrade postgresql.conf, which carries the operator's own
+               lines below the darling-managed.conf include (DarlingStoreUpgrade.CarryConfAfterSwapAsync). */
+            targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeConfFileName), false, false, "the pre-upgrade postgresql.conf"));
+        }
+
+        /* #4004: a bring-your-own service keeps its log-hash key in darling-keys beside darling.json, a directory the
+           service creates with no INTERACTIVE access at all, so it gets none here either. Only when darling-keys IS
+           this install's key directory (#4004 review): on a managed install it never exists legitimately, and the
+           config's folder can let any local user create one, as a junction to anything. */
+        var configDirectory = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
+        if (keyDirectory is not null
+            && string.Equals(
+                Path.GetFullPath(keyDirectory), Path.Combine(configDirectory, DarlingLogHashKeyFile.BringYourOwnDirectoryName),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            targets.Add(new(keyDirectory, AllowInteractive: false, IsDirectory: true, "the log-hash key directory"));
+            targets.Add(new(Path.Combine(keyDirectory, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
         }
 
         /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
@@ -3386,6 +3781,7 @@ public static class DarlingCliCommands
 
         var exposed = 0;
         var touched = 0;
+        var refused = 0;
 
         foreach (var target in targets)
         {
@@ -3397,13 +3793,33 @@ public static class DarlingCliCommands
 
             touched++;
 
+            /* #4004 review: an ACL set by path follows every junction and symbolic link on it, so one planted in the
+               config's folder would have this elevated run rewrite whatever it points at. */
+            if (ReparsePointOnPath(configDirectory, target.Path) is { } link)
+            {
+                error.WriteLine($"  REFUSED  {target.Path} ({target.What}): {link}, so nothing was changed through it. Remove it and re-run.");
+                refused++;
+                continue;
+            }
+
             try
             {
-                if (target.IsDirectory)
+                if (IsBelow(configDirectory, target.Path))
                 {
-                    /* Traverse, not read: the operator's Viewer needs to walk to the config, never to read the
-                       credential blobs sitting in here. Mirrors DarlingManagedPostgres' own call. */
-                    DarlingFileSecurity.HardenDirectory(target.Path, allowInteractiveTraverse: true);
+                    /* Through a handle to exactly the checked object, so a link swapped in after the check above is
+                       not followed either. A directory's AllowInteractive is traverse, never read. */
+                    if (DarlingFileSecurity.HardenWithoutFollowingLinks(target.Path, target.IsDirectory, target.AllowInteractive, configDirectory) is { } swapped)
+                    {
+                        error.WriteLine($"  REFUSED  {target.Path} ({target.What}): {swapped}, so nothing was changed through it. Remove it and re-run.");
+                        refused++;
+                        continue;
+                    }
+                }
+                else if (target.IsDirectory)
+                {
+                    /* A directory's AllowInteractive is traverse, never read (the store directory's, above); a
+                       directory the service keeps from the operator entirely (darling-keys) keeps even that. */
+                    DarlingFileSecurity.HardenDirectory(target.Path, allowInteractiveTraverse: target.AllowInteractive);
                 }
                 else
                 {
@@ -3451,6 +3867,11 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        if (refused > 0)
+        {
+            error.WriteLine($"{refused} of {touched} item(s) were REFUSED: a junction or symbolic link is on the path, or the file has another name (a hard link), and nothing is changed through one.");
+        }
+
         if (exposed > 0)
         {
             error.WriteLine($"{exposed} of {touched} item(s) are STILL readable by ordinary users.");
@@ -3459,9 +3880,61 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        if (refused > 0)
+        {
+            return 1;
+        }
+
         output.WriteLine($"All {touched} item(s) secured. The service re-asserts these ACLs at every start.");
         return 0;
     }
+
+    /// <summary>
+    /// Why <paramref name="target"/> must not be hardened by path: the first junction or symbolic link (any reparse
+    /// point) on its path below <paramref name="configDirectory"/>, the target itself included, or a component that
+    /// could not be checked for one; null when there is none (#4004 review). An ACL set by path
+    /// follows every one of them, and the config's folder can let any local user create one, so
+    /// <see cref="HardenFiles"/> refuses such a target rather than rewrite whatever it points at. A target outside that
+    /// folder (the store's) is checked itself.
+    /// </summary>
+    internal static string? ReparsePointOnPath(string configDirectory, string target)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(configDirectory));
+        var path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(target));
+        var inside = IsBelow(root, path);
+
+        for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+        {
+            if (inside && current.Length <= root.Length)
+            {
+                break;
+            }
+
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return $"{current} is a junction or symbolic link";
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* Fail closed: a path that cannot be checked is not known to be free of one. */
+                return $"{current} could not be checked for a junction or symbolic link ({ex.Message})";
+            }
+
+            if (!inside)
+            {
+                break;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether <paramref name="path"/> is strictly below <paramref name="directory"/>, a volume root included
+    /// (<see cref="DarlingPathContainment.IsStrictlyBelow"/>, #4004 review, round 3).</summary>
+    internal static bool IsBelow(string directory, string path) => DarlingPathContainment.IsStrictlyBelow(directory, path);
 
     /// <summary>Directory enumeration that treats an unreadable or missing folder as empty — this verb runs
     /// precisely when permissions are broken, so a throw here would defeat its purpose.</summary>
@@ -3867,7 +4340,7 @@ public static class DarlingCliCommands
         }
         catch (Exception ex)
         {
-            return (null, null, $"the stored store credential could not be read ({ex.Message})");
+            return (null, null, $"the stored store credential could not be read ({StoreCredentialFailureDetail(ex)})");
         }
 
         if (connectionString is null)
@@ -3881,7 +4354,9 @@ public static class DarlingCliCommands
 
         try
         {
-            await using var connection = new NpgsqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
             await connection.OpenAsync(budget.Token);
             await using var command = new NpgsqlCommand(ReadEndpointTogglesSql, connection)
             {
@@ -4013,9 +4488,11 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var connectionString = postgres.Managed
-            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
-            : postgres.ConnectionString;
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return 1;
+        }
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -4025,7 +4502,9 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        await using var connection = new NpgsqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
         try
         {
             await connection.OpenAsync(cancellationToken);
@@ -4398,9 +4877,11 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var connectionString = postgres.Managed
-            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
-            : postgres.ConnectionString;
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return 1;
+        }
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -4410,7 +4891,9 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        await using var connection = new NpgsqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
         try
         {
             await connection.OpenAsync(cancellationToken);
@@ -4702,9 +5185,11 @@ public static class DarlingCliCommands
     /// Renders the <c>add_servers</c> result JSON as operator lines plus an exit code. PURE, so the formatting and
     /// the exit-code policy pin without a store — the same split <see cref="FormatProbeLine"/> uses.
     ///
-    /// <para>Exit 0 requires that something landed and nothing failed. A batch of pure duplicates exits 0: re-running
-    /// the same file is idempotent, not an error. Nothing at all landed (an empty array, or every entry rejected)
-    /// exits 1, because a verb that changed nothing must not report success to a deployment script.</para>
+    /// <para>Exit 0 requires that something landed and that nothing failed and nothing collided. A batch of pure
+    /// duplicates exits 0: re-running the same file is idempotent, not an error. A collided server (#4789) was not
+    /// added and cannot be by retrying, so it exits 1 exactly as a failed one does, even beside servers that
+    /// landed. Nothing at all landed (an empty array, or every entry rejected) exits 1, because a verb that changed
+    /// nothing must not report success to a deployment script.</para>
     /// </summary>
     internal static (IReadOnlyList<string> Lines, int ExitCode) FormatAddServerOutcome(string resultJson)
     {
@@ -4732,6 +5217,8 @@ public static class DarlingCliCommands
                 {
                     "added" => "ADDED",
                     "duplicate" => "SKIP",
+                    "collides" => "COLLIDES",
+                    "not_saved" => "NOT SAVED",
                     "connection_failed" => "FAIL",
                     "invalid" => "INVALID",
                     _ => status.ToUpperInvariant(),
@@ -4743,14 +5230,19 @@ public static class DarlingCliCommands
 
             var added = root.TryGetProperty("added", out var a) ? a.GetInt32() : 0;
             var skipped = root.TryGetProperty("skipped", out var k) ? k.GetInt32() : 0;
+            var collided = root.TryGetProperty("collided", out var c) ? c.GetInt32() : 0;
             var failed = root.TryGetProperty("failed", out var f) ? f.GetInt32() : 0;
 
+            /* Collided is its own number (#4789): the four counters sum to the servers requested, and a collided
+               server was NOT added — it needs a different identity, not a retry — so folding it into another
+               number, or leaving it out, would make the totals line read as a cleaner run than it was. */
             lines.Add(string.Empty);
             lines.Add(string.Format(
                 CultureInfo.InvariantCulture,
-                "{0} added, {1} already registered, {2} failed.",
+                "{0} added, {1} already registered, {2} collided, {3} failed.",
                 added,
                 skipped,
+                collided,
                 failed));
 
             if (added > 0)
@@ -4760,16 +5252,19 @@ public static class DarlingCliCommands
                 lines.Add("The running service picks these up on its next config poll; no restart is needed.");
             }
 
-            return (lines, failed > 0 || (added == 0 && skipped == 0) ? 1 : 0);
+            return (lines, failed > 0 || collided > 0 || (added == 0 && skipped == 0) ? 1 : 0);
         }
         catch (JsonException)
         {
-            /* Not every failure arrives as JSON. AddServersAsync's catch-all returns McpHelpers.FormatError,
-               which is PLAIN TEXT ("Error during add_servers: ..."), so a genuine store failure that happens
-               AFTER the request parsed — a dropped connection mid-batch, a constraint violation — lands here.
-               That text IS the message the operator needs; wrapping it in "could not parse" buries the one line
-               that explains the failure, precisely when the verb is being used as a deployment gate. Only
-               something that looked like JSON and was not gets the parse wrapper. */
+            /* Not every failure arrives as JSON. Until #3653 Q11, AddServersAsync's catch-all returned
+               McpHelpers.FormatError as PLAIN TEXT ("Error during add_servers: ..."), so a genuine store failure
+               that happened AFTER the request parsed — a dropped connection mid-batch, a constraint violation —
+               landed here. FormatError is now the {status:"error", message} envelope, which the whole-payload
+               branch above renders as "[ERROR] Error during add_servers: ..." with the same exit code; this arm
+               keeps the plain-text case honest for any non-JSON text that still reaches it. That text IS the
+               message the operator needs; wrapping it in "could not parse" buries the one line that explains the
+               failure, precisely when the verb is being used as a deployment gate. Only something that looked
+               like JSON and was not gets the parse wrapper. */
             var text = resultJson?.Trim() ?? string.Empty;
             lines.Add(text.StartsWith('{') || text.StartsWith('[')
                 ? $"  Could not parse the result: {text}"
@@ -4817,39 +5312,32 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        string? connectionString;
-        if (postgres.Managed)
+        /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no
+           such guard, which is why this is scoped to the managed store rather than the whole verb — a Linux
+           host pointed at its own Postgres can register servers. */
+        if (postgres.Managed && !OperatingSystem.IsWindows())
         {
-            /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no
-               such guard, which is why this is scoped to the managed branch rather than the whole verb — a Linux
-               host pointed at its own Postgres can register servers. */
-            if (!OperatingSystem.IsWindows())
-            {
-                error.WriteLine("A managed Postgres store keeps its credential in DPAPI, so --add-server needs Windows. "
-                    + "A bring-your-own store (postgres.connectionString) works on any platform.");
-                return 1;
-            }
-
-            connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
-            if (string.IsNullOrWhiteSpace(connectionString))
-            {
-                /* Emitted HERE, inside the branch the guard above proved is Windows, rather than from a shared
-                   check below keyed on postgres.Managed. The sibling verbs can write it below because they carry
-                   [SupportedOSPlatform("windows")] on the whole method; this one deliberately does not, and a
-                   bool is not something the platform analyzer can correlate with an earlier OS guard — so the
-                   call has to sit where Windows is provable rather than where it merely happens to hold. */
-                error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
-                return 1;
-            }
+            error.WriteLine("A managed Postgres store keeps its credential in DPAPI, so --add-server needs Windows. "
+                + "A bring-your-own store (postgres.connectionString) works on any platform.");
+            return 1;
         }
-        else
+
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
         {
-            connectionString = postgres.ConnectionString;
-            if (string.IsNullOrWhiteSpace(connectionString))
-            {
-                error.WriteLine("postgres.connectionString is empty, so there is no store to register a server in.");
-                return 1;
-            }
+            error.WriteLine(unusable);
+            return 1;
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            /* The missing-credential message is written where Windows is provable in the condition itself. The
+               sibling verbs can write it unconditionally because they carry [SupportedOSPlatform("windows")] on the
+               whole method; this one deliberately does not, and a bool is not something the platform analyzer can
+               correlate with the OS guard above. */
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
+                : "postgres.connectionString is empty, so there is no store to register a server in.");
+            return 1;
         }
 
         output.WriteLine();
@@ -4859,7 +5347,9 @@ public static class DarlingCliCommands
         string resultJson;
         try
         {
-            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            await using var dataSource = NpgsqlDataSource.Create(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
             resultJson = await DarlingMcpServerAdminTools.AddServers(dataSource, json);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -4875,6 +5365,800 @@ public static class DarlingCliCommands
         }
 
         return exitCode;
+    }
+
+    /* ───────────────────── --enable-collector / --disable-collector (#3752) ───────────────────── */
+
+    /// <summary>
+    /// What the collector toggle verbs print when their arguments do not parse or name no known collector — to
+    /// STDOUT, per the [#2097] lesson <see cref="AddServerUsageText"/> follows: a verb that explains itself only
+    /// on STDERR reads as hung in the ISE and some integrated terminals. The one-line refusal itself still goes
+    /// to STDERR, where a script's error stream expects it. Ends with the collector list, because the commonest
+    /// way to arrive here is a misspelled name and the fix is to see the real ones.
+    /// </summary>
+    public static string CollectorToggleUsageText() =>
+        "Usage:" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --enable-collector <collector> [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --disable-collector <collector> [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
+        Environment.NewLine +
+        "<collector> is a collector name as collection health reports it (long_query_completions, wait_stats, ...)." + Environment.NewLine +
+        "Without --server the change is FLEET-WIDE (the schedule row with no server); --server <server> writes that" + Environment.NewLine +
+        "server's own row instead (its display name or storage name, as the Viewer and the MCP tools show it)." + Environment.NewLine +
+        "Only the enabled flag is written; a frequency or retention override already on the row is kept." + Environment.NewLine +
+        Environment.NewLine +
+        "Known collectors (\"ships OFF\" = opt-in, like long_query_completions, whose enabling creates its Extended Events session on the monitored servers and whose disabling drops it):" + Environment.NewLine +
+        KnownCollectorsText();
+
+    /// <summary>
+    /// The collector names the verbs accept — <see cref="CollectorScheduleDefaults.All"/>'s keys, sorted, two
+    /// spaces in, wrapped so a 60-name list is a paragraph rather than a screen. The opt-in ones are tagged,
+    /// because they are the reason the verb exists. Pure, so the listing pins.
+    /// </summary>
+    internal static string KnownCollectorsText()
+    {
+        var names = CollectorScheduleDefaults.All
+            .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => kv.Value.DefaultEnabled ? kv.Key : kv.Key + " (ships OFF)")
+            .ToList();
+
+        var lines = new List<string>();
+        var current = new System.Text.StringBuilder();
+        foreach (var name in names)
+        {
+            if (current.Length > 0 && current.Length + name.Length + 2 > 100)
+            {
+                lines.Add("  " + current.ToString().TrimEnd(',', ' '));
+                current.Clear();
+            }
+
+            current.Append(name).Append(", ");
+        }
+
+        if (current.Length > 0)
+        {
+            lines.Add("  " + current.ToString().TrimEnd(',', ' '));
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>
+    /// The dictionary's OWN spelling of a collector name the operator typed, or null when no collector matches.
+    /// <see cref="CollectorScheduleDefaults.All"/> looks names up case-insensitively and so does the runner's
+    /// <c>StoreConfigProvider.ResolveSchedule</c> — but the store's two partial unique indexes on
+    /// <c>config_collector_schedules</c> compare <c>collector_name</c> exactly, so <c>Wait_Stats</c> and
+    /// <c>wait_stats</c> would be TWO fleet rows and the resolver's first-match would pick one by row order.
+    /// Writing the canonical key makes the CLI's row the same row the Viewer writes. Pure.
+    /// </summary>
+    internal static string? CanonicalCollectorName(string? typed)
+    {
+        if (string.IsNullOrWhiteSpace(typed))
+        {
+            return null;
+        }
+
+        var wanted = typed.Trim();
+        foreach (var key in CollectorScheduleDefaults.All.Keys)
+        {
+            if (string.Equals(key, wanted, StringComparison.OrdinalIgnoreCase))
+            {
+                return key;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Parses the toggle verbs' trailing arguments STRICTLY — the #1581 posture
+    /// <see cref="TryParseExportViewerConfigArgs"/> takes: never guess. Exactly one bare argument (the collector
+    /// name); <c>--server &lt;name&gt;</c> and <c>--config &lt;path&gt;</c> each take a value; anything else
+    /// starting with '-' is refused rather than taken as a name, because a typo'd flag that became a collector
+    /// name would be refused one step later with a LESS useful message, and a bare <c>--server</c> with no value
+    /// would otherwise swallow the next flag as a server name. Pure so the grammar pins. Returns false with a
+    /// ready-to-print <paramref name="errorMessage"/>.
+    /// </summary>
+    /// <param name="verb">The verb as typed (for the messages).</param>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static bool TryParseCollectorToggleArgs(
+        string verb, string[] rest, out string? collectorName, out string? serverName, out string? configPath, out string? errorMessage)
+    {
+        collectorName = null;
+        serverName = null;
+        configPath = null;
+        errorMessage = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--server", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--server needs a server name: {verb} <collector> --server <display name or storage name>";
+                    return false;
+                }
+
+                serverName = rest[++i];
+                continue;
+            }
+
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--config needs a path: {verb} <collector> --config <path to darling.json>";
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                errorMessage = $"Unknown option for {verb}: {arg}";
+                return false;
+            }
+
+            if (collectorName is not null)
+            {
+                errorMessage = $"{verb} takes ONE collector name; got '{collectorName}' and '{arg}'.";
+                return false;
+            }
+
+            collectorName = arg;
+        }
+
+        if (string.IsNullOrWhiteSpace(collectorName))
+        {
+            errorMessage = $"{verb} needs a collector name.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The store command the verb stands in for: the <c>enable_collector</c> / <c>disable_collector</c> row the
+    /// command plane (<c>config.config_command</c>, #1262 Stage 2) carries for the same request, minus the queue.
+    /// <c>CommandId</c> 0 because no row exists; <c>RequestedBy</c> names the surface. Internal so a pin can hold
+    /// the verb's command to the shape the executor's own tests feed <see cref="DarlingCommandExecutor.ResolvePlan"/>.
+    /// </summary>
+    internal static ClaimedCommand BuildCollectorToggleCommand(bool enable, string collectorName, int? serverId) =>
+        new(
+            CommandId: 0,
+            CommandType: enable ? "enable_collector" : "disable_collector",
+            TargetServerId: serverId,
+            ArgsJson: JsonSerializer.Serialize(new { collector_name = collectorName }),
+            RequestedBy: "cli");
+
+    /// <summary>
+    /// The plan the verb executes — <see cref="DarlingCommandExecutor.ResolvePlan"/> over
+    /// <see cref="BuildCollectorToggleCommand"/>, nothing else. This is the whole of the ONE-WRITE-PATH claim:
+    /// the SQL, its parameters, the success status and the "unknown collector" refusal are the executor's, and a
+    /// test holds this equal to the executor's plan for the same inputs. Pure.
+    /// </summary>
+    internal static CommandPlan PlanCollectorToggle(bool enable, string collectorName, int? serverId) =>
+        DarlingCommandExecutor.ResolvePlan(BuildCollectorToggleCommand(enable, collectorName, serverId));
+
+    /// <summary>
+    /// The read-back after the write: every override row for the collector, both scopes, each per-server row
+    /// labelled from the registry (display name, else storage name; a server_id with no registry row — a server
+    /// that has never connected — prints as its id). Matched on <c>lower()</c> because that is how the runner's
+    /// <c>ResolveSchedule</c> matches, so what prints is what the service will resolve, including any mixed-case
+    /// row an older writer left. Schema-qualified like the executor's write, so it does not depend on the
+    /// connection's search_path. $1 collector_name. Internal const so Darling.Tests can pin the dialect.
+    /// </summary>
+    internal const string CollectorScheduleReadbackSql = @"
+SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days, cs.enabled, cs.databases,
+       COALESCE(s.display_name, s.server_name) AS server_label
+FROM config.config_collector_schedules cs
+LEFT JOIN collect.servers s ON s.server_id = cs.server_id
+WHERE lower(cs.collector_name) = lower($1)
+ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
+
+    /// <summary>One <c>config_collector_schedules</c> row as the verb reads it back: the service's
+    /// <see cref="ScheduleOverride"/> columns plus the registry label the operator knows the server by.</summary>
+    internal sealed record CollectorScheduleReadbackRow(
+        int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled,
+        IReadOnlyList<string>? Databases, string? ServerLabel);
+
+    internal static async Task<List<CollectorScheduleReadbackRow>> ReadCollectorScheduleRowsAsync(
+        NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
+    {
+        var rows = new List<CollectorScheduleReadbackRow>();
+        /* The deadline is written ON the construction, as every CLI store command in this file writes it: the
+           #2874 straggler census counts this file's sites and reads the initializer from the construction span,
+           so a deadline assigned a statement later would be a site it cannot certify. */
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(CollectorScheduleReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new CollectorScheduleReadbackRow(
+                reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                reader.GetBoolean(4),
+                /* V125 (#3477): NULL and an empty array are different readings — keep both, as the service's
+                   ReadScheduleOverridesAsync does, so the printout says which one the row carries. */
+                reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Renders the read-back as operator lines: the code default first (so "(default)" in a row has a number
+    /// beside it), then one line per override row — scope, enabled, frequency, retention, and the database scope
+    /// when the row carries one. PURE, so the layout pins without a store (the <see cref="FormatProbeLine"/> split).
+    /// </summary>
+    internal static IReadOnlyList<string> FormatCollectorScheduleRows(string collectorName, IReadOnlyList<CollectorScheduleReadbackRow> rows)
+    {
+        var lines = new List<string>();
+        var entry = CollectorScheduleDefaults.All.TryGetValue(collectorName, out var e) ? e : null;
+        var defaultText = entry is null
+            ? "no code default"
+            : string.Format(
+                CultureInfo.InvariantCulture,
+                "code default: {0}, {1}-day retention, ships {2}",
+                DescribeFrequency(entry.FrequencyMinutes),
+                entry.RetentionDays,
+                entry.DefaultEnabled ? "ON" : "OFF");
+        lines.Add($"Schedule override rows in the store for {collectorName} ({defaultText}):");
+
+        if (rows.Count == 0)
+        {
+            lines.Add("  (none — the code default applies everywhere)");
+            return lines;
+        }
+
+        foreach (var row in rows)
+        {
+            var scope = row.ServerId is null
+                ? "fleet-wide"
+                : string.IsNullOrEmpty(row.ServerLabel)
+                    ? string.Format(CultureInfo.InvariantCulture, "server_id {0} (not in the servers registry)", row.ServerId)
+                    : string.Format(CultureInfo.InvariantCulture, "{0} (server_id {1})", row.ServerLabel, row.ServerId);
+            var frequency = row.FrequencyMinutes is int f ? DescribeFrequency(f) : "(default)";
+            var retention = row.RetentionDays is int r ? string.Format(CultureInfo.InvariantCulture, "{0} days", r) : "(default)";
+            var line = string.Format(
+                CultureInfo.InvariantCulture,
+                "  {0}: enabled={1}  frequency={2}  retention={3}",
+                scope, row.Enabled ? "true" : "false", frequency, retention);
+            if (row.Databases is not null)
+            {
+                line += row.Databases.Count == 0
+                    ? "  databases=[] (explicit: no scope at this level)"
+                    : "  databases=[" + string.Join(", ", row.Databases) + "]";
+            }
+
+            lines.Add(line);
+        }
+
+        if (rows.Any(r => r.ServerId is not null) && rows.Any(r => r.ServerId is null))
+        {
+            lines.Add("  (a server's own row wins over the fleet-wide row for that server, column by column)");
+        }
+
+        return lines;
+    }
+
+    private static string DescribeFrequency(int minutes) =>
+        minutes == 0 ? "on load only" : string.Format(CultureInfo.InvariantCulture, "every {0} min", minutes);
+
+    /// <summary>Exit codes <see cref="ToggleCollectorAsync"/> returns for <c>--enable-collector</c> and
+    /// <c>--disable-collector</c> (#4744): one code for a usage or configuration problem and another for a store that
+    /// cannot be reached or refuses the change, so a script can tell them apart instead of reading every failure as a
+    /// bare 1. The same idea as <see cref="CheckSettingsExitCode"/>, with the two failure kinds these verbs have.</summary>
+    public static class CollectorToggleExitCode
+    {
+        /// <summary>The row was written and read back.</summary>
+        public const int Success = 0;
+
+        /// <summary>Bad arguments, a config that is missing or invalid, a connection string that cannot be used, a
+        /// managed store's credential that is not stored or cannot be read, an unknown collector, or a
+        /// <c>--server</c> that names no server or more than one.</summary>
+        public const int UsageOrConfig = 1;
+
+        /// <summary>The store cannot be reached, or it refuses the write (or the read-back after it).</summary>
+        public const int StoreUnavailable = 2;
+    }
+
+    /// <summary>
+    /// <c>--enable-collector</c> / <c>--disable-collector</c> (#3752): flips one collector's <c>enabled</c> flag
+    /// in <c>config.config_collector_schedules</c> — fleet-wide, or for one server with <c>--server</c> — and
+    /// prints the rows read back from the store.
+    ///
+    /// <para><b>Why this exists.</b> <c>long_query_completions</c> is the one collector that ships OFF
+    /// (<see cref="CollectorScheduleDefaults"/>, #1496 — a completion trace is not free), and enabling it is
+    /// what creates its Extended Events session on the monitored servers. The only writer of that flag was the
+    /// WPF Viewer's Collector Schedules window: an interactive desktop plus the <c>admin</c> role, on a product
+    /// whose design point is a headless service. The MCP surface has config writers but none for schedules, and
+    /// adding one there is a product decision this verb does not take.</para>
+    ///
+    /// <para><b>One write path.</b> The verb owns no SQL. It builds the same <see cref="ClaimedCommand"/> the
+    /// store's command plane carries for <c>enable_collector</c>, asks <see cref="DarlingCommandExecutor.ResolvePlan"/>
+    /// for the plan — which is where "unknown collector" is refused and where the two ON CONFLICT arbiters live —
+    /// and runs that plan through the executor's own <see cref="DarlingCommandExecutor.ExecuteStoreWriteAsync(NpgsqlDataSource, CommandPlan, CancellationToken)"/>.
+    /// The plan touches ONLY <c>enabled</c>, so a frequency/retention override already on the row survives, and
+    /// the V17 <c>trg_bump_collector_schedules</c> trigger bumps <c>config_version</c> so the running service
+    /// re-resolves schedules within one sweep. Executed in-process rather than enqueued, because a queued command
+    /// needs the service RUNNING to be claimed, and an operator flipping a collector before the first start — or
+    /// while the service is stopped for exactly this — would wait forever on a row nothing reads.</para>
+    ///
+    /// <para><b>Scope.</b> No <c>--server</c> = the fleet-wide row (<c>server_id</c> NULL), the executor's own
+    /// default when a command carries no target. <c>--server</c> resolves a display name or storage name against
+    /// the enabled <c>servers</c> registry the MCP read tools resolve against, by the write rule (exact case on the
+    /// storage name, where the read tools also take it in another letter case),
+    /// <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/> (#3541 A14): a storage name that matches one
+    /// registration exactly (case-sensitive) picks it, otherwise every exact match counts, a
+    /// partial match is honored only when unique, and anything ambiguous is refused with the candidates named —
+    /// a first-wins partial is a coin an operator did not know was being flipped.</para>
+    ///
+    /// <para><b>Platform.</b> The <c>--add-server</c> posture: no Windows guard on the verb, because Windows is
+    /// needed only for a MANAGED store's DPAPI credential, which is checked here; a Linux host on bring-your-own
+    /// Postgres can toggle a collector. Exit codes are <see cref="CollectorToggleExitCode"/>'s (#4744): 0 when the row was written
+    /// and read back; 1 on an argument, config, credential or server-resolution problem; 2 when the store cannot be
+    /// reached or refuses the change (a failure reading the row back after the write included), so a script can tell
+    /// its own mistake from a store that is down.</para>
+    /// </summary>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static async Task<int> ToggleCollectorAsync(
+        bool enable, string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var verb = enable ? "--enable-collector" : "--disable-collector";
+
+        if (!TryParseCollectorToggleArgs(verb, rest, out var typedName, out var serverName, out var configPath, out var argError))
+        {
+            error.WriteLine(argError);
+            output.WriteLine(CollectorToggleUsageText());
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        /* Validate the name BEFORE touching config or the store, through the executor itself: a fleet-scoped plan
+           for the typed name either resolves (StoreWrite) or fails with the executor's own reason, and a typo
+           never opens a connection. The canonical spelling is what gets written (see CanonicalCollectorName). */
+        var collectorName = CanonicalCollectorName(typedName) ?? typedName!;
+        var preflight = PlanCollectorToggle(enable, collectorName, serverId: null);
+        if (preflight.Kind != CommandKind.StoreWrite)
+        {
+            error.WriteLine(preflight.FailReason ?? $"{verb}: the executor refused the request.");
+            output.WriteLine(CollectorToggleUsageText());
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no such
+           guard, which is why this is scoped to the managed store rather than the whole verb — the --add-server
+           shape, for the --add-server reason. */
+        if (postgres.Managed && !OperatingSystem.IsWindows())
+        {
+            error.WriteLine($"A managed Postgres store keeps its credential in DPAPI, so {verb} needs Windows. "
+                + "A bring-your-own store (postgres.connectionString) works on any platform.");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        /* Building the store connection is where a string Npgsql cannot parse (sslmode=NotARealSslMode, say) and a
+           managed credential file that cannot be read or unprotected both throw. That is a problem with the
+           setting, not a crash: say so and exit with the usage-or-config code (#4744). The worker's own
+           normalization goes with it: a bring-your-own string usually omits the collect/config search path, and the
+           registry read below (--server) names the servers table bare, as every MCP read does. */
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable, ensureStoreSearchPath: true))
+        {
+            error.WriteLine(unusable);
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            /* Written where Windows is provable in the condition itself, for the reason --add-server documents: a
+               bool is not something the platform analyzer can correlate with an earlier OS guard. */
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
+                : "postgres.connectionString is empty, so there is no store to write a schedule to.");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+
+        output.WriteLine();
+        output.WriteLine($"PerformanceMonitor Darling — {(enable ? "enable" : "disable")} a collector ({verb})");
+        output.WriteLine();
+
+        int? serverId = null;
+        var scopeLabel = "fleet-wide";
+        if (serverName is not null)
+        {
+            List<DarlingServerResolver.RegisteredServer> servers;
+            try
+            {
+                servers = await DarlingServerResolver.LoadEnabledAsync(dataSource, CancellationToken.None);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"Could not read the servers registry from the store: {ex.Message}");
+                return CollectorToggleExitCode.StoreUnavailable;
+            }
+
+            var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName);
+            if (target.Candidates.Count == 0)
+            {
+                /* The read resolver's miss message: the local listing (a typo is the commonest miss) plus the
+                   #2339 peer disclosure when another store declares coverage of the name. The resolver hands it
+                   back as the `invalid` envelope since #3739; stderr is TEXT, so the sentence is read out of it. */
+                var (_, missMessage) = DarlingServerResolver.ResolveOrError(servers, serverName);
+                error.WriteLine(missMessage is null ? $"Could not resolve server '{serverName}'." : McpHelpers.ErrorMessageOf(missMessage));
+                error.WriteLine("Nothing was changed.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            }
+
+            if (target.Candidates.Count > 1)
+            {
+                error.WriteLine(
+                    $"'{serverName}' matches {target.Candidates.Count} servers " +
+                    $"({(target.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); nothing was changed. " +
+                    "Re-run with ONE candidate's full storage name:");
+                foreach (var candidate in target.Candidates)
+                {
+                    error.WriteLine(string.IsNullOrEmpty(candidate.DisplayName) || candidate.DisplayName == candidate.ServerName
+                        ? $"  {candidate.ServerName}"
+                        : $"  {candidate.DisplayName} ({candidate.ServerName})");
+                }
+
+                return CollectorToggleExitCode.UsageOrConfig;
+            }
+
+            var resolved = target.Candidates[0];
+            serverId = resolved.ServerId;
+            scopeLabel = string.IsNullOrEmpty(resolved.DisplayName) || resolved.DisplayName == resolved.ServerName
+                ? resolved.ServerName
+                : $"{resolved.DisplayName} ({resolved.ServerName})";
+        }
+
+        /* The executor's plan for the FINAL scope — the same call the pre-flight made, now with the server
+           resolved — executed through the executor's own store-write path. */
+        var plan = PlanCollectorToggle(enable, collectorName, serverId);
+        try
+        {
+            await DarlingCommandExecutor.ExecuteStoreWriteAsync(dataSource, plan, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not update the control-plane store: {ex.Message}");
+            return CollectorToggleExitCode.StoreUnavailable;
+        }
+
+        output.WriteLine($"  [{(enable ? "ENABLED" : "DISABLED")}] {collectorName} — {scopeLabel} ({plan.SuccessStatus}).");
+        output.WriteLine();
+
+        /* Read back rather than echo: the rows are what the service will resolve, and printing the input would
+           say nothing about a frequency override the write preserved or a per-server row the fleet row does not
+           govern. A failure HERE is reported as what it is — the write is already committed. */
+        List<CollectorScheduleReadbackRow> rows;
+        try
+        {
+            rows = await ReadCollectorScheduleRowsAsync(dataSource, collectorName, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"The schedule write succeeded, but reading the rows back failed: {ex.Message}");
+            return CollectorToggleExitCode.StoreUnavailable;
+        }
+
+        foreach (var line in FormatCollectorScheduleRows(collectorName, rows))
+        {
+            output.WriteLine(line);
+        }
+
+        output.WriteLine();
+        /* The schedule write bumps config_version through trg_bump_collector_schedules, which the worker polls
+           every sweep — so say the restart is unnecessary rather than leaving them to wonder (the --add-server line). */
+        output.WriteLine("The running service re-resolves its schedules on its next config poll; no restart is needed.");
+        return CollectorToggleExitCode.Success;
+    }
+
+    /// <summary>Exit codes <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> returns for
+    /// <c>--drop-xe-sessions</c> (#4732), in the two-failure-kind shape <see cref="CollectorToggleExitCode"/> uses, so a script
+    /// can tell its own mistake from a server that is down.</summary>
+    public static class DropXeSessionsExitCode
+    {
+        /// <summary>Every session found was dropped (listed, with <c>--dry-run</c>), none was there, or <c>--print-sql</c> printed.</summary>
+        public const int Success = 0;
+
+        /// <summary>Bad arguments, a configuration that is missing or invalid, a store setting that cannot be used, or a server name
+        /// that matches no server (the message names <c>--print-sql</c>) or more than one.</summary>
+        public const int UsageOrConfig = 1;
+
+        /// <summary>The server cannot be connected to, cannot be searched (all of it, or one database of it), or refused a DROP.</summary>
+        public const int TargetUnavailable = 2;
+    }
+
+    /// <summary>The grammar <c>--drop-xe-sessions</c> prints when its arguments are wrong. Pure ASCII.</summary>
+    public static string DropXeSessionsUsageText() =>
+        "Usage:" + Environment.NewLine +
+        "  --drop-xe-sessions <server-name> [--dry-run] [--config <path>]" + Environment.NewLine +
+        "      Connect to the named server (resolved from the configuration exactly as --validate-config resolves it) and drop the" + Environment.NewLine +
+        $"      Darling Extended Events sessions on it: {DarlingXeSessionCleanup.SessionNamesPhrase()}, server scope, and on" + Environment.NewLine +
+        "      Azure SQL Database the database-scoped copies in each monitored database. --dry-run lists them and drops nothing." + Environment.NewLine +
+        "      Run it just before you remove the server (it finds only a server this service still monitors, and stops that server's deadlock and blocked-process capture until this service reconnects); after the removal, use --print-sql." + Environment.NewLine +
+        "  --drop-xe-sessions --print-sql" + Environment.NewLine +
+        "      Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
+        "Credentials come only from the configuration, never from arguments.";
+
+    /// <summary>
+    /// Parses <c>--drop-xe-sessions</c>'s arguments STRICTLY, the #1581 posture <see cref="TryParseCollectorToggleArgs"/> takes:
+    /// one bare server name, <c>--dry-run</c>, <c>--print-sql</c>, and <c>--config &lt;path&gt;</c> (which takes a value); anything
+    /// else that starts with '-' is refused. <c>--print-sql</c> prints the same statements for every server and connects to
+    /// nothing, so it takes no server name, no <c>--dry-run</c> and no <c>--config</c> rather than quietly ignoring them. Pure, so
+    /// the grammar pins. Returns false with a ready-to-print <paramref name="errorMessage"/>.
+    /// </summary>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static bool TryParseDropXeSessionsArgs(
+        string[] rest, out string? serverName, out bool dryRun, out bool printSql, out string? configPath, out string? errorMessage)
+    {
+        const string verb = "--drop-xe-sessions";
+        serverName = null;
+        dryRun = false;
+        printSql = false;
+        configPath = null;
+        errorMessage = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
+            {
+                dryRun = true;
+                continue;
+            }
+
+            if (string.Equals(arg, "--print-sql", StringComparison.OrdinalIgnoreCase))
+            {
+                printSql = true;
+                continue;
+            }
+
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--config needs a path: {verb} <server-name> --config <path to darling.json>";
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                errorMessage = $"Unknown option for {verb}: {arg}";
+                return false;
+            }
+
+            if (serverName is not null)
+            {
+                errorMessage = $"{verb} takes ONE server name; got '{serverName}' and '{arg}'.";
+                return false;
+            }
+
+            serverName = arg;
+        }
+
+        if (printSql)
+        {
+            if (serverName is not null)
+            {
+                errorMessage = $"{verb} --print-sql takes no server name: it prints the same statements for any server and connects to nothing.";
+                return false;
+            }
+
+            if (dryRun)
+            {
+                errorMessage = $"{verb} --print-sql takes no --dry-run: it connects to nothing and runs nothing.";
+                return false;
+            }
+
+            if (configPath is not null)
+            {
+                errorMessage = $"{verb} --print-sql reads no configuration, so it takes no --config.";
+                return false;
+            }
+
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(serverName))
+        {
+            errorMessage = $"{verb} needs a server name, or --print-sql for a server that is no longer configured.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The servers a typed <c>--drop-xe-sessions</c> name picks, by the WRITE rule the toggle verbs use: a storage name that
+    /// equals one server's exactly (case-sensitive) picks it; otherwise every server whose display name or storage name
+    /// equals the text ignoring case. No partial match: a drop that lands on the wrong sibling is not something to guess at.
+    /// Pure. Zero results is an unknown name; more than one is ambiguous.
+    /// </summary>
+    internal static IReadOnlyList<MonitoredServer> MatchDropXeSessionsTarget(IReadOnlyList<MonitoredServer> servers, string typed)
+    {
+        var byStorageName = servers.Where(s => string.Equals(s.StorageName, typed, StringComparison.Ordinal)).ToList();
+        if (byStorageName.Count == 1)
+        {
+            return byStorageName;
+        }
+
+        return servers
+            .Where(s => string.Equals(s.DisplayName, typed, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(s.StorageName, typed, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    /// <summary>
+    /// <c>--drop-xe-sessions</c> (#4732): drops the Extended Events sessions Darling created on a server this service still
+    /// monitors (run it just before the server is removed), or with <c>--print-sql</c> prints the guarded statements to run
+    /// by hand.
+    ///
+    /// <para><b>Why a verb.</b> The service does not drop these sessions when a server is removed: the names are shared with Lite
+    /// and with any other Darling service that monitors the same server, and a server that is unreachable from the service
+    /// cannot be cleaned by it. Leaving the deadlock and blocked-process sessions costs a 4 MB ring buffer each; the opt-in
+    /// long-query completion session has one too and also tests every completed statement and batch, and the service drops it
+    /// itself only for a server it still monitors. An operator who wants them gone says so here.</para>
+    ///
+    /// <para><b>Resolution and connection are the pre-flight's.</b> The server is resolved from the store's registry (darling.json's
+    /// list when the store cannot be reached) by <see cref="ResolveValidationTargetsAsync"/>, the resolution
+    /// <see cref="ValidateConfigAsync"/> uses, and reached through <see cref="DarlingServerConnector.ConnectAsync"/>, the connector
+    /// the service and that pre-flight use. Credentials come only from the configuration; nothing on the command line carries one.
+    /// A PostgreSQL target has no Extended Events, so naming one connects to nothing and succeeds.</para>
+    ///
+    /// <para><b>A server that is no longer configured cannot be connected to</b> (its definition, and with it the credentials, are
+    /// gone), so an unknown name exits 1 and names <c>--print-sql</c>, which prints the same statements to run on the server
+    /// yourself. Exit codes are <see cref="DropXeSessionsExitCode"/>'s: 0 when everything found was dropped (or listed, or none
+    /// was there), 1 for an argument, configuration or name problem, 2 when the server cannot be reached or searched or a drop is
+    /// refused. No Windows guard, the <c>--enable-collector</c> posture: Windows is needed only for a managed store's DPAPI
+    /// credential and for encrypted SQL passwords, and the paths that read them say so themselves.</para>
+    /// </summary>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static Task<int> DropXeSessionsAsync(
+        string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        DropXeSessionsAsync(rest, ConnectXeSessionCleanupTargetAsync, output, error, cancellationToken);
+
+    /// <summary>The connector the public verb uses: the shared server connector, wrapped as the cleanup target. Throws when the
+    /// server cannot be reached.</summary>
+    private static async Task<IXeSessionCleanupTarget> ConnectXeSessionCleanupTargetAsync(
+        MonitoredServer server, CancellationToken cancellationToken)
+    {
+        var runtime = await DarlingServerConnector.ConnectAsync(server, logger: null, cancellationToken);
+        return new SqlServerXeSessionCleanupTarget(runtime);
+    }
+
+    /// <summary>The verb with the connection injected, so a test drives the connect-and-drop path without a SQL Server.</summary>
+    internal static async Task<int> DropXeSessionsAsync(
+        string[] rest,
+        Func<MonitoredServer, CancellationToken, Task<IXeSessionCleanupTarget>> connect,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        if (!TryParseDropXeSessionsArgs(rest, out var serverName, out var dryRun, out var printSql, out var configPath, out var argError))
+        {
+            error.WriteLine(argError);
+            output.WriteLine(DropXeSessionsUsageText());
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        if (printSql)
+        {
+            output.WriteLine(DarlingXeSessionCleanup.GuardedDropScript());
+            return DropXeSessionsExitCode.Success;
+        }
+
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        var problems = config.Validate();
+        if (problems.Count > 0)
+        {
+            error.WriteLine("Configuration is invalid:");
+            foreach (var problem in problems)
+            {
+                error.WriteLine("  - " + problem);
+            }
+
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken, DropXeSessionsRegistryWording);
+        if (targets is null)
+        {
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        var matches = MatchDropXeSessionsTarget(targets, serverName!);
+        if (matches.Count == 0)
+        {
+            error.WriteLine($"No monitored server named '{serverName}' is in the store's registry or the configuration. Nothing was changed.");
+            if (targets.Count > 0)
+            {
+                const int listed = 20;
+                error.WriteLine("Monitored servers: " + string.Join(", ", targets.Take(listed).Select(t => t.DisplayName))
+                    + (targets.Count > listed ? $", and {targets.Count - listed} more." : "."));
+            }
+
+            error.WriteLine("For a server that is no longer configured, run --drop-xe-sessions --print-sql: it prints guarded DROP statements to run on the server yourself.");
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        if (matches.Count > 1)
+        {
+            error.WriteLine($"'{serverName}' matches {matches.Count} servers; nothing was changed. Re-run with ONE server's full storage name:");
+            foreach (var candidate in matches)
+            {
+                error.WriteLine($"  {candidate.DisplayName} ({candidate.StorageName})");
+            }
+
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        var server = matches[0];
+        output.WriteLine();
+        output.WriteLine($"PerformanceMonitor Darling - drop Extended Events sessions (--drop-xe-sessions{(dryRun ? " --dry-run" : string.Empty)})");
+        output.WriteLine();
+
+        if (server.IsPostgres)
+        {
+            output.WriteLine($"'{server.DisplayName}' is a PostgreSQL target. It has no Extended Events sessions, so there is nothing to drop and nothing was connected to.");
+            return DropXeSessionsExitCode.Success;
+        }
+
+        IXeSessionCleanupTarget target;
+        try
+        {
+            target = await connect(server, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not connect to '{server.DisplayName}': {ex.Message}");
+            error.WriteLine(DarlingXeSessionCleanup.PrintSqlHint);
+            return DropXeSessionsExitCode.TargetUnavailable;
+        }
+
+        return await DarlingXeSessionCleanup.RunAsync(server.DisplayName, dryRun, target, output, error, cancellationToken);
     }
 
     /// <summary>
@@ -4920,9 +6204,11 @@ public static class DarlingCliCommands
 
         /* Managed reads the service's own DPAPI-protected owner credential; bring-your-own uses the operator's
            configured string. Both are supported — this is a STORE operation, not a Windows one. */
-        var connectionString = postgres.Managed
-            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
-            : postgres.ConnectionString;
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return 1;
+        }
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -4932,7 +6218,9 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        await using var connection = new NpgsqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
         try
         {
             await connection.OpenAsync(cancellationToken);
@@ -5034,7 +6322,7 @@ public static class DarlingCliCommands
                 return 1;
             }
 
-            output.WriteLine("Every rollup already covers its own source. Any retention policy still held will arm itself on the next service start.");
+            output.WriteLine("Every rollup already covers its own source. Any retention policy still held will arm itself on the service's next hourly retention re-evaluation (or its next start, whichever comes first).");
             return 0;
         }
 
@@ -5251,16 +6539,19 @@ public static class DarlingCliCommands
 
         output.WriteLine("DONE. Every rollup now covers its own source, which is what each retention policy's arming gate measures.");
         output.WriteLine();
-        output.WriteLine("NEXT: restart the PerformanceMonitor Darling service. The arming gate checks coverage at");
-        output.WriteLine("startup and releases the held retention policies by itself — there is no arming step here and");
-        output.WriteLine("nothing to run by hand. The startup log line reading");
-        output.WriteLine("  'N/N retention policies in place, N armed, 0 held paused pending backfill'");
-        output.WriteLine("is the confirmation; the first purge then reclaims the raw tables in one pass.");
+        output.WriteLine("NEXT: nothing, unless you are in a hurry. The running service re-judges every held retention policy");
+        output.WriteLine("on its hourly store-maintenance tick (and at every start) and releases the ones this coverage now");
+        output.WriteLine("satisfies by itself — there is no arming step here and nothing to run by hand. The service log line");
+        output.WriteLine("  'Retention re-evaluation: 0 policies held, N armed this pass, K unchanged'");
+        output.WriteLine("on the next hour is the confirmation; the first purge then reclaims the raw tables in one pass, and");
+        output.WriteLine("the Retention Held alert resolves on the hour after that. To arm immediately instead, restart the");
+        output.WriteLine("PerformanceMonitor Darling service: the same gate runs on the start path.");
         output.WriteLine();
-        output.WriteLine($"Do not delay the restart. The hourly rollups carry their OWN retention policy ({TimescaleSupport.HourlyRetentionInterval}), already");
+        output.WriteLine($"Do not let it wait a day. The hourly rollups carry their OWN retention policy ({TimescaleSupport.HourlyRetentionInterval}), already");
         output.WriteLine("armed on these stores, which will trim the coverage this run just built when it next fires");
-        output.WriteLine("(roughly daily). Restarting now is what lets the raw policies arm off that coverage first. If");
-        output.WriteLine("the trim wins the race nothing is lost — raw is still held — and re-running this verb rebuilds it.");
+        output.WriteLine("(roughly daily). The hourly re-evaluation, or a restart now, is what lets the raw policies arm off");
+        output.WriteLine("that coverage first. If the trim wins the race nothing is lost — raw is still held — and re-running");
+        output.WriteLine("this verb rebuilds it.");
         return 0;
     }
 
@@ -5275,6 +6566,20 @@ public static class DarlingCliCommands
         NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         var dataDirectory = await RollupBackfill.DataDirectoryAsync(connection, cancellationToken);
+        return ResolveDirectoryFreeSpace(dataDirectory);
+    }
+
+    /// <summary>
+    /// <see cref="ResolveStoreFreeSpaceAsync"/> once the data directory is known. On Windows the free space is
+    /// read for the volume that holds the directory, so a data directory on a volume mounted at a folder is
+    /// judged by its own volume and not by the one behind its drive letter, which is the number that decides
+    /// whether a materialization or a rewrite has room. Elsewhere the free-space call does not exist and the read is the
+    /// path root's. <paramref name="readAvailableFreeBytes"/> replaces the read, so a test can say what the
+    /// volume holds and what a failed read looks like.
+    /// </summary>
+    internal static (long FreeBytes, string? Error) ResolveDirectoryFreeSpace(
+        string? dataDirectory, Func<string, long>? readAvailableFreeBytes = null)
+    {
         if (string.IsNullOrWhiteSpace(dataDirectory))
         {
             return (0, "could not read the store's data_directory, so the free space on the volume that will grow is unknown. The login needs superuser or pg_read_all_settings.");
@@ -5287,7 +6592,19 @@ public static class DarlingCliCommands
 
         try
         {
-            return (new DriveInfo(Path.GetPathRoot(Path.GetFullPath(dataDirectory))!).AvailableFreeSpace, null);
+            if (readAvailableFreeBytes is null)
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    readAvailableFreeBytes = DarlingStoreUpgrade.ReadAvailableFreeBytes;
+                }
+                else
+                {
+                    readAvailableFreeBytes = directory => new DriveInfo(Path.GetPathRoot(Path.GetFullPath(directory))!).AvailableFreeSpace;
+                }
+            }
+
+            return (readAvailableFreeBytes(dataDirectory), null);
         }
         catch (Exception ex)
         {

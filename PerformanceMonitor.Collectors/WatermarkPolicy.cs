@@ -116,4 +116,30 @@ public static class WatermarkPolicy
     /// </summary>
     public static DateTime? ReadFloor(DateTime now) =>
         now == default ? null : now - MaxCatchup - ReadFloorMargin;
+
+    /// <summary>
+    /// A DIFFERENT technique from <see cref="ReadFloor"/>, for readers <see cref="ReadFloor"/>'s own remarks
+    /// say must NOT adopt it: the ring-buffer and other unclamped server-scoped watermark reads (#4197),
+    /// whose legitimate catch-up can span days and so cannot accept <see cref="ReadFloor"/>'s "a row older
+    /// than the horizon cannot move the result" argument — for them, a row older than the horizon very much
+    /// CAN be the right answer.
+    ///
+    /// <para><b>The technique: probe, then confirm.</b> A caller with no clamp tries
+    /// <c>collection_time &gt; now - RecentWatermarkWindow</c> first. Every chunk older than the window is
+    /// excluded outright — the same chunk exclusion <see cref="ReadFloor"/> relies on — so the probe costs
+    /// one recent, almost-certainly-uncompressed chunk instead of the whole retained history. If the probe
+    /// finds a row, it IS the true unbounded MAX: nothing outside the window can be newer than something
+    /// inside it. Only when the probe finds NOTHING — a gap wider than the window, or a genuinely empty
+    /// table — does the caller re-run the true unbounded MAX. That fallback is what makes the technique
+    /// exact rather than approximate: unlike <see cref="ClampCatchup"/>, nothing here ever substitutes a
+    /// floor for a real answer.</para>
+    ///
+    /// <para><b>Sizing.</b> Six hours against a 1-day chunk width and a 1-day <c>compress_after</c>
+    /// (<c>TimescaleSupport.ChunkIntervalDays</c> / <c>CompressAfterDays</c> — not referenced from here,
+    /// this project sits below <c>Darling.Storage</c>) leaves the probe inside the current, uncompressed
+    /// chunk for any collector running on its documented cadence (every reader this window applies to polls
+    /// at 1-15 minutes, #4197's own survey), with a wide margin before the fallback ever fires in a healthy
+    /// fleet.</para>
+    /// </summary>
+    public static readonly TimeSpan RecentWatermarkWindow = TimeSpan.FromHours(6);
 }

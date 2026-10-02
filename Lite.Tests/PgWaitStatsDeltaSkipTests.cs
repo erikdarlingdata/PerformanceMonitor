@@ -47,10 +47,15 @@ public class PgWaitStatsDeltaSkipTests
         ExcludedDatabases = Array.Empty<string>(),
     };
 
-    /// <summary>One row's worth of reader values in ordinal order (type_id, event_id, type_name, event_name, waits, wait_time_us).</summary>
+    /// <summary>The trailing postmaster_start_time (#3653 A5, ordinal 6). Every context here carries no persisted
+    /// prior, so the observation is a first sighting on each pass: it stages the value and forgets nothing, and
+    /// the skip semantics under test are undisturbed.</summary>
+    private static readonly DateTime Started = new(2026, 8, 29, 22, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>One row's worth of reader values in ordinal order (type_id, event_id, type_name, event_name, waits, wait_time_us, postmaster_start_time).</summary>
     private static object[] Row(long eventId, long waits, long waitTimeMicroseconds, int typeId = 10, string typeName = "IO", string eventName = "DataFileRead") => new object[]
     {
-        typeId, eventId, typeName, eventName, waits, waitTimeMicroseconds,
+        typeId, eventId, typeName, eventName, waits, waitTimeMicroseconds, Started,
     };
 
     private static async Task<List<PgWaitStatsCollector.Row>> ReadAsync(
@@ -67,7 +72,9 @@ public class PgWaitStatsDeltaSkipTests
 
         var rows = await ReadAsync(Row(eventId: 1, waits: 0, waitTimeMicroseconds: 0), T0, deltas);
 
-        Assert.Single(rows);
+        /* #3540 (V128): and it ships as the (0, 0) marker — interval 0 is what tells a reader this row's
+           zero deltas are unknowable rather than a confirmed idle interval. */
+        Assert.Equal(0, Assert.Single(rows).SampleIntervalSeconds);
     }
 
     [Fact]
@@ -92,6 +99,8 @@ public class PgWaitStatsDeltaSkipTests
         var row = Assert.Single(repeat);
         Assert.Equal(50, row.DeltaWaits);
         Assert.Equal(3000, row.DeltaWaitTime);
+        /* #3540 (V128): the measured span the two deltas accrued over, stored beside them. */
+        Assert.Equal(60, row.SampleIntervalSeconds);
     }
 
     /// <summary>
@@ -108,7 +117,9 @@ public class PgWaitStatsDeltaSkipTests
 
         var afterReset = await ReadAsync(Row(eventId: 4, waits: 40, waitTimeMicroseconds: 1200), T0.AddSeconds(60), deltas);
 
-        Assert.Single(afterReset);
+        /* #3540 (V128): a reset row ships with interval 0, not the 60 s that elapsed — the elapsed span is
+           real, but no delta is knowable over it, and a stored 60 beside a 0 delta would read as idle. */
+        Assert.Equal(0, Assert.Single(afterReset).SampleIntervalSeconds);
     }
 
     /// <summary>

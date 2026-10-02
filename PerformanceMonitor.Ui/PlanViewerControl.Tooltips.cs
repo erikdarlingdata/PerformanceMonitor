@@ -48,8 +48,8 @@ public partial class PlanViewerControl
 
         // Cost
         AddTooltipSection(stack, "Costs");
-        AddTooltipRow(stack, "Cost", $"{node.CostPercent}% of statement ({node.EstimatedOperatorCost:F6})");
-        AddTooltipRow(stack, "Subtree Cost", $"{node.EstimatedTotalSubtreeCost:F6}");
+        AddTooltipRow(stack, "Cost", $"{node.CostPercent}% of statement ({MetricFormatter.FormatCost(node.EstimatedOperatorCost)})");
+        AddTooltipRow(stack, "Subtree Cost", MetricFormatter.FormatCost(node.EstimatedTotalSubtreeCost));
 
         // Rows
         AddTooltipSection(stack, "Rows");
@@ -66,8 +66,8 @@ public partial class PlanViewerControl
         if (node.EstimateIO > 0 || node.EstimateCPU > 0 || node.EstimatedRowSize > 0)
         {
             AddTooltipSection(stack, "Estimates");
-            if (node.EstimateIO > 0) AddTooltipRow(stack, "I/O Cost", $"{node.EstimateIO:F6}");
-            if (node.EstimateCPU > 0) AddTooltipRow(stack, "CPU Cost", $"{node.EstimateCPU:F6}");
+            if (node.EstimateIO > 0) AddTooltipRow(stack, "I/O Cost", MetricFormatter.FormatCost(node.EstimateIO));
+            if (node.EstimateCPU > 0) AddTooltipRow(stack, "CPU Cost", MetricFormatter.FormatCost(node.EstimateCPU));
             if (node.EstimatedRowSize > 0) AddTooltipRow(stack, "Avg Row Size", $"{node.EstimatedRowSize} B");
         }
 
@@ -181,8 +181,7 @@ public partial class PlanViewerControl
 
                 foreach (var (type, severity, count) in distinct)
                 {
-                    var warnColor = severity == PlanWarningSeverity.Critical ? "#E57373"
-                        : severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(severity);
                     var label = count > 1 ? $"\u26A0 {type} ({count})" : $"\u26A0 {type}";
                     stack.Children.Add(new TextBlock
                     {
@@ -198,8 +197,7 @@ public partial class PlanViewerControl
                 // Individual node: show full warning messages
                 foreach (var w in warnings)
                 {
-                    var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
-                        : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
                     stack.Children.Add(new TextBlock
                     {
                         Text = $"\u26A0 {w.WarningType}: {w.Message}",

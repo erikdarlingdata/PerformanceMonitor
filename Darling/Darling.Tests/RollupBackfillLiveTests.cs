@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -74,17 +75,24 @@ public sealed class RollupBackfillLiveTests
         /* ── 2. The rollup is created over that history, WITH NO DATA — the #1759 shape exactly. ── */
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
+        /* #3653 LC: query_stats_hourly is one of the frozen six — it still stands up WITH NO DATA, but nothing
+           ever gives it a refresh policy or feeds the raw purge gate off its coverage again (RawTierCoverage
+           now names the successor). The #1759 shape this test proves — a rollup created over pre-existing
+           history reads empty below its shallow floor until backfilled, and the purge gate then releases —
+           only still happens on a view the freeze left live, so query_stats_interval_hourly stands in as the
+           example, keeping the same source, grain and daily companion. */
+
         /* Materialize only the recent window, which is all the 3-day refresh policy would ever have done on a
            store that existed before its rollups. This is what makes the floor shallow. */
         await RollupBackfill.RunSliceAsync(
-            connection, TimescaleSupport.QueryStatsHourlyView, now.Date.AddDays(-2), now.Date.AddDays(1), SilentDisclosure(), ct);
+            connection, TimescaleSupport.QueryStatsIntervalHourlyView, now.Date.AddDays(-2), now.Date.AddDays(1), SilentDisclosure(), ct);
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var rollups = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
-        Assert.True(rollups.QueryGrainHourly, "the query_stats hourly rollup should exist after the ensure sweep");
+        Assert.True(rollups.QueryGrainIntervalHourly, "the query_stats_interval_hourly rollup should exist after the ensure sweep");
 
         var before = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
-        var floorBefore = before.FloorOf(TimescaleSupport.QueryStatsHourlyView);
+        var floorBefore = before.FloorOf(TimescaleSupport.QueryStatsIntervalHourlyView);
         var rawFloor = before.RawOldestOf("query_stats");
 
         Assert.NotNull(floorBefore);
@@ -96,7 +104,7 @@ public sealed class RollupBackfillLiveTests
                the rows — this is the hard partition, not a slow path. If this assertion ever stops holding,
                the premise behind all of #1759 has changed and the fix should be revisited, not patched. ── */
         var windowStart = now.AddDays(-8);
-        var rollupRows = await CountAsync(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsHourlyView} WHERE bucket >= $1 AND bucket < $2", windowStart, now.AddDays(-6), ct);
+        var rollupRows = await CountAsync(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} WHERE bucket >= $1 AND bucket < $2", windowStart, now.AddDays(-6), ct);
         var rawRows = await CountAsync(connection, "SELECT count(*) FROM collect.query_stats WHERE collection_time >= $1 AND collection_time < $2", windowStart, now.AddDays(-6), ct);
 
         Assert.True(rawRows > 0, "raw must hold rows in the pre-coverage window, or the test is not exercising #1759");
@@ -104,19 +112,19 @@ public sealed class RollupBackfillLiveTests
 
         /* ── 4. PHASE 1: the router must send that window to RAW, where the data actually is. Age alone puts an
                8-day window on the hourly rollup, which would answer with silence. ── */
-        var coverageLadder = before.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView);
+        var coverageLadder = before.For(TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsIntervalDailyView);
 
         Assert.Equal(
             RetentionTier.Hourly,
-            RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainHourly, rollups.QueryGrainDaily));
+            RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainIntervalHourly, rollups.QueryGrainIntervalDaily));
 
         Assert.Equal(
             RetentionTier.Raw,
-            RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainHourly, rollups.QueryGrainDaily, coverageLadder));
+            RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainIntervalHourly, rollups.QueryGrainIntervalDaily, coverageLadder));
 
         /* ── 5. PHASE 2: back fill in slices, newest-first, exactly as the verb does. ── */
         var plan = RollupBackfill.Plan(
-            TimescaleSupport.QueryStatsHourlyView, rawFloor, floorBefore,
+            TimescaleSupport.QueryStatsIntervalHourlyView, rawFloor, floorBefore,
             materializedBuckets: 48, materializedBytes: 48 * 1024,
             rawBytes: 0, bucketWidth: TimeSpan.FromHours(1));
 
@@ -127,7 +135,7 @@ public sealed class RollupBackfillLiveTests
         var previousFloor = floorBefore;
         foreach (var (from, to) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
         {
-            var floorDuring = await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsHourlyView, from, to, SilentDisclosure(), ct);
+            var floorDuring = await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, from, to, SilentDisclosure(), ct);
             slicesRun++;
 
             /* Progress only ever goes BACKWARDS. Deliberately NOT "the floor reached this slice's start": a
@@ -149,14 +157,14 @@ public sealed class RollupBackfillLiveTests
 
         /* ── 6. CONVERGENCE, MEASURED FROM DATA — never from the fact that the calls returned. ── */
         var after = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
-        var floorAfter = after.FloorOf(TimescaleSupport.QueryStatsHourlyView);
+        var floorAfter = after.FloorOf(TimescaleSupport.QueryStatsIntervalHourlyView);
 
         Assert.NotNull(floorAfter);
         Assert.True(floorAfter <= rawFloor,
             $"after the backfill the rollup must reach at or before raw's oldest row (rollup {floorAfter:O}, raw {rawFloor:O})");
 
         /* The window that was empty in step 3 now has rows. */
-        var rollupRowsAfter = await CountAsync(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsHourlyView} WHERE bucket >= $1 AND bucket < $2", windowStart, now.AddDays(-6), ct);
+        var rollupRowsAfter = await CountAsync(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} WHERE bucket >= $1 AND bucket < $2", windowStart, now.AddDays(-6), ct);
         Assert.True(rollupRowsAfter > 0, "the backfilled window must now be materialized");
 
         /* ── 7. The router goes BACK to the rollup — the backfill restored acceleration rather than stranding
@@ -164,24 +172,40 @@ public sealed class RollupBackfillLiveTests
         Assert.Equal(
             RetentionTier.Hourly,
             RetentionTierRouter.Resolve(
-                now, windowStart, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
-                after.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView)));
+                now, windowStart, rollups.QueryGrainIntervalHourly, rollups.QueryGrainIntervalDaily,
+                after.For(TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsIntervalDailyView)));
 
         /* ── 8. And the ARMING GATE now reports safe, which is the whole point: the held raw purge releases
-               itself on the next service start, with no manual step and nothing armed by the backfill. Run
+               itself on the next evaluation — the running service's hourly pass since #3812, or the next start
+               — with no manual step and nothing armed by the backfill. Run
                through EnsureRetentionPoliciesAsync — the real seam — rather than re-evaluating its predicate,
                because "the gate would say yes" and "the gate DID arm the policy" are different claims. ── */
+
+        /* #3653 LC: RawTierCoverage now requires BOTH query_stats_interval_hourly AND
+           query_stats_db_interval_hourly to cover the raw data before arming the purge gate. The test
+           only backfilled the former. The db-grain companion must be force-refreshed: the backfill slices
+           above consumed query_stats' shared invalidation log, so a plain refresh finds no entries and
+           leaves query_stats_db_interval_hourly empty. force=true bypasses the log and scans the source. */
+        /* Floor rawOldest to the hourly bucket boundary: refresh_continuous_aggregate interprets window_start
+           as "only refresh buckets whose START >= window_start", so passing a sub-hour timestamp skips the
+           first bucket (whose start is rawOldest.Truncate(hour)) and leaves query_stats_db_interval_hourly
+           one bucket short of raw's oldest row, causing the coverage gate to remain Short. */
+        var dbRefreshFrom = new DateTime(rawOldest.Year, rawOldest.Month, rawOldest.Day, rawOldest.Hour, 0, 0, DateTimeKind.Unspecified);
+        using (var dbRefresh = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsDbIntervalHourlyView, force: true), connection))
+        {
+            dbRefresh.Parameters.AddWithValue(dbRefreshFrom);
+            await dbRefresh.ExecuteNonQueryAsync(ct);
+        }
+
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
 
-        var armed = await CountAsync(connection, @"
-SELECT count(*)
-FROM timescaledb_information.jobs AS j
-WHERE j.proc_name = 'policy_retention'
-AND   j.hypertable_schema = 'collect'
-AND   j.hypertable_name = 'query_stats'
-AND   j.scheduled", ct);
+        /* #4299 (d′): query_stats is a raw relation now — its armed verdict is config->>'darling_armed'
+           through the shipped RawArmedStateSql, never 'scheduled' (which this pass converges to false
+           unconditionally for the three raw jobs). */
+        await using var armedRead = new NpgsqlCommand(TimescaleSupport.RawArmedStateSql("query_stats"), connection);
+        var armedFlag = await armedRead.ExecuteScalarAsync(ct);
 
-        Assert.True(armed == 1, "query_stats' retention policy should have armed itself once the rollup covered it");
+        Assert.True(armedFlag is bool flag && flag, "query_stats' retention policy should have armed itself once the rollup covered it");
 
         /* Same reason as above: no background worker left running against a database about to vanish. */
         await UnscheduleAllJobsAsync(connection, ct);
@@ -303,12 +327,15 @@ AND   j.scheduled", ct);
             var dryText = dryOut.ToString();
             Assert.Contains("--dry-run: nothing was materialized", dryText, StringComparison.Ordinal);
             Assert.Contains("Free space on the store volume", dryText, StringComparison.Ordinal);
-            Assert.Contains(TimescaleSupport.QueryStatsHourlyView, dryText, StringComparison.Ordinal);
+            /* #3653 LC: query_stats_hourly is one of the frozen six and left RollupBackfill.Targets — the verb
+               would never plan it and its name would not appear here. query_stats_interval_hourly, its
+               interval-honest successor, is still a live target and stands in as the example. */
+            Assert.Contains(TimescaleSupport.QueryStatsIntervalHourlyView, dryText, StringComparison.Ordinal);
 
             await using (var check = new NpgsqlConnection(scratch.ConnectionString))
             {
                 await check.OpenAsync(ct);
-                var probe = await RollupBackfill.ProbeAsync(check, TimescaleSupport.QueryStatsHourlyView, "query_stats", "collection_time", ct);
+                var probe = await RollupBackfill.ProbeAsync(check, TimescaleSupport.QueryStatsIntervalHourlyView, "query_stats", "collection_time", ct);
 
                 /* Deliberately NOT "the rollup is still empty": the aggregate's own refresh policy is attached
                    by the ensure sweep and fires immediately, so a trailing window IS materialized by the time a
@@ -329,10 +356,17 @@ AND   j.scheduled", ct);
                contract line has to promise what the gate actually checks or DONE keeps over-claiming. */
             Assert.Contains("DONE. Every rollup now covers its own source", runText, StringComparison.Ordinal);
 
-            /* The restart instruction is the operator's ONLY next step, and the trim race is the one thing that
-               can waste the run — both must be in the output, not just in a comment. */
-            Assert.Contains("restart the PerformanceMonitor Darling service", runText, StringComparison.Ordinal);
-            Assert.Contains("Do not delay the restart", runText, StringComparison.Ordinal);
+            /* The operator's next step is to WAIT for the hourly re-evaluation (#3812) — the restart is the
+               hurry-up option, not the remedy — and the trim race is the one thing that can waste the run. All
+               three must be in the output, not just in a comment: the pre-#3812 text made the restart
+               mandatory ("NEXT: restart", "Do not delay the restart"), which after #3812 sends an operator to
+               restart a service that would have released the hold on its own within the hour. */
+            Assert.Contains("hourly store-maintenance tick", runText, StringComparison.Ordinal);
+            Assert.Contains("'Retention re-evaluation: 0 policies held", runText, StringComparison.Ordinal);
+            Assert.Contains("To arm immediately instead, restart the", runText, StringComparison.Ordinal);
+            Assert.DoesNotContain("NEXT: restart", runText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Do not delay the restart", runText, StringComparison.Ordinal);
+            Assert.Contains("Do not let it wait a day", runText, StringComparison.Ordinal);
 
             /* ── The verb's success claim is CHECKED against the store, not taken at its word. ── */
             await using (var verify = new NpgsqlConnection(scratch.ConnectionString))
@@ -550,7 +584,8 @@ AND   j.scheduled", ct);
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        /* Wide enough that one refresh spans many internal batches, so there is a real window to cancel in. */
+        /* Wide enough that the raw hypertable holds several chunks, so that one in the MIDDLE of the range exists to
+           hold the refresh at. */
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         var rangeFrom = now.Date.AddDays(-CancellationHistoryDays);
         var rangeTo = now.Date;
@@ -572,50 +607,80 @@ AND   j.scheduled", ct);
         var view = TimescaleSupport.QueryStatsHourlyView;
         Assert.Null(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct));
 
-        /* ONE wide refresh over the whole un-materialized range, cancelled once it has demonstrably started.
-           Polling for the floor to appear is deterministic where a fixed delay would race the machine. */
+        /* THE CANCEL POINT IS HELD, NOT RACED. The cancel used to follow a 25 ms poll of the coverage floor, which
+           no interval can make reliable: a fast runner commits every batch of the range between two polls, the
+           floor is already at the bottom when the cancel lands, and the vacuity check below fails on a refresh
+           nobody managed to catch. So the refresh is held instead. A third connection takes ACCESS EXCLUSIVE on
+           the raw chunk that holds the MIDDLE of the seeded range, before the refresh starts. Each batch is its
+           own transaction and reads only the chunks inside its own window, so the refresh commits its newest
+           batches and then waits on that lock. The wait is visible in pg_locks, and the cancel is issued only
+           once it is seen: the test waits for a state rather than for a duration, on a slow runner and a fast one
+           alike. A MIDDLE chunk rather than an end one, so that the two possible engines part ways there:
+           newest-first leaves the upper half materialized (a floor mid-range, nothing missing above it), while an
+           engine that had flipped to oldest-first would commit the LOWER half and stop at the lock (a floor at the
+           bottom, the upper half missing), which is what the gap assertion below reports. */
+        var middle = rangeFrom + (rangeTo - rangeFrom) / 2;
+        var heldChunk = await FindRawChunkHoldingAsync(connection, middle, ct);
+
+        await using var lockConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await lockConnection.OpenAsync(ct);
+        await using var lockTransaction = await lockConnection.BeginTransactionAsync(ct);
+        await using (var hold = new NpgsqlCommand(
+            $"SET LOCAL lock_timeout = '60s'; LOCK TABLE {heldChunk} IN ACCESS EXCLUSIVE MODE", lockConnection, lockTransaction))
+        {
+            await hold.ExecuteNonQueryAsync(ct);
+        }
+
+        /* ONE wide refresh over the whole un-materialized range, on its own connection so that its backend can be
+           picked out in pg_locks. */
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
         await using var refreshConnection = new NpgsqlConnection(scratch.ConnectionString);
         await refreshConnection.OpenAsync(ct);
 
-        var refresh = Task.Run(
+        var refresh = Task.Run<Exception?>(
             async () =>
             {
                 try
                 {
                     await RollupBackfill.RunSliceAsync(refreshConnection, view, rangeFrom, rangeTo, SilentDisclosure(), cancellation.Token);
+                    return null;
                 }
                 catch (Exception ex) when (ex is OperationCanceledException or PostgresException or NpgsqlException)
                 {
-                    /* Cancelling a CALL mid-flight surfaces as any of these; the outcome is measured below. */
-                    _ = ex;
+                    /* Cancelling a CALL mid-flight surfaces as any of these; the outcome is measured below. It is
+                       returned rather than dropped so that a refresh which failed BEFORE it was held can say why. */
+                    return ex;
                 }
             },
             CancellationToken.None);
 
-        DateTime? floorDuring = null;
-        for (var attempt = 0; attempt < 200 && !refresh.IsCompleted; attempt++)
+        try
         {
-            floorDuring = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
-            if (floorDuring is not null && floorDuring > rangeFrom)
-            {
-                break;
-            }
-
-            await Task.Delay(25, ct);
+            await WaitUntilBackendWaitsOnAsync(connection, refreshConnection.ProcessID, heldChunk, refresh, ct);
         }
+        finally
+        {
+            try
+            {
+                await cancellation.CancelAsync();
+                _ = await refresh;
 
-        await cancellation.CancelAsync();
-        await refresh;
-
-        /* Release the cancelled backend BEFORE anything else touches this store. `await refresh` returns when
-           the client-side task completes, which is not the same instant the server-side backend finishes
-           unwinding an aborted CALL — and ScratchPostgres ends this test with DROP DATABASE ... WITH (FORCE).
-           Closing explicitly removes that window rather than relying on disposal order to close it. This is
-           the same lifecycle-hardening the arming tests got: the shared-store flake class on this rig is
-           connection-level, so a test that deliberately aborts a statement should not leave the cleanup to
-           chance. */
-        await refreshConnection.CloseAsync();
+                /* Release the cancelled backend BEFORE anything else touches this store. `await refresh` returns when
+                   the client-side task completes, which is not the same instant the server-side backend finishes
+                   unwinding an aborted CALL — and ScratchPostgres ends this test with DROP DATABASE ... WITH (FORCE).
+                   Closing explicitly removes that window rather than relying on disposal order to close it. This is
+                   the same lifecycle-hardening the arming tests got: the shared-store flake class on this rig is
+                   connection-level, so a test that deliberately aborts a statement should not leave the cleanup to
+                   chance. */
+                await refreshConnection.CloseAsync();
+            }
+            finally
+            {
+                /* The lock ends last, and ALWAYS: the assertions below read the raw table, which contains the held
+                   chunk, so a lock left standing would hang them rather than fail them. */
+                await lockTransaction.RollbackAsync(CancellationToken.None);
+            }
+        }
 
         var floor = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
 
@@ -643,20 +708,102 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
 
         /* (a) The floor landed INSIDE the cancelled range. Checked AFTER the gap test on purpose: floor-at-the-
                bottom WITH gaps is a flipped engine (reported above, accurately), while floor-at-the-bottom with
-               NO gaps just means the refresh finished before it could be caught — a vacuous pass, which must
-               fail loudly and say what to widen rather than bank an assertion that proved nothing. */
+               NO gaps means the refresh got past the chunk that was held against it — it was never caught
+               mid-flight, a vacuous pass, which must fail loudly and say so rather than bank an assertion that
+               proved nothing. */
         Assert.True(floor > rangeFrom,
             $"the refresh completed the whole range before cancellation (floor {floor:O} reached the bottom {rangeFrom:O}) " +
-            $"with no gaps, so nothing mid-flight was exercised — widen {nameof(CancellationHistoryDays)} rather than " +
-            "accepting a vacuous pass");
+            $"with no gaps, so nothing mid-flight was exercised — it should have been held at chunk {heldChunk}, so " +
+            "the lock did not hold it, and a vacuous pass is not accepted");
 
         Assert.True(floor < rangeTo, $"floor {floor:O} is not inside the cancelled range [{rangeFrom:O}, {rangeTo:O})");
     }
 
-    /// <summary>History for the cancellation pin: wide enough that one refresh spans many internal batches, so
-    /// there is a real window to cancel inside. Widen it if that test ever reports the refresh completing
-    /// first.</summary>
+    /// <summary>History for the cancellation pin: wide enough that the raw hypertable holds several chunks, so
+    /// one in the MIDDLE of the range exists to hold the refresh at. The width does not decide when the cancel
+    /// lands; the held lock does.</summary>
     private const int CancellationHistoryDays = 120;
+
+    /// <summary>How long the cancellation pin waits for the refresh to reach the held chunk before it stops and
+    /// says so. A guard against a hang, never a timing expectation: the newest half of the range commits in
+    /// seconds, so reaching this means the refresh is stuck somewhere else.</summary>
+    private static readonly TimeSpan HeldChunkWaitLimit = TimeSpan.FromSeconds(120);
+
+    /// <summary>
+    /// The raw <c>collect.query_stats</c> chunk whose time range holds <paramref name="instant"/>, as a
+    /// schema-qualified, quoted name that both <c>LOCK TABLE</c> and <c>::regclass</c> accept. Found by RANGE in
+    /// the chunk catalog. The catalog reports chunk bounds as <c>timestamptz</c> while the hypertable's own
+    /// column is <c>timestamp</c>, so the instant is compared as UTC rather than in whatever zone the session
+    /// happens to have.
+    /// </summary>
+    private static async Task<string> FindRawChunkHoldingAsync(
+        NpgsqlConnection connection, DateTime instant, CancellationToken cancellationToken)
+    {
+        await using var find = new NpgsqlCommand(@"
+SELECT format('%I.%I', chunk_schema, chunk_name)
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'collect'
+  AND hypertable_name = 'query_stats'
+  AND range_start <= ($1::timestamp AT TIME ZONE 'UTC')
+  AND range_end > ($1::timestamp AT TIME ZONE 'UTC')", connection);
+        find.Parameters.AddWithValue(instant);
+
+        var chunk = await find.ExecuteScalarAsync(cancellationToken) as string;
+        Assert.True(chunk is not null,
+            $"no raw query_stats chunk holds {instant:O}, so there is nothing to hold the refresh at");
+        return chunk!;
+    }
+
+    /// <summary>
+    /// Returns once backend <paramref name="backendPid"/> is WAITING for a lock on <paramref name="relation"/>:
+    /// a <c>pg_locks</c> row for that pid and that relation that has not been granted. Fails, saying what
+    /// happened, if <paramref name="refresh"/> ends before that or the wait is not seen within
+    /// <see cref="HeldChunkWaitLimit"/>.
+    /// </summary>
+    private static async Task WaitUntilBackendWaitsOnAsync(
+        NpgsqlConnection connection, int backendPid, string relation, Task<Exception?> refresh,
+        CancellationToken cancellationToken)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (true)
+        {
+            await using (var probe = new NpgsqlCommand(@"
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_locks
+    WHERE locktype = 'relation'
+      AND pid = $1
+      AND relation = $2::regclass
+      AND NOT granted)", connection))
+            {
+                probe.Parameters.AddWithValue(backendPid);
+                probe.Parameters.AddWithValue(relation);
+                if ((bool)(await probe.ExecuteScalarAsync(cancellationToken))!)
+                {
+                    return;
+                }
+            }
+
+            if (refresh.IsCompleted)
+            {
+                var ended = await refresh;
+                var outcome = ended is null ? "ran to completion" : $"ended with {ended.GetType().Name}: {ended.Message}";
+                Assert.Fail(
+                    $"the refresh {outcome} without its backend {backendPid} ever waiting on the held chunk {relation}, " +
+                    "so it was never stopped mid-flight and there is nothing to cancel");
+            }
+
+            if (elapsed.Elapsed > HeldChunkWaitLimit)
+            {
+                Assert.Fail(
+                    $"the refresh's backend {backendPid} did not wait on the held chunk {relation} within " +
+                    $"{HeldChunkWaitLimit.TotalSeconds:0} s although it is still running, so it is stuck somewhere else " +
+                    "or the lock never reached its statements");
+            }
+
+            await Task.Delay(50, cancellationToken);
+        }
+    }
 
     /// <summary>
     /// THE INTERRUPTED-BACKFILL ACCEPTANCE — the reviewer's data-loss proof, inverted.
@@ -693,7 +840,11 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         await SeedHourlyQueryStatsAsync(connection, now.AddDays(-HistoryDays), now, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        var view = TimescaleSupport.QueryStatsHourlyView;
+        /* #3653 LC: query_stats_hourly is one of the frozen six now — nothing ever advances its watermark
+           again, so backfilling IT can never arm the raw purge gate. RawTierCoverage arms query_stats'
+           retention off the interval-honest successor's coverage instead (RequireSuccessorOf), so that is
+           the view this test's arming-gate assertions have to drive. */
+        var view = TimescaleSupport.QueryStatsIntervalHourlyView;
         var probe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", "collection_time", ct);
         var plan = RollupBackfill.Plan(
             view, probe.SourceOldestUtc, probe.CoverageOldestUtc,
@@ -728,7 +879,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         /* (3) THE ARMING GATE MUST REFUSE while coverage is partial — the step that turns a hole into data
                loss. Run the REAL policy sweep, not its predicate, and read the job's scheduled flag. */
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
-        Assert.Equal(0L, await CountAsync(connection, ArmedRawPolicySql, ct));
+        Assert.False(await RawArmedAsync(connection, "query_stats", ct));
 
         /* ── THE RESUME: finish the remaining slices from the measured floor. ── */
         foreach (var (from, to) in RollupBackfill.Slices(resumePlan.FromUtc, resumePlan.ToUtc))
@@ -752,8 +903,22 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
 
         /* (5) And only NOW does the gate arm — coverage genuinely reaches raw. */
         Assert.True(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct) <= probe.SourceOldestUtc);
+
+        /* #3653 LC: RawTierCoverage for query_stats now requires BOTH query_stats_interval_hourly AND
+           query_stats_db_interval_hourly. Force-refresh the db-grain companion so the gate can arm; the
+           force is needed because the backfill slices above consumed query_stats' shared invalidation log,
+           leaving the db-grain companion with no entries to process on a plain refresh. Floor to the hourly
+           bucket boundary: refresh_continuous_aggregate window_start excludes buckets whose START < start,
+           so a sub-hour timestamp would skip the first bucket and leave coverage one bucket short of raw. */
+        var dbRefreshFrom = new DateTime(plan.FromUtc.Year, plan.FromUtc.Month, plan.FromUtc.Day, plan.FromUtc.Hour, 0, 0, DateTimeKind.Unspecified);
+        using (var dbRefresh = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsDbIntervalHourlyView, force: true), connection))
+        {
+            dbRefresh.Parameters.AddWithValue(dbRefreshFrom);
+            await dbRefresh.ExecuteNonQueryAsync(ct);
+        }
+
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
-        Assert.Equal(1L, await CountAsync(connection, ArmedRawPolicySql, ct));
+        Assert.True(await RawArmedAsync(connection, "query_stats", ct));
 
         /* Stand the scheduler down before this scratch database is force-dropped underneath it. */
         await UnscheduleAllJobsAsync(connection, ct);
@@ -919,15 +1084,19 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
 
         await SeedHourlyQueryStatsAsync(connection, historyFrom, now, ct);
 
-        /* Aggregates WITHOUT their refresh policies — see the remarks. */
-        foreach (var createSql in new[] { TimescaleSupport.CreateQueryStatsHourlySql, TimescaleSupport.CreateQueryStatsDailySql })
+        /* Aggregates WITHOUT their refresh policies — see the remarks.
+           #3653 LC: query_stats_hourly/query_stats_daily are two of the frozen six now, and left
+           RollupBackfill.Targets entirely — the Single() lookup below would throw. The interval-honest
+           successor pair is still hierarchical the same way (daily reads the hourly's bucket, not raw) and
+           still a live Targets entry, so it stands in as the example. */
+        foreach (var createSql in new[] { TimescaleSupport.CreateQueryStatsIntervalHourlySql, TimescaleSupport.CreateQueryStatsIntervalDailySql })
         {
             await using var create = new NpgsqlCommand(createSql, connection);
             await create.ExecuteNonQueryAsync(ct);
         }
 
-        var hourly = TimescaleSupport.QueryStatsHourlyView;
-        var daily = TimescaleSupport.QueryStatsDailyView;
+        var hourly = TimescaleSupport.QueryStatsIntervalHourlyView;
+        var daily = TimescaleSupport.QueryStatsIntervalDailyView;
 
         /* The hourly holds the WHOLE history... */
         await RollupBackfill.RunSliceAsync(connection, hourly, historyFrom, now.Date, SilentDisclosure(), ct);
@@ -978,14 +1147,14 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
         await UnscheduleAllJobsAsync(connection, ct);
     }
 
-    /// <summary>Is query_stats_hourly's retention policy ARMED? The #1798 observable — it is gated on the
-    /// DAILY covering the hourly, which is the comparison the backfill now converges to.</summary>
+    /// <summary>Is query_stats_interval_hourly's retention policy ARMED? The #1798 observable — it is gated on
+    /// the DAILY covering the hourly, which is the comparison the backfill now converges to.</summary>
     private const string ArmedHourlyPolicySql = @"
 SELECT count(*)
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
-AND   j.hypertable_name = 'query_stats_hourly'
+AND   j.hypertable_name = 'query_stats_interval_hourly'
 AND   j.scheduled";
 
     /// <summary>One nullable timestamp, for reading a relation's oldest instant.</summary>
@@ -996,15 +1165,15 @@ AND   j.scheduled";
         return await command.ExecuteScalarAsync(cancellationToken) is DateTime instant ? instant : null;
     }
 
-    /// <summary>Is query_stats' raw retention policy ARMED? The gate's real observable, read from the job
-    /// catalog rather than by re-evaluating its predicate.</summary>
-    private const string ArmedRawPolicySql = @"
-SELECT count(*)
-FROM timescaledb_information.jobs AS j
-WHERE j.proc_name = 'policy_retention'
-AND   j.hypertable_schema = 'collect'
-AND   j.hypertable_name = 'query_stats'
-AND   j.scheduled";
+    /// <summary>#4299 (d′): is query_stats' raw retention policy ARMED? query_stats is a raw relation now —
+    /// its verdict is config->>'darling_armed' through the shipped RawArmedStateSql, never 'scheduled' (which
+    /// this pass converges to false unconditionally for the three raw jobs).</summary>
+    private static async Task<bool> RawArmedAsync(NpgsqlConnection connection, string relation, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(TimescaleSupport.RawArmedStateSql(relation), connection);
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is bool flag && flag;
+    }
 
     /// <summary>
     /// Distinct queries per hourly bucket. <b>MUST stay above 1.</b>

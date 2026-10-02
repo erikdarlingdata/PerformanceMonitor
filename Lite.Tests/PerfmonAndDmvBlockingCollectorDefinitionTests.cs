@@ -64,23 +64,90 @@ public sealed class PerfmonStatsCollectorDefinitionTests
         Assert.DoesNotContain("Batch Requests/sec", text, StringComparison.Ordinal);
     }
 
+    /// <summary>The query selects the DMV's <c>cntr_type</c> (V132 / v62) and the payload declares it LAST —
+    /// both stores' writers are positional and an upgraded store receives the column by ALTER TABLE, which
+    /// can only land at the end. Seven payload columns; the interval stays sixth.</summary>
     [Fact]
-    public async Task WritePayload_PinsDeltaContract_AndTheMeasuredInterval()
+    public void BuildQuery_SelectsTheCounterType_AndThePayloadDeclaresItLast()
     {
-        /* A distinctive interval, deliberately neither 0 nor the 60 this collector used to hard-code,
-           so the payload assertion below can only pass if the MEASURED value is what gets written. */
+        var text = PerfmonStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas)).Text;
+        Assert.Contains("cntr_type = pc.cntr_type", text, StringComparison.Ordinal);
+
+        var columns = PerfmonStatsCollector.Instance.PayloadColumns;
+        Assert.Equal(7, columns.Count);
+        Assert.Equal(new[] { "object_name", "counter_name", "instance_name", "cntr_value", "delta_cntr_value", "sample_interval_seconds", "cntr_type" },
+            columns.Select(c => c.Name));
+        Assert.Equal(CollectorColumnType.Integer, columns[^1].Type);
+        Assert.Equal(CollectorColumnType.BigInt, columns.Single(c => c.Name == "cntr_value").Type);
+    }
+
+    /// <summary>A RATE row (<c>PERF_COUNTER_BULK_COUNT</c>) keeps the pre-rung write — raw value, the calculator's
+    /// delta, the MEASURED interval — plus the type as the seventh value. The interval is distinctive,
+    /// deliberately neither 0 nor the 60 this collector used to hard-code, so the assertion can only pass if
+    /// the MEASURED value is what gets written (#2234).</summary>
+    [Fact]
+    public async Task WritePayload_RateRow_DeltaAndMeasuredInterval_ThenTheType()
+    {
         var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
         var context = CollectorTestContext.Make(deltas);
         using var reader = new FakeCollectorDataReader(
-            new object[] { "SQLServer:SQL Statistics", "Batch Requests/sec", "", 987654L });
+            new object[] { "SQLServer:SQL Statistics", "Batch Requests/sec", "", 987654L, 272696576 });
 
         var rows = await PerfmonStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
         var writer = new RecordingCollectorRowWriter();
         PerfmonStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(new object?[] { "SQLServer:SQL Statistics", "Batch Requests/sec", "", 987654L, 9876540L, 137 }, writer.Values);
+        Assert.Equal(new object?[] { "SQLServer:SQL Statistics", "Batch Requests/sec", "", 987654L, 9876540L, 137, 272696576 }, writer.Values);
         var call = Assert.Single(deltas.Calls);
         Assert.Equal(("perfmon", "SQLServer:SQL Statistics|Batch Requests/sec|", 987654L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), call);
+    }
+
+    /// <summary>
+    /// A GAUGE row (<c>PERF_COUNTER_LARGE_RAWCOUNT</c>, and the 32-bit <c>PERF_COUNTER_RAWCOUNT</c>) is written as its
+    /// level: the raw value, NULL delta, NULL interval, the type — and the delta calculator is NOT called, so a
+    /// falling level can never present to it as a counter reset (#3653 A7, #3540 "a falling gauge = fake counter
+    /// reset"). NULL rather than (0, 0): 0 is the calculator's "no delta knowable" marker, a claim about a count,
+    /// and a gauge has no delta to know. The measurement contract's rule 8, "gauges are never delta'd", made
+    /// executable.
+    /// </summary>
+    [Theory]
+    [InlineData(65792)]
+    [InlineData(65536)]
+    public async Task WritePayload_GaugeRow_WritesTheLevelWithNullDeltaAndNullInterval_AndNeverCallsTheCalculator(int gaugeType)
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
+        var context = CollectorTestContext.Make(deltas);
+        using var reader = new FakeCollectorDataReader(
+            new object[] { "SQLServer:Memory Manager", "Total Server Memory (KB)", "", 8_388_608L, gaugeType });
+
+        var rows = await PerfmonStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        var writer = new RecordingCollectorRowWriter();
+        PerfmonStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
+
+        Assert.Equal(new object?[] { "SQLServer:Memory Manager", "Total Server Memory (KB)", "", 8_388_608L, null, null, gaugeType }, writer.Values);
+        Assert.Empty(deltas.Calls);
+        Assert.True(PerfmonStatsCollector.IsGauge(gaugeType));
+    }
+
+    /// <summary>The average/fraction/base family (<c>PERF_AVERAGE_BULK</c> here — the wait-statistics counters'
+    /// <c>Average wait time (ms)</c> instance) is NOT a gauge and keeps the pre-rung write: its delta is a real
+    /// per-interval change of the raw numerator, and the stored type is what tells a reader not to divide it
+    /// into the average the instance name promises. Stated finding of the rung, not something it fixes.</summary>
+    [Fact]
+    public async Task WritePayload_AverageBulkRow_IsDifferencedLikeARate_AndCarriesItsType()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 299 };
+        var context = CollectorTestContext.Make(deltas);
+        using var reader = new FakeCollectorDataReader(
+            new object[] { "SQLServer:Wait Statistics", "Lock waits", "Average wait time (ms)", 4242L, 1073874176 });
+
+        var rows = await PerfmonStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        var writer = new RecordingCollectorRowWriter();
+        PerfmonStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
+
+        Assert.Equal(new object?[] { "SQLServer:Wait Statistics", "Lock waits", "Average wait time (ms)", 4242L, 42420L, 299, 1073874176 }, writer.Values);
+        Assert.Single(deltas.Calls);
+        Assert.False(PerfmonStatsCollector.IsGauge(1073874176));
     }
 }
 

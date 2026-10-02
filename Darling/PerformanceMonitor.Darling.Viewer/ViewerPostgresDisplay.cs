@@ -121,7 +121,7 @@ internal static class PgDisplay
 
     internal static string Timestamp(DateTime? utc) =>
         utc is { } value
-            ? ViewerTimeHelper.ForDisplay(value).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
+            ? ViewerTimeHelper.FormatForDisplay(value, "yyyy-MM-dd HH:mm")
             : string.Empty;
 
     /// <summary>A percentage of a total, or the dash when the total is zero — which is "nothing happened",
@@ -141,6 +141,8 @@ internal static class PgDisplay
         public string PeakXminAge { get; init; } = "";
         public string WinnerShare { get; init; } = "";
         public string MeasuredAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? MeasuredAtUtc { get; init; }
         public string Holder { get; init; } = "";
         public string Detail { get; init; } = "";
     }
@@ -158,6 +160,7 @@ internal static class PgDisplay
             ? NotApplicableText
             : string.Create(CultureInfo.CurrentCulture, $"{row.SamplesAsWinner:N0} of {row.Samples:N0} samples"),
         MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAtUtc = row.MeasuredAt,
         Holder = row.Holder ?? "",
         Detail = row.Detail ?? "",
     };
@@ -176,9 +179,17 @@ internal static class PgDisplay
         public string InsertsSinceVacuum { get; init; } = "";
         public string InsertVacuumThreshold { get; init; } = "";
         public string LastVacuum { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastVacuum"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastVacuumUtc { get; init; }
         public string LastAutovacuum { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastAutovacuum"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastAutovacuumUtc { get; init; }
         public string LastAnalyze { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastAnalyze"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastAnalyzeUtc { get; init; }
         public string LastAutoanalyze { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastAutoanalyze"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastAutoanalyzeUtc { get; init; }
         public string AutovacuumCount { get; init; } = "";
         public string LiveTuples { get; init; } = "";
         public string DeadTuplePct { get; init; } = "";
@@ -186,6 +197,8 @@ internal static class PgDisplay
         public string AnalyzeThreshold { get; init; } = "";
         public string TotalSize { get; init; } = "";
         public string MeasuredAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? MeasuredAtUtc { get; init; }
     }
 
     internal static AutovacuumRow Autovacuum(DarlingPgAutovacuumReader.PgAutovacuumRow row) => new()
@@ -216,9 +229,13 @@ internal static class PgDisplay
            whose only vacuums are manual is one somebody is nursing, and that is a finding about the
            configuration rather than about the workload. */
         LastVacuum = Timestamp(row.LastVacuum),
+        LastVacuumUtc = row.LastVacuum,
         LastAutovacuum = Timestamp(row.LastAutovacuum),
+        LastAutovacuumUtc = row.LastAutovacuum,
         LastAnalyze = Timestamp(row.LastAnalyze),
+        LastAnalyzeUtc = row.LastAnalyze,
         LastAutoanalyze = Timestamp(row.LastAutoanalyze),
+        LastAutoanalyzeUtc = row.LastAutoanalyze,
         /* Zero is the finding, not a missing value: a table autovacuum has NEVER processed is the classic
            wraparound route, because relfrozenxid never advances. */
         AutovacuumCount = Count(row.AutovacuumCount),
@@ -232,6 +249,7 @@ internal static class PgDisplay
         AnalyzeThreshold = Count(row.AnalyzeThreshold),
         TotalSize = Bytes(row.TotalBytes),
         MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAtUtc = row.MeasuredAt,
     };
 
     internal sealed class WraparoundRow
@@ -251,6 +269,8 @@ internal static class PgDisplay
         public string WindowPeakMinMultiXidAge { get; init; } = "";
         public string ConnectionsAllowed { get; init; } = "";
         public string MeasuredAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? MeasuredAtUtc { get; init; }
     }
 
     internal static WraparoundRow Wraparound(DarlingPgWraparoundReader.PgWraparoundRow row) => new()
@@ -278,6 +298,7 @@ internal static class PgDisplay
            anything that connects to it. It is the finding, not a footnote. */
         ConnectionsAllowed = row.AllowsConnections ? "allowed" : "NOT ALLOWED",
         MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAtUtc = row.MeasuredAt,
     };
 
     // ── Waits, I/O, replication ──────────────────────────────────────────────────────────────────
@@ -349,6 +370,8 @@ internal static class PgDisplay
 
         public string WriteVolume { get; init; } = "";
         public string StatsReset { get; init; } = "";
+        /// <summary>The UTC instant <see cref="StatsReset"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? StatsResetUtc { get; init; }
     }
 
     /// <summary>
@@ -404,6 +427,7 @@ internal static class PgDisplay
                 ? Bytes(row.Writes * row.OpBytes) + " (est.)"
                 : "not measured"),
         StatsReset = Timestamp(row.StatsReset),
+        StatsResetUtc = row.StatsReset,
     };
 
     internal sealed class SlotRow
@@ -418,6 +442,8 @@ internal static class PgDisplay
         public string XminAge { get; init; } = "";
         public string CatalogXminAge { get; init; } = "";
         public string InactiveSince { get; init; } = "";
+        /// <summary>The UTC instant <see cref="InactiveSince"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? InactiveSinceUtc { get; init; }
         public string DatabaseName { get; init; } = "";
         public string Plugin { get; init; } = "";
         public string InvalidationReason { get; init; } = "";
@@ -430,6 +456,8 @@ internal static class PgDisplay
         public string Conflicting { get; init; } = "";
 
         public string MeasuredAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? MeasuredAtUtc { get; init; }
         public bool IsInvalidated { get; init; }
         public bool IsInactive { get; init; }
     }
@@ -446,11 +474,13 @@ internal static class PgDisplay
         XminAge = Count(row.XminAge),
         CatalogXminAge = Count(row.CatalogXminAge),
         InactiveSince = Timestamp(row.InactiveSince),
+        InactiveSinceUtc = row.InactiveSince,
         DatabaseName = row.DatabaseName ?? "",
         Plugin = row.Plugin ?? "",
         InvalidationReason = row.InvalidationReason ?? "",
         Conflicting = row.Conflicting ? "CONFLICTING" : "",
         MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAtUtc = row.MeasuredAt,
         /* An invalidated slot has already lost its WAL: the replica behind it needs rebuilding, and that
            is a different day from an inactive slot that is merely accumulating. A CONFLICTING slot is in
            the same category — its subscriber cannot continue — so it shares the highlight even though the
@@ -466,6 +496,8 @@ internal static class PgDisplay
     internal sealed class ChainRow
     {
         public string CapturedAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CapturedAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? CapturedAtUtc { get; init; }
         public int RootPid { get; init; }
 
         /// <summary>The collector's synthetic backend id, which is what "seen as root" is counted on — pids
@@ -503,6 +535,7 @@ internal static class PgDisplay
         return new ChainRow
         {
             CapturedAt = Timestamp(row.CapturedAt),
+            CapturedAtUtc = row.CapturedAt,
             RootPid = row.RootPid,
             RootBackendId = row.RootBackendId == 0
                 ? "unknown"
@@ -532,6 +565,8 @@ internal static class PgDisplay
     internal sealed class CycleRow
     {
         public string CapturedAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CapturedAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? CapturedAtUtc { get; init; }
         public int ParticipantCount { get; init; }
         public string Pids { get; init; } = "";
         public string DatabaseName { get; init; } = "";
@@ -543,6 +578,7 @@ internal static class PgDisplay
     internal static CycleRow Cycle(DarlingPgBlockingReader.PgBlockingCycleRow row) => new()
     {
         CapturedAt = Timestamp(row.CapturedAt),
+        CapturedAtUtc = row.CapturedAt,
         ParticipantCount = row.ParticipantCount,
         Pids = string.Join(", ", row.Pids),
         DatabaseName = row.DatabaseName ?? "",
@@ -628,9 +664,16 @@ internal static class PgDisplay
         public string RollbackPct { get; init; } = "";
         public int SampleCount { get; init; }
 
+        /// <summary>The window's peak of connected backends (V133 <c>numbackends</c>), the one LEVEL in a row
+        /// of differenced counters. "not sampled" when no row in the window carried the column — a pre-V133
+        /// history — rather than 0, which would read as an idle database.</summary>
+        public string PeakNumbackends { get; init; } = "";
+
         /// <summary>The stored <c>stats_reset</c> timestamp. Shown beside the caveat that counts resets in
         /// the window, because "reset once" and "reset at 14:02" send you to different places.</summary>
         public string StatsReset { get; init; } = "";
+        /// <summary>The UTC instant <see cref="StatsReset"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? StatsResetUtc { get; init; }
 
         public string Caveats { get; init; } = "";
     }
@@ -660,10 +703,17 @@ internal static class PgDisplay
             XactRollback = Count(row.XactRollback),
             RollbackPct = Percent(row.XactRollback, row.XactCommit + row.XactRollback),
             SampleCount = row.SampleCount,
+            PeakNumbackends = row.PeakNumbackends is { } backends ? Count(backends) : NotSampledText,
             StatsReset = Timestamp(row.StatsReset),
+            StatsResetUtc = row.StatsReset,
             Caveats = string.Join("; ", caveats),
         };
     }
+
+    /// <summary>What a column shows when the store never carried the value for these rows — distinct from
+    /// <see cref="NotApplicableText"/>, which says the engine has no such figure. A pre-V133 row has no
+    /// <c>numbackends</c> because nobody wrote it, not because PostgreSQL lacks one.</summary>
+    internal const string NotSampledText = "not sampled";
 
     internal sealed class TableBloatRow
     {
@@ -746,7 +796,20 @@ internal static class PgDisplay
     internal sealed class IndexUsageRow
     {
         public string DatabaseName { get; init; } = "";
+        public string SchemaName { get; init; } = "";
         public string TableName { get; init; } = "";
+
+        /// <summary>
+        /// <c>schema.table</c> for the grid's Table column (#3576, the Postgres sibling of the FinOps Locking
+        /// grid's defect). The store's reader carried <c>SchemaName</c> from the start, but this display row
+        /// never took it and the grid showed the bare table name, so <c>public.events</c> and
+        /// <c>archive.events</c> read as one table. The other Postgres grids on this tab show Schema as its own
+        /// column; this one names the table qualified instead, the same shape as the FinOps Locking grid's
+        /// <c>IndexLockingRow.FullName</c> and <c>ProcedureStatsRow.FullName</c>, so it sorts as one string.
+        /// Falls back to the bare name when the schema is empty.
+        /// </summary>
+        public string FullName => string.IsNullOrEmpty(SchemaName) ? TableName : $"{SchemaName}.{TableName}";
+
         public string IndexName { get; init; } = "";
         public string IndexSize { get; init; } = "";
         public string ScansInWindow { get; init; } = "";
@@ -757,6 +820,8 @@ internal static class PgDisplay
         public string TotalScans { get; init; } = "";
 
         public string LastScan { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastScan"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastScanUtc { get; init; }
         public string BlockAccesses { get; init; } = "";
         public int SampleCount { get; init; }
 
@@ -796,6 +861,7 @@ internal static class PgDisplay
         return new IndexUsageRow
         {
             DatabaseName = row.DatabaseName ?? "",
+            SchemaName = row.SchemaName ?? "",
             TableName = row.TableName ?? "",
             IndexName = row.IndexName ?? "",
             IndexSize = Bytes(row.IndexBytes),
@@ -805,6 +871,7 @@ internal static class PgDisplay
                16+ it is an index never scanned since the reset - so the dash stands for "not recorded"
                rather than being filled with a fabricated date. The MCP read spells out which. */
             LastScan = Timestamp(row.LastScan),
+            LastScanUtc = row.LastScan,
             BlockAccesses = Count(row.BlocksHit + row.BlocksRead),
             SampleCount = row.SampleCount,
             Droppability = droppability,
@@ -900,7 +967,11 @@ internal static class PgDisplay
         public string IdleInTransactionShare { get; init; } = "";
         public int SampleCount { get; init; }
         public string FirstSeenAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="FirstSeenAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? FirstSeenAtUtc { get; init; }
         public string LastSeenAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastSeenAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastSeenAtUtc { get; init; }
 
         /// <summary>What the rest of the instance looked like in this backend's most recent sample. Two
         /// idle-in-transaction sessions out of six connections is a different server from two out of four
@@ -1021,7 +1092,9 @@ internal static class PgDisplay
                     $"{r.IdleInTransactionSamples:N0} of {r.SampleCount:N0} samples"),
             SampleCount = r.SampleCount,
             FirstSeenAt = Timestamp(r.FirstSeenAt),
+            FirstSeenAtUtc = r.FirstSeenAt,
             LastSeenAt = Timestamp(r.LastSeenAt),
+            LastSeenAtUtc = r.LastSeenAt,
             InstanceContext = string.Create(CultureInfo.CurrentCulture,
                 $"{r.IdleInTransactionSessions:N0} idle in xact / {r.ActiveSessions:N0} active / "
                 + $"{r.TotalSessions:N0} sessions; {r.ReportableSessions:N0} reportable"),
@@ -1060,24 +1133,36 @@ internal static class PgDisplay
     {
         ArgumentNullException.ThrowIfNull(row);
 
+        /* #3955: the five checkpoint figures a shutdown checkpoint lands in are blank across a restart, for a reason
+           neither the version notes nor the reset note cover, so each of those rows says it in its own note. */
+        string Checkpoint(string note) => row.PostmasterRestartedDuringWindow
+            ? "Blank: PostgreSQL restarted inside this window. The shutdown checkpoint is counted as requested and "
+              + "its own write, sync and buffer work lands in the same counters, so across a restart this figure "
+              + "cannot be told from the workload's. Choose a window that starts after the restart to see it."
+            : note;
+
         return new List<WriteStatRow>
         {
             Metric("Checkpoints", "Timed", row.CheckpointsTimed,
                 "Checkpoints that began because checkpoint_timeout elapsed. This is the healthy kind."),
             Metric("Checkpoints", "Requested", row.CheckpointsRequested,
-                "Began because WAL volume demanded one. Climbing against Timed is the classic "
-                + "max_wal_size-too-small signal."),
+                Checkpoint("Began because WAL volume demanded one. Climbing against Timed is the classic "
+                    + "max_wal_size-too-small signal.")),
             Metric("Checkpoints", "Completed", row.CheckpointsDone,
                 "PostgreSQL 18+. Blank on earlier majors, which do not expose it."),
             MetricMs("Checkpoints", "Write Time (ms)", row.CheckpointWriteTimeMs,
-                "Time spent writing buffers during checkpoints."),
+                Checkpoint("Time spent writing buffers during checkpoints.")),
             MetricMs("Checkpoints", "Sync Time (ms)", row.CheckpointSyncTimeMs,
-                "Time spent in fsync during checkpoints. High here with low write time points at the "
-                + "storage rather than at the volume."),
+                Checkpoint("Time spent in fsync during checkpoints. High here with low write time points at the "
+                    + "storage rather than at the volume.")),
             Metric("Checkpoints", "Buffers Written", row.BuffersWrittenCheckpoint,
-                "Buffers written by the checkpointer."),
+                Checkpoint("Buffers written by the checkpointer.")),
+            /* Two reasons can blank this one, so the restart note names both rather than replacing the version note. */
             Metric("Checkpoints", "SLRU Written", row.SlruWritten,
-                "PostgreSQL 18+. Blank on earlier majors."),
+                row.PostmasterRestartedDuringWindow
+                    ? "PostgreSQL 18+, so blank on earlier majors; and blank on any major across a restart inside this "
+                      + "window, for the reason the Requested row gives."
+                    : "PostgreSQL 18+. Blank on earlier majors."),
             Metric("Restartpoints", "Timed", row.RestartpointsTimed,
                 "A standby's equivalent of a checkpoint. PostgreSQL 17+, and zero on a primary."),
             Metric("Restartpoints", "Requested", row.RestartpointsRequested,
@@ -1133,4 +1218,241 @@ internal static class PgDisplay
             Note = note,
         };
     }
+
+    // -- Locks, sampled waits, replication, column statistics, index bloat: the time columns (#4766) ---------
+
+    /* These five grids used to bind the shared reader's row as it came, so each of their time columns was a
+       DateTime: it printed the raw UTC value in every display mode, where every other time on the tab follows
+       the mode and words the offset of a repeated autumn hour. The reader rows are shared with the MCP tools and
+       stay as they are; each grid now binds one of the display rows below.
+
+       A display row keeps the reader row's property names and types for every column the grid binds, so the other
+       bindings and the sort keys of the other columns are unchanged. The time is the one exception: it becomes text
+       under its old name (PgDisplay.Timestamp), with the instant it was formatted from beside it as <Name>Utc,
+       which is what the column sorts by.
+
+       The reader's value IS a UTC instant. The store keeps these columns as timestamp (no zone), the collectors
+       write UTC into them (the replication collector converts the standby's backend_start with AT TIME ZONE 'UTC'
+       first), and each reader stamps the value Kind=Utc as it reads it. */
+
+    /// <summary>One lock group of the Locks grid: the reader's columns, with Last Seen as text.</summary>
+    internal sealed class LockStatRow
+    {
+        public string? DatabaseName { get; init; }
+        public string? LockType { get; init; }
+        public string? Mode { get; init; }
+        public bool Granted { get; init; }
+        public long? RelationOid { get; init; }
+        public string? RelationName { get; init; }
+        public long Captures { get; init; }
+        public long TotalCaptures { get; init; }
+        public long MaxBackends { get; init; }
+        public double? MaxWaitMs { get; init; }
+        public string LastSeen { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastSeen"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime LastSeenUtc { get; init; }
+    }
+
+    internal static List<LockStatRow> LockStatRows(IReadOnlyList<DarlingPgLockStatsReader.PgLockStatRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        return rows.Select(LockStat).ToList();
+    }
+
+    internal static LockStatRow LockStat(DarlingPgLockStatsReader.PgLockStatRow row) => new()
+    {
+        DatabaseName = row.DatabaseName,
+        LockType = row.LockType,
+        Mode = row.Mode,
+        Granted = row.Granted,
+        RelationOid = row.RelationOid,
+        RelationName = row.RelationName,
+        Captures = row.Captures,
+        TotalCaptures = row.TotalCaptures,
+        MaxBackends = row.MaxBackends,
+        MaxWaitMs = row.MaxWaitMs,
+        LastSeen = Timestamp(row.LastSeen),
+        LastSeenUtc = row.LastSeen,
+    };
+
+    /// <summary>One sampled wait of the Wait Sampling grid: the reader's columns, with Last Seen as text.</summary>
+    internal sealed class WaitSamplingRow
+    {
+        public string? EventType { get; init; }
+        public string? Event { get; init; }
+        public long QueryId { get; init; }
+        public long SampleCount { get; init; }
+        public long EstimatedWaitMs { get; init; }
+        public int BackendCount { get; init; }
+        public bool CounterReset { get; init; }
+        public string CaptureTime { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime CaptureTimeUtc { get; init; }
+    }
+
+    internal static List<WaitSamplingRow> WaitSamplingRows(IReadOnlyList<DarlingPgWaitSamplingReader.PgWaitSamplingRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        return rows.Select(WaitSampling).ToList();
+    }
+
+    internal static WaitSamplingRow WaitSampling(DarlingPgWaitSamplingReader.PgWaitSamplingRow row) => new()
+    {
+        EventType = row.EventType,
+        Event = row.Event,
+        QueryId = row.QueryId,
+        SampleCount = row.SampleCount,
+        EstimatedWaitMs = row.EstimatedWaitMs,
+        BackendCount = row.BackendCount,
+        CounterReset = row.CounterReset,
+        CaptureTime = Timestamp(row.CaptureTime),
+        CaptureTimeUtc = row.CaptureTime,
+    };
+
+    /// <summary>One standby of the Replication grid: the reader's columns, with Connected Since as text.</summary>
+    internal sealed class ReplicationStatRow
+    {
+        public string? ApplicationName { get; init; }
+        public string? ClientAddr { get; init; }
+        public string? State { get; init; }
+        public string? SyncState { get; init; }
+        public long? ReplayBytesBehind { get; init; }
+        public long? WorstReplayBytesBehind { get; init; }
+        public double? ReplayLagMs { get; init; }
+        public double? WorstReplayLagMs { get; init; }
+        public long Samples { get; init; }
+        public long TotalSamples { get; init; }
+        /// <summary>Empty when the collector recorded no start time for the standby.</summary>
+        public string BackendStart { get; init; } = "";
+        /// <summary>The UTC instant <see cref="BackendStart"/> is formatted from, or null when there is none. The column sorts by it, not by that text.</summary>
+        public DateTime? BackendStartUtc { get; init; }
+    }
+
+    internal static List<ReplicationStatRow> ReplicationStatRows(IReadOnlyList<DarlingPgReplicationStatsReader.PgReplicationStatRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        return rows.Select(ReplicationStat).ToList();
+    }
+
+    internal static ReplicationStatRow ReplicationStat(DarlingPgReplicationStatsReader.PgReplicationStatRow row) => new()
+    {
+        ApplicationName = row.ApplicationName,
+        ClientAddr = row.ClientAddr,
+        State = row.State,
+        SyncState = row.SyncState,
+        ReplayBytesBehind = row.ReplayBytesBehind,
+        WorstReplayBytesBehind = row.WorstReplayBytesBehind,
+        ReplayLagMs = row.ReplayLagMs,
+        WorstReplayLagMs = row.WorstReplayLagMs,
+        Samples = row.Samples,
+        TotalSamples = row.TotalSamples,
+        BackendStart = Timestamp(row.BackendStart),
+        BackendStartUtc = row.BackendStart,
+    };
+
+    /// <summary>One column of the Column Statistics grid: the reader's columns, with Captured as text.</summary>
+    internal sealed class ColumnStatRow
+    {
+        public string? DatabaseName { get; init; }
+        public string? SchemaName { get; init; }
+        public string? TableName { get; init; }
+        public string? ColumnName { get; init; }
+        public double? NDistinct { get; init; }
+        public double? NullFrac { get; init; }
+        public int? AvgWidth { get; init; }
+        public double? Correlation { get; init; }
+        public double? TopValueFrequency { get; init; }
+        public int? CommonValueCount { get; init; }
+        public string CaptureTime { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime CaptureTimeUtc { get; init; }
+    }
+
+    internal static List<ColumnStatRow> ColumnStatRows(IReadOnlyList<DarlingPgColumnStatsReader.PgColumnStatRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        return rows.Select(ColumnStat).ToList();
+    }
+
+    internal static ColumnStatRow ColumnStat(DarlingPgColumnStatsReader.PgColumnStatRow row) => new()
+    {
+        DatabaseName = row.DatabaseName,
+        SchemaName = row.SchemaName,
+        TableName = row.TableName,
+        ColumnName = row.ColumnName,
+        NDistinct = row.NDistinct,
+        NullFrac = row.NullFrac,
+        AvgWidth = row.AvgWidth,
+        Correlation = row.Correlation,
+        TopValueFrequency = row.TopValueFrequency,
+        CommonValueCount = row.CommonValueCount,
+        CaptureTime = Timestamp(row.CaptureTime),
+        CaptureTimeUtc = row.CaptureTime,
+    };
+
+    /// <summary>One index of the Index Bloat grid: the reader's columns, with Measured and Estimated as text.</summary>
+    internal sealed class IndexBloatRow
+    {
+        public string? DatabaseName { get; init; }
+        public string? SchemaName { get; init; }
+        public string? TableName { get; init; }
+        public string? IndexName { get; init; }
+        public string? MeasurementKind { get; init; }
+        public long IndexBytes { get; init; }
+        public long? EstimatedReclaimableBytes { get; init; }
+        public double? EstBloatPct { get; init; }
+        public double? AvgLeafDensity { get; init; }
+        public double? LeafFragmentation { get; init; }
+        public long? EmptyPages { get; init; }
+
+        /// <summary>The reader row's own command for measuring this index exactly, taken as it is so the grid and the
+        /// MCP payload cannot word it two ways.</summary>
+        public string ExactMeasurementCommand { get; init; } = "";
+
+        public string? SkippedReason { get; init; }
+
+        /// <summary>When the index was exactly measured, as text; empty on a row with no exact measurement.</summary>
+        public string MeasuredAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from, or null. The column sorts by it, not by that text.</summary>
+        public DateTime? MeasuredAtUtc { get; init; }
+
+        /// <summary>When the index was estimated, as text; empty on a row that is not a successful estimate.</summary>
+        public string EstimatedAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="EstimatedAt"/> is formatted from, or null. The column sorts by it, not by that text.</summary>
+        public DateTime? EstimatedAtUtc { get; init; }
+    }
+
+    internal static List<IndexBloatRow> IndexBloatRows(IReadOnlyList<DarlingPgIndexBloatReader.PgIndexBloatRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        return rows.Select(IndexBloat).ToList();
+    }
+
+    /* Which of the two times a row carries is the reader row's own rule (MeasuredAt and EstimatedAt there: exactly
+       one is set on a row with an answer, neither on a row with a reason), so this reads them and does not restate it. */
+    internal static IndexBloatRow IndexBloat(DarlingPgIndexBloatReader.PgIndexBloatRow row) => new()
+    {
+        DatabaseName = row.DatabaseName,
+        SchemaName = row.SchemaName,
+        TableName = row.TableName,
+        IndexName = row.IndexName,
+        MeasurementKind = row.MeasurementKind,
+        IndexBytes = row.IndexBytes,
+        EstimatedReclaimableBytes = row.EstimatedReclaimableBytes,
+        EstBloatPct = row.EstBloatPct,
+        AvgLeafDensity = row.AvgLeafDensity,
+        LeafFragmentation = row.LeafFragmentation,
+        EmptyPages = row.EmptyPages,
+        ExactMeasurementCommand = row.ExactMeasurementCommand,
+        SkippedReason = row.SkippedReason,
+        MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAtUtc = row.MeasuredAt,
+        EstimatedAt = Timestamp(row.EstimatedAt),
+        EstimatedAtUtc = row.EstimatedAt,
+    };
 }

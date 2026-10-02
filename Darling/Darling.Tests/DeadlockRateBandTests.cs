@@ -237,23 +237,20 @@ public sealed class DeadlockRateBandTests
     /* ─────────────────────── the null (no-source) arm ─────────────────────── */
 
     /// <summary>
-    /// A PostgreSQL target has no SQL-Server deadlock reading, so it bands off none (#3272/#3017) — and that
-    /// survives the rate change at every window, including the unrateable ones where a COUNT above zero
-    /// reads Warning. The null arm is tested first in the method for exactly this reason: an absent source
-    /// must not be reachable by the arm that exists for an absent denominator.
+    /// A caller with no deadlock source bands off none (#3272) — and that survives the rate change at every
+    /// window, including the unrateable ones where a COUNT above zero reads Warning. The null arm is tested
+    /// first in the method for exactly this reason: an absent source must not be reachable by the arm that
+    /// exists for an absent denominator. Since #3539 neither engine's CARD takes this arm (a PostgreSQL
+    /// target's count is its own counter difference); the arm stays for the daily classifier's empty cells
+    /// and for any caller that genuinely reads nothing.
     /// </summary>
     [Fact]
-    public void NoDeadlockSourceForTheEngine_StaysUnknown()
+    public void NoDeadlockSource_StaysUnknown()
     {
         foreach (var hours in new[] { 0, 1, 24, 168 })
         {
             Assert.Equal(HealthSeverity.Unknown, Band(null, TimeSpan.FromHours(hours)));
         }
-
-        Assert.Equal(
-            HealthSeverity.Unknown,
-            ServerHealthClassifier.DeadlockSeverity(
-                ServerMetricSources.DmvSourced(0, isPostgres: true), Hour, DeadlockRateThresholds.Default));
     }
 
     /* ─────────────────────── the tiers are settable ─────────────────────── */

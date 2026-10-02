@@ -80,7 +80,9 @@ public sealed class DeadlocksCollectorDefinitionTests
         Assert.Contains("event[@name=\"xml_deadlock_report\"]", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("event[@name=\"database_xml_deadlock_report\"]", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("dm_xe_database_session_targets", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("> @cutoff_time", plan.Text, StringComparison.Ordinal);
+        /* The time filter runs inside the XQuery; a .value() cast in WHERE shreds every event first. */
+        Assert.Contains("WHERE evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("datetime2') > @cutoff_time", plan.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -92,6 +94,11 @@ public sealed class DeadlocksCollectorDefinitionTests
         Assert.Contains("JOIN sys.dm_xe_database_sessions AS xes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("event[@name=\"database_xml_deadlock_report\"]", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'PerformanceMonitor_Deadlock'", plan.Text, StringComparison.Ordinal);
+        /* Both Azure arms filter inside the XQuery: the ring buffer's events and the telemetry file's
+           one-event documents, the telemetry arm on its own cursor (@telemetry_cutoff_time). */
+        Assert.Contains("WHERE evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("AND   tel.evt.exist('/event/@timestamp[. > sql:variable(\"@telemetry_cutoff_time\")]') = 1", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("datetime2') > @cutoff_time", plan.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -99,14 +106,15 @@ public sealed class DeadlocksCollectorDefinitionTests
     {
         var watermark = new DateTime(2026, 7, 2, 11, 55, 0, DateTimeKind.Utc);
         var withWatermark = DeadlocksCollector.Instance.BuildQuery(MakeContext(watermark: watermark));
-        var parameter = Assert.Single(withWatermark.Parameters);
-        Assert.Equal("@cutoff_time", parameter.Name);
+        /* #4200 added @last_execution_count alongside @cutoff_time. */
+        Assert.Equal(2, withWatermark.Parameters.Count);
+        var parameter = Assert.Single(withWatermark.Parameters, p => p.Name == "@cutoff_time");
         Assert.Equal(watermark, parameter.Value);
         Assert.Equal(CollectorParameterType.DateTime2, parameter.Type);
 
         var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
         var fallback = DeadlocksCollector.Instance.BuildQuery(MakeContext(collectionTime: collectionTime));
-        Assert.Equal(collectionTime.AddMinutes(-10), Assert.Single(fallback.Parameters).Value);
+        Assert.Equal(collectionTime.AddMinutes(-10), Assert.Single(fallback.Parameters, p => p.Name == "@cutoff_time").Value);
     }
 
     [Fact]

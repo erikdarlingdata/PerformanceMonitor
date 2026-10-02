@@ -84,7 +84,10 @@ internal static class DarlingFleetSweepEndpoints
     /// receive a complete-looking answer to a different one), a readable value goes through
     /// <see cref="McpHelpers.ValidateWindow"/>'s range check, and the anchor is parsed by the same
     /// authority every MCP read uses. Returns null and the resolved window on success, else the
-    /// refusal message.
+    /// refusal — the <c>invalid</c> envelope (<see cref="McpHelpers.Refusal"/>, #3739) both arms, because
+    /// the shared validator answers that shape and a caller that reads the words should not have to know
+    /// which arm refused it. This surface's routes answer <c>{"error": sentence}</c> and unwrap it through
+    /// <see cref="McpHelpers.ErrorMessageOf"/> (see <see cref="SweepError"/>).
     /// </summary>
     internal static string? ValidateSpan(string? rawHours, string? asOf, out int hours, out DateTime endUtc)
     {
@@ -94,7 +97,7 @@ internal static class DarlingFleetSweepEndpoints
         if (rawHours is not null
             && !int.TryParse(rawHours, NumberStyles.Integer, CultureInfo.InvariantCulture, out hours))
         {
-            return $"Invalid hours value '{rawHours}'. Expected a whole number of hours (1-{McpHelpers.MaxHoursBack}).";
+            return McpHelpers.Refusal("hours", $"Invalid hours value '{rawHours}'. Expected a whole number of hours (1-{McpHelpers.MaxHoursBack}).");
         }
 
         return McpHelpers.ValidateWindow(hours, asOf, out endUtc);
@@ -104,16 +107,19 @@ internal static class DarlingFleetSweepEndpoints
     /// Validates the watch-item <c>?state=</c> filter: null (absent) selects the open-union-carried
     /// default view; one of the machine's four states selects that state; anything else is refused
     /// naming the legal values, because an unknown state matches nothing and an empty answer to a
-    /// typo is indistinguishable from a clean worklist.
+    /// typo is indistinguishable from a clean worklist. The refusal is the <c>invalid</c> envelope (#3739)
+    /// with <paramref name="parameterName"/> under <c>hints.parameter</c>: the web feed calls the knob
+    /// <c>state</c> and <c>get_sweep_reports</c> calls it <c>watch_state</c>, and the hint has to name the
+    /// one the caller actually sent.
     /// </summary>
-    internal static string? ValidateWatchState(string? state)
+    internal static string? ValidateWatchState(string? state, string parameterName = "state")
     {
         if (state is null || KnownWatchStates.Contains(state, StringComparer.Ordinal))
         {
             return null;
         }
 
-        return $"Unknown state '{state}'. Legal values: {string.Join(", ", KnownWatchStates)}; omit for open + carried.";
+        return McpHelpers.Refusal(parameterName, $"Unknown state '{state}'. Legal values: {string.Join(", ", KnownWatchStates)}; omit for open + carried.");
     }
 
     /// <summary>
@@ -144,7 +150,12 @@ internal static class DarlingFleetSweepEndpoints
     /// the auth middleware like every other route. Handlers answer through the surface's standard
     /// shapes: data as JSON, refusals as 400 <c>{"error"}</c>, absence as 404, and a store fault as a
     /// 500 <c>{"error"}</c> — the page's own error strip is the degraded rendering, so nothing here
-    /// swallows a fault into an answer that reads healthier than the store.
+    /// swallows a fault into an answer that reads healthier than the store. This was not true before
+    /// #4315: the five presentation reads under these routes used to log-and-degrade a store fault
+    /// into an empty list, which read as a genuinely quiet span or worklist — an empty
+    /// <c>{"sweeps": []}</c> the page rendered as "No sweeps in this span" instead of the error strip.
+    /// Since #4315 those reads throw; since #4293 both routes reach the pipeline's #4276 backstop
+    /// directly, with no local catch, which answers through <see cref="Hosting.DarlingWebFailureLog"/>.
     ///
     /// <para><b>The logger seat is the HOST SERVICE's logger, never <c>app.Logger</c>.</b> The web
     /// host clears the dashboard app's logging providers (the framework-noise decision, stated at its
@@ -172,7 +183,7 @@ internal static class DarlingFleetSweepEndpoints
 
             var startUtc = endUtc.AddHours(-hours);
             var runs = await FleetSweepStore.GetSweepsBySpanAsync(
-                postgres, startUtc, endUtc, logger, context.RequestAborted);
+                postgres, startUtc, endUtc, context.RequestAborted);
 
             return JsonResult(FleetSweepPresentation.BuildTimelineNode(runs, startUtc, endUtc));
         });
@@ -182,36 +193,25 @@ internal static class DarlingFleetSweepEndpoints
            renders as its empty state rather than an error. */
         app.MapGet("/api/sweeps/latest", async (HttpContext context) =>
         {
-            try
-            {
-                var run = await FleetSweepStore.GetLatestSweepAsync(postgres, context.RequestAborted);
-                return run is null
-                    ? SweepError("No sweep has been recorded yet.", StatusCodes.Status404NotFound)
-                    : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                /* The latest-sweep read throws on a store fault (the engine-seam posture); here the
-                   loud shape is a 500 the page renders red — never a 404 that reads as "no sweeps". */
-                return SweepError($"Error reading the latest sweep: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+            /* #4283: no local catch. A store-fault throw here used to answer 500 with ex.Message; the #4281
+               top-of-pipeline backstop (MapAll wires this route after it) now answers it — the loud shape is
+               still a 500 (503 for a caught statement_timeout) the page renders red, never a 404 that reads
+               as "no sweeps", because a store fault is never the null BuildDetailAsync sees on a genuine miss. */
+            var run = await FleetSweepStore.GetLatestSweepAsync(postgres, context.RequestAborted);
+            return run is null
+                ? SweepError("No sweep has been recorded yet.", StatusCodes.Status404NotFound)
+                : JsonResult(await BuildDetailAsync(postgres, run, context));
         });
 
         /* One sweep in full, by id — the timeline click-through. 404 means genuinely absent (pruned
            by retention, or never recorded); a store fault is the 500 arm, per the store read's doc. */
         app.MapGet("/api/sweeps/{id:long}", async (HttpContext context, long id) =>
         {
-            try
-            {
-                var run = await FleetSweepStore.GetSweepAsync(postgres, id, context.RequestAborted);
-                return run is null
-                    ? SweepError("Sweep not found.", StatusCodes.Status404NotFound)
-                    : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return SweepError($"Error reading sweep {id}: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+            /* #4283: no local catch — see /api/sweeps/latest's comment above. */
+            var run = await FleetSweepStore.GetSweepAsync(postgres, id, context.RequestAborted);
+            return run is null
+                ? SweepError("Sweep not found.", StatusCodes.Status404NotFound)
+                : JsonResult(await BuildDetailAsync(postgres, run, context));
         });
 
         /* The watch-item worklist. Default = open + carried in ONE store read; ?state= narrows to a
@@ -226,8 +226,8 @@ internal static class DarlingFleetSweepEndpoints
             }
 
             var items = state is null
-                ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, logger, context.RequestAborted)
-                : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, state, logger, context.RequestAborted);
+                ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, context.RequestAborted)
+                : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, state, context.RequestAborted);
 
             var names = await ReadWatchItemNamesAsync(postgres, items, logger, context.RequestAborted);
             return JsonResult(FleetSweepPresentation.BuildWatchItemsNode(items, names));
@@ -235,18 +235,20 @@ internal static class DarlingFleetSweepEndpoints
     }
 
     /// <summary>One sweep's full document: the run plus its verdicts and — under master-off — the
-    /// would-have-paged ledger, through the shared builders. The child reads are the store's
-    /// presentation reads (log-and-degrade into the service log via <paramref name="logger"/> —
-    /// the seat <see cref="Map"/>'s doc explains), so a child fault costs its section, not the page.</summary>
+    /// would-have-paged ledger, through the shared builders. THROWS on a store fault (#4315): the
+    /// child reads are the store's presentation reads, and since #4315 they throw rather than
+    /// degrade, so a verdicts or would-have-paged fault now fails the WHOLE document — the pipeline's
+    /// #4276 backstop (see <see cref="Map"/>, no local catch) answers the loud shape instead of
+    /// publishing a document with a section silently missing.</summary>
     private static async Task<JsonObject> BuildDetailAsync(
-        ILogger logger, NpgsqlDataSource postgres, FleetSweepRun run, HttpContext context)
+        NpgsqlDataSource postgres, FleetSweepRun run, HttpContext context)
     {
         var verdicts = await FleetSweepStore.GetServerVerdictsAsync(
-            postgres, run.SweepId, logger, context.RequestAborted);
+            postgres, run.SweepId, context.RequestAborted);
 
         var ledger = run.AlertsEnabled
             ? new List<FleetSweepWouldHavePagedEntry>()
-            : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, logger, context.RequestAborted);
+            : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, context.RequestAborted);
 
         return FleetSweepPresentation.BuildSweepDetailNode(run, verdicts, ledger);
     }
@@ -262,6 +264,10 @@ internal static class DarlingFleetSweepEndpoints
     private static IResult JsonResult(JsonNode node) =>
         Results.Text(node.ToJsonString(), "application/json");
 
+    /// <summary>This surface's error body — <c>{"error": sentence}</c>, its own contract since #2506, kept
+    /// rather than switched to the read surface's envelope pass-through: <paramref name="message"/> may be the
+    /// <c>invalid</c> envelope the shared validators answer since #3739, so the sentence is read out of it
+    /// and a web client that reads <c>.error</c> is not handed JSON inside a string.</summary>
     private static IResult SweepError(string message, int statusCode) =>
-        Results.Text(new JsonObject { ["error"] = message }.ToJsonString(), "application/json", statusCode: statusCode);
+        Results.Text(new JsonObject { ["error"] = McpHelpers.ErrorMessageOf(message) }.ToJsonString(), "application/json", statusCode: statusCode);
 }

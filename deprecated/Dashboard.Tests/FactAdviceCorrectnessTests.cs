@@ -42,12 +42,22 @@ public class FactAdviceCorrectnessTests
         Assert.DoesNotContain("every INSERT/UPDATE/DELETE pays", Text("MISSING_INDEX"));
     }
 
+    // #4149: last-page-insert / OPTIMIZE_FOR_SEQUENTIAL_KEY moved to PAGELATCH_EX — LATCH_EX excludes
+    // buffer latches (sys.dm_os_wait_stats), so it is no longer where this advice belongs.
     [Fact]
-    public void LatchEx_LastPageFix_IsOptimizeForSequentialKey_NotAddClusteredIndex()
+    public void PagelatchEx_LastPageFix_IsOptimizeForSequentialKey_NotAddClusteredIndex()
     {
-        var t = Text("LATCH_EX");
+        var t = Text("PAGELATCH_EX");
         Assert.DoesNotContain("add a clustered index", t);
         Assert.Contains("OPTIMIZE_FOR_SEQUENTIAL_KEY", t);
+    }
+
+    [Fact]
+    public void LatchEx_DoesNotDescribePageLatches()
+    {
+        var t = Text("LATCH_EX");
+        Assert.DoesNotContain("OPTIMIZE_FOR_SEQUENTIAL_KEY", t);
+        Assert.Contains("non-buffer", t);
     }
 
     [Fact]
@@ -76,6 +86,21 @@ public class FactAdviceCorrectnessTests
     public void LatencyAnomalies_HeadlineNotRightNow(string key)
     {
         Assert.DoesNotContain("right now", FactAdvice.GetForFactKey(key)!.Headline);
+    }
+
+    // #3531: the two reader/writer lock twins hand out the same RCSI ALTER, so both must name its
+    // counter-objectives — the brief exclusive lock the ALTER takes, the test-on-a-copy warning for
+    // NOLOCK-dependent code, and the tempdb version-store cost FactRiskDisclosure discloses at apply
+    // time. LCK_M_IS shipped the bare ALTER calling RCSI "strictly better" with none of them.
+    [Theory]
+    [InlineData("LCK_M_S")]
+    [InlineData("LCK_M_IS")]
+    public void RcsiLockTwins_NameTheCaveatsAlongsideTheAlter(string key)
+    {
+        var remediation = FactAdvice.GetForFactKey(key)!.Remediation;
+        Assert.Contains("brief exclusive lock", remediation);
+        Assert.Contains("test on a copy", remediation);
+        Assert.Contains("version store", remediation);
     }
 
     // Review note (§2): SOS rewrite over-swung to "never CPU pressure". The amount + a deep runnable

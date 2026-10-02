@@ -74,9 +74,13 @@
             </DataGrid.Columns>
         </DataGrid>
 
-        <!-- Status text -->
-        <TextBlock Grid.Row="3" x:Name="StatusText" FontSize="11" FontStyle="Italic"
-                   Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,8,0,0"/>
+        <!-- Status text + the delta cadence cap (text set in code from the shared gap-policy constants) -->
+        <StackPanel Grid.Row="3" Margin="0,8,0,0">
+            <TextBlock x:Name="StatusText" FontSize="11" FontStyle="Italic"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <TextBlock x:Name="DeltaBoundText" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+        </StackPanel>
 
         <!-- Buttons -->
         <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">

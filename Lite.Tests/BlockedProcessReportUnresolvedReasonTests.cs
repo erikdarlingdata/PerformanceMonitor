@@ -327,6 +327,16 @@ public sealed class BlockedProcessReportUnresolvedReasonTests
         payload.Rows.Add(new DateTime(2026, 7, 30, 11, 59, 0, DateTimeKind.Utc), ReportXml, DBNull.Value, 6, unresolvedLabel);
         dataSet.Tables.Add(payload);
 
+        /* #4200: the gate's own trailing result set, between the payload and the probe-failure set in
+           the real batch. ReadAsync consumes exactly this one itself (NextResultAsync) before
+           returning, which is what leaves the reader positioned on probe_failures below for
+           EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync -- the seam this test is about. */
+        var gate = new DataTable("gate");
+        gate.Columns.Add("execution_count", typeof(long));
+        gate.Columns.Add("gated", typeof(bool));
+        gate.Rows.Add(1L, false);
+        dataSet.Tables.Add(gate);
+
         if (probeFailures is not null)
         {
             var failures = new DataTable("probe_failures");

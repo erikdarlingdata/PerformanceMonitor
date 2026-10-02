@@ -298,7 +298,7 @@
                             <!-- CPU Details -->
                             <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
                                 <Run x:Name="CpuCountText" Text="-"/>
-                                <Run Text=" CPUs,"/>
+                                <Run x:Name="CpuCountUnitText" Text=" CPUs,"/>
                                 <Run x:Name="WorkerThreadsText" Text="-"/>
                                 <Run Text=" workers,"/>
                                 <Run x:Name="CpuSamplesText" Text="-"/>
@@ -345,7 +345,7 @@
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0" Text="Buffer Pool %" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
-                                           ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool"/>
+                                           ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
                                     <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                     <Grid>
@@ -369,7 +369,7 @@
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0">
                                     <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5">
-                                        <Run Text="Physical: " FontWeight="SemiBold"/>
+                                        <Run x:Name="PhysicalMemoryCaption" Text="Physical: " FontWeight="SemiBold"/>
                                         <Run x:Name="PhysicalMemoryText" Text="-"/>
                                     </TextBlock>
                                     <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
@@ -429,7 +429,7 @@
                               MaxHeight="200" RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100"/>
+                            <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
                             <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="130">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
@@ -555,46 +555,52 @@
                         <!-- Database Size Chart -->
                         <GroupBox Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10"
                                   Foreground="{DynamicResource ForegroundBrush}">
-                            <ItemsControl x:Name="DbSizeChart" Margin="8,4,8,4" Grid.IsSharedSizeScope="True">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Margin="0,2" Height="22">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="160"/>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto" MinWidth="90" SharedSizeGroup="DbSizeLabel"/>
-                                            </Grid.ColumnDefinitions>
-                                            <!-- Database name -->
-                                            <TextBlock Grid.Column="0" Text="{Binding DatabaseName}"
-                                                       VerticalAlignment="Center" FontSize="11.5"
-                                                       Foreground="{DynamicResource ForegroundBrush}"
-                                                       TextTrimming="CharacterEllipsis"/>
-                                            <!-- Stacked bar: used (accent) + free (dim) -->
-                                            <Grid Grid.Column="1" Margin="4,2">
-                                                <Border CornerRadius="3" Background="#1AFFFFFF"/>
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="{Binding UsedStarWidth}"/>
-                                                        <ColumnDefinition Width="{Binding FreeStarWidth}"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <Border Grid.Column="0" CornerRadius="3" Background="#3498DB"/>
+                            <DockPanel>
+                                <!-- Says which bars leave the log out and why; the loader shows it only when a bar needs it -->
+                                <TextBlock x:Name="DbSizeChartCaption" DockPanel.Dock="Bottom" Visibility="Collapsed"
+                                           Margin="8,2,8,4" TextWrapping="Wrap" FontSize="11.5" FontStyle="Italic"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <ItemsControl x:Name="DbSizeChart" Margin="8,4,8,4" Grid.IsSharedSizeScope="True">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="0,2" Height="22">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="160"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto" MinWidth="90" SharedSizeGroup="DbSizeLabel"/>
+                                                </Grid.ColumnDefinitions>
+                                                <!-- Database name -->
+                                                <TextBlock Grid.Column="0" Text="{Binding DatabaseName}"
+                                                           VerticalAlignment="Center" FontSize="11.5"
+                                                           Foreground="{DynamicResource ForegroundBrush}"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                                <!-- Stacked bar: used (accent) + free (dim) -->
+                                                <Grid Grid.Column="1" Margin="4,2">
+                                                    <Border CornerRadius="3" Background="#1AFFFFFF"/>
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="{Binding UsedStarWidth}"/>
+                                                            <ColumnDefinition Width="{Binding FreeStarWidth}"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Border Grid.Column="0" CornerRadius="3" Background="#3498DB"/>
+                                                    </Grid>
                                                 </Grid>
+                                                <!-- Size label -->
+                                                <TextBlock Grid.Column="2" Margin="0,0,4,0" VerticalAlignment="Center"
+                                                           HorizontalAlignment="Right" FontSize="11.5"
+                                                           Foreground="{DynamicResource ForegroundBrush}">
+                                                    <TextBlock.Text>
+                                                        <MultiBinding StringFormat="{}{0:N0} / {1:N0} MB">
+                                                            <Binding Path="UsedMb"/>
+                                                            <Binding Path="TotalMb"/>
+                                                        </MultiBinding>
+                                                    </TextBlock.Text>
+                                                </TextBlock>
                                             </Grid>
-                                            <!-- Size label -->
-                                            <TextBlock Grid.Column="2" Margin="0,0,4,0" VerticalAlignment="Center"
-                                                       HorizontalAlignment="Right" FontSize="11.5"
-                                                       Foreground="{DynamicResource ForegroundBrush}">
-                                                <TextBlock.Text>
-                                                    <MultiBinding StringFormat="{}{0:N0} / {1:N0} MB">
-                                                        <Binding Path="UsedMb"/>
-                                                        <Binding Path="TotalMb"/>
-                                                    </MultiBinding>
-                                                </TextBlock.Text>
-                                            </TextBlock>
-                                        </Grid>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </DockPanel>
                         </GroupBox>
                     </Grid>
                 </ScrollViewer>
@@ -895,7 +901,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding Growth7dMb, StringFormat='{}{0:N2}'}" Width="110">
+                            <DataGridTextColumn Binding="{Binding Growth7dMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Growth7dMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -908,7 +914,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding Growth30dMb, StringFormat='{}{0:N2}'}" Width="110">
+                            <DataGridTextColumn Binding="{Binding Growth30dMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Growth30dMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -921,7 +927,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding DailyGrowthRateMb, StringFormat='{}{0:N2}'}" Width="100">
+                            <DataGridTextColumn Binding="{Binding DailyGrowthRateMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}" Width="100">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DailyGrowthRateMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -934,7 +940,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding GrowthPct30d, StringFormat='{}{0:N1}'}" Width="100">
+                            <DataGridTextColumn Binding="{Binding GrowthPct30d, StringFormat='{}{0:N1}', TargetNullValue='n/a'}" Width="100">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="GrowthPct30d" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -944,6 +950,14 @@
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <!-- Note: AzureSiblingDatabaseSize.StorageGrowthNote on a database whose size leaves its log out (another database on an Azure SQL Database server, or a Hyperscale log in the log service), empty on every other row. The loader hides the column when no row has a note. -->
+                            <DataGridTextColumn x:Name="StorageGrowthNoteColumn" Header="Note" Binding="{Binding Note}" Width="*" MinWidth="260">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="TextWrapping" Value="Wrap"/>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
@@ -989,9 +1003,9 @@
                               <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentUsedMb, StringFormat='{}{0:N1}'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat='{}{0:N0}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Indexes" Binding="{Binding IndexCount}" Width="70" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Growth MB" Binding="{Binding Growth30dMb, StringFormat='{}{0:N1}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Growth %" Binding="{Binding GrowthPct30d, StringFormat='{}{0:N1}%'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Daily Rate MB" Binding="{Binding DailyGrowthRateMb, StringFormat='{}{0:N2}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Growth MB" Binding="{Binding Growth30dMb, StringFormat='{}{0:N1}', TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Growth %" Binding="{Binding GrowthPct30d, StringFormat='{}{0:N1}%', TargetNullValue='n/a'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Daily Rate MB" Binding="{Binding DailyGrowthRateMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
                           </DataGrid.Columns>
                       </DataGrid>
                       <TextBlock Grid.Row="1" Grid.RowSpan="2" x:Name="ObjectGrowthNoDataMessage"
@@ -1043,6 +1057,7 @@
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
@@ -1061,7 +1076,15 @@
                     <TextBlock Text="Cumulative since restart; cells shaded per-column by wait time" Margin="12,0,0,0" VerticalAlignment="Center"
                                FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
-                <Grid Grid.Row="1" Margin="10,0,10,10">
+                <StackPanel Grid.Row="1">
+                  <TextBlock x:Name="LockingSeparatelyMonitoredNoteText" Visibility="Collapsed" TextWrapping="Wrap"
+                             Margin="10,0,10,6" FontSize="11" FontStyle="Italic"
+                             Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                  <TextBlock x:Name="OptimizedLockingNoteText" Visibility="Collapsed" TextWrapping="Wrap"
+                             Margin="10,0,10,6" FontSize="11" FontStyle="Italic"
+                             Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
+                <Grid Grid.Row="2" Margin="10,0,10,10">
                   <!-- View 0 (parent): top-N indexes by total lock+latch wait; the four *_wait_in_ms cells are
                        shaded per-column (log) by their wait category's hue. Double-click an index for detail. -->
                   <Grid x:Name="LockingParentView">
@@ -1079,9 +1102,13 @@
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding TableName}" Width="170">
+                            <!-- #3576: schema.table, not the bare table name — the same table name in two schemas
+                                 (the norm on Azure SQL DB) read as one object here. The filter Tag names the SAME
+                                 property as the binding: the popup filter resolves Tag by reflection and a Tag
+                                 that names a property the row does not expose filters nothing, silently. -->
+                            <DataGridTextColumn Binding="{Binding FullName}" Width="220">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TableName" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FullName" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Table" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
                             <DataGridTextColumn Binding="{Binding IndexName}" Width="180">
@@ -1211,7 +1238,8 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding TotalSizeMb, StringFormat='{}{0:N2}'}" Width="110">
+                            <!-- TargetNullValue: a null size is the Hyperscale log file, which lives in the log service. The words are HyperscaleLogSize.Display; a Lite.Tests pin holds them together. -->
+                            <DataGridTextColumn Binding="{Binding TotalSizeMb, StringFormat='{}{0:N2}', TargetNullValue='n/a (log service)'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSizeMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1263,7 +1291,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VolumeMountPoint}" Width="80">
+                            <DataGridTextColumn Binding="{Binding VolumeMountPoint, TargetNullValue='n/a'}" Width="80">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeMountPoint" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1271,7 +1299,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VolumeTotalMb, StringFormat='{}{0:N0}'}" Width="120">
+                            <DataGridTextColumn Binding="{Binding VolumeTotalMb, StringFormat='{}{0:N0}', TargetNullValue='n/a'}" Width="120">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeTotalMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1284,7 +1312,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VolumeFreeMb, StringFormat='{}{0:N0}'}" Width="120">
+                            <DataGridTextColumn Binding="{Binding VolumeFreeMb, StringFormat='{}{0:N0}', TargetNullValue='n/a'}" Width="120">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeFreeMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1330,6 +1358,14 @@
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <!-- Note: AzureSiblingDatabaseSize.LogNote on the row another database on an Azure SQL Database server gets (its log size is not reported), empty on every other row. -->
+                            <DataGridTextColumn x:Name="DatabaseSizesNoteColumn" Header="Note" Binding="{Binding Note}" Width="*" MinWidth="260">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="TextWrapping" Value="Wrap"/>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
@@ -2350,7 +2386,7 @@
                                       RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding DayDisplay}" Width="100">
+                                    <DataGridTextColumn Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DayDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Day" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding AvgGrantedMb, StringFormat='{}{0:N1}'}" Width="120">
@@ -2863,7 +2899,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding FirstSeenLocal, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150">
+                            <DataGridTextColumn Binding="{Binding FirstSeenText}" SortMemberPath="FirstSeen" Width="170">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FirstSeenLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2871,7 +2907,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding LastSeenLocal, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150">
+                            <DataGridTextColumn Binding="{Binding LastSeenText}" SortMemberPath="LastSeen" Width="170">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSeenLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2961,7 +2997,8 @@
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuCount" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                        <TextBlock Text="Logical CPUs" FontWeight="Bold" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Logical CPUs" FontWeight="Bold" VerticalAlignment="Center"
+                                                   ToolTip="The CPU count the engine reports. On Azure SQL Database this is the scheduler count, so it can differ from the vCores you pay for."/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle>

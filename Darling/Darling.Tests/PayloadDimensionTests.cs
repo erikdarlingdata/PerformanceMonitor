@@ -239,11 +239,13 @@ public sealed class PayloadDimensionTests
     [Fact]
     public void CopyCommandFor_NonDivertingCollector_IsUnchangedByTheDimensions()
     {
-        /* Every collector that declares no dimension keeps the pre-#1767 command verbatim, byte for byte. */
+        /* Every collector that declares no dimension keeps the pre-#1767 command verbatim, byte for byte —
+           plus the trailing sample_interval_seconds V127 appended (#3540), which lands last because the
+           COPY column list is the PayloadColumns order and the column was appended there. */
         Assert.Equal(
             "COPY wait_stats (collection_id, collection_time, server_id, server_name, wait_type, " +
             "waiting_tasks_count, wait_time_ms, signal_wait_time_ms, delta_waiting_tasks, delta_wait_time_ms, " +
-            "delta_signal_wait_time_ms) FROM STDIN (FORMAT BINARY)",
+            "delta_signal_wait_time_ms, sample_interval_seconds) FROM STDIN (FORMAT BINARY)",
             PgCollectorRowWriter.CopyCommandFor(WaitStatsCollector.Instance));
     }
 
@@ -430,10 +432,11 @@ public sealed class PayloadDimensionTests
            content writes no new row. */
         Assert.Contains("ON CONFLICT (digest) DO UPDATE", sql, StringComparison.Ordinal);
 
-        /* The churn guard. Without it, every referenced dim row takes an UPDATE every collection cycle —
+        /* The churn guard, now 6 hours (#4503, widened from 1 to cut non-HOT WAL on the indexed
+           last_seen column). Without it, every referenced dim row takes an UPDATE every collection cycle —
            a dead tuple per row per minute — to maintain a watermark whose only consumer (the GC) has a
            multi-day horizon. */
-        Assert.Contains("INTERVAL '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("INTERVAL '6 hours'", sql, StringComparison.Ordinal);
 
         /* ONE statement with array parameters: an Npgsql batch mixing multiple statements with positional
            parameters fails SILENTLY, and a 200-row batch would otherwise cost 200 round trips. */
@@ -443,9 +446,24 @@ public sealed class PayloadDimensionTests
             "INSERT INTO query_text_dim (digest, query_text, last_seen)\n" +
             "SELECT u.digest, u.payload, $3\n" +
             "FROM unnest($1::bytea[], $2::text[]) AS u(digest, payload)\n" +
+            "WHERE NOT EXISTS (\n" +
+            "    SELECT 1 FROM query_text_dim d\n" +
+            "    WHERE d.digest = u.digest\n" +
+            "    AND   d.last_seen >= $3 - INTERVAL '6 hours')\n" +
+            "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
-            "WHERE query_text_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
+            "WHERE query_text_dim.last_seen < EXCLUDED.last_seen - INTERVAL '6 hours'",
             sql);
+
+        /* #4249: the pre-filter is a plain MVCC read (no lock) that keeps an already-fresh digest from
+           ever reaching INSERT or ON CONFLICT — that is what stops the write, not the conflict guard
+           above, which only ever stopped the UPDATE. */
+        Assert.Contains("WHERE NOT EXISTS (", sql, StringComparison.Ordinal);
+
+        /* #4249: the anti-join gives the planner a row source it can reorder (a hash anti-join returns
+           survivors in hash order), so client-side digest ordering alone no longer fixes the order rows
+           reach ON CONFLICT. Both branches must carry this. */
+        Assert.Contains("ORDER BY u.digest", sql, StringComparison.Ordinal);
 
         /* The plan dimension upserts gzip BYTES into query_plan_gz (#2069) — same statement shape,
            same conflict semantics, bytea payload array instead of text. The text column is never
@@ -454,8 +472,13 @@ public sealed class PayloadDimensionTests
             "INSERT INTO query_plan_dim (digest, query_plan_gz, last_seen)\n" +
             "SELECT u.digest, u.payload, $3\n" +
             "FROM unnest($1::bytea[], $2::bytea[]) AS u(digest, payload)\n" +
+            "WHERE NOT EXISTS (\n" +
+            "    SELECT 1 FROM query_plan_dim d\n" +
+            "    WHERE d.digest = u.digest\n" +
+            "    AND   d.last_seen >= $3 - INTERVAL '6 hours')\n" +
+            "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
-            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '6 hours'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable));
 
         /* #2171: compressContent false routes the plan dim through the TEXT branch - query_plan_xml
@@ -465,8 +488,13 @@ public sealed class PayloadDimensionTests
             "INSERT INTO query_plan_dim (digest, query_plan_xml, last_seen)\n" +
             "SELECT u.digest, u.payload, $3\n" +
             "FROM unnest($1::bytea[], $2::text[]) AS u(digest, payload)\n" +
+            "WHERE NOT EXISTS (\n" +
+            "    SELECT 1 FROM query_plan_dim d\n" +
+            "    WHERE d.digest = u.digest\n" +
+            "    AND   d.last_seen >= $3 - INTERVAL '6 hours')\n" +
+            "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
-            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '6 hours'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: false));
 
         /* Explicit true is byte-identical to the default - the parameter cannot drift the gzip shape. */
@@ -475,6 +503,30 @@ public sealed class PayloadDimensionTests
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: true));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => PayloadDimensions.UpsertSql("not_a_dim"));
+    }
+
+    /// <summary>
+    /// #4249's source pin: reads <c>PayloadDimensions.cs</c> itself and requires BOTH branches of
+    /// <c>UpsertSql</c> — the compressed-content early return and the shared text/plan-xml tail — to carry
+    /// <c>ORDER BY u.digest</c>. The exact-string assertions above already cover the shipped shape, but they
+    /// pin the STRING; this pins the SOURCE, so a future edit that special-cases one branch and drops the
+    /// other's ORDER BY fails here even if nobody updates the string pins to match.
+    /// </summary>
+    [Fact]
+    public void UpsertSql_SourceCarriesOrderByOnBothBranches()
+    {
+        var root = FindRepoRoot();
+        Assert.True(root is not null, RepoRootNotFound);
+
+        var source = File.ReadAllText(Path.Combine(
+            root!, "Darling", "PerformanceMonitor.Darling.Storage", "PayloadDimensions.cs"));
+
+        var body = MethodBody(source, "public static string UpsertSql(string dimTable, bool compressContent = true)");
+        Assert.False(string.IsNullOrEmpty(body),
+            "could not locate UpsertSql -- this guard must fail rather than silently pass on a parse miss");
+
+        var occurrences = System.Text.RegularExpressions.Regex.Matches(body, "ORDER BY u.digest").Count;
+        Assert.Equal(2, occurrences);
     }
 
     // ── the gzip codec (#2069) ──
@@ -765,10 +817,12 @@ public sealed class PayloadDimensionTests
            exactly this tripwire's regression in review: its first cut was a SELECT * passthrough.
            The shipped V51 DROPs the view (the new column lands mid-list, which CREATE OR REPLACE
            refuses) and re-emits the generator's resolving definition. V121 re-defines it again for
-           query_plan_xml_bytes, by the same DROP-then-re-emit route and for the same reason.
-           The literal is deliberate: a rung that redefines this view has to change this line, which
-           is what brings a human to the paragraph above. */
-        Assert.Equal(121, definers[^1].Version);
+           query_plan_xml_bytes, by the same DROP-then-re-emit route and for the same reason. V128
+           (#3540) re-defines it a fourth time for statement_start_offset / statement_end_offset — the
+           delta key's two halves — again DROP-then-re-emit, because the offsets land ahead of the digest
+           columns. The literal is deliberate: a rung that redefines this view has to change this line,
+           which is what brings a human to the paragraph above. */
+        Assert.Equal(128, definers[^1].Version);
         Assert.Contains(
             "COALESCE(f.query_text, qtd.query_text) AS query_text",
             definers[^1].Sql,
@@ -1450,7 +1504,9 @@ public sealed class PayloadDimensionTests
 
         /* And the sweep must still iterate the hoisted list rather than rebuilding one beside it — otherwise
            everything above could be true of a field nothing reads. */
-        var sweep = MethodBody(source, "public static async Task<int> EnsureRetentionPoliciesAsync");
+        /* The four-argument overload is the sweep proper; the three-argument one is a one-line forward to it
+           (#3812 replaced the bare int with TimescaleSupport.RetentionPolicySweepSummary and added the pass). */
+        var sweep = MethodBody(source, "public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(");
         Assert.False(string.IsNullOrEmpty(sweep),
             "could not locate EnsureRetentionPoliciesAsync — the guard cannot silently pass on a parse miss");
         Assert.Contains(nameof(TimescaleSupport.RetentionPolicies), sweep, StringComparison.Ordinal);

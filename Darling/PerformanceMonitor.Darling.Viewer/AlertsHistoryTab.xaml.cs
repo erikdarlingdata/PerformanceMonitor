@@ -455,17 +455,10 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
-        var context = new AlertMuteContext
-        {
-            ServerName = item.ServerName,
-            MetricName = item.MetricName
-        };
-        /* #3309: pass the metric name so a custom alert ("Custom:<id>") skips detail_text pre-fill parsing -
-           a custom rule has no Database/Wait Type/Job/Query dimension to pre-fill, and its user-authored name
-           must not be able to forge a mute-context label line. */
-        context.PopulateFromDetailText(item.DetailText, item.MetricName);
-
-        await CreateMuteRuleAsync(context);
+        /* The row's own mute context (server + metric + the dimensions parsed from detail_text; #3309's
+           custom-alert skip lives inside it). Shared with the tray-toast filter (#3570) so a rule authored
+           from this row is judged against the same context the toast filter will later judge it with. */
+        await CreateMuteRuleAsync(item.ToMuteContext());
     }
 
     private async void MuteSimilarAlerts_Click(object sender, RoutedEventArgs e)
@@ -500,6 +493,15 @@ public partial class AlertsHistoryTab : UserControl
         if (dialog.ShowDialog() != true)
         {
             return;
+        }
+
+        /* A server-scoped rule keys on the row's store id (the name is not unique). Only when the operator left
+           the server name as the row spelled it: an edited name is a deliberate by-name rule. */
+        if (context.ServerId is not (null or 0)
+            && !string.IsNullOrEmpty(dialog.Rule.ServerName)
+            && string.Equals(dialog.Rule.ServerName, context.ServerName, StringComparison.Ordinal))
+        {
+            dialog.Rule.ServerId = context.ServerId;
         }
 
         try

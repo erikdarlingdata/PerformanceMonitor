@@ -127,6 +127,8 @@ public partial class SettingsWindow : Window
 
         /* Manage Mute Rules writes the shared Postgres config; needs a live store connection. */
         ManageMuteRulesButton.IsEnabled = _dataService is not null;
+        /* #3598: so do the notification routes — same store, same reason. */
+        ManageNotificationRoutesButton.IsEnabled = _dataService is not null;
         EditSchedulesButton.IsEnabled = _dataService is not null;
 
         /* Read the authoritative operator config from the store (async), then apply read-only gating. */
@@ -469,8 +471,9 @@ public partial class SettingsWindow : Window
         var port = McpPortTextBox.Text;
         var command = $"claude mcp add --transport http --scope user sql-monitor-darling http://localhost:{port}/";
         /* SetDataObject with copy=false avoids WPF's problematic Clipboard.Flush(). */
-        Clipboard.SetDataObject(command, false);
-        McpStatusText.Text = "Copied to clipboard!";
+        McpStatusText.Text = ClipboardText.TrySetDataObject(command)
+            ? "Copied to clipboard!"
+            : "Couldn't copy: the clipboard is in use.";
     }
 
     private void AutoPortButton_Click(object sender, RoutedEventArgs e)
@@ -503,8 +506,9 @@ public partial class SettingsWindow : Window
     {
         var url = $"http://localhost:{WebPortTextBox.Text}/";
         /* SetDataObject with copy=false avoids WPF's problematic Clipboard.Flush(). */
-        Clipboard.SetDataObject(url, false);
-        WebStatusText.Text = "Copied to clipboard!";
+        WebStatusText.Text = ClipboardText.TrySetDataObject(url)
+            ? "Copied to clipboard!"
+            : "Couldn't copy: the clipboard is in use.";
     }
 
     /// <summary>Asks the OS for a free loopback TCP port (bind to port 0, read the assignment, release).</summary>
@@ -742,6 +746,8 @@ public partial class SettingsWindow : Window
         LrqExcludeBackupsCheckBox.IsChecked = r.LongRunningQueryExcludeBackups;
         LrqExcludeMiscWaitsCheckBox.IsChecked = r.LongRunningQueryExcludeMiscWaits;
         LrqExcludeCdcCheckBox.IsChecked = r.LongRunningQueryExcludeCdc;
+        AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", r.LongRunningQueryExcludedProgramNamePrefixes);
+        AlertLrqExcludedLoginsBox.Text = string.Join(", ", r.LongRunningQueryExcludedLogins);
         AlertExcludedDatabasesBox.Text = string.Join(", ", r.ExcludedDatabases);
         AlertTempDbSpaceCheckBox.IsChecked = r.TempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = r.TempDbSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
@@ -751,6 +757,7 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalPercentBox.Text = r.DiskCriticalFreePercent.ToString(CultureInfo.InvariantCulture);
         AlertDiskCriticalGbBox.Text = r.DiskCriticalFreeGb.ToString(CultureInfo.InvariantCulture);
         AlertSelfDiskWarnPercentBox.Text = r.SelfDiskFreeWarnPercent.ToString(CultureInfo.InvariantCulture);
+        AlertSelfDiskWarnGbBox.Text = r.SelfDiskFreeWarnGb.ToString(CultureInfo.InvariantCulture);
         AlertCollectionStaleMinutesBox.Text = r.CollectionStaleMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCollectionFailureThresholdBox.Text = r.CollectionFailureThreshold.ToString(CultureInfo.InvariantCulture);
         AlertStoreJobCadenceWarnPercentBox.Text = r.StoreJobCadenceWarnPercent.ToString(CultureInfo.InvariantCulture);
@@ -780,6 +787,12 @@ public partial class SettingsWindow : Window
         AnalysisNotificationsCheckBox.IsChecked = r.AnalysisNotificationsEnabled;
         AnalysisNotifySeverityBox.Text = r.AnalysisNotifySeverity.ToString("0.0", CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = r.AnalysisNotifyCooldownMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #3712 (V137): the route knob's store half, a tri-state -- the combo's Tag is the stored wire spelling
+           ('digest' / 'page') or empty for NULL ("use the service's darling.json value"), which is what every store
+           reads after the upgrade and what a store nobody has touched here prefills as. Parsed through the same
+           FindingRouting.TryParseRoute the service applies, so a row value the service would ignore (impossible under
+           the CHECK) lands on the NULL item rather than on a wrong route. */
+        SelectAnalysisUncorroboratedRoute(r.AnalysisUncorroboratedRoute);
         /* #3466 (V124): the fleet sweep's own switch and cadence, prefilled beside Automated Analysis —
            the other scheduled whole-fleet evaluation — and deliberately OUTSIDE the master-toggle
            enable/disable group: sweeps keep running under a fleet-wide mute by contract. */
@@ -825,6 +838,9 @@ public partial class SettingsWindow : Window
             LongRunningQueryExcludeBackups = LrqExcludeBackupsCheckBox.IsChecked == true,
             LongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true,
             LongRunningQueryExcludeCdc = LrqExcludeCdcCheckBox.IsChecked == true,
+            /* #3653 (A5, Q5): comma-separated in the boxes; the row's bind normalises through the shared rule. */
+            LongRunningQueryExcludedProgramNamePrefixes = LongRunningQueryExclusions.Normalize(AlertLrqExcludedProgramNamePrefixesBox.Text.Split(',')).ToList(),
+            LongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(AlertLrqExcludedLoginsBox.Text.Split(',')).ToList(),
             TempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true,
             LowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true,
             PvsEnabled = AlertPvsCheckBox.IsChecked == true,
@@ -834,6 +850,10 @@ public partial class SettingsWindow : Window
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
+            /* #3712 (V137): the combo's Tag IS the stored value -- 'digest' / 'page', or empty for NULL ("the file
+               governs"). No validation arm: the combo can only produce the three states the CHECK admits, and
+               the bind normalises the spelling. */
+            AnalysisUncorroboratedRoute = SelectedAnalysisUncorroboratedRoute(),
             FleetSweepEnabled = FleetSweepEnabledCheckBox.IsChecked == true,
             ExcludedDatabases = AlertExcludedDatabasesBox.Text
                 .Split(',')
@@ -882,6 +902,10 @@ public partial class SettingsWindow : Window
             row.DiskCriticalFreeGb = critGb;
         if (int.TryParse(AlertSelfDiskWarnPercentBox.Text, out var selfDiskPct) && selfDiskPct is >= 0 and <= 100)
             row.SelfDiskFreeWarnPercent = selfDiskPct;
+        /* #3528: validated to the same bound DarlingAlertSettings clamps (Math.Max(0, ...)) and the MCP
+           writer accepts ([0, int.MaxValue]) — 0 is IN range because it removes the floor. */
+        if (int.TryParse(AlertSelfDiskWarnGbBox.Text, out var selfDiskGb) && selfDiskGb >= 0)
+            row.SelfDiskFreeWarnGb = selfDiskGb;
         if (int.TryParse(AlertCollectionStaleMinutesBox.Text, out var staleMin) && staleMin is >= 5 and <= 1440)
             row.CollectionStaleMinutes = staleMin;
         if (int.TryParse(AlertCollectionFailureThresholdBox.Text, out var failThresh) && failThresh is >= 1 and <= 1000)
@@ -1006,6 +1030,9 @@ public partial class SettingsWindow : Window
         LrqExcludeBackupsCheckBox.IsChecked = true;
         LrqExcludeMiscWaitsCheckBox.IsChecked = true;
         LrqExcludeCdcCheckBox.IsChecked = true;
+        /* #3653 (A5, Q5): "defaults" for the opt-out knob are the SEEDS (the rung's column DEFAULT), not empty boxes. */
+        AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultProgramNamePrefixes);
+        AlertLrqExcludedLoginsBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultLogins);
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
@@ -1013,6 +1040,10 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalPercentBox.Text = "3";
         AlertDiskCriticalGbBox.Text = "2";
         AlertSelfDiskWarnPercentBox.Text = "10";
+        /* #3528: the shipped GB floor (DarlingSelfAlertEvaluator.DiskFreeWarnFloorGb) as a literal — the
+           constant lives on the Service assembly the viewer does not reference, and the V126 rung test
+           pins this literal equal to it. */
+        AlertSelfDiskWarnGbBox.Text = "50";
         AlertCollectionStaleMinutesBox.Text = "30";
         AlertCollectionFailureThresholdBox.Text = "10";
         /* #3060: derived, unlike its neighbours, because this one is not merely a mirrored default — it is
@@ -1046,6 +1077,12 @@ public partial class SettingsWindow : Window
         AlertPerEventMaxBox.Text = "5";
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
+        /* #3712 (V137): "defaults" for the route knob is the NULL item -- the store column cleared, the service's
+           darling.json value (shipped 'digest') governing -- not 'digest' pinned into the store. A Restore Defaults
+           that wrote 'digest' would silently move the decision off the file for every operator who pressed it,
+           which is the provenance shift the MCP writer warns about; the honest default is the row's own
+           (AlertSettingsRow.Defaults() holds null here for the same reason). */
+        SelectAnalysisUncorroboratedRoute(null);
         /* #3466 (V124): from the shared constant rather than a literal, so a moved default cannot
            leave this button writing a cadence nobody chose. The checkbox resets to the shipped ON. */
         FleetSweepEnabledCheckBox.IsChecked = true;
@@ -1063,6 +1100,17 @@ public partial class SettingsWindow : Window
         }
 
         var window = new MuteRulesWindow(_dataService) { Owner = this };
+        window.ShowDialog();
+    }
+
+    private void ManageNotificationRoutesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        var window = new NotificationRoutesWindow(_dataService) { Owner = this };
         window.ShowDialog();
     }
 
@@ -1094,7 +1142,9 @@ public partial class SettingsWindow : Window
             && !string.Equals(AlertPgBlockingThresholdBox.Text, AlertBlockingThresholdBox.Text, StringComparison.Ordinal))
             parts.Add($"pg blocking >= {AlertPgBlockingThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
-            parts.Add($"poison waits >= {AlertPoisonWaitThresholdBox.Text}ms avg");
+            /* #3539 A4: the live bar, from the shared constants — not the retired ms box, which nothing reads. */
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"poison waits >= {PoisonWaitEvaluator.WarningAvgWaiters * PoisonWaitEvaluator.WindowMinutes * 60:N0}s accumulated in {PoisonWaitEvaluator.WindowMinutes}min"));
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
@@ -1104,7 +1154,10 @@ public partial class SettingsWindow : Window
         if (AlertPvsCheckBox.IsChecked == true)
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
         if (AlertFileGrowthCheckBox.IsChecked == true)
-            parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text}MB/{AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
+            /* #3539 A8c: the rise is a RATE (MB per hour) averaged over the lookback, in the same unit phrase the
+               row's label, the alert's threshold line and the MCP payload description use. It used to read
+               "10240MB/60m", which was the per-window delta the engine then compared literally. */
+            parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text} {AlertContextBuilders.FileGrowthRiseUnit} over {AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
         if (AlertFailedJobCheckBox.IsChecked == true)
@@ -1113,6 +1166,35 @@ public partial class SettingsWindow : Window
         AlertPreviewText.Text = parts.Count > 0
             ? $"Will alert when: {string.Join(", ", parts)}"
             : "No alerts enabled";
+    }
+
+    /// <summary>#3712 (V137): selects the route combo's item for a stored value — the item whose Tag is the
+    /// parsed route's wire spelling, or the empty-Tag item for NULL and for anything <see cref="FindingRouting.TryParseRoute"/>
+    /// reads as neither route (impossible under the V137 CHECK; on a hand-edited row the honest item is "the
+    /// file governs", which is what the service resolves such a value to as well).</summary>
+    private void SelectAnalysisUncorroboratedRoute(string? stored)
+    {
+        var tag = FindingRouting.TryParseRoute(stored) is { } route ? FindingRouting.RouteText(route) : "";
+        foreach (ComboBoxItem item in AnalysisUncorroboratedRouteBox.Items)
+        {
+            if (string.Equals(item.Tag as string, tag, StringComparison.Ordinal))
+            {
+                AnalysisUncorroboratedRouteBox.SelectedItem = item;
+                return;
+            }
+        }
+
+        /* Unreachable while the XAML carries the three items; if one is ever removed, land on the NULL item
+           rather than leave the combo unselected and the save writing whatever a null Tag maps to. */
+        AnalysisUncorroboratedRouteBox.SelectedIndex = AnalysisUncorroboratedRouteBox.Items.Count - 1;
+    }
+
+    /// <summary>#3712 (V137): the route combo's selection as the value the row stores — the item's Tag, with the
+    /// empty Tag (and no selection at all) mapping to null, "the file governs".</summary>
+    private string? SelectedAnalysisUncorroboratedRoute()
+    {
+        var tag = (AnalysisUncorroboratedRouteBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        return string.IsNullOrEmpty(tag) ? null : tag;
     }
 
     private void UpdateAlertControlStates()
@@ -1136,7 +1218,10 @@ public partial class SettingsWindow : Window
         AlertPgDeadlockThresholdBox.IsEnabled = enabled;
         AlertPgBlockingThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
-        AlertPoisonWaitThresholdBox.IsEnabled = enabled;
+        /* #3539 A4: the poison-wait ms box is retired (nothing reads it) and stays disabled regardless of the
+           master switch — the XAML sets IsEnabled="False", and this loop must not re-enable it on load or
+           on toggle, or the operator is back to tuning a number the engine ignores. */
+        AlertPoisonWaitThresholdBox.IsEnabled = false;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         /* V20 long-running-query read-shape controls follow the master switch like the rest of the engine. */
@@ -1146,6 +1231,8 @@ public partial class SettingsWindow : Window
         LrqExcludeBackupsCheckBox.IsEnabled = enabled;
         LrqExcludeMiscWaitsCheckBox.IsEnabled = enabled;
         LrqExcludeCdcCheckBox.IsEnabled = enabled;
+        AlertLrqExcludedProgramNamePrefixesBox.IsEnabled = enabled;
+        AlertLrqExcludedLoginsBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;
@@ -1158,6 +1245,7 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalPercentBox.IsEnabled = enabled;
         AlertDiskCriticalGbBox.IsEnabled = enabled;
         AlertSelfDiskWarnPercentBox.IsEnabled = enabled;
+        AlertSelfDiskWarnGbBox.IsEnabled = enabled;
         AlertCollectionStaleMinutesBox.IsEnabled = enabled;
         AlertCollectionFailureThresholdBox.IsEnabled = enabled;
         AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;
@@ -1340,7 +1428,7 @@ public partial class SettingsWindow : Window
         else if (!SmtpFromBox.Text.Trim().Contains('@'))
             errors.Add("From address must be a valid email");
         if (string.IsNullOrWhiteSpace(SmtpRecipientsBox.Text))
-            errors.Add("At least one recipient is required");
+            errors.Add("Default recipients are needed for alerts that no notification route covers.");
 
         if (errors.Count == 0)
         {
@@ -1756,6 +1844,7 @@ public partial class SettingsWindow : Window
 
         public double AnalysisNotifySeverity { get; private init; }
         public int AnalysisNotifyCooldownMinutes { get; private init; }
+        public int AnalysisPageCap => 5;
 
         /* #2710: test sends never carry a triage link (the builders' isTest paths skip it anyway), and the
            Viewer edits the store, not the headless box's darling.json where web.publicBaseUrl lives. */

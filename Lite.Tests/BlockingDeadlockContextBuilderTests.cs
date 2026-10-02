@@ -517,6 +517,86 @@ public class BlockingDeadlockContextBuilderTests
         Assert.True(typeof(IAlertReadAdapter).IsAssignableFrom(typeof(LiteAlertReadAdapter)));
     }
 
+    /// <summary>
+    /// #3539 A4: Lite's DuckDB poison read is the Darling text in another dialect — same wait types, same
+    /// aggregates in the same column order, same GROUP BY, same parameter positions, and the same three
+    /// ABSENCES (no <c>delta_waiting_tasks &gt; 0</c> filter, no LIMIT, no threshold). Read from source on
+    /// both sides through <see cref="Lite.Tests.ParitySource"/> because Lite.Tests does not reference the Darling
+    /// service project; the Darling-side pins in Darling.Tests hold the same clauses, so a drift on either
+    /// SKU reds one suite or the other.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitAccumulationSql_IsTheDarlingTextInDuckDbDialect()
+    {
+        var lite = LocalDataService.PoisonWaitAccumulationSql;
+        var darling = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/DarlingAlertReadAdapter.cs");
+        var darlingSql = darling[darling.IndexOf("public const string PoisonWaitsSql", StringComparison.Ordinal)..];
+        darlingSql = darlingSql[..darlingSql.IndexOf("\";", StringComparison.Ordinal)];
+
+        foreach (var clause in new[]
+        {
+            "wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')",
+            "SUM(delta_wait_time_ms)",
+            "SUM(delta_waiting_tasks)",
+            "COUNT(*)",
+            "MAX(collection_time) AS newest_collection_time",
+            "server_id = $1",
+            "collection_time >= $2",
+            "GROUP BY wait_type",
+            "ORDER BY accumulated_wait_ms DESC",
+        })
+        {
+            Assert.Contains(clause, lite, StringComparison.Ordinal);
+            Assert.Contains(clause, darlingSql, StringComparison.Ordinal);
+        }
+
+        foreach (var absent in new[] { "delta_waiting_tasks > 0", "LIMIT", "avg_ms_per_wait", "sample_interval" })
+        {
+            Assert.DoesNotContain(absent, lite, StringComparison.Ordinal);
+            Assert.DoesNotContain(absent, darlingSql, StringComparison.Ordinal);
+        }
+
+        /* The dialect differences, and only these: Lite reads the v_ view and CASTs DuckDB's HUGEINT sums
+           back to BIGINT; Darling reads the raw table and uses the ::bigint form. */
+        Assert.Contains("FROM v_wait_stats", lite, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(delta_wait_time_ms) AS BIGINT)", lite, StringComparison.Ordinal);
+        Assert.Contains("FROM wait_stats", darlingSql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_wait_time_ms)::bigint", darlingSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2157/#3579: Lite's forced-plan-failures read is Darling's text with ONE substitution — the dedup view
+    /// <c>v_query_store_stats</c> for the raw table — and nothing else. Both files say "shape-for-shape"; this
+    /// is the sentence as an assertion, held as whole-text equality rather than a clause list because the two
+    /// texts ARE equal today and any drift, in either direction, is the disagreement about "what counts as a
+    /// new failure" the files promise cannot happen. Read from source on the Darling side through
+    /// <see cref="Lite.Tests.ParitySource"/> for the reason the poison pin above gives.
+    ///
+    /// <para>Also pins the #3579 column: the newer sighting's <c>collection_time</c> travels as
+    /// <c>observed_at</c>, second to last, so the seven ordinals both readers already bind do not move;
+    /// <c>prior_observed_at</c> (#4659) follows it, and Lite does not read it.</para>
+    /// </summary>
+    [Fact]
+    public void ForcePlanFailuresSql_IsTheDarlingText_ReadingTheDedupView()
+    {
+        var lite = LocalDataService.ForcePlanFailuresSql;
+        var darling = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/DarlingAlertReadAdapter.cs");
+        var darlingSql = darling[(darling.IndexOf("public const string ForcePlanFailuresSql = @\"", StringComparison.Ordinal) + "public const string ForcePlanFailuresSql = @\"".Length)..];
+        darlingSql = darlingSql[..darlingSql.IndexOf("\";", StringComparison.Ordinal)];
+
+        Assert.Contains("FROM v_query_store_stats AS qs", lite, StringComparison.Ordinal);
+        Assert.Contains("FROM query_store_stats AS qs", darlingSql, StringComparison.Ordinal);
+        Assert.Equal(
+            darlingSql.ReplaceLineEndings("\n"),
+            lite.Replace("FROM v_query_store_stats AS qs", "FROM query_store_stats AS qs", StringComparison.Ordinal).ReplaceLineEndings("\n"));
+
+        /* #3579: the observation stamp, second to last; #4659: prior_observed_at follows it. */
+        Assert.EndsWith(
+            "n.failures AS total_failures,\n    n.collection_time AS observed_at,\n    p.collection_time AS prior_observed_at\nFROM ranked AS n",
+            lite[..(lite.IndexOf("FROM ranked AS n", StringComparison.Ordinal) + "FROM ranked AS n".Length)].ReplaceLineEndings("\n"),
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public void LiteAlertReadAdapter_ExposesAllSevenCollectedFeeds()
     {
@@ -526,9 +606,11 @@ public class BlockingDeadlockContextBuilderTests
             typeof(LiteAlertReadAdapter).GetMethod("GetRecentBlockedProcessReportsAsync")!.ReturnType);
         Assert.Equal(typeof(Task<List<DeadlockAlertRow>>),
             typeof(LiteAlertReadAdapter).GetMethod("GetRecentDeadlocksAsync")!.ReturnType);
-        Assert.Equal(typeof(Task<List<PoisonWaitDelta>>),
-            typeof(LiteAlertReadAdapter).GetMethod("GetPoisonWaitDeltasAsync")!.ReturnType);
-        Assert.Equal(typeof(Task<List<LongRunningQueryInfo>>),
+        /* #3539 A4: the poison feed is a window ACCUMULATION per wait type now, not the newest deltas. */
+        Assert.Equal(typeof(Task<List<PoisonWaitAccumulation>>),
+            typeof(LiteAlertReadAdapter).GetMethod("GetPoisonWaitAccumulationAsync")!.ReturnType);
+        /* #3653 (A5, Q5): sessions plus the opt-out knob's excluded count, in one shared record. */
+        Assert.Equal(typeof(Task<LongRunningQueryReadResult>),
             typeof(LiteAlertReadAdapter).GetMethod("GetLongRunningQueriesAsync")!.ReturnType);
         Assert.Equal(typeof(Task<List<VolumeFreeSpaceInfo>>),
             typeof(LiteAlertReadAdapter).GetMethod("GetVolumeFreeSpaceAsync")!.ReturnType);

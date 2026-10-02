@@ -43,7 +43,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /* The full column list, shared by the upsert (Add/Edit) and the insert-if-absent (migrate-in). The
+    /* The full column list, shared by the upsert (Edit) and the insert-if-absent (Add and migrate-in). The
        toggled-boolean-free VALUES bind every field as a parameter; created_at/modified_at are server-side.
        #3499: engine + port joined the list — the V70 columns the MCP add_servers tool and the service seed
        had been writing all along, which the viewer's writes silently defaulted ('sqlserver'/0) and its reads
@@ -58,8 +58,10 @@ public sealed partial class ViewerDataService
         "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, " +
         "(now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')";
 
-    /// <summary>Upsert by <c>server_id</c> — the Add/Edit save. ON CONFLICT rewrites every field but
-    /// <c>created_at</c>, bumping <c>modified_at</c> (and, via the V17 trigger, <c>config_version</c>).</summary>
+    /// <summary>Upsert by <c>server_id</c> — the Edit save. ON CONFLICT rewrites every field but
+    /// <c>created_at</c>, bumping <c>modified_at</c> (and, via the V17 trigger, <c>config_version</c>). An Add does
+    /// NOT use it (#4789): two different servers can hash to one <c>server_id</c>, and this statement would
+    /// rewrite the one already holding it.</summary>
     public const string MonitoredServerUpsertSql = @"
 INSERT INTO config_monitored_servers (" + MonitoredServerColumns + @", created_at, modified_at)
 VALUES (" + MonitoredServerValues + @")
@@ -83,9 +85,9 @@ ON CONFLICT (server_id) DO UPDATE SET
     port = EXCLUDED.port,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
-    /// <summary>Insert only when the <c>server_id</c> is absent — the one-time <c>viewer-servers.json</c>
-    /// migrate-in. DO NOTHING so it never overwrites a row the service already seeded from darling.json (no
-    /// double-seed) or a later viewer edit.</summary>
+    /// <summary>Insert only when the <c>server_id</c> is absent — the Add save (#4789) and the one-time
+    /// <c>viewer-servers.json</c> migrate-in. DO NOTHING so it never overwrites a row the service already seeded
+    /// from darling.json (no double-seed), a later viewer edit, or a different server that hashes to the same id.</summary>
     public const string MonitoredServerInsertIfAbsentSql = @"
 INSERT INTO config_monitored_servers (" + MonitoredServerColumns + @", created_at, modified_at)
 VALUES (" + MonitoredServerValues + @")
@@ -218,6 +220,10 @@ AND   port = $5";
     /// whose tab set, chip and card were already correct. It is read from the OBSERVED side beside the kind,
     /// for the same reason: a probed fact lives on <c>collect.servers</c>, and the desired-state config plane
     /// cannot carry one.</para>
+    ///
+    /// <para><c>created_date</c> (#3967) is read from the OBSERVED side for the same reason, and on both
+    /// queries for the #3145 one: it is the first successful connect, and a server the operator added that the
+    /// service has not reached has none, which keeps its dot on "Awaiting first collection".</para>
     /// </summary>
     public const string ManagedServersSql = @"
 SELECT
@@ -229,7 +235,8 @@ SELECT
     c.monthly_cost_usd,
     s.engine_kind,
     COALESCE(s.sql_engine_edition, 0) AS sql_engine_edition,
-    s.postgres_major_version
+    s.postgres_major_version,
+    s.created_date
 FROM config_monitored_servers c
 LEFT JOIN servers s ON s.server_id = c.server_id
 ORDER BY COALESCE(s.display_name, c.name)";
@@ -242,9 +249,22 @@ ORDER BY COALESCE(s.display_name, c.name)";
     /// </summary>
     public async Task<List<DarlingServer>> GetManagedServersAsync(CancellationToken cancellationToken = default)
     {
+        return await GetConfigManagedServersAsync(cancellationToken) ?? await GetServersAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The config half of <see cref="GetManagedServersAsync"/>: the managed set when the store is seeded, and
+    /// null when <see cref="IsConfigSeededAsync"/> says no. That covers a pre-seed store AND a seeded check
+    /// that failed, which the check cannot tell apart. Null rather than the observed fallback, for a caller
+    /// that must act only on the config list: the server-list sync compares these ids with the ones loaded,
+    /// and the observed list lacks every configured server that has never collected, so comparing it would
+    /// read each of those as removed.
+    /// </summary>
+    public async Task<List<DarlingServer>?> GetConfigManagedServersAsync(CancellationToken cancellationToken = default)
+    {
         if (!await IsConfigSeededAsync(cancellationToken))
         {
-            return await GetServersAsync(cancellationToken);
+            return null;
         }
 
         var servers = new List<DarlingServer>();
@@ -264,7 +284,8 @@ ORDER BY COALESCE(s.display_name, c.name)";
                 reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7),
-                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
+                reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
         }
 
         return servers;
@@ -378,9 +399,10 @@ ORDER BY COALESCE(s.display_name, c.name)";
     }
 
     /// <summary>
-    /// Upserts a server definition (Add / Edit save). The row's <c>server_id</c> is (re)derived from
-    /// host/database/read-only-intent so a definition always lands on its shared identity; the caller passes
-    /// a row whose <see cref="MonitoredServerRow.ServerId"/> is already <see cref="ComputeServerId"/>.
+    /// Upserts a server definition (the Edit save). An edit keeps its row's <c>server_id</c> even when the address
+    /// changes (#2158), so the write lands on the row that already owns it. An ADD does not come through here
+    /// (#4789): it goes through <see cref="AddMonitoredServerAsync"/>, which refuses to overwrite a different
+    /// server that hashes to the same id.
     /// </summary>
     public async Task UpsertMonitoredServerAsync(MonitoredServerRow row, CancellationToken cancellationToken = default)
     {
@@ -405,6 +427,76 @@ ORDER BY COALESCE(s.display_name, c.name)";
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
         return await ExecuteWriteAsync(command, cancellationToken) > 0;
+    }
+
+    /// <summary>
+    /// The Add save (#4789): writes the definition only when its <c>server_id</c> is free, and when it is not,
+    /// says what holds the id.
+    ///
+    /// <para><b>Why not the upsert.</b> The id is a 32-bit hash of the server's identity, so two different
+    /// servers can share one. The upsert's <c>ON CONFLICT (server_id) DO UPDATE</c> would rewrite the server
+    /// already holding it with the new address: that server stops being monitored and its collected history
+    /// shows under the new one. The insert here does nothing on a taken id (<see cref="InsertMonitoredServerIfAbsentAsync"/>),
+    /// so the holder is never touched; this method then reads the holder (secret-free, so a read-only seat gets
+    /// the same answer) and <see cref="ClassifyAddAgainstOccupant"/> decides whether that is the same server
+    /// again or a different one that collides.</para>
+    ///
+    /// <para>An edit does not come through here: it keeps its row's id when the address changes (#2158) and still
+    /// updates in place through <see cref="UpsertMonitoredServerAsync"/>.</para>
+    /// </summary>
+    public async Task<MonitoredServerAddResult> AddMonitoredServerAsync(MonitoredServerRow row, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+
+        if (await InsertMonitoredServerIfAbsentAsync(row, cancellationToken))
+        {
+            return new MonitoredServerAddResult(MonitoredServerAddOutcome.Added, null);
+        }
+
+        MonitoredServerRow? occupant;
+        await using (var command = _dataSource.CreateCommand(MonitoredServerByIdNoSecretSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            occupant = await reader.ReadAsync(cancellationToken) ? ReadMonitoredServerRowNoSecret(reader) : null;
+        }
+
+        return new MonitoredServerAddResult(ClassifyAddAgainstOccupant(row, occupant), occupant);
+    }
+
+    /// <summary>
+    /// What an Add that did not write means (#4789): the row that holds the candidate's <c>server_id</c>
+    /// (<paramref name="occupant"/>) is either the same server again (<see cref="MonitoredServerAddOutcome.Duplicate"/>),
+    /// a DIFFERENT server whose identity hashes to the same id (<see cref="MonitoredServerAddOutcome.Collides"/>),
+    /// or absent (<see cref="MonitoredServerAddOutcome.NotSaved"/>: nothing was written and nothing holds the id,
+    /// which is a holder removed between the insert and the read). Never answers
+    /// <see cref="MonitoredServerAddOutcome.Added"/>: that is the insert having written. Pure, so it pins without a store.
+    ///
+    /// <para><b>Same identity is judged the way the dialogs' address check judges it</b>
+    /// (<see cref="MonitoredServerByAddressSql"/>): host, database, read-only intent, engine as a KIND
+    /// (<see cref="MonitoredServerRow.IsPostgres"/>, so every accepted spelling of PostgreSQL is one engine) and
+    /// port. Host and database compare case-sensitively, and a missing database only equals a missing database,
+    /// exactly as <c>=</c> and <c>IS NOT DISTINCT FROM</c> do in that query. The display name, credentials and
+    /// every other setting are not part of the identity: the same server re-added under a new name is a duplicate.</para>
+    /// </summary>
+    public static MonitoredServerAddOutcome ClassifyAddAgainstOccupant(MonitoredServerRow candidate, MonitoredServerRow? occupant)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+
+        if (occupant is null)
+        {
+            return MonitoredServerAddOutcome.NotSaved;
+        }
+
+        var sameIdentity =
+            string.Equals(candidate.Host, occupant.Host, StringComparison.Ordinal)
+            && string.Equals(candidate.Database, occupant.Database, StringComparison.Ordinal)
+            && candidate.ReadOnlyIntent == occupant.ReadOnlyIntent
+            && candidate.IsPostgres == occupant.IsPostgres
+            && candidate.Port == occupant.Port;
+
+        return sameIdentity ? MonitoredServerAddOutcome.Duplicate : MonitoredServerAddOutcome.Collides;
     }
 
     /// <summary>Removes a server definition by id (the Remove action).</summary>
@@ -608,3 +700,27 @@ public sealed class MonitoredServerRow
     /// <summary>Server-set creation time (read-only, from the store's <c>created_at</c>); null when not read.</summary>
     public DateTime? CreatedAt { get; set; }
 }
+
+/// <summary>How an Add ended (#4789): see <see cref="ViewerDataService.AddMonitoredServerAsync"/>.</summary>
+public enum MonitoredServerAddOutcome
+{
+    /// <summary>The <c>server_id</c> was free and the row was written.</summary>
+    Added,
+
+    /// <summary>The <c>server_id</c> is held by the SAME server (same host, database, read-only intent, engine and
+    /// port): it is already monitored. Nothing was written.</summary>
+    Duplicate,
+
+    /// <summary>The <c>server_id</c> is held by a DIFFERENT server: the two identities hash to one id. Nothing was
+    /// written, so the server holding the id is untouched.</summary>
+    Collides,
+
+    /// <summary>Nothing was written and nothing holds the id (the holder was removed between the insert and the
+    /// read). There is no server to name; the add can simply be tried again.</summary>
+    NotSaved,
+}
+
+/// <summary>The outcome of <see cref="ViewerDataService.AddMonitoredServerAsync"/> and, when the id was already
+/// taken, the secret-free row that holds it (the server to name in the refusal). <see cref="Occupant"/> is null
+/// for <see cref="MonitoredServerAddOutcome.Added"/> and <see cref="MonitoredServerAddOutcome.NotSaved"/>.</summary>
+public sealed record MonitoredServerAddResult(MonitoredServerAddOutcome Outcome, MonitoredServerRow? Occupant);

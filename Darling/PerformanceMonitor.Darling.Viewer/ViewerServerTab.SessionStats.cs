@@ -28,8 +28,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// per-application <c>v_session_stats</c> FinOps' Application Connections read uses. The chart BODY is the
 /// shared <see cref="SessionStatsChartRenderer"/> (byte-identical to Lite's, each status series on its fixed
 /// <see cref="ChartPalette.SeriesColor"/> "Session*" key, all-zero series skipped, Y-floored at 0 with a
-/// bottom legend); this partial keeps the per-app data read, the hover wiring, the display-time projection
-/// (<c>ViewerTimeHelper.ForDisplay</c>) it hands the renderer, and the summary strip (shaped by the shared
+/// bottom legend); this partial keeps the per-app data read, the hover wiring, the identity projection and display zone
+/// (<c>ViewerTimeHelper.CurrentDisplayZone</c>) it hands the renderer, and the summary strip (shaped by the shared
 /// <see cref="SessionStatsSummary"/>). The chart's Copy/Save/CSV right-click menu is wired in
 /// <c>ViewerServerTab.ChartContextMenu.cs</c>.
 /// </para>
@@ -39,9 +39,9 @@ public partial class ViewerServerTab
     private ChartHoverHelper? _sessionStatsHover;
 
     private SessionStatsChartRenderer? _sessionStatsRendererField;
-    /// <summary>The shared Session Stats trend-chart renderer, bound to the viewer's display-time projection.</summary>
+    /// <summary>The shared Session Stats trend-chart renderer, bound to the viewer's display zone (it plots the UTC instant).</summary>
     private SessionStatsChartRenderer SessionStatsRenderer =>
-        _sessionStatsRendererField ??= new SessionStatsChartRenderer(_chartHelper, ViewerTimeHelper.ForDisplay);
+        _sessionStatsRendererField ??= new SessionStatsChartRenderer(_chartHelper, static utc => utc, ViewerTimeHelper.CurrentDisplayZone);
 
     /// <summary>Applies the shared chrome + hover to the Session Stats chart up front (constructor), so it
     /// doesn't flash white before the tab's first load — matching the CPU/Memory/latch charts.</summary>
@@ -49,7 +49,7 @@ public partial class ViewerServerTab
     {
         ApplyTheme(SessionStatsChart);
         SessionStatsChart.Refresh();
-        _sessionStatsHover = new ChartHoverHelper(SessionStatsChart, "sessions");
+        _sessionStatsHover = new ChartHoverHelper(SessionStatsChart, "sessions", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>Loads the Session Stats tab: the session-summary snapshots over the toolbar's settable
@@ -66,8 +66,8 @@ public partial class ViewerServerTab
     private void RenderSessionStatsChart(List<SessionStatsPoint> data)
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        double xMin = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        double xMax = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        double xMin = startUtc.ToOADate();
+        double xMax = endUtc.ToOADate();
 
         SessionStatsRenderer.Render(SessionStatsChart, _sessionStatsHover, data, xMin, xMax);
 

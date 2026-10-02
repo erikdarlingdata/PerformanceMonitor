@@ -42,6 +42,279 @@ public static class PgMigrations
         public string Sql { get; }
     }
 
+    /// <summary>
+    /// V152 (#4503) — drops the auto-created per-column GROUP BY index TimescaleDB builds on six Query Store
+    /// rollups' materialization hypertables, on every store that upgrades through this rung, the same way
+    /// #3597 did for <see cref="TimescaleSupport.QueryStoreStatsIntervalHourlyView"/>'s materialization at
+    /// CREATE time. A production catalog read found the same shape repeated on
+    /// <see cref="TimescaleSupport.QueryStoreStatsHourlyView"/>, <see cref="TimescaleSupport.QueryStoreStatsCorrectedHourlyView"/>,
+    /// <see cref="TimescaleSupport.QueryStoreStatsDailyView"/>, <see cref="TimescaleSupport.QueryStoreStatsCorrectedDailyView"/>,
+    /// <see cref="TimescaleSupport.QueryStoreStatsIntervalDailyView"/> and
+    /// <see cref="TimescaleSupport.QueryStoreStatsDayGrainDailyView"/>: five group indexes apiece
+    /// (<c>database_name</c>, <c>module_name</c>, <c>query_hash</c>, <c>server_id</c>, <c>server_name</c>, each
+    /// paired with <c>bucket DESC</c>) on the first five, eleven on the interval-daily view, and lifetime
+    /// <c>idx_scan</c> of ZERO on every one of them except <c>server_id</c> (kept) and <c>server_name</c> (kept
+    /// on the two hourly views only, where reads measurably use it) — the reader check this rung's PR body
+    /// carries in full.
+    ///
+    /// <para><b>Resolved by view name and by the indexed COLUMN, never by a string-built index name
+    /// (#4503).</b> A continuous aggregate's materialization hypertable id is assigned at CREATE time and
+    /// differs per store — the production catalog this rung read from happened to number them
+    /// 103/106/109/110/112/113, but a fresh or differently-ordered store would not; that part was already
+    /// handled by resolving <c>materialization_hypertable_name</c> from
+    /// <c>timescaledb_information.continuous_aggregates</c>. What was NOT safe is building the auto-created
+    /// index's NAME as a string and passing it to <c>DROP INDEX IF EXISTS</c>: PostgreSQL truncates an
+    /// identifier at 63 bytes with no hash suffix, and
+    /// <c>_materialized_hypertable_112_runtime_stats_interval_id_bucket_idx</c> is 68 characters, so the name
+    /// actually on disk is the 63-byte truncation, not the string this rung would have built — the DROP
+    /// would have silently no-op'd against a name nothing wears, leaving the real index in place. The
+    /// <c>DO</c> block below never builds that name: for each view it resolves the materialization's OID,
+    /// then reads <c>pg_index</c>/<c>pg_attribute</c> directly for a two-key btree whose FIRST key column is
+    /// one of that view's drop-list columns and whose SECOND key column is <c>bucket</c> — the exact shape
+    /// <c>create_group_indexes</c>'s default builds — and drops whatever index actually carries that shape,
+    /// by its real (possibly-truncated) name via <c>::regclass</c>. A single-column index (the kept
+    /// <c>bucket_idx</c>) and a two-key index whose kept column ISN'T in the drop list both fail the match
+    /// and are never touched. A plain-PostgreSQL store, which has never created the extension, has no
+    /// <c>timescaledb_information</c> catalog to read at all, so the whole block returns before the loop —
+    /// a no-op there, not a per-view skip. A TimescaleDB store missing one of the six CAGGs (one that never
+    /// enabled a given rollup) skips just that view rather than erroring, and re-running the block after the
+    /// indexes are already gone is a no-op — the catalog read finds nothing to drop.</para>
+    ///
+    /// <para><b><c>SET LOCAL lock_timeout</c>, derived from <see cref="MigrationCommandTimeoutSeconds"/>.</b>
+    /// <c>DROP INDEX</c> takes <c>AccessExclusiveLock</c> on the materialization hypertable and on every one
+    /// of its chunks, across six hypertables in one transaction, while a background refresh policy can hold
+    /// the same lock for as long as its own run takes — measured around 264 s on the hourly rollups, well
+    /// past a flat 5 s. Rather than fail the rung on the very refresh it is racing, the lock_timeout here is
+    /// set to <see cref="MigrationCommandTimeoutSeconds"/> minus a 20 s margin (280 s): long enough to wait
+    /// out one whole refresh cycle, but still short enough that the server's own clean, retryable
+    /// <c>55P03</c> always fires before the client-side <see cref="MigrationCommandTimeoutSeconds"/> command
+    /// timeout would cancel the statement out from under it — if a refresh somehow outlasts even that, the
+    /// failure is still retryable (lock-not-available is already in the retryable set the service's startup
+    /// triage carries), so the next start retries the same rung, still at V151, rather than blocking
+    /// collection. This is a per-STATEMENT wait inside one rung, smaller by construction than
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/>, the whole-SESSION budget a sibling migrator polls
+    /// against; V152 spending up to 280 s of its own command timeout still leaves that budget's other
+    /// multiples for the rest of the ladder.</para>
+    /// </summary>
+    private static readonly string V152Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $$
+DECLARE
+    v_view text;
+    v_drop_cols text[];
+    v_mat_schema text;
+    v_mat_table text;
+    v_mat_oid regclass;
+    r record;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created, and this runs on stores
+       where it never was -- reaching it unconditionally raises 42P01. Probed with to_regclass (NULL rather
+       than an error when absent); no extension means there are no continuous aggregates and so no rollup
+       group indexes to drop, which makes this rung a no-op there. The per-view read below goes through
+       EXECUTE so the timescaledb_information reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        RETURN;
+    END IF;
+
+    FOR v_view, v_drop_cols IN VALUES
+        ('query_store_stats_hourly',          ARRAY['database_name', 'module_name', 'query_hash']),
+        ('query_store_stats_corrected_hourly', ARRAY['database_name', 'module_name', 'query_hash']),
+        ('query_store_stats_daily',           ARRAY['database_name', 'module_name', 'query_hash', 'server_name']),
+        ('query_store_stats_corrected_daily',  ARRAY['database_name', 'module_name', 'query_hash', 'server_name']),
+        ('query_store_stats_interval_daily',   ARRAY['database_name', 'execution_type_desc', 'first_execution_time', 'module_name', 'plan_id', 'query_hash', 'query_id', 'replica_role', 'runtime_stats_interval_id', 'server_name']),
+        ('query_store_stats_daygrain_daily',   ARRAY['database_name', 'module_name', 'query_hash', 'server_name'])
+    LOOP
+        EXECUTE 'SELECT materialization_hypertable_schema, materialization_hypertable_name
+                 FROM timescaledb_information.continuous_aggregates
+                 WHERE view_schema = ''collect'' AND view_name = $1'
+        INTO v_mat_schema, v_mat_table
+        USING v_view;
+
+        IF v_mat_table IS NULL THEN
+            CONTINUE;
+        END IF;
+
+        v_mat_oid := format('%I.%I', v_mat_schema, v_mat_table)::regclass;
+
+        FOR r IN
+            SELECT i.indexrelid::regclass AS idx
+            FROM pg_index i
+            JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
+            JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
+            WHERE i.indrelid = v_mat_oid
+            AND   i.indnkeyatts = 2
+            AND   NOT i.indisunique
+            AND   a1.attname = ANY (v_drop_cols)
+            AND   a2.attname = 'bucket'
+        LOOP
+            EXECUTE format('DROP INDEX IF EXISTS %s', r.idx);
+        END LOOP;
+    END LOOP;
+END $$;";
+
+    /// <summary>
+    /// V153 (#4608, split #4615) — a plain btree on <c>first_execution_time</c> for
+    /// <see cref="PerformanceMonitor.Darling.Storage.QueryStoreIntervalLatest"/>'s <c>query_store_interval_latest</c>
+    /// (V143) only — the column both the daily retention sweep's
+    /// <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.TimeSlicedDeleteSql"/> filters on and the
+    /// read gate's per-server floor (<c>PlainTableFloorSql</c>) reads. V154 is the twin rung for
+    /// <c>query_store_interval_wide</c> (V145) — split into its own rung (#4615) so each index build gets its
+    /// own <see cref="MigrationCommandTimeoutSeconds"/> window rather than sharing one across both tables.
+    ///
+    /// <para><b>The measured cost (#4608).</b> On a rig seeded with 4M <c>query_store_interval_latest</c> rows
+    /// over 20 days: the purge's cold-cache "nothing to delete" run cost ~4.09 s (a Seq-equivalent full index
+    /// scan of the table's unique index, since neither <c>min()</c> subquery nor the outer DELETE had a
+    /// leading column to seek on) and ~211 ms warm; the same statement with this index costs ~0.56 ms cold and
+    /// ~0.12 ms warm — three to four orders of magnitude down, and it stays flat regardless of table size
+    /// because it seeks straight past the cutoff instead of walking the whole index. A one-day-to-delete run
+    /// (200 k rows) cost ~587 ms without the index and ~0.1-52 ms with it. The read gate's per-server floor
+    /// (<c>MIN(first_execution_time) WHERE server_id = $1</c>) already had an efficient plan off the existing
+    /// unique index (~9 ms) — this rung's index gives it an equally fast plan (~1.4 ms) without displacing
+    /// that path; either index serves it.</para>
+    ///
+    /// <para><b>Why a plain index, not <c>CONCURRENTLY</c>.</b> <c>MigrateAsync</c> wraps every rung in one
+    /// transaction, and <c>CREATE INDEX CONCURRENTLY</c> cannot run inside a transaction block (PostgreSQL
+    /// rejects it, 25001). The lock this takes is <c>ShareLock</c> (a plain <c>CREATE INDEX</c>, not a
+    /// rewrite of an existing index), which blocks writers to the table for the build's duration but not
+    /// readers. At the rig's 4M row size the build itself took low single-digit seconds; a field store's
+    /// two tables are kept to 15 and 9 days respectively by the same purge this index speeds up, so neither
+    /// grows unbounded between upgrades.</para>
+    ///
+    /// <para><b>Why not <see cref="UnorderedRowCappedDeleteSql"/> instead (the alternative measured for #4608).</b>
+    /// That builder exists for the two plain (non-hypertable) tables whose V149 migration deliberately
+    /// dropped their own <c>last_seen</c> btree so an unordered cap could avoid a second sort pass — it does
+    /// not apply here, where V143/V145 never had a <c>first_execution_time</c> index to drop in the first
+    /// place and the read gate needs one whether or not the purge does. Measured, <see cref="UnorderedRowCappedDeleteSql"/>
+    /// without an index still costs ~234 ms per 50 k-row-capped batch on this rig's size (it still walks the
+    /// unique index looking for rows under the cutoff before it can build the <c>ctid</c> list) — slower than
+    /// this rung's indexed <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.TimeSlicedDeleteSql"/>
+    /// and it leaves the read gate's floor scan unindexed too. The index serves both call sites from one
+    /// object, which is why it is the winner here.</para>
+    ///
+    /// <para><b><c>max_parallel_maintenance_workers = 2</c> (#4615).</b> Measured on a rig seeded to 20 M
+    /// <c>query_store_interval_latest</c> rows with the field store's own <c>maintenance_work_mem</c>
+    /// (2047 MB): a serial build (<c>max_parallel_maintenance_workers = 0</c>) took ~7.0-8.0 s; with 2
+    /// workers it took ~3.0-3.2 s, a consistent ~2.3x speed-up over three runs each way. 2 is what this
+    /// rig's own <c>max_parallel_workers</c> (15) and <c>max_worker_processes</c> (85) both allow with
+    /// headroom to spare, and it is a plain, user-settable GUC — harmless to set on a bring-your-own store
+    /// that has never heard of this service. Set inside the same <c>SET LOCAL</c> scope as
+    /// <c>lock_timeout</c>: the applier gives this rung's whole SQL ONE <c>NpgsqlCommand</c> inside ONE
+    /// transaction (see <see cref="MigrateLockedAsync"/>), and <c>SET LOCAL</c> is scoped to the
+    /// transaction, so it is in force for the <c>CREATE INDEX</c> statement below it in the same rung.</para>
+    /// </summary>
+    private static readonly string V153Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+SET LOCAL max_parallel_maintenance_workers = 2;
+CREATE INDEX IF NOT EXISTS idx_query_store_interval_latest_first_exec
+ON collect.query_store_interval_latest (first_execution_time);";
+
+    /// <summary>
+    /// V154 (#4608, split #4615) — <c>query_store_interval_wide</c>'s (V145) twin of V153's index, in its
+    /// own rung so its build gets its own <see cref="MigrationCommandTimeoutSeconds"/> window rather than
+    /// sharing V153's. See V153Sql's doc comment for the measured cost, the reason for a plain (not
+    /// <c>CONCURRENTLY</c>) index, and the <c>max_parallel_maintenance_workers</c> measurement — both hold
+    /// identically here.
+    /// </summary>
+    private static readonly string V154Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+SET LOCAL max_parallel_maintenance_workers = 2;
+CREATE INDEX IF NOT EXISTS idx_query_store_interval_wide_first_exec
+ON collect.query_store_interval_wide (first_execution_time);";
+
+    /// <summary>
+    /// V155 (#4765) — each Query Store interval's END, on <c>collect.query_store_stats</c> and on
+    /// <c>collect.query_store_interval_wide</c> (V145): <c>interval_end_time_utc</c>
+    /// (<c>sys.query_store_runtime_stats_interval.end_time</c>, converted to UTC at collection), the twin of
+    /// V41's <c>interval_start_time_utc</c>.
+    ///
+    /// <para>A rate divides an interval's totals by the interval's length. Until now the only length a read
+    /// had was the time since the previous STORED interval, and Query Store stores no row for an interval with
+    /// no executions, so an interval that follows a quiet one divided by the gap PLUS its own length and read
+    /// too low. End minus start is the interval's own length. This rung only stores the end; the reads that
+    /// turn it into a rate change separately.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, the V41 shape: a row collected before this rung never
+    /// asked the engine for the end and nothing can reconstruct it, so NULL is the honest value and a reader
+    /// treats it as "fall back to the previous-interval gap". A nullable, default-less <c>ADD COLUMN</c> is
+    /// catalog-only in PostgreSQL and TimescaleDB accepts it on a compressed hypertable, the shape
+    /// V127/V128/V132/V133/V150/V151 used.</para>
+    ///
+    /// <para><b>Appended LAST on both tables.</b> Both bulk writers are positional (the binary COPY into
+    /// <c>query_store_stats</c>, the <c>INSERT ... SELECT</c> that composes <c>query_store_interval_wide</c>),
+    /// so a fresh store and an upgraded one must share one physical column order. A fresh
+    /// <c>query_store_stats</c> gets the column from V1's generated CREATE TABLE (the collector's payload
+    /// carries it, appended last) and the ALTER no-ops there; V145's CREATE TABLE is fixed text, so the
+    /// interval-wide column always arrives here, after <c>interval_start_time_utc</c>. The trailing
+    /// <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_query_store_stats</c>' pinned <c>SELECT *</c> (Postgres
+    /// freezes it at CREATE; append-only ADDs keep the refresh legal), the V41 idiom. It is unqualified like
+    /// V41's so it resolves through the migrate session's <c>search_path = collect, config, public</c> and
+    /// stays visible to the drift guard that scans for that form.</para>
+    /// </summary>
+    private const string V155Sql = @"
+ALTER TABLE collect.query_store_stats ADD COLUMN IF NOT EXISTS interval_end_time_utc timestamp;
+ALTER TABLE collect.query_store_interval_wide ADD COLUMN IF NOT EXISTS interval_end_time_utc timestamp;
+CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
+
+    /// <summary>
+    /// V156 (#4834) — the hour's LONGEST single checkpoint sync on the store's own checkpointer row: two nullable
+    /// columns on <c>collect.store_metrics</c>, <c>checkpoint_longest_sync_ms</c> (<c>bigint</c>) and
+    /// <c>checkpoint_longest_sync_at</c> (<c>timestamp</c>, naive UTC — the sample that saw it, so the minute the
+    /// checkpoint had finished by). No new table, no new hypertable (<c>TimescaleSupport.HypertableCount</c> stays
+    /// 72), no DEFAULT, no backfill, no passthrough refresh, and <b>no Lite twin</b>: Lite stores no
+    /// <c>store_metrics</c>.
+    ///
+    /// <para><b>The gap this closes.</b> Before this rung the hourly checkpointer row held only cumulative counters.
+    /// The pressure rule (<c>CheckpointerReading.IsPressure</c>, read by <c>get_store_metrics</c> and by the Store
+    /// Checkpointer Pressure self-alert through the same reader) differenced the two newest rows to the interval's
+    /// total sync time and averaged it over the checkpoints the interval held (V140, #4037), so the alert and the tool
+    /// agreed, and both were blind to the maximum. An average spreads one long sync over the interval's short ones:
+    /// one 23.5 s sync among four checkpoints averages 5.9 s, under the 10 s bar, so an hour in which a single sync
+    /// stalled every reader read as "no pressure". The worker now samples the checkpointer's cumulative sync time
+    /// once a minute (#4823); this rung stores the largest difference that sample saw in the hour on the row the
+    /// hour's other checkpointer facts already live on, where the tool, the alert and any raw read see the same
+    /// value.</para>
+    ///
+    /// <para><b>Filled on the <c>object_kind = 'checkpointer'</c> row only</b>, NULL on every other kind by the
+    /// table's per-kind convention (V137, V139, V140). NULL on that row too when the sampler took no difference in
+    /// the hour (a service just started, or every read of the window failed): NULL is "no evidence", which the
+    /// reader judges exactly as it judged the row before this rung existed, never as a zero. <c>store_metrics</c> is a
+    /// PLAIN table and must stay one (the sweep's own retention DELETE assumes it), so a nullable, default-less
+    /// <c>ADD COLUMN</c> rewrites nothing; on a compressed hypertable it is the same catalog-only shape V127/V128/V133
+    /// /V137/V138/V139 used, but this rung touches none. It has no <c>v_</c> passthrough (V53; and
+    /// <c>PgSchemaGenerator.AllPassthroughViews</c> agrees), so the V14 frozen-column-list problem cannot arise, and
+    /// it is not a collector table, so no generator walks it and the columns live in this ALTER alone. The stamp is
+    /// written from a naive-UTC parameter, never a bare cast that would render in the session's zone.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not backfill: rows written before it cannot
+    /// know what the sampler saw. It adds no alert, knob or Viewer column. The reader's pressure rule and the tool's
+    /// block change in the same commit, but both are reads of these two columns, not schema.</para>
+    /// </summary>
+    private const string V156Sql = @"
+/* store_metrics is a plain table with no v_ passthrough (V53). Filled on the object_kind = 'checkpointer' row only,
+   NULL on every other kind by the table's per-kind convention, and NULL there too when the sampler took no
+   difference in the hour. Nullable, no DEFAULT, no backfill: a pre-rung row cannot know what the sampler saw, and
+   NULL is what the reader judges as no evidence. The stamp is naive UTC. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS checkpoint_longest_sync_ms bigint,
+    ADD COLUMN IF NOT EXISTS checkpoint_longest_sync_at timestamp;";
+
+    /// <summary>
+    /// V157 — <c>config.config_mute_rules.server_id</c>: a mute rule can name a server by its store id.
+    ///
+    /// <para>A server's display name is not an identity. A blank display name falls back to the host, so two
+    /// registrations on one logical server (two Azure SQL Database databases on one logical server) shared a
+    /// whole-server silence key: silencing one silenced the other, and unsilencing one lifted both. The store id is
+    /// the identity that is unique per registration, so a rule that carries it matches only that server and its
+    /// <c>server_name</c> becomes a label.</para>
+    ///
+    /// <para><b>NULL is a legacy name-keyed rule</b>, matched by <c>server_name</c> exactly as before, so every
+    /// stored rule keeps its effect and there is no backfill (a rule's name cannot be resolved to one id when the name
+    /// is the ambiguity). Nullable, no DEFAULT, one catalog-only <c>ADD COLUMN</c>. Needs no GRANT (the roles' table-level
+    /// grants cover a new column) and no trigger (the V117 reload beacon fires on any change to the table). The id is
+    /// deliberately NOT a foreign key: a rule outlives a removed server's registration, as a name-keyed rule always did.</para>
+    /// </summary>
+    private const string V157Sql = @"ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS server_id integer;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -198,6 +471,45 @@ public static class PgMigrations
         new Migration(123, "fleet-sweep-state", V123Sql),
         new Migration(124, "fleet-sweep-cadence-knobs", V124Sql),
         new Migration(125, "collector-database-scope", V125Sql),
+        new Migration(126, "self-disk-warn-gb-floor", V126Sql),
+        new Migration(127, "delta-family-interval-columns", V127Sql),
+        /* V128 re-emits the payload-resolving v_query_stats (its two new query_stats columns land mid-list,
+           ahead of the digests, which CREATE OR REPLACE VIEW refuses), so it rides the V121 idiom: V54's
+           gz pre-add, then every payload column's pre-add, then the regenerated view. MigrationLadderPins
+           holds the ordering. */
+        new Migration(128, "delta-family-interval-completion",
+            V128Sql + "\n" + V54Sql + "\n"
+            + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() + "\n"
+            + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(129, "pg-log-events", V129Sql),
+        new Migration(130, "pg-log-event-metrics", V130Sql),
+        new Migration(131, "notification-routes", V131Sql),
+        new Migration(132, "perfmon-counter-type", V132Sql),
+        new Migration(133, "pg-numbackends-and-sampled-ms", V133Sql),
+        new Migration(134, "time-honesty", V134Sql),
+        new Migration(135, "lrq-exclusion-knob", V135Sql),
+        new Migration(136, "pg-database-size-and-host-memory", V136Sql),
+        new Migration(137, "qs-capture-mode-route-knob-toast-utilisation", V137Sql),
+        new Migration(138, "pg-server-config-database-role-overrides", V138Sql),
+        new Migration(139, "postmaster-start-time", V139Sql),
+        new Migration(140, "checkpointer-timed-count", V140Sql),
+        new Migration(141, "collection-caveats", V141Sql),
+        new Migration(142, "index-object-stats-server-time", V142Sql),
+        new Migration(143, "query-store-interval-latest", V143Sql),
+        new Migration(144, "raw-chunk-interval-rung-history", V144Sql),
+        new Migration(145, "query-store-interval-wide", V145Sql),
+        new Migration(146, "managed-conf-verdicts", V146Sql),
+        new Migration(147, "compose-statement-timeout-sixty", V147Sql),
+        new Migration(148, "read-latency", V148Sql),
+        new Migration(149, "query-store-liveness-hot-touch", V149Sql),
+        new Migration(150, "collection-log-watermark-and-job-history-indexes", V150Sql),
+        new Migration(151, "ag-group-id", V151Sql),
+        new Migration(152, "drop-unread-cagg-group-indexes", V152Sql),
+        new Migration(153, "interval-tables-first-exec-index", V153Sql),
+        new Migration(154, "interval-tables-wide-first-exec-index", V154Sql),
+        new Migration(155, "query-store-interval-end", V155Sql),
+        new Migration(156, "checkpoint-longest-sync", V156Sql),
+        new Migration(157, "mute-rule-server-id", V157Sql),
     };
 
     /// <summary>
@@ -504,7 +816,11 @@ DROP VIEW IF EXISTS v_query_stats;";
     /// Server deadlock figure is agreement with <c>deadlock_warn_per_hour</c> (V120), and a PostgreSQL
     /// server has no deadlock band to agree with — <c>v_deadlocks</c> is the extended-event capture and is
     /// structurally zero for a PostgreSQL server (#3017), and the reading is nulled again by
-    /// <c>ServerMetricSources.DmvSourced</c> before it reaches the band. On the blocking side the
+    /// <c>ServerMetricSources.DmvSourced</c> before it reaches the band (superseded by #3638, which gave the
+    /// PostgreSQL card a measured band from its own <c>pg_stat_database.deadlocks</c> counter differenced
+    /// over the window, through the SAME <c>health_bands</c> tiers — so the #3444 move of raising a fire gate
+    /// to meet the band's Warning bar is now available on this column too; the columns stay separate for
+    /// the first reason, the instruments differ). On the blocking side the
     /// denominators differ outright: the SQL Server count is engine-recorded blocked-process reports, the
     /// PostgreSQL one is distinct root blockers in a periodic SAMPLE of <c>pg_stat_activity</c>. Reusing
     /// the columns would also make the upgrade behaviour a function of store state — a store whose
@@ -650,6 +966,1765 @@ ALTER TABLE config.config_alert_settings
     private const string V125Sql = @"
 ALTER TABLE config.config_collector_schedules
     ADD COLUMN IF NOT EXISTS databases text[];";
+
+    /// <summary>
+    /// V126 — the Store Disk Pressure warning's GB floor on the singleton <c>config_alert_settings</c>
+    /// row (#3528): the self-alert's percent trigger additionally requires free space below this many
+    /// GB before it fires, an AND qualifier so a large volume at a low percent (400 GB free on a 4 TB
+    /// store) stops paging CRITICAL. 0 removes the floor and restores the percent-only condition —
+    /// the <c>pvs_floor_gb</c> composition, deliberately not the target-volume pair's OR, whose GB
+    /// dimension ADDS fires.
+    ///
+    /// <para><b>The column default IS the shipped constant</b>
+    /// (<c>DarlingSelfAlertEvaluator.DiskFreeWarnFloorGb</c> — restated as a literal here only because
+    /// a rung is a SQL string, and pinned equal by <c>SelfDiskWarnGbFloorRungTests</c>). Non-zero on
+    /// upgrade DELIBERATELY, unlike the V122 knobs: their acceptance was "an untouched store fires
+    /// exactly where it did", while #3528's is that the untouched firing IS the defect — the issue's
+    /// own example is a default-configured store paging "act now" with 400 GB of runway. 50 puts the
+    /// crossover at a 500 GB volume, so any store volume at or under that keeps the exact pre-#3528
+    /// percent behaviour.</para>
+    ///
+    /// <para>No CHECK enforcing the bound, matching V119/V120/V122/V124: the floor-at-0 is enforced as
+    /// the <c>update_alert_settings</c> write bound and <c>DarlingAlertSettings</c>' read-side clamp —
+    /// the raw-in/clamped-out split every knob on this table uses. No reload beacon of its own: V17's
+    /// statement-level <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c>
+    /// on any write here. No GRANT: this table carries table-level grants with no column carve.</para>
+    /// </summary>
+    private const string V126Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS self_disk_free_warn_gb integer NOT NULL DEFAULT 50;";
+
+    /// <summary>
+    /// V127 — <c>sample_interval_seconds</c> on the four delta families that persisted their deltas NAKED
+    /// (#3540): <c>wait_stats</c>, <c>file_io_stats</c>, <c>latch_stats</c>, <c>spinlock_stats</c>. The
+    /// measurement-layer keystone: the shared delta calculator reports (delta 0, interval 0) when no delta is
+    /// knowable — first sighting, counter reset, a gap past the measured 3600 s policy — and (0, n) when an
+    /// interval was genuinely idle, and the interval is the ONLY thing that tells those apart. These four
+    /// collectors discarded it at the write, so the fabricated zero survived as a measured one and every
+    /// per-second reader LAG-divided it into a confident 0.00 ms/sec at exactly the moments (restarts) it was
+    /// unknowable; the file-I/O latency chart rendered "0.00 ms" mid-restart; and the wait-rate window
+    /// statistic counted the restart collection as a sample. <c>perfmon_stats</c> and <c>query_stats</c> have
+    /// carried the column from the start and their readers <c>NULLIF(sample_interval_seconds, 0)</c> — this
+    /// rung gives the other four the same column, in the same <c>integer</c> type, so the same idiom applies.
+    /// Pinned by <c>DeltaFamilyIntervalColumnsRungTests</c>.
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching every column-adding rung on a collector
+    /// table (V80, V81, V121): the interval a historical row accrued over was never recorded, so NULL is the
+    /// honest value and a backfilled 0 would stamp every pre-V127 row as "unknowable" and erase 30 days of
+    /// perfectly good history from every rate chart. Readers treat the three states distinctly: <c>n &gt; 0</c>
+    /// is the measured interval; <c>0</c> is the calculator's unknowable marker and maps to NULL (the point is
+    /// absent, never 0.00); <c>NULL</c> is a pre-V127 row and falls back to the LAG-over-collection_time
+    /// derivation those readers always used, so history keeps rendering exactly as it did. A nullable
+    /// no-default ADD COLUMN is a catalog-only change in PostgreSQL and TimescaleDB accepts it on a
+    /// compressed hypertable, so this stays instant on a multi-hundred-GB <c>wait_stats</c>.</para>
+    ///
+    /// <para><b>The passthrough views are refreshed</b> because Postgres freezes a view's <c>SELECT *</c>
+    /// column list at CREATE (the V14 lesson, restated by V80 and V81): without the four
+    /// <c>CREATE OR REPLACE VIEW</c> lines every <c>v_*</c> reader would keep seeing the pre-V127 column list
+    /// forever and the new column would be invisible to the whole read layer. Appending is the one alteration
+    /// <c>CREATE OR REPLACE VIEW</c> permits, which is exactly what an ADD COLUMN produces. Fresh stores get
+    /// the column from the generated CREATE TABLE at V4/V10 (the collector definitions carry it now) and
+    /// this rung's ALTERs no-op there; the view refresh is idempotent either way.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do: touch <c>collect.wait_stats_baseline</c>.</b> That
+    /// continuous aggregate sums <c>delta_wait_time_ms</c> per collection over the raw table, so a restart
+    /// collection materializes as a <c>total_wait_ms = 0</c> sample and drags the WaitStats/WaitMsPerSec
+    /// baselines' mean down (the campaign's A6). The measurement contract says the rollup should aggregate
+    /// <c>sample_interval_seconds IS DISTINCT FROM 0</c> rows only — but a continuous aggregate cannot change
+    /// its defining query in place; the only path is DROP + CREATE + refresh, and the raw <c>wait_stats</c>
+    /// horizon is operator-editable and typically 30 days against the aggregate's 35-day baseline tier, so
+    /// a rebuild forfeits materialized baseline history that raw can no longer refill. That is the exact
+    /// trade #3527 declined for <c>perfmon_baseline</c> (its interval is LAG-derived from the collapsed series
+    /// for the same reason), and this rung declines it the same way. The follow-up is a NEW aggregate under
+    /// a new name with the filter baked in, built <c>WITH NO DATA</c> and backfilled by
+    /// <c>--backfill-rollups</c>, with the old one retired through <c>RetiredBaselineRelations</c> once the
+    /// new one has 35 days — the #2007 retirement shape, which loses nothing. Until then the baseline
+    /// provider's magnitude heuristic (the QUALIFY restart signature) is the guard it always was.</para>
+    /// </summary>
+    private const string V127Sql = @"
+ALTER TABLE collect.wait_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.file_io_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.latch_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.spinlock_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the four passthroughs would keep serving
+   the pre-V127 column list forever — the V14 lesson, restated by V80 and V81. Appending is the one
+   alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_wait_stats AS SELECT * FROM collect.wait_stats;
+CREATE OR REPLACE VIEW collect.v_file_io_stats AS SELECT * FROM collect.file_io_stats;
+CREATE OR REPLACE VIEW collect.v_latch_stats AS SELECT * FROM collect.latch_stats;
+CREATE OR REPLACE VIEW collect.v_spinlock_stats AS SELECT * FROM collect.spinlock_stats;";
+
+    /// <summary>
+    /// V128 — the completion of V127 (#3540): <c>sample_interval_seconds</c> on the four delta families
+    /// V127 left naked — <c>procedure_stats</c>, <c>memory_grant_stats</c>, <c>pg_wait_stats</c>,
+    /// <c>pg_statement_stats</c> — and the two statement offsets on <c>query_stats</c> that its delta key
+    /// is made of. After this rung EVERY member of <c>CollectorDeltaCalculator.DeltaFamilyCollectors</c>
+    /// stores the interval its deltas accrued over, so the calculator's (delta 0, interval 0) "no delta
+    /// knowable" marker reaches the store from every family and no restart zero reads as a measurement
+    /// anywhere; Lite.Tests' <c>DeltaFamilyIntervalColumnTests</c> census asserts the set with nothing
+    /// left on its still-naked list. Same <c>integer</c> type as the six that already carry it, so the
+    /// one <c>NULLIF(sample_interval_seconds, 0)</c> idiom reads all ten. Pinned by
+    /// <c>DeltaFamilyIntervalCompletionRungTests</c>.
+    ///
+    /// <para><b>Why five tables in one rung.</b> The repo allows one un-landed rung at a time, and these
+    /// five changes are one change: every column here exists so the same reader idiom can be applied
+    /// uniformly (stored interval → <c>NULLIF(…, 0)</c>; NULL → the LAG derivation; no <c>ELSE 0</c>),
+    /// and the offsets exist so the restart seed can rebuild the one delta key the store could not
+    /// reproduce. Five rungs would have been five fleet schema hops carrying one idea.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> on all six columns, matching V127 and every
+    /// column-adding rung on a collector table (V80, V81, V121): a historical row never recorded its
+    /// interval or its offsets, so NULL is the honest value. A backfilled 0 interval would stamp every
+    /// pre-V128 row "unknowable" and blank 30 days of rate history; a backfilled 0/-1 offset pair would
+    /// build a delta key nothing will ever present, and the seed would restore baselines under it
+    /// silently. Readers treat the three interval states distinctly: <c>n &gt; 0</c> measured; <c>0</c>
+    /// the unknowable marker, mapped to NULL (the point is absent, never 0.00); <c>NULL</c> a pre-V128
+    /// row, falling back to the LAG-over-collection_time derivation those readers always used. The seed
+    /// consumes only rows whose offsets are NOT NULL for keys, and every row for the pass window. A
+    /// nullable no-default ADD COLUMN is catalog-only in PostgreSQL and TimescaleDB accepts it on a
+    /// compressed hypertable with continuous aggregates attached (verified live on 2.28.1 against
+    /// <c>procedure_stats</c> with its hourly/daily aggregates and <c>query_stats</c> with its hourly one),
+    /// so this stays instant on a multi-hundred-GB store.</para>
+    ///
+    /// <para><b>The offsets' semantics, stated here because this is where the next reader will look.</b>
+    /// <c>statement_start_offset</c> and <c>statement_end_offset</c> are <c>sys.dm_exec_query_stats</c>'s
+    /// own columns: the statement's position inside its batch text in <b>BYTES</b> of the
+    /// <c>nvarchar</c> text, not characters — so slicing the text at them divides by two (the
+    /// collector's <c>SUBSTRING(st.text, (statement_start_offset / 2) + 1, …)</c>), and a reader who
+    /// forgets the Unicode factor lands halfway into the wrong statement. <c>statement_end_offset = -1</c>
+    /// means "to the end of the batch"; <c>(0, -1)</c> is the whole batch. They are stored
+    /// <b>verbatim as the DMV reports them</b>, <c>-1</c> included and never normalized to a length,
+    /// because the collector's delta key is <c>$"{sql_handle}:{start}:{end}:{plan_handle}"</c> over the raw
+    /// ints and the seed has to spell the same string byte for byte.</para>
+    ///
+    /// <para><b>The PostgreSQL pair's columns are added in TWO places and both are required</b> — the V101
+    /// rule. A store's tables come from one of two texts depending on when it was created: a fresh store
+    /// builds every table from V1's generated schema, walked from the collector catalog, while a store that
+    /// predates V63/V64 has whatever those rungs built. So the <c>pg_wait_stats</c> and
+    /// <c>pg_statement_stats</c> CREATE TABLE rungs gain the column for the population that first meets them
+    /// (<c>PgSchemaGeneratorTests</c> enforces the rung text against the generator, column for column) and
+    /// THIS rung's ALTER carries the existing one. Neither is redundant: the CREATE is <c>IF NOT EXISTS</c>
+    /// and never re-runs on a store that already has the table, and the ALTER is <c>ADD COLUMN IF NOT
+    /// EXISTS</c> and is a no-op wherever the column already exists. The three SQL Server tables need no
+    /// second site: they are generated at V1 and only ever ALTERed.</para>
+    ///
+    /// <para><b>Two view treatments.</b> <c>v_memory_grant_stats</c> is a <c>SELECT *</c> passthrough
+    /// and is refreshed here for the V14/V80/V81/V127 reason (Postgres freezes the column list at CREATE;
+    /// appending is the one alteration <c>CREATE OR REPLACE VIEW</c> permits). <c>procedure_stats</c>,
+    /// <c>pg_wait_stats</c> and <c>pg_statement_stats</c> have no <c>v_*</c> view (their readers hit the
+    /// base table; <c>PgSchemaGenerator.AllPassthroughViews</c> pins the set). <c>v_query_stats</c> is
+    /// the #1767 payload-RESOLVING view, not a passthrough, and the generator emits payload columns BEFORE
+    /// the trailing digest columns, so the two offsets land mid-list — an alteration
+    /// <c>CREATE OR REPLACE VIEW</c> refuses. Hence <c>DROP VIEW</c> here and the regenerated resolving
+    /// definition concatenated after this constant in the ladder entry, exactly as V51 and V121 did, with
+    /// <c>V54Sql</c> and <c>GenerateQueryStatsPayloadColumnPreAdds()</c> ahead of it so a store climbing
+    /// from below those rungs has every column the view names (<c>MigrationLadderPins</c>). Plain DROP,
+    /// no CASCADE: nothing persistent depends on the view.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not touch
+    /// <c>collect.wait_stats_baseline</c> (V127's stated follow-up is a new aggregate under a new name —
+    /// an aggregate-plus-retirement operation, not a column, and not this rung). It does not backfill. It
+    /// does not change <c>procedure_stats_hourly</c>/<c>_daily</c> or <c>query_stats_hourly</c>: those sum
+    /// deltas, and a fabricated 0 adds nothing to a sum.</para>
+    /// </summary>
+    private const string V128Sql = @"
+ALTER TABLE collect.procedure_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.memory_grant_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.pg_wait_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.pg_statement_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+
+/* The delta key's two halves that were never stored. BYTE offsets into the batch's nvarchar text
+   (a character position is offset / 2); statement_end_offset = -1 means ""to the end of the batch"";
+   stored raw, -1 included, because the key string carries the raw values. */
+ALTER TABLE collect.query_stats
+    ADD COLUMN IF NOT EXISTS statement_start_offset integer;
+ALTER TABLE collect.query_stats
+    ADD COLUMN IF NOT EXISTS statement_end_offset integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough would keep serving the
+   pre-V128 column list forever — the V14 lesson, restated by V80, V81 and V127. The other three interval
+   tables have no v_ view. */
+CREATE OR REPLACE VIEW collect.v_memory_grant_stats AS SELECT * FROM collect.memory_grant_stats;
+
+/* v_query_stats is the payload-RESOLVING view (#1767), and its two new columns land ahead of the digest
+   columns — mid-list, which CREATE OR REPLACE VIEW refuses. Dropped here; the ladder entry concatenates
+   the regenerated resolving definition after the pre-adds, the V51/V121 idiom. */
+DROP VIEW IF EXISTS collect.v_query_stats;";
+
+    /// <summary>
+    /// V129 — <c>collect.pg_log_events</c>, the classified PostgreSQL server-log events (#3601): errors,
+    /// connections, lock waits, and the recognised-only spill / autovacuum / checkpoint shapes, out of the
+    /// same log the deadlock (V103) and plan (V99) readers already tail. The keystone for #3602 and #3603,
+    /// which each add one parser family on the pipeline this table stores.
+    ///
+    /// <para><b>The identity column is the point, for V103's reason.</b> The <c>pg_read_file</c> transport
+    /// re-reads an OVERLAPPING tail every cycle on purpose, so without <c>raw_line_hash</c> the same event
+    /// is stored once per cycle for as long as it stays inside the window; every read dedupes on it as the
+    /// deadlock reads do on <c>deadlock_hash</c>. Over the RAW entry text rather than the stored columns,
+    /// because two events that store alike — the same error from one statement shape run with two values, same
+    /// millisecond, same pid — are two events, and the hash must keep them apart. It is NOT secret-safe (#3996's
+    /// review): an unkeyed hash of text a reader can mostly rebuild is an offline guessing oracle for the rest, a
+    /// failed UPDATE's four-digit PIN included, so no read surface returns it (#4004).</para>
+    ///
+    /// <para><b>The statement itself is never stored, and the SQL the other columns quote is normalized.</b>
+    /// <c>statement_fingerprint</c> is a hash of the REDACTED <c>STATEMENT</c> companion, the plan parser's own
+    /// patterns applied to SQL, so one statement shape recurs to one fingerprint and the statement's quoted
+    /// literals and numbers exist nowhere in the store (a dollar-quoted body is hashed as written, #3996's
+    /// review). <c>message</c>, <c>detail</c> and <c>context</c> are PostgreSQL's prose as
+    /// written (#3944), except the SQL PostgreSQL writes into a DETAIL or CONTEXT (a deadlock's queries, a
+    /// function's statement), which <c>PgLogTextRedactor</c> normalizes with every literal replaced by
+    /// <c>?</c> (#3920). Both are enforced at the row constructor rather than by convention.</para>
+    ///
+    /// <para><b>Retention is thirty days, not the deadlock table's ninety</b> (<c>CollectorScheduleDefaults</c>
+    /// carries the argument): a deadlock is rare by construction and a log event is as common as the
+    /// target's settings let it be — <c>log_connections</c> on a reconnect-per-statement pool writes three
+    /// rows per query. Hypertable conversion, one-day chunks, compression segmented by <c>server_id</c> and
+    /// the retention policy all follow from the catalog entry, as for every collector table.</para>
+    ///
+    /// <para><b>One index, the generated one.</b> The read filters on <c>(server_id, collection_time)</c>
+    /// first — chunk exclusion — and on family and severity within that window; a <c>(server_id, family,
+    /// collection_time)</c> index would help a family-filtered read over a long window on a loud target,
+    /// and it is a SEPARATE rung when it comes, for V104's reason: <c>PgSchemaGeneratorTests</c> requires a
+    /// collector's rung to be exactly what the generator emits, and the generator emits one index, so a
+    /// second one in this rung would give the upgraded store an index the fresh store never gets. All
+    /// value columns nullable, matching the generated schema this must be identical to.</para>
+    ///
+    /// <para><b>The thirteen columns after <c>raw_line_hash</c> are V130's (#3602, #3603), and they are here
+    /// for the V101 rule.</b> A store's tables come from one of two texts: a fresh store builds every table
+    /// from the generated schema at V1 (this CREATE then no-ops, <c>IF NOT EXISTS</c>), while a store that
+    /// climbed through V129 before V130 existed has the seventeen-column table this text built at the time.
+    /// <c>PgSchemaGeneratorTests</c> requires this rung to be the generator's output column for column, and
+    /// the generator emits the collector's CURRENT columns — so this text carries them for the fresh
+    /// population, and V130's ALTER carries them for the existing one. Neither is redundant; dropping
+    /// either leaves one population permanently without the columns.</para>
+    /// </summary>
+    private const string V129Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_log_events (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    occurred_at timestamp,
+    family text,
+    severity text,
+    sqlstate text,
+    database_name text,
+    user_name text,
+    application_name text,
+    pid integer,
+    message text,
+    detail text,
+    context text,
+    statement_fingerprint text,
+    raw_line_hash text,
+    relation_name text,
+    bytes bigint,
+    duration_ms bigint,
+    pages_removed bigint,
+    pages_remaining bigint,
+    tuples_removed bigint,
+    tuples_remaining bigint,
+    buffer_hits bigint,
+    buffer_misses bigint,
+    buffer_dirtied bigint,
+    wal_records bigint,
+    wal_bytes bigint,
+    is_analyze boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_log_events_time
+    ON collect.pg_log_events(server_id, collection_time);";
+
+    /// <summary>
+    /// V130 — the family-specific NUMBERS on <c>collect.pg_log_events</c> (#3602, #3603): a spill's bytes,
+    /// and an autovacuum run's relation, duration, pages, tuples, buffers and WAL. V129 stored those two
+    /// families as recognised-only events — the line's prose and nothing lifted — and this rung
+    /// is where the prose becomes columns a reader can sum, rank and alert on.
+    ///
+    /// <para><b>Columns on the event row, not sibling tables — the shape #3601 planned and this rung
+    /// declined, deliberately.</b> A <c>pg_temp_files</c> and a <c>pg_autovacuum_runs</c> table would each
+    /// have needed its own identity column and its own dedupe of the same overlapping tail, its own
+    /// retention, its own hypertable and compression policy, its own CI worker slot, and a join on
+    /// <c>raw_line_hash</c> for every read that wanted the event beside its numbers. Thirteen nullable
+    /// columns cost none of that: the row already has the identity, the dedupe, the fingerprint and the
+    /// retention, and "everything at 03:07" and "what did the 03:07 spill cost" are one query. The
+    /// <c>family</c> column says which columns can be non-null — <c>bytes</c> on <c>temp_file</c>, the rest
+    /// on <c>autovacuum</c>, nothing on the others — so a reader is never guessing what a NULL means on a
+    /// row whose family cannot carry the figure. What this trades away is per-family retention (a spill
+    /// history longer than thirty days would want its own table) and per-family indexing; both are the
+    /// separate rungs V129's doc already reserves.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching every column-adding rung on a collector
+    /// table (V80, V81, V101, V114, V121, V127, V128). The rows stored under V129 were recognised-only and
+    /// never had the figures lifted; NULL is the honest value for them, and re-parsing thirty days of
+    /// redacted <c>message</c> text to fill them in would be re-deriving from a copy what the log itself
+    /// still holds for the collector to re-read. A nullable no-default ADD COLUMN is a catalog-only change
+    /// in PostgreSQL and TimescaleDB accepts it on a compressed hypertable (V127 and V128 verified the same
+    /// shape live on 2.28.1 against tables with continuous aggregates attached; this table has none), so
+    /// this stays instant however loud the target has been. Compression segments by <c>server_id</c> as
+    /// before; the new columns compress as ordinary members.</para>
+    ///
+    /// <para><b>Every column is <c>bigint</c> except the two that are not, and the types are the
+    /// collector's.</b> Bytes, pages, tuples, buffers and WAL figures are all counts PostgreSQL prints as
+    /// 64-bit integers; <c>duration_ms</c> is whole milliseconds from a centisecond figure. <c>relation_name</c>
+    /// is <c>text</c>, <c>schema.table</c>, the key <c>get_pg_autovacuum_health</c> joins on; <c>is_analyze</c>
+    /// is <c>boolean</c>, false for a vacuum and true for an analyze, NULL for a row of any other family.
+    /// <c>PgSchemaGeneratorTests</c> renders V129 from <c>PayloadColumns</c> and requires it to match column
+    /// for column, so a type here that differs from the collector's declaration is a build failure.</para>
+    ///
+    /// <para><b>The columns are added in TWO places and both are required</b> — the V101 rule. V129's CREATE
+    /// carries them for the fresh population (walked from the generator at V1, and never re-run on a store
+    /// that has the table); this ALTER carries them for the store that built the seventeen-column table
+    /// first. <c>ADD COLUMN IF NOT EXISTS</c> is a no-op on the fresh store that already has them.</para>
+    ///
+    /// <para>No view refresh: <c>collect.pg_log_events</c> has no <c>v_</c> passthrough. No index: the reads
+    /// still enter through <c>idx_pg_log_events_time</c> and filter within the window; a
+    /// <c>(server_id, relation_name, collection_time)</c> index for the per-table run history is the same
+    /// separate rung as the family index, when a long window on a loud target asks for it.</para>
+    /// </summary>
+    private const string V130Sql = @"
+ALTER TABLE collect.pg_log_events
+    ADD COLUMN IF NOT EXISTS relation_name text,
+    ADD COLUMN IF NOT EXISTS bytes bigint,
+    ADD COLUMN IF NOT EXISTS duration_ms bigint,
+    ADD COLUMN IF NOT EXISTS pages_removed bigint,
+    ADD COLUMN IF NOT EXISTS pages_remaining bigint,
+    ADD COLUMN IF NOT EXISTS tuples_removed bigint,
+    ADD COLUMN IF NOT EXISTS tuples_remaining bigint,
+    ADD COLUMN IF NOT EXISTS buffer_hits bigint,
+    ADD COLUMN IF NOT EXISTS buffer_misses bigint,
+    ADD COLUMN IF NOT EXISTS buffer_dirtied bigint,
+    ADD COLUMN IF NOT EXISTS wal_records bigint,
+    ADD COLUMN IF NOT EXISTS wal_bytes bigint,
+    ADD COLUMN IF NOT EXISTS is_analyze boolean;";
+
+    /// <summary>
+    /// V131 — <c>config.config_notification_routes</c>, the sparse routes table that lets alert FAMILIES land
+    /// on different channels (#3598). Before it the notification model had one routing decision, made at
+    /// install time: the singleton <c>config_notification</c> row holds one destination per channel TYPE and
+    /// the fan-out sends every alert to every configured one. A self-monitor alert about the store, a
+    /// collector-cost digest, a failed Agent job and a deadlock page interleaved on one channel, and the
+    /// reader did the routing in their head on every post. This table is the layer over the parent row that
+    /// <c>config_collector_schedules</c> is over the code defaults: a row per family (or per exact metric
+    /// name) with a destination per channel, EMPTY meaning "inherit the parent's", so a store with zero rows
+    /// behaves byte for byte as it did and the rung is a no-op for every existing install.
+    ///
+    /// <para><b>The columns mirror the parent row's destinations, one per channel type</b> —
+    /// <c>teams_url</c>, <c>slack_url</c>, <c>generic_url</c>, <c>pagerduty_routing_key</c>,
+    /// <c>smtp_recipients</c> — spelled identically so the same ACL list, the same secret classification and
+    /// the same reader idiom apply. Proxies, the generic channel's headers/template and the PagerDuty region
+    /// flag are NOT mirrored: they say how a channel type is reached, not where a family lands. <c>NOT NULL
+    /// DEFAULT ''</c> like the parent's, so "inherit" and "unset" are one state and the resolver has one
+    /// test. <c>metric_match</c> is a family name from the closed <c>AlertFamily</c> taxonomy or an exact
+    /// metric name; the CHECK refuses a blank one, which would match nothing and read as a configured route.</para>
+    ///
+    /// <para><b><c>configured_channels</c> is generated, and exists for the roles that may not read the
+    /// URLs.</b> Four of the five destination columns are bearer secrets exactly as they are on the parent
+    /// row, so they are carved from the <c>viewer</c> and <c>mcp</c> roles' SELECT
+    /// (<c>DarlingManagedRoles.ViewerRestrictedConfigTables</c>). Without this column those roles could list
+    /// a route and not say which channels it configures — the one fact a settings read needs. A STORED
+    /// generated column over the secret columns discloses presence and nothing else (column-level SELECT
+    /// is per column), so the MCP <c>get_alert_settings</c> and a read-only seat can say "route 3 sets
+    /// Slack and PagerDuty" without ever holding either value. <c>array_remove</c> and <c>&lt;&gt;</c> are
+    /// IMMUTABLE, which a generated expression requires.</para>
+    ///
+    /// <para><b>The trigger is V117's shape</b>: statement-level, <c>config.config_bump_version()</c> verbatim,
+    /// <c>AFTER INSERT OR UPDATE OR DELETE</c> — DELETE because it is the direction that costs most (an
+    /// operator removes a route believing alerts fall back to the parent, and a stale route list keeps
+    /// sending them elsewhere). The service's <c>StoreConfigProvider</c> reads this table with the parent
+    /// row on every beacon change, so a route lands on the next firing with no restart. <c>DROP TRIGGER IF
+    /// EXISTS</c> first so a replay is a harmless no-op. <c>GENERATED ALWAYS AS IDENTITY</c> like
+    /// <c>config_command</c>, so the admin INSERT needs no sequence USAGE grant.</para>
+    ///
+    /// <para><b>No GRANT here.</b> <c>admin</c> gets its writes from the schema-wide default privileges;
+    /// the <c>viewer</c>/<c>mcp</c> column carve and the mcp role's narrow <c>UPDATE (enabled, modified_at)</c>
+    /// + <c>DELETE</c> are provisioning statements, re-asserted every managed start after migration, and
+    /// hand-mirrored in <c>Darling/tools/provision-roles.sql</c> for bring-your-own stores (the drift test
+    /// holds the two together). Pinned by <c>NotificationRoutesRungTests</c>.</para>
+    /// </summary>
+    private const string V131Sql = @"
+CREATE TABLE IF NOT EXISTS config.config_notification_routes (
+    route_id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    metric_match text NOT NULL,
+    teams_url text NOT NULL DEFAULT '',
+    slack_url text NOT NULL DEFAULT '',
+    generic_url text NOT NULL DEFAULT '',
+    pagerduty_routing_key text NOT NULL DEFAULT '',
+    smtp_recipients text NOT NULL DEFAULT '',
+    configured_channels text[] GENERATED ALWAYS AS (array_remove(ARRAY[
+        CASE WHEN teams_url <> '' THEN 'Teams' END,
+        CASE WHEN slack_url <> '' THEN 'Slack' END,
+        CASE WHEN generic_url <> '' THEN 'Generic' END,
+        CASE WHEN pagerduty_routing_key <> '' THEN 'PagerDuty' END,
+        CASE WHEN smtp_recipients <> '' THEN 'Email' END], NULL)) STORED,
+    enabled boolean NOT NULL DEFAULT TRUE,
+    modified_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    CONSTRAINT ck_config_notification_routes_metric_match CHECK (btrim(metric_match) <> '')
+);
+
+DROP TRIGGER IF EXISTS trg_bump_notification_routes ON config.config_notification_routes;
+CREATE TRIGGER trg_bump_notification_routes
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_notification_routes
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
+
+    /// <summary>
+    /// V132 — <c>cntr_type</c> on <c>collect.perfmon_stats</c> (#3653 A7's rung; the measurement contract's
+    /// rule 8, "gauges are never delta'd"): the Windows performance-counter type id
+    /// <c>sys.dm_os_performance_counters</c> reports for every row, stored beside the raw value so the store
+    /// can finally say which of its perfmon rows are COUNTS and which are LEVELS. Until this rung the
+    /// collector differenced every counter it read — <c>Total Server Memory (KB)</c> exactly like
+    /// <c>Batch Requests/sec</c> — and a target that released memory, a FALLING level, presented to the
+    /// shared delta calculator as a counter reset: the (0, 0) "no delta knowable" marker written at exactly
+    /// the moment the drop mattered, and the perfmon chart drawing a level's meaningless per-sweep
+    /// difference as "activity". The viewers had to classify by a name-suffix proxy (<c>/sec</c> = rate,
+    /// #3702) because the row could not tell them. Pinned by <c>PerfmonCounterTypeRungTests</c>.
+    ///
+    /// <para><b>What the column means, row by row.</b> The DMV's raw <c>cntr_type</c> word, stored verbatim:
+    /// <c>272696576</c> (<c>PERF_COUNTER_BULK_COUNT</c>) is a rate and the row keeps its pre-rung write — raw
+    /// value, delta, measured interval; <c>65792</c> (<c>PERF_COUNTER_LARGE_RAWCOUNT</c>) is a gauge and the
+    /// collector now writes the raw value with <c>delta_cntr_value</c> AND <c>sample_interval_seconds</c>
+    /// NULL — NULL, not (0, 0), because 0 is the calculator's "no delta knowable" marker and a gauge has no
+    /// delta to know; the average/fraction/base family (<c>1073874176</c> <c>PERF_AVERAGE_BULK</c> and
+    /// siblings) keeps the pre-rung write too, its delta a real per-interval change of the raw value that the
+    /// stored type tells a reader not to divide. The vocabulary and the three-way reading every consumer
+    /// applies live in <c>PerformanceMonitor.Common.PerfmonCounterTypes</c>; the collector's own gauge set
+    /// is pinned equal to it.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching V127, V128 and every column-adding rung on a
+    /// collector table: a row written before this rung never recorded its type, and NULL is the honest value
+    /// for it. Readers treat NULL as "classify as you did before the rung" — the viewers fall back to the
+    /// #3702 name proxy, the MCP tools publish <c>counter_kind: null</c> and say so — so history renders
+    /// exactly as the operator last saw it, and the type decides the moment a row carries one. Because a
+    /// counter's type does not change, the viewers take ANY row's non-null type as the series' type: a
+    /// gauge's whole 30-day history plots as a level the morning after the upgrade (its pre-rung rows stored
+    /// <c>cntr_value</c> all along), which is the correction, not a discontinuity. No backfill could do
+    /// better — the store holds no way to recover a type from a name — and a backfilled 0 would be a lie
+    /// about every historical row.</para>
+    ///
+    /// <para><b>The compressed-chunk shape.</b> <c>perfmon_stats</c> is a compressed hypertable on the fleet
+    /// (one-day chunks, compression segmented by <c>server_id</c>, 30 days of raw retention like its
+    /// delta-family siblings). A nullable, default-less <c>ADD COLUMN</c> is catalog-only in PostgreSQL and TimescaleDB
+    /// accepts it on a compressed hypertable with a compression policy attached — the shape V127 and V128
+    /// used on <c>wait_stats</c> and <c>procedure_stats</c> and verified live on 2.28.1; verified again for
+    /// this rung against a store stopped at 131 with a compressed <c>perfmon_stats</c> chunk, which climbed
+    /// to 132 in one rung with the pre-rung rows reading NULL through the compressed chunk. A DEFAULT would
+    /// be the trap: TimescaleDB has to rewrite compressed segments to honour one, which on a
+    /// multi-hundred-GB table is neither instant nor safe inside the migration transaction.</para>
+    ///
+    /// <para><b>The passthrough view is refreshed</b> for the V14/V80/V81/V127/V128 reason: Postgres freezes
+    /// a view's <c>SELECT *</c> column list at CREATE, so without the <c>CREATE OR REPLACE VIEW</c> every
+    /// <c>v_perfmon_stats</c> reader — both trend reads, the latest-snapshot read, the analysis facts —
+    /// would never see the column. Appending is the one alteration <c>CREATE OR REPLACE VIEW</c> permits,
+    /// which is exactly what an <c>ADD COLUMN</c> produces. A fresh store gets the column from the generated
+    /// CREATE TABLE at V4 (the collector definition carries it, appended last) and the ALTER no-ops there;
+    /// the view refresh is idempotent either way.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not divide a <c>PERF_AVERAGE_BULK</c>
+    /// numerator by its <c>PERF_LARGE_RAW_BASE</c> sibling (the default list carries ten such instance rows,
+    /// the wait-statistics <c>Average wait time (ms)</c> family; their per-interval delta is plotted as
+    /// exactly that and the average their name promises needs a join this store does not make — a stated
+    /// finding, its own lane). It does not touch <c>perfmon_interval_baseline</c> or the analysis facts
+    /// (<c>Batch Requests/sec</c> and the compilation counters only, all rates). It does not backfill.</para>
+    /// </summary>
+    private const string V132Sql = @"
+ALTER TABLE collect.perfmon_stats
+    ADD COLUMN IF NOT EXISTS cntr_type integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough would keep serving the
+   pre-V132 column list forever — the V14 lesson, restated by V80, V81, V127 and V128. Appending is the one
+   alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_perfmon_stats AS SELECT * FROM collect.perfmon_stats;";
+
+    /// <summary>
+    /// V133 — two nullable integer columns on two PostgreSQL-target tables, the ONE rung of the #3691 v2 wave:
+    /// <c>numbackends</c> on <c>collect.pg_database_stats</c> and <c>sampled_ms</c> on
+    /// <c>collect.pg_wait_sampling</c>. Both are written by their collectors from this rung on and READ BY
+    /// NOTHING yet — the analysis-side consumers (a connection-saturation numerator, a duty-cycle-honest
+    /// sampled wait rate) are follow-on lanes once the fleet has rows to calibrate against. Pinned by
+    /// <c>PgNumbackendsAndSampledMsRungTests</c>.
+    ///
+    /// <para><b><c>numbackends</c> — the saturation NUMERATOR the design wanted.</b>
+    /// <c>pg_stat_database.numbackends</c> is the number of backends currently connected to each database:
+    /// a LEVEL, not a counter, client-only (background workers are not counted), universal (present since
+    /// PostgreSQL 8.x, so every major this repo sweeps reports it) and sampled every minute with the rest of
+    /// the row. The v1 saturation read had only <c>pg_session_states.total_sessions</c>, which is an
+    /// exception capture — that collector stores the sessions holding an open transaction old enough to
+    /// matter, so its count is the population that met its capture rule, not the connected population — and
+    /// an exception count over <c>max_connections</c> is not a saturation fraction. Stored per database like
+    /// every other column of the row
+    /// (a consumer sums across databases for the cluster figure, and the per-database split is itself a
+    /// finding: one database holding 900 of 1,000 slots is a different conversation from ten holding 90).
+    /// NULL on a pre-rung row, which a reader must treat as "not sampled" rather than 0 connections.</para>
+    ///
+    /// <para><b><c>sampled_ms</c> — the duty-cycle denominator the sampler arm owed its readers.</b> The #3604
+    /// service-side sampler stores <c>profile_period_ms = 1000</c> and its cumulative tally, but it OBSERVES
+    /// only <c>SamplerSnapshotsPerCycle</c> one-second snapshots (30 s) of each 300 s cycle, so
+    /// <c>Δsamples × period / observed_window</c> — the arithmetic a rate read over the analysis window
+    /// naturally writes — understates that arm's wait rate by the duty cycle, roughly 10×. The instrument
+    /// token that would let a reader correct for it lives in <c>collector_state</c>, outside the analysis
+    /// FROM/JOIN whitelist, and the period alone cannot say how much of the interval was watched. This column
+    /// stores, on every row a collection writes, the milliseconds of observation that collection folded into
+    /// the tally: the number of snapshots actually read × the period (30 × 1,000 = 30,000 on a full window;
+    /// fewer if the batch was cut short). The extension arm writes NULL — the module samples in-engine every
+    /// <c>profile_period</c> for the WHOLE interval, so the interval IS the observed time and there is no
+    /// duty cycle to disclose — and a reader treats NULL as "period × count over the row's whole interval",
+    /// which is exactly today's behaviour. Per row rather than cumulative-in-state: the observed window of one
+    /// collection is a fact the collection knows and nothing else can recover, a per-row value survives a
+    /// tally reset or a cap-drop without a second counter to keep in step with the first, and a consumer that
+    /// wants the window's total sums it over the collections between its two endpoints (one value per
+    /// <c>collection_time</c>; every row of a collection carries the same figure, like
+    /// <c>profile_period_ms</c>).</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching V127, V128 and V132 and every column-adding
+    /// rung on a collector table: a pre-rung row never sampled either value, and NULL is the honest word for
+    /// it. Both tables are compressed hypertables on the fleet (one-day chunks, segmented by <c>server_id</c>,
+    /// 30 days of raw retention) and a nullable, default-less <c>ADD COLUMN</c> is catalog-only in PostgreSQL;
+    /// TimescaleDB accepts it on a compressed hypertable with a compression policy attached — the shape V127
+    /// and V128 used on <c>wait_stats</c>, <c>pg_wait_stats</c> and <c>pg_statement_stats</c> and V132 on
+    /// <c>perfmon_stats</c>, verified live on 2.28.1 each time. A DEFAULT would be the trap: TimescaleDB has
+    /// to rewrite compressed segments to honour one.</para>
+    ///
+    /// <para><b>No view to refresh.</b> Neither table has a <c>v_</c> passthrough — the PostgreSQL collector
+    /// tables have been view-less since V63 (V83's doc says so of <c>pg_database_stats</c>; V128 restated it
+    /// when it dressed <c>pg_wait_stats</c>), which is why this rung is two ALTERs and nothing else, unlike
+    /// V132's ALTER-plus-view. A fresh store gets both columns from the
+    /// generated CREATE TABLE (each collector definition carries its column, appended LAST so the positional
+    /// COPY writer and an upgraded store's ALTER agree on where it sits) and the ALTERs no-op there. The V101
+    /// rule applies: V83's and V96's CREATE texts carry the columns too, because <c>PgSchemaGeneratorTests</c>
+    /// holds every collector rung column-for-column equal to the generator's CURRENT output, and a store that
+    /// climbed through them before this rung existed is exactly the population these ALTERs are for.</para>
+    ///
+    /// <para><b>Lite is unchanged.</b> Lite stores no <c>pg_*</c> table
+    /// (<c>DuckDbSchemaGenerator.StoredCollectors</c> is the SQL Server set), so there is no twin column and
+    /// no DuckDB schema bump — the V96 decision, where V128's Lite bump was for the SQL Server families it
+    /// also dressed, not for <c>pg_wait_stats</c>.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It reads neither column anywhere: no MCP tool
+    /// projects <c>numbackends</c>, no fact divides by it, and
+    /// <c>DarlingPgWaitSamplingReader.EstimatedWaitMs</c> keeps its <c>samples × period</c> arithmetic with
+    /// a doc-comment naming <c>sampled_ms</c> as the denominator a rate read must use. It does not backfill,
+    /// touch <c>pg_session_states</c>, or change either collector's existing columns.</para>
+    /// </summary>
+    private const string V133Sql = @"
+ALTER TABLE collect.pg_database_stats
+    ADD COLUMN IF NOT EXISTS numbackends integer;
+
+ALTER TABLE collect.pg_wait_sampling
+    ADD COLUMN IF NOT EXISTS sampled_ms integer;";
+
+    /// <summary>
+    /// V134 — the "time honesty" rung (#3653 item 13, rulings Q7 and Q8): two nullable columns that let the store
+    /// say, for the first time, WHICH clock two of its values are in. <c>sample_time_utc</c> on
+    /// <c>collect.cpu_utilization_stats</c> — the same instant <c>sample_time</c> records, in UTC — and
+    /// <c>time_zone_id</c> on <c>collect.server_properties</c> — the monitored engine's own time-zone name,
+    /// beside the <c>utc_offset_minutes</c> V16 added. Pinned by <c>TimeHonestyRungTests</c>; the Lite twin is
+    /// schema v63 (<c>DuckDbInitializer</c>).
+    ///
+    /// <para><b>The two lies this rung retires, stated plainly.</b> First: <c>cpu_utilization_stats.sample_time</c>
+    /// is the MONITORED SERVER'S LOCAL wall clock (<c>SYSDATETIME()</c> minus each ring-buffer entry's age) in a
+    /// store whose every other timestamp is naive UTC. That was a documented convention rather than an
+    /// accident — Lite plots it in the server's own frame and it is the collector's watermark — but every
+    /// reader that windows or aligns it against UTC had to DERIVE the UTC value: Darling's #1262 de-skew recovers
+    /// the offset per batch as <c>MAX(sample_time) OVER (batch) - collection_time</c> rounded to fifteen minutes,
+    /// and Lite shifts its whole window by the single <c>utc_offset_minutes</c> the store holds now. Both
+    /// derivations assume one offset per batch or per server, and across a DST transition that is false for
+    /// exactly the rows nearest the change: the batch that straddles it rounds to one side, the Lite window
+    /// applies today's offset to yesterday's samples, and the misplacement is one hour, silent, and in the
+    /// plausible direction. Second: <c>server_properties.utc_offset_minutes</c> is
+    /// <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — an OFFSET, the one in force at collection — and #3231
+    /// already documented that subtracting it from a stored instant that can outlive a transition
+    /// (<c>get_index_usage</c>'s <c>last_user_access</c>, the PVS cleaner stamps) is exact on one side and an
+    /// hour wrong on the other, with nothing in the store able to say which side a given instant was on. An
+    /// offset cannot; a ZONE can, because <c>AT TIME ZONE</c> applies the rule that was in force at that
+    /// instant. The ruling: add the UTC twin as a column and store the zone id, both nullable, the offset kept
+    /// alongside — "readers prefer the new column when present".</para>
+    ///
+    /// <para><b><c>sample_time_utc</c> — what it is and what it is not.</b> Written by <c>CpuUtilizationCollector</c>
+    /// from this rung on, on every row, beside an UNCHANGED <c>sample_time</c>: on the ring-buffer arm it is
+    /// the identical two-step <c>DATEADD</c> anchored on <c>SYSUTCDATETIME()</c> instead of <c>SYSDATETIME()</c>
+    /// (both are runtime constants folded once per statement, so the pair differs by exactly the server's
+    /// offset at the poll); on the Azure SQL DB arm it is <c>drs.end_time</c>, which is documented UTC and
+    /// which <c>sample_time</c> already reads — Azure SQL Database's clock IS UTC, so the two frames coincide
+    /// there and neither column lies. <c>sample_time</c> is NOT converted to UTC, deliberately and for two
+    /// reasons the ruling names: existing rows would be indistinguishable from converted ones (a column that
+    /// is local before some instant and UTC after it is worse than either), and it is the watermark — a
+    /// watermark that changed frame would re-ingest or skip one offset's worth of samples on the first poll
+    /// after the upgrade. The readers that compare the sample against a UTC window — the viewer's raw CPU read
+    /// and the MCP <c>get_cpu_utilization</c> read on this side, the Lite CPU window on the other — now take
+    /// <c>COALESCE(sample_time_utc, …)</c> with their pre-rung derivation as the fallback, so a post-rung row
+    /// is placed by a stored UTC instant and a pre-rung row renders exactly as it did. The readers that want
+    /// the server's frame (Lite's chart x-axis, the viewer's Server-time mode) keep <c>sample_time</c>; the
+    /// latest-row reads that ORDER BY it as a within-batch tiebreak (<c>DarlingWorker.LatestCpuSql</c> and its
+    /// three siblings) keep it too, because an ORDER BY carries no clock frame and — the load-bearing
+    /// reason — that read's <c>sample_time</c> is the CPU alert gate's observation identity, compared only
+    /// against the value the same read stored last sweep: switching it to the UTC column would make the first
+    /// post-upgrade sample read OLDER than the last pre-upgrade one on every server east of UTC, and freeze
+    /// the gate for one offset's worth of hours (#3282 named that trap when it left the value
+    /// <c>Kind=Unspecified</c>).</para>
+    ///
+    /// <para><b><c>time_zone_id</c> — what it is and where it is.</b> <c>CURRENT_TIMEZONE_ID()</c>, the engine's
+    /// own zone name (a Windows zone id such as <c>Eastern Standard Time</c>, the key <c>AT TIME ZONE</c> and
+    /// <c>sys.time_zone_info</c> use), collected by <c>ServerPropertiesCollector</c> beside the offset. It lives on
+    /// <c>server_properties</c> because THAT is where the offset lives (V16) and the ruling says the offset
+    /// stays alongside; the brief that dispatched this lane said "server registry", and this rung says
+    /// <c>server_properties</c> so the next reader does not go looking at <c>servers</c>. NULL is a REAL value
+    /// here and the common one on an older fleet: the function exists on SQL Server 2022+ and Azure SQL
+    /// Database / Managed Instance only, and on an older engine it is not a missing object but a missing
+    /// built-in — a batch that names it fails to compile as a whole — so the collector reads it in its own
+    /// <c>sp_executesql</c> batch behind a version / edition gate and inside <c>TRY … CATCH</c>, and writes NULL
+    /// where the engine cannot say. Readers publish NULL as "pre-2022 engine: only the offset is known";
+    /// nothing in this rung converts through the zone yet (an <c>AT TIME ZONE</c> read boundary for the #3231
+    /// fields is the consumer lane this column exists for), which is why the offset is kept rather than
+    /// replaced: every de-skew in the tree still runs on it.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching V127, V128, V132 and V133 and every
+    /// column-adding rung on a collector table — and here the no-backfill is not merely the safe choice but
+    /// the ONLY honest one. A pre-rung <c>sample_time</c> could be converted to UTC only by subtracting the
+    /// offset its server had AT THAT SAMPLE'S INSTANT, and the store never recorded that offset: it holds the
+    /// offset at each <c>server_properties</c> collection (a sparse, on-load series) and the per-batch estimate
+    /// #1262 derives, both of which are exactly the DST-blind derivations this column replaces. A backfilled
+    /// value would be the old lie written into the new column, where a reader could no longer tell it from a
+    /// measurement. NULL says "not recorded", the readers fall back to what they always did, and the column
+    /// decides the moment a row carries one. Likewise no zone can be backfilled from an offset — several zones
+    /// share every offset. Both tables are compressed hypertables on the fleet (one-day chunks, segmented by
+    /// <c>server_id</c>; <c>cpu_utilization_stats</c> carries the 30-day service-side retention V115's
+    /// neighbour describes) and a nullable, default-less <c>ADD COLUMN</c> is catalog-only in PostgreSQL;
+    /// TimescaleDB accepts it on a compressed hypertable with a compression policy attached — the shape V127,
+    /// V128, V132 and V133 used, verified live on 2.28.1 each time. A DEFAULT would be the trap: TimescaleDB has
+    /// to rewrite compressed segments to honour one.</para>
+    ///
+    /// <para><b>One view refreshed, one not.</b> <c>cpu_utilization_stats</c> HAS a <c>v_</c> passthrough (V4's
+    /// <c>v_cpu_utilization_stats</c>, which the viewer's latest-CPU read, the fleet read, the analysis facts and
+    /// the daily summary all read), and Postgres freezes a view's <c>SELECT *</c> column list at CREATE, so
+    /// without the <c>CREATE OR REPLACE VIEW</c> here every one of those readers would never see the column
+    /// — the V14 lesson, restated by V80, V81, V127, V128 and V132. Appending is the one alteration
+    /// <c>CREATE OR REPLACE VIEW</c> permits, which is exactly what an <c>ADD COLUMN</c> produces.
+    /// <c>server_properties</c> has no passthrough (V16 says so; <c>PgSchemaGenerator.AllPassthroughViews</c>
+    /// agrees), so its ALTER stands alone. A fresh store gets both columns from the generated CREATE TABLE at
+    /// V1 (each collector definition carries its column, appended LAST so the positional COPY writer and an
+    /// upgraded store's ALTER agree on where it sits) and the ALTERs no-op there; the view refresh is
+    /// idempotent either way.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not convert <c>sample_time</c>, rename it,
+    /// or move the watermark off it. It does not backfill either column. It does not touch the Compose
+    /// catalog's CPU measures (they bucket on <c>collection_time</c>, the collector prefix, and never read
+    /// <c>sample_time</c>), the analysis windows (likewise <c>collection_time</c>-bounded), or any of the
+    /// #3231 de-skews — the zone is stored so that a later lane can apply <c>AT TIME ZONE</c> at those read
+    /// boundaries, and until then the offset does what it did. It does not publish the zone anywhere but
+    /// <c>get_server_properties</c> (both SKUs), and it does not add a viewer surface for it.</para>
+    /// </summary>
+    private const string V134Sql = @"
+ALTER TABLE collect.cpu_utilization_stats
+    ADD COLUMN IF NOT EXISTS sample_time_utc timestamp;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough would keep serving the
+   pre-V134 column list forever — the V14 lesson, restated by V80, V81, V127, V128 and V132. Appending is
+   the one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_cpu_utilization_stats AS SELECT * FROM collect.cpu_utilization_stats;
+
+/* server_properties has no v_ passthrough (V16), so this ALTER stands alone. */
+ALTER TABLE collect.server_properties
+    ADD COLUMN IF NOT EXISTS time_zone_id text;";
+
+    /// <summary>
+    /// V135 — the Long-Running Query alert's OPT-OUT knob on the singleton <c>config_alert_settings</c> row
+    /// (#3653 A5, ruling Q5): two <c>text[]</c> lists — <c>program_name</c> PREFIXES and exact <c>login_name</c>
+    /// values — whose sessions the alert does NOT EVALUATE: not read into the decision, not counted, not
+    /// fingerprinted, as opposed to a mute rule, which silences a fire already decided. The shape is
+    /// <c>excluded_databases</c>'s (V17), <c>text[] NOT NULL</c>; the DEFAULT is not.
+    ///
+    /// <para><b>Why a knob and not a gate.</b> Measured on one production store class: 191 distinct sessions over
+    /// the 30-minute bar in 7 days, the p90 of them seen in 6,192 snapshots — permanent background requests that
+    /// are over any duration threshold forever, so no persistence gate can separate them from a runaway query.
+    /// Coverage is the fix. The match rule (programs by case-insensitive PREFIX — job-step names embed the job
+    /// id; logins EXACT, case-insensitive — a prefix would let <c>svc</c> swallow <c>svc_owner</c>; no wildcard
+    /// grammar) is spelled once in <c>PerformanceMonitor.Alerting.LongRunningQueryExclusions</c> and applied
+    /// INSIDE both SKUs' reads ahead of the row cap; the store holds the normalised lists (trimmed, blanks
+    /// dropped, de-duplicated case-insensitively).</para>
+    ///
+    /// <para><b>The DEFAULT is the production read's seeds, and this is the one place a knob rung on this row
+    /// has shipped a non-empty list.</b> A 7-day read of one large production store split the long-running
+    /// population into four classes: (1) SQL Agent job-step programs — <c>program_name</c> starting
+    /// <c>SQLAgent - TSQL JobStep</c>, ~460 sessions a week across 11 single-server jobs, medians 35–62 minutes
+    /// — the seeded PREFIX; (2) the <c>NT AUTHORITY\SYSTEM</c> and <c>NT AUTHORITY\NETWORK SERVICE</c> logins —
+    /// the permanent multi-DAY background, ~70 sessions across 42 servers, medians 4.8–8.6 days, 300K+
+    /// snapshots, CDC-capture shaped — the seeded LOGINS; (3) the application's admin login — deliberately NOT
+    /// a default, because it carries the job wave but also real ad-hoc long-runners, and the job-step prefix
+    /// already removes its share; (4) named humans — 3 sessions a week, never excluded: they are what the page
+    /// is for. A pre-rung row therefore reads as the seeds, which is exactly what <c>DarlingAlertSettings</c>
+    /// returned before this rung and what Lite ships, so the two SKUs and the two sides of the rung all
+    /// evaluate one population. The seeds are DEFAULTS an operator may clear: a cleared list is stored as an
+    /// explicit empty array and excludes nothing on that arm — present-and-empty is a decision, and nothing
+    /// re-seeds it. <c>LongRunningQueryExclusionKnobRungTests</c> pins the literal defaults here equal to
+    /// <c>LongRunningQueryExclusions.DefaultProgramNamePrefixes</c> / <c>DefaultLogins</c>.</para>
+    ///
+    /// <para><b>Readers and writers.</b> <c>StoreConfigProvider</c> seeds them as the 69th/70th bindings and reads
+    /// them at ordinals 67–68 (the reachability rule: a column selected but not read resets the knob on every
+    /// worker start); the Viewer's <c>ViewerDataService.AlertSettings</c> binds them as $68/$69;
+    /// <c>DarlingAlertReader.AlertSettingsSelectSql</c> reads them at 67–68 for <c>get_alert_settings</c>;
+    /// <c>update_alert_settings</c> writes <c>long_running_query.excluded_program_name_prefixes</c> /
+    /// <c>.excluded_logins</c>. No reload beacon of its own: V17's statement-level
+    /// <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c> on any write here. No
+    /// ACL or provisioning change: <c>config_alert_settings</c> carries table-level grants (no column carve),
+    /// the same fact every knob rung on this row has relied on. Rides after V134 (#3653 item 13's time-honesty
+    /// rung), one un-landed rung at a time.</para>
+    /// </summary>
+    private const string V135Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS long_running_query_excluded_program_name_prefixes text[] NOT NULL
+        DEFAULT ARRAY['SQLAgent - TSQL JobStep']::text[];
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS long_running_query_excluded_logins text[] NOT NULL
+        DEFAULT ARRAY['NT AUTHORITY\SYSTEM', 'NT AUTHORITY\NETWORK SERVICE']::text[];";
+
+    /// <summary>
+    /// V136 — two PostgreSQL-target series the analysis engine had no source for (#3691, design §4b and
+    /// §6): <c>collect.pg_database_size_stats</c>, the hourly per-database size series — a NEW table — and the
+    /// host's memory from AWS Performance Insights, SIX COLUMNS on <c>collect.pg_cpu_utilization</c>. One rung
+    /// for both, deliberately: they unblock the same wave of consumer lanes (object growth, the memory
+    /// composition checks), and the ladder rule is one un-landed rung at a time.
+    ///
+    /// <para><b>Why memory is columns on the CPU row and not <c>pg_host_memory</c>, the table the plan
+    /// named.</b> Two reasons, and the second is the one that decided it. The memory counters ARE the CPU
+    /// row: one <c>GetResourceMetrics</c> response, one minute stamp, one watermark, one COPY — a sibling table
+    /// would re-store the same identity under a second name with its own resume point. And every collector
+    /// table is a hypertable: <c>TimescaleSupport.CompressionPhaseBandMinutes</c> spreads them at three per
+    /// minute, a 73rd hypertable widens the band 24→25 minutes, the heaviest hourly refresh's window shrinks
+    /// 18→17 and its watch line drops 900→850 s — BELOW the 896 s recorded ceiling. The grid's own doc calls
+    /// that a scheduling decision (#3035, #3044, #3107), not a renumbering, and it is not this rung's to make.
+    /// A 72nd hypertable fits exactly (72 / 3 = 24); six nullable columns cost nothing. V130 made the same
+    /// choice for the log-event numbers, for the same reasons.</para>
+    ///
+    /// <para><b>The new table is exactly what the generator emits</b>, column for column — the V104 rule
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c> enforces. A fresh store
+    /// builds it from the generated schema at V1 and this CREATE no-ops (<c>IF NOT EXISTS</c>); a store that
+    /// climbed here gets it from this text. One generated index, on <c>(server_id, collection_time)</c>.
+    /// Hypertable conversion, one-day chunks, compression segmented by <c>server_id</c> and the retention policy
+    /// follow from the catalog entry on the service's next start, as for every collector table. All value
+    /// columns nullable, matching the generated schema this must be identical to.</para>
+    ///
+    /// <para><b>The six columns are added in TWO places and both are required</b> — the V101 rule. V106's
+    /// CREATE carries them for the fresh population (walked from the generator at V1, and never re-run on a
+    /// store that has the table); this rung's ALTER carries them for the store that built the nine-column
+    /// table first. <c>ADD COLUMN IF NOT EXISTS</c> is a no-op on the fresh store that already has them.
+    /// <b>Nullable, no DEFAULT, no backfill</b>, matching every column-adding rung on a collector table (V80,
+    /// V81, V127, V128, V130, V133): a pre-V136 row never had a memory sample taken, NULL is the honest value,
+    /// and a nullable no-default ADD COLUMN is catalog-only on a compressed hypertable (V127/V128/V133 verified
+    /// the shape live on 2.28.1). No view — the PostgreSQL collector tables have no <c>v_</c> passthrough.</para>
+    ///
+    /// <para><b><c>pg_database_size_stats</c>: BYTES, and NULL where the role may not size a database.</b>
+    /// <c>size_bytes</c> is <c>pg_database_size(oid)</c>; <c>total_bytes</c> is the instance total denormalized
+    /// onto every row of a collection (the <c>pg_session_states.total_sessions</c> shape — one read, no GROUP
+    /// BY) and is NULL when ANY database's size is, because a sum over the databases this role can see is not
+    /// the instance total. A database the role lacks <c>CONNECT</c> on and is not <c>pg_read_all_stats</c> for
+    /// — the vendor-owned database on a managed target — is a row with <c>size_bytes NULL</c>, never 0 and
+    /// never a failed collection. Templates are collected and flagged (<c>is_template</c>), not skipped. The
+    /// only contract a later join against the store's own <c>collect.store_metrics</c> (V53, <c>total_bytes</c>
+    /// = <c>pg_total_relation_size</c>) or the SQL Server side's size columns depends on is <c>*_bytes
+    /// bigint</c> naming and naive-UTC timestamps, and both are kept. Hourly, a year of retention: ~6,000 rows
+    /// a day fleet-wide.</para>
+    ///
+    /// <para><b>The memory columns: the CPU row's source, the CPU row's minute.</b> The <c>os.memory.*</c>
+    /// counters are named in the <c>GetResourceMetrics</c> request <c>RdsCpuIngestor</c> already makes — more
+    /// metric names on one call rather than a second API, a second IAM grant or a second collector cycle. The
+    /// five <c>memory_*_bytes</c> columns are PI's kilobyte counters × 1024; <c>configured_memory_bytes</c> is
+    /// the minute's Serverless v2 capacity × 2 GiB per ACU (vendor-defined) and NULL on a provisioned instance
+    /// class. <b>A stock PostgreSQL target has no <c>pg_cpu_utilization</c> row at all</b> — there is no OS
+    /// source from inside the engine — and that absence is the answer a consumer must read as
+    /// <c>unavailable</c>, never as "no memory". A store that monitors only SQL Server or only self-hosted
+    /// PostgreSQL carries one more empty table, six more empty columns, and nothing else changes.</para>
+    ///
+    /// <para><b>Nothing reads the new table or the six columns yet</b>, and the rung says so rather than
+    /// implying a consumer: the composition checks, the object-growth family and the disk-free read are
+    /// #3691's later slices, and the point of landing the series first is that they have a day of rows when
+    /// those land. No backfill — a series starts when it starts. Lite stores neither
+    /// (<c>DuckDbSchemaGenerator.StoredCollectors</c> is the SQL Server set), so the rung has no DuckDB twin.</para>
+    /// </summary>
+    private const string V136Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_database_size_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    size_bytes bigint,
+    total_bytes bigint,
+    is_template boolean,
+    allows_connections boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_database_size_stats_time
+    ON collect.pg_database_size_stats(server_id, collection_time);
+
+ALTER TABLE collect.pg_cpu_utilization
+    ADD COLUMN IF NOT EXISTS memory_total_bytes bigint,
+    ADD COLUMN IF NOT EXISTS memory_free_bytes bigint,
+    ADD COLUMN IF NOT EXISTS memory_cached_bytes bigint,
+    ADD COLUMN IF NOT EXISTS memory_buffers_bytes bigint,
+    ADD COLUMN IF NOT EXISTS memory_active_bytes bigint,
+    ADD COLUMN IF NOT EXISTS configured_memory_bytes bigint;";
+
+    /// <summary>
+    /// V137 — four column sets on three EXISTING tables, one rung, because they unblock four follow-up
+    /// lanes at once and the ladder rule is one un-landed rung at a time: (a) the two Query Store capture
+    /// modes on <c>collect.query_store_health</c> (#3796); (b) the store-backed twin of the #3712
+    /// uncorroborated-finding route knob on <c>config.config_alert_settings</c>; (c) the plan dimension's
+    /// TOAST bytes on <c>collect.store_metrics</c> (#3783); (d) the store's own checkpointer phases, three
+    /// more columns on <c>collect.store_metrics</c> (#3783, with #3802 and #3745 as the levers they inform).
+    /// Eight nullable columns, no DEFAULT, no backfill, no new table, no new hypertable
+    /// (<c>TimescaleSupport.HypertableCount</c> stays 72 — the V136 doc says what a 73rd would cost the
+    /// compression grid), one passthrough refreshed. Pinned by <c>QsCaptureModeRouteKnobToastRungTests</c>; the
+    /// Lite twin is schema v64 (<c>DuckDbInitializer</c>), for (a) only — Lite stores <c>query_store_health</c>
+    /// through the shared collector, stores no <c>store_metrics</c>, and keeps its alert settings in
+    /// settings.json rather than a table.
+    ///
+    /// <para><b>(a) <c>query_capture_mode</c> and <c>wait_stats_capture_mode</c> — the option that names a
+    /// plan-churn factory (#3796).</b> <c>QueryStoreHealthCollector</c> read every column of
+    /// <c>sys.database_query_store_options</c> that says whether Query Store WORKS and none that says what it
+    /// CAPTURES. Measured on one production store class: ~755 k new distinct plans a day into the plan
+    /// dimension from 42 servers, and one database taking 92–96 % of the <c>query_store</c> collector's
+    /// per-database fan-out on the largest store — the signature of <c>QUERY_CAPTURE_MODE = ALL</c> on an
+    /// ad-hoc workload, which the health row could not confirm or rule out because it never asked, while
+    /// the fleet's other three knobs (200 plans / 21 days / 8 GB) are uniform. Both columns are the DMV's
+    /// <c>*_desc</c> spelling verbatim (<c>ALL</c> / <c>AUTO</c> / <c>CUSTOM</c> / <c>NONE</c>; <c>ON</c> / <c>OFF</c>),
+    /// <c>text</c> because the collector declares them <c>Varchar</c> and the generator renders <c>Varchar</c>
+    /// as <c>text</c> (the type here is the generator's rendering of the declaration, which is what
+    /// <c>PgSchemaGeneratorTests</c> holds every collector rung to). <c>query_capture_mode_desc</c> shipped
+    /// with the view in 2016 and is always selected; <c>wait_stats_capture_mode_desc</c> is 2017+ (v14), and
+    /// on a 2016 engine a body that names it fails to compile for the whole database, so the collector
+    /// gates that ONE column (<c>QueryStoreHealthCollector.HasWaitStatsCaptureMode</c>, the
+    /// <c>DatabaseConfigCollector</c> idiom) and writes NULL there — a NULL a reader must publish as
+    /// "engine predates the option", never as <c>OFF</c>. NULL on every pre-rung row means "never asked". The
+    /// reader is the Query Store clutter view (#3797): churn × <c>ALL</c> is "switch to AUTO", churn ×
+    /// <c>AUTO</c> points at the workload; it lands in its own lane, as do the <c>get_query_store_health</c>
+    /// fields and the Viewer grid columns.</para>
+    ///
+    /// <para><b>(b) <c>analysis_uncorroborated_route</c> — the store-backed half of a knob #3732 shipped
+    /// file-level (#3712).</b> <c>FindingRouting.Classify</c> sends a notify-worthy but UNCORROBORATED finding
+    /// (one fact in its chain, no matched co-fire) to the daily digest instead of a page, and the ONE knob
+    /// that governs it, <c>analysis.uncorroboratedRoute</c> in darling.json, was fenced to the file because two
+    /// rungs were in flight when it landed (<c>AnalysisConfig.UncorroboratedRoute</c> says so, and
+    /// <c>StoreConfigProvider.LoadViewAsync</c> CARRIES the file value across the wholesale
+    /// <c>config.Analysis</c> swap on every reload for exactly that reason). This column is the store's
+    /// half, spelled the way the knob is already spelled everywhere the product persists it: Lite's
+    /// settings.json key IS <c>analysis_uncorroborated_route</c> (<c>App.AnalysisUncorroboratedRoute</c>), and both
+    /// SKUs' MCP surfaces publish <c>analysis.uncorroborated_route</c>. It is a TRI-STATE, which is why it is
+    /// nullable with no DEFAULT where every numeric knob on this
+    /// row ships one: NULL means "not set in the store — the file-level knob, or its shipped default
+    /// <c>digest</c>, governs", and that is what every existing store reads the morning after the upgrade,
+    /// so nothing changes until an operator writes a value. The precedence the code half (its own lane)
+    /// implements is <b>store non-NULL wins over file</b>: <c>DarlingAlertSettings.UncorroboratedFindingRoute</c>
+    /// reads this column first and falls to <c>analysis.uncorroboratedRoute</c> only on NULL, the reload
+    /// carry becomes a column read, <c>get_alert_settings</c> publishes the effective route and WHICH source
+    /// it came from, and <c>update_alert_settings</c> gains the field it refuses today. Until that lands the
+    /// column is written by nothing and read by nothing, and the rung says so.</para>
+    ///
+    /// <para><b>Why (b) carries a CHECK when the knob rungs on this row deliberately do not.</b> V119, V120,
+    /// V122, V124 and V126 refused a CHECK because a NUMBER has a clamp: the write tool bounds it and
+    /// <c>DarlingAlertSettings</c> clamps it on read, so any stored value maps to a valid one. A route has no
+    /// clamp. <c>FindingRouting.TryParseRoute</c> reads anything that is neither <c>digest</c> nor <c>page</c> as
+    /// "no opinion" and falls to the default — so a misspelled <c>pgae</c> written straight into the row would
+    /// not error, it would silently turn an operator's decision to PAGE back into the digest, which is the
+    /// one failure this knob exists to make impossible. The CHECK makes that a write error at the store,
+    /// the V62 <c>plan_xml_compression</c> precedent (an enumeration on <c>config_service</c>, CHECK mirroring the
+    /// provider's normalization). <c>IS NULL OR IN ('digest', 'page')</c>, lower-case wire spellings
+    /// (<c>FindingRouting.DigestText</c> / <c>PageText</c>; the parser is case-insensitive but the store holds
+    /// the canonical form, which is what the write tool normalizes to). Added inside V62's <c>DO</c> guard
+    /// because <c>ADD CONSTRAINT</c> has no <c>IF NOT EXISTS</c>, and the rung must be re-runnable on a store
+    /// that already carries it.</para>
+    ///
+    /// <para><b>(c) <c>toast_bytes</c> and <c>toast_live_bytes</c> — the plan dimension's file-slack question
+    /// (#3783).</b> On one production store class <c>query_plan_dim</c>'s TOAST file was 154 GB holding ~61 GB
+    /// of live chunks — 40 % utilisation, ~93 GB of slack left by the V54 text→gz conversion plus ~755 k
+    /// rows a day cycling through row-capped deletes — and the store self-metrics could not say so, because
+    /// the dimension row stores <c>pg_total_relation_size</c> (heap + indexes + TOAST) and nothing about how
+    /// full the TOAST file is. Ordinary <c>VACUUM</c> returns those pages to the table, never to the OS; only
+    /// <c>--recompress-plan-dim --vacuum-full</c> (#2076) compacts the file, and an operator should learn that
+    /// from a stored series rather than from a size pass. Both columns are filled only on
+    /// <c>object_kind = 'dimension'</c> rows (<c>StoreSelfMetrics.DimensionInsertSql</c>) and NULL on every
+    /// other kind, the table's own per-kind convention. <c>toast_bytes</c> is
+    /// <c>pg_relation_size(reltoastrelid)</c> — the TOAST relation's main fork, the file whose slack #3783
+    /// measured — written from this rung on; NULL where the table has no TOAST relation.</para>
+    ///
+    /// <para><b><c>toast_live_bytes</c> exists and is written NULL, deliberately, and the reason is a
+    /// measurement.</b> The bundled store has neither <c>pgstattuple</c> nor <c>pg_freespacemap</c>
+    /// installed (both are contrib modules the TimescaleDB image SHIPS and does not CREATE), and every
+    /// extension-free read was tried on a rig — TimescaleDB 2.28.1 / PostgreSQL 18, 215 MB of 9.6 KB TOASTed
+    /// values in the plan dimension's shape, half deleted, ordinary <c>VACUUM</c>, <c>pgstattuple</c> as the
+    /// oracle (47.9 % live). The tuple-share proxy, <c>n_live_tup / (n_live_tup + n_dead_tup) × file</c>, read
+    /// <b>100 %</b>: after <c>VACUUM</c> the dead tuples are gone and the file keeps the pages, which is the
+    /// #3783 case exactly, so that number is a lie and is not stored. The chunk-count estimate,
+    /// <c>n_live_tup(toast) × 1996</c>, read 48.9 % — honest to within one partial chunk per value on 9.6 KB
+    /// values, but the error is value-size-dependent (a dimension whose values barely cross the TOAST
+    /// threshold overstates by up to half), and <c>n_live_tup</c> is a statistics figure that is exact only
+    /// after a vacuum. <c>pg_freespacemap</c>'s <c>file − sum(avail)</c> read 48.5 % — an honest byte
+    /// measurement — but it needs <c>CREATE EXTENSION pg_freespacemap</c>, which is a product-wide dependency
+    /// decision this rung does not make. So the column is created now (no second rung when the maintainer
+    /// decides) and written NULL until then; a reader that finds it NULL beside a non-NULL <c>toast_bytes</c>
+    /// must say "utilisation not measured", never compute one from the total.</para>
+    ///
+    /// <para><b>(d) <c>checkpoint_write_ms</c>, <c>checkpoint_sync_ms</c> and <c>checkpoints_requested</c> — the
+    /// store's own checkpointer, as a series (#3783; the levers are #3802's and #3745's).</b> Three unattributed
+    /// read kills on a production store in one day all sat inside checkpoint SYNC phases of 25.2 s and 14.0 s —
+    /// the fsync storm a checkpoint's end is — and nothing in the store recorded that the checkpointer had
+    /// been there. These columns are for a <c>checkpointer</c> row (<c>object_kind = 'checkpointer'</c>,
+    /// <c>object_name = 'pg_stat_checkpointer'</c>) the store self-metrics inventory writes once per run,
+    /// carrying DELTAS since its previous run: milliseconds the checkpointer spent in the write phase, in the
+    /// sync phase, and how many REQUESTED (not timed) checkpoints ran: WAL volume reaching <c>max_wal_size</c>, a
+    /// base backup and a <c>CHECKPOINT</c> statement all request one, so the count alone does not say the store
+    /// outran <c>max_wal_size</c> rather than merely reaching <c>checkpoint_timeout</c>. The source is
+    /// <c>pg_stat_checkpointer</c> on PostgreSQL 17+ (<c>write_time</c>, <c>sync_time</c>, <c>num_requested</c>) and
+    /// <c>pg_stat_bgwriter</c> before it (<c>checkpoint_write_time</c>, <c>checkpoint_sync_time</c>,
+    /// <c>checkpoints_req</c>); the bundled store is 18, and the WRITER guards the version, not this rung.
+    /// The existing columns cannot carry these honestly — <c>total_bytes</c> is a size, <c>row_count</c> a count
+    /// of rows, and the <c>job_history</c> kind already bent one column's name once (the sweep doc says which
+    /// and why a dedicated column was the clean follow-up) — so they are NEW columns by ruling, on the table
+    /// whose rows already join on one <c>metric_time</c> per run so the checkpointer's phases can be read
+    /// beside the same run's sizes and job durations. <b>Filled by the inventory from #3783's code half; NULL
+    /// until then.</b> The delta needs the previous run's cumulative (a read of the last checkpointer row, or
+    /// an in-process baseline the first run has to seed), which is a writer with state and not a line beside
+    /// the TOAST read, so this rung creates the columns and writes nothing into them; on every other kind's
+    /// row they are NULL by the table's per-kind convention, exactly like (c)'s pair.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> on all eight, matching every column-adding rung. Only
+    /// <c>query_store_health</c> is a hypertable (compressed on the fleet, one-day chunks); a nullable,
+    /// default-less <c>ADD COLUMN</c> is catalog-only there — the V127/V128/V132/V133/V134 shape, verified live
+    /// on 2.28.1 each time and again for this rung against a store stopped at 136. <c>store_metrics</c> and
+    /// <c>config_alert_settings</c> are plain tables (the first must stay one: it measures the hypertables).
+    /// The passthrough view is refreshed for the V14 reason — Postgres freezes a view's <c>SELECT *</c> column
+    /// list at CREATE, and <c>v_query_store_health</c> is what <c>get_query_store_health</c> and the Viewer's
+    /// grid read; neither <c>store_metrics</c> nor <c>config_alert_settings</c> has a <c>v_</c> passthrough
+    /// (<c>PgSchemaGenerator.AllPassthroughViews</c> agrees), so their ALTERs stand alone. A fresh store gets
+    /// the two collector columns from the generated CREATE TABLE at V1 (the collector definition carries
+    /// them, appended LAST so the positional COPY writer and an upgraded store's ALTER agree on where they
+    /// sit) and the ALTER no-ops; the V101 rule applies, so V76's CREATE text carries them too. No GRANT on
+    /// (b): <c>config_alert_settings</c> carries table-level grants with no column carve. No reload beacon of
+    /// its own: V17's statement-level <c>trg_bump_alert_settings</c> already bumps <c>config_version</c> on any
+    /// write to that row.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It adds no reader, tool field, Viewer column or
+    /// alert for any of the eight. It does not read the 2019+ <c>capture_policy_*</c> knobs behind
+    /// <c>CUSTOM</c>. It does not change the route knob's precedence today (NULL everywhere = the file
+    /// governs, exactly as before). It does not install an extension. It does not compute a utilisation. It
+    /// does not write the checkpointer row.</para>
+    /// </summary>
+    private const string V137Sql = @"
+ALTER TABLE collect.query_store_health
+    ADD COLUMN IF NOT EXISTS query_capture_mode text,
+    ADD COLUMN IF NOT EXISTS wait_stats_capture_mode text;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough would keep serving the
+   pre-V137 column list forever — the V14 lesson, restated by V80, V81, V127, V128, V132 and V134. Appending
+   is the one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_query_store_health AS SELECT * FROM collect.query_store_health;
+
+/* config_alert_settings has no v_ passthrough (V17), so this ALTER stands alone. Nullable on purpose and
+   nothing fills it: NULL is a value here (not set in the store; the file-level knob governs), which is what
+   every existing store reads the morning after the upgrade. */
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS analysis_uncorroborated_route text;
+
+/* The CHECK the numeric knobs on this row do without: a route has no clamp, and an unrecognised
+   spelling would read as the shipped route rather than as an error. V62's guard, because ADD CONSTRAINT
+   has no IF NOT EXISTS. */
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'config_alert_settings_analysis_uncorroborated_route_check'
+    ) THEN
+        ALTER TABLE config.config_alert_settings
+            ADD CONSTRAINT config_alert_settings_analysis_uncorroborated_route_check
+            CHECK (analysis_uncorroborated_route IS NULL OR analysis_uncorroborated_route IN ('digest', 'page'));
+    END IF;
+END $$;
+
+/* store_metrics is a plain table with no v_ passthrough (V53), so this ALTER stands alone too. The first two
+   are filled only on object_kind = 'dimension' rows; toast_live_bytes is written NULL until the maintainer
+   decides how live bytes are measured (the rung doc carries the rig numbers). The last three belong to the
+   object_kind = 'checkpointer' row #3783's code half will write — deltas since the previous run of the
+   checkpointer's write-phase ms, sync-phase ms and requested-checkpoint count — and are NULL until then. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS toast_bytes bigint,
+    ADD COLUMN IF NOT EXISTS toast_live_bytes bigint,
+    ADD COLUMN IF NOT EXISTS checkpoint_write_ms bigint,
+    ADD COLUMN IF NOT EXISTS checkpoint_sync_ms bigint,
+    ADD COLUMN IF NOT EXISTS checkpoints_requested bigint;";
+
+    /// <summary>
+    /// V138 — two nullable columns on <c>collect.pg_server_config</c> so a setting row can say WHOSE setting
+    /// it is (#3691, the "per-database settings" collector line). Server-wide rows leave both NULL, which is
+    /// every row this table has ever held; an override row carries a database name, a role name, or both.
+    /// No new table, no new hypertable (<c>TimescaleSupport.HypertableCount</c> stays 72 — the V136 doc says
+    /// what a 73rd would cost the compression grid), no DEFAULT, no backfill, no passthrough refresh.
+    /// <b>No Lite twin</b>: Lite has no PostgreSQL collectors at all, so there is nothing on the DuckDB side
+    /// to port — <c>pg_server_config</c> is Darling-only, as is every <c>pg_*</c> collector table.
+    ///
+    /// <para><b>The lie this ends.</b> <c>pg_settings</c> is the RESOLVED view for the collector's own
+    /// backend, and the collector connects to one database as one role — so what it stores is what that
+    /// session sees, which the <c>CONFIG_PG_*</c> facts and <c>get_pg_server_config</c> then present as "the
+    /// server's configuration". A cluster where one database carries
+    /// <c>ALTER DATABASE … SET work_mem = '256MB'</c>, or one role carries
+    /// <c>ALTER ROLE … SET statement_timeout = 0</c>, is invisible today: the override lives in
+    /// <c>pg_db_role_setting</c>, which nothing read, and the fact grades a value that database's or that
+    /// role's sessions never use. That is the worst shape an advisory number can take — confidently right
+    /// about a value nobody runs. The collector now reads that catalog beside <c>pg_settings</c> and these
+    /// two columns are what distinguish the two populations in the stored rows.</para>
+    ///
+    /// <para><b>Why columns on this table rather than a table of its own.</b> An override IS a setting: same
+    /// name, same text value, same server, same hourly snapshot clock, and the question an operator asks is
+    /// "what is <c>work_mem</c> here" — which needs the server-wide value and the overrides in one answer,
+    /// ordered and stamped together. A second table would need its own index, its own hypertable decision
+    /// (the 73rd, which V136 argued against on compression-grid grounds), its own retention rung, and every
+    /// read that wants both would become a join across two snapshots whose <c>collection_time</c>s are only
+    /// approximately equal. Two nullable columns cost the existing table nothing and make the
+    /// discriminator a predicate.</para>
+    ///
+    /// <para><b>NULL is a value here, and it means server-wide.</b> Both columns are nullable with no
+    /// DEFAULT for the reason every column-adding rung is: a nullable, default-less <c>ADD COLUMN</c> on a
+    /// compressed hypertable is catalog-only on TimescaleDB 2.28.1 (the V127/V128/V132/V133/V134/V137
+    /// shape), so an upgraded store rewrites nothing. It also means every pre-rung row reads as server-wide
+    /// the moment the migration lands, which is exactly what those rows ARE: the collector could not have
+    /// stored an override before this rung existed. <c>pg_db_role_setting</c> itself spells the same thing
+    /// the same way — <c>setdatabase = 0</c> means all databases and <c>setrole = 0</c> means all roles, and
+    /// the collector's <c>LEFT JOIN</c> turns both zeros into the NULLs this table stores.</para>
+    ///
+    /// <para><b>The reads are the correctness edge, not this rung.</b> Every shipped read of this table is a
+    /// "latest snapshot, one row per setting name" shape, several of them loading a dictionary keyed by
+    /// <c>name</c> — so an override row arriving with a duplicate name would either shadow the server-wide
+    /// value or throw on the duplicate key. That is why this lane's commit puts
+    /// <c>AND database_name IS NULL AND role_name IS NULL</c> on the OUTER row select of every one of them
+    /// (the inner <c>MAX(collection_time)</c> subqueries are per SERVER, not per name, so an override row
+    /// cannot move the anchor and they need no predicate), and why exactly ONE read — the override section
+    /// <c>get_pg_server_config</c> gained — selects the rows where those columns are NOT NULL. A census pin
+    /// asserts that set: every <c>pg_server_config</c> read in the repo either filters the overrides out or
+    /// is the one that asks for them.</para>
+    ///
+    /// <para><b>The V101 rule applies</b>, so V102's CREATE text carries both columns too: a fresh store
+    /// builds the table from the generated schema at V1 (the generator walks
+    /// <c>PgServerConfigCollector.PayloadColumns</c>, where the two are appended LAST so the positional COPY
+    /// writer and an upgraded store's ALTER agree on where they sit) and this ALTER no-ops, while a store
+    /// that climbed through V102 before V138 existed gets them from the ALTER.
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c> requires V102's text
+    /// to be the generator's output column for column, so neither place is redundant. No passthrough
+    /// refresh: <c>pg_server_config</c> has no <c>v_</c> view (<c>PgSchemaGenerator.AllPassthroughViews</c>
+    /// agrees — it is not in <c>PostV8ViewCollectors</c> and V102 creates none), so the V14 frozen-column-list
+    /// problem cannot arise. No index either: the existing <c>(server_id, collection_time)</c> index is what
+    /// every read anchors on, and the override predicate is a cheap filter inside a snapshot that holds a few
+    /// hundred rows.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not make the <c>CONFIG_PG_*</c> facts
+    /// per-database — they stay server-wide in this lane, and a per-database fact family (which needs a
+    /// database dimension on the fact, a per-database grading policy, and an answer to "which database's
+    /// <c>work_mem</c> is the server's work_mem") is a later brief. It adds no alert, no Viewer column and no
+    /// threshold. It does not store the ROLE's effective settings resolved against the database's — PostgreSQL
+    /// resolves those per session at connect time, and the catalog stores only what was SET.</para>
+    /// </summary>
+    private const string V138Sql = @"
+/* Nullable, no DEFAULT, no backfill: catalog-only on a compressed hypertable (the V127/V128/V132/V133/V134/
+   V137 shape on 2.28.1), and NULL already means what every pre-rung row is — a server-wide pg_settings row.
+   pg_server_config has no v_ passthrough (V102 creates none, PgSchemaGenerator.AllPassthroughViews agrees),
+   so the V14 frozen-column-list refresh does not apply here. Appended LAST, matching the collector's payload
+   order, so the positional COPY writer and an upgraded store's column order agree. */
+ALTER TABLE collect.pg_server_config
+    ADD COLUMN IF NOT EXISTS database_name text,
+    ADD COLUMN IF NOT EXISTS role_name text;";
+
+    /// <summary>
+    /// V139 — one nullable column, <c>postmaster_start_time</c>, on two existing tables (#3955): the
+    /// <c>checkpointer</c> row of <c>collect.store_metrics</c> and every row of <c>collect.pg_write_stats</c>. Each
+    /// sample of a server's cumulative checkpointer counters now says which postmaster produced it, so a reader
+    /// can tell an interval that spans a restart from one that does not. No new table, no new hypertable
+    /// (<c>TimescaleSupport.HypertableCount</c> stays 72), no DEFAULT, no backfill, no passthrough refresh, and
+    /// <b>no Lite twin</b>: Lite stores neither table.
+    ///
+    /// <para><b>The lie this ends.</b> PostgreSQL counts a shutdown checkpoint in
+    /// <c>pg_stat_checkpointer.num_requested</c> (<c>pg_stat_bgwriter.checkpoints_req</c> through 16) and keeps the
+    /// count across the restart: 0|0|0, then 0|1|0, then 0|2|0 as <c>num_timed | num_requested | num_done</c> on a
+    /// fresh 18.6 cluster over two fast stops. The Store Checkpointer Pressure self-alert (#3783) reads any
+    /// requested checkpoint in an interval as proof the store outran <c>max_wal_size</c>, so every service restart
+    /// raised it: on 2026-09-22 a production store reported "2 WAL-forced checkpoint(s)" for an interval whose
+    /// server log held one timed checkpoint and two <c>shutdown immediate</c> ones, and no WAL-triggered checkpoint
+    /// at all. Every host restarts when it upgrades. The monitored-target write reads difference the same counter,
+    /// so a monitored server's restart read as WAL pressure in <c>PG_CHECKPOINT_PRESSURE</c> and in
+    /// <c>get_pg_write_stats</c> the same way. The shutdown checkpoint's own write and sync phases land in the
+    /// counters beside it, where nothing can separate them from the live checkpoints'. <see cref="PostmasterRestart"/>
+    /// is the rule those readers now share, and across a restart they state none of those figures and judge
+    /// neither arm; this rung is the evidence the rule reads.</para>
+    ///
+    /// <para><b>Why a stored column rather than a read of <c>pg_postmaster_start_time()</c> at read time.</b> A
+    /// live read says when the CURRENT postmaster started, which dates the newest sample only if nothing restarted
+    /// since it was taken, so <c>get_store_metrics</c> read an hour after a restart would call the last clean
+    /// interval unknown. It also cannot serve the monitored-target reads, which difference rows the store holds
+    /// for thirty days about servers it does not query at read time. A value on every sample makes the rule
+    /// exact: two samples that report one postmaster start were taken by one postmaster, compared on the
+    /// server's own clock, so skew between the collecting host and the server cannot move the answer. The per-row
+    /// shape is the one <c>pg_write_stats</c> already gives its three <c>stats_reset</c> stamps, for the same
+    /// reason: the reads difference per sample and need the epoch on the row they difference.</para>
+    ///
+    /// <para><b>Naive UTC</b>, written as <c>pg_postmaster_start_time() AT TIME ZONE 'UTC'</c> by
+    /// <c>StoreSelfMetrics.CheckpointerInsertSql</c> (both majors' statements) and by the shared
+    /// <c>PgWriteStatsCollector</c>, never a bare <c>::timestamp</c> cast, which renders in the session's zone.
+    /// <b>Nullable, no DEFAULT, no backfill</b>, matching every column-adding rung: a row written before this rung
+    /// cannot know which postmaster wrote it, and NULL is what the rule reads as "no evidence". On the newer
+    /// sample of a pair that means the interval is judged as before; on the older it means the rule falls back to
+    /// whether that sample predates the newer sample's postmaster start, which is what makes the first interval
+    /// after the upgrade restart unknown rather than a warning. <c>pg_write_stats</c> is a compressed hypertable
+    /// on the fleet (one-day chunks); a nullable, default-less <c>ADD COLUMN</c> is catalog-only there, the
+    /// V127/V128/V133/V137/V138 shape, verified again for this rung on a compressed chunk under TimescaleDB 2.30.1.
+    /// <c>store_metrics</c> is a plain table and must stay one.</para>
+    ///
+    /// <para><b>The V101 rule applies</b> to <c>pg_write_stats</c>: the collector appends the column LAST, so the
+    /// positional COPY writer and an upgraded store's ALTER agree on where it sits, and V88's CREATE text carries it
+    /// for the fresh population because <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>
+    /// holds that text to the generator's current output. <c>store_metrics</c> is not a collector table
+    /// (V53 creates it by hand and no generator walks it), so its column lives in this ALTER alone. <b>No
+    /// passthrough refresh</b>: neither table has a <c>v_</c> view (<c>PgSchemaGenerator.AllPassthroughViews</c>
+    /// agrees), so the V14 frozen-column-list problem cannot arise.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not backfill. It does not touch the
+    /// counter-reset handling (the Reset status, the <c>stats_reset</c> guards), which a crash still reaches first.
+    /// It adds no alert, knob or Viewer column. The price of the rule it feeds is one unjudged interval per
+    /// restart, which the readers say rather than hide.</para>
+    /// </summary>
+    private const string V139Sql = @"
+/* store_metrics is a plain table with no v_ passthrough (V53). Filled on the object_kind = 'checkpointer' row only,
+   NULL on every other kind by the table's per-kind convention. Nullable, no DEFAULT, no backfill: a pre-rung row
+   cannot know which postmaster wrote it, and NULL is what the restart rule reads as no evidence. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS postmaster_start_time timestamp;
+
+/* pg_write_stats is a compressed hypertable on the fleet; a nullable, default-less ADD COLUMN is catalog-only there
+   (the V127/V128/V133/V137/V138 shape). No v_ passthrough, so no view refresh. Appended LAST, matching the
+   collector's payload order, so the positional COPY writer and an upgraded store's column order agree. */
+ALTER TABLE collect.pg_write_stats
+    ADD COLUMN IF NOT EXISTS postmaster_start_time timestamp;";
+
+    /// <summary>
+    /// V140 — <c>checkpoints_timed</c> on the store's own checkpointer row (#4037): the cumulative COUNT of
+    /// TIMED checkpoints, beside the write-ms/sync-ms/requested counters V137 already carries. Store
+    /// Checkpointer Pressure (#3783) and <c>get_store_metrics</c>' checkpointer block judged the interval's
+    /// SUMMED sync-phase milliseconds against <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, a
+    /// PER-CHECKPOINT bar (the MCP read deadline), and the hourly interval covers about twelve timed
+    /// checkpoints on the default five-minute <c>checkpoint_timeout</c> — so a healthy store whose checkpoints
+    /// each sync in five to eight seconds summed past the bar every interval and never recovered, while the
+    /// actual per-checkpoint figure never approached it. Judging the AVERAGE (<c>SyncMs / (timed +
+    /// requested)</c>) needs the timed count on the row the sync-ms delta already comes from; nothing else in
+    /// the store carries it per-store (<c>pg_write_stats.num_timed</c>, V88, is the MONITORED-target series,
+    /// a different row for a different server).</para>
+    ///
+    /// <para><b>One column, same convention as V137/V139</b>: filled on the <c>object_kind = 'checkpointer'</c>
+    /// row only, NULL on every other kind. Nullable, no DEFAULT, no backfill — a row written before this rung
+    /// has no timed count, and the reader treats that NULL as unmeasured for the average arm rather than as
+    /// zero (a zero would read as "every checkpoint" and misjudge the row). <c>store_metrics</c> is a plain
+    /// table with no <c>v_</c> passthrough (V53), so this ALTER stands alone; appended last, matching V137's
+    /// and V139's columns, so a fresh V1 store and an upgraded one agree on column order for the same reason
+    /// those rungs did.</para>
+    /// </summary>
+    private const string V140Sql = @"
+/* store_metrics is a plain table with no v_ passthrough (V53). Filled on the object_kind = 'checkpointer' row
+   only, NULL on every other kind by the table's per-kind convention. Nullable, no DEFAULT, no backfill: a
+   pre-rung row cannot know how many checkpoints were timed, and NULL is what the average-per-checkpoint rule
+   reads as unmeasured rather than zero. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS checkpoints_timed bigint;";
+
+    /// <summary>
+    /// V141 (#3691, part a1) — <c>collect.analysis_collection_caveats</c>: the CURRENT set of fact families an
+    /// analysis pass could not read, one row per (server, family), so a scheduled pass's caveats survive past
+    /// the in-process ledger <see cref="PerformanceMonitor.Analysis.CollectionCaveatLedger"/> already keeps —
+    /// that ledger is per-process and unread by anything outside the service that ran the pass, so the Viewer,
+    /// which is a separate process reading only the store, has never been able to say "this family has not
+    /// been read for N passes" at all. This table is what closes that gap: not a replacement for the ledger
+    /// (which stays in-memory by design, shared with Lite, and untouched here), but the store side <c>CollectionCaveatStore</c>
+    /// writes beside it, on the same pass, best-effort.
+    ///
+    /// <para><b>Current, not historical.</b> The table holds only the families a server is failing to read
+    /// RIGHT NOW: a family a pass reads successfully has its row deleted, not stamped closed, because the
+    /// pass already knows definitively which families it read and which it did not — there is no ambiguous
+    /// middle state to distinguish with a status column. Bounded by construction: at most (servers × distinct
+    /// families) rows, which on any fleet measured so far is a few hundred at most.</para>
+    ///
+    /// <para><b>Primary key <c>(server_id, family)</c>, no surrogate.</b> The upsert key IS the identity a
+    /// reader wants: one open caveat per server per family. <c>reason</c> keeps only the most recent failure's
+    /// classification (the payload spelling from <c>CollectionFailure.Label</c> — <c>timeout</c>, <c>cancelled</c>,
+    /// <c>missing_schema</c>, <c>error</c>); a family failing for two different reasons across passes is not a
+    /// fact this table tries to hold, because the ledger already holds the per-pass history for whoever wants
+    /// it and the Viewer's use is "is this family currently missing", not "how did it fail last Tuesday".</para>
+    ///
+    /// <para><b>Not a collector table.</b> Absent from <see cref="CollectorCatalog"/>, so <see cref="TimescaleSupport"/>'s
+    /// catalog-driven hypertable conversion and <c>DarlingRetention</c>'s catalog purge never reach it — the
+    /// <c>collect.oversized_plan_backlog</c> (V121) precedent exactly: it needs neither chunks nor compression
+    /// at this size, and its own prune (<c>CollectionCaveatStore.PruneAsync</c>, called beside the backlog's own
+    /// sweep-driven prune) is a simpler policy than retention's catalog-driven one because there is no sighting
+    /// cadence to reason about — a row not re-written this pass either was read (and is gone) or the server
+    /// stopped being analysed (and prune reaps it after 7 days).</para>
+    ///
+    /// <para>Granted through the <c>collect</c> schema's blanket <c>GRANT … ON ALL TABLES IN SCHEMA collect</c>
+    /// (the V54/V101 convention — no per-table GRANT here), which the service and viewer roles both already
+    /// hold, so the Viewer can SELECT it without a provisioning change.</para>
+    /// </summary>
+    private const string V141Sql = @"
+CREATE TABLE IF NOT EXISTS collect.analysis_collection_caveats
+(
+    server_id integer NOT NULL,
+    family text NOT NULL,
+    reason text NOT NULL,
+    first_seen_utc timestamp NOT NULL,
+    last_seen_utc timestamp NOT NULL,
+    CONSTRAINT pk_analysis_collection_caveats PRIMARY KEY (server_id, family)
+);";
+
+    /// <summary>
+    /// V142 — #4196: the supporting index for the anomaly detector's "latest two object-stats snapshots"
+    /// read (<c>PgAnomalyDetector.ObjectGrowthSql</c> / <c>PgAnomalyDetector.ObjectContentionSql</c>'s
+    /// <c>snaps</c> CTE, <c>SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1
+    /// ORDER BY collection_time DESC LIMIT 2</c>). Neither existing index leads with <c>collection_time</c>
+    /// second: V1's <c>idx_index_object_stats_object</c> is <c>(server_id, database_name, object_id, index_id,
+    /// collection_time)</c> and V22's <c>idx_index_object_stats_latest</c> is <c>(server_id, database_id,
+    /// object_id, index_id, collection_time DESC)</c> — both put two unconstrained columns between the equality
+    /// filter and the sort key the read needs, so neither can drive it. TimescaleDB's automatic per-chunk
+    /// <c>collection_time</c> index CAN drive the <c>ORDER BY ... LIMIT 2</c> directly (SkipScan), but it has no
+    /// <c>server_id</c> column at all, so every server's rows in the chunk are read and rejected by a Filter
+    /// until two matching ones turn up. <c>index_object_stats</c> is collected once daily per server, so the
+    /// "prior" snapshot is usually a chunk boundary away, but the "latest" one is always in the newest chunk
+    /// alongside the rest of that day's fleet — paid once per server per analysis pass, twice (once per
+    /// statement). No other read needs a new index: the <c>cur</c>/<c>prv</c> CTEs also filter on
+    /// <c>collection_time</c> once the two times are known, but they are already bounded to the one server by
+    /// <c>idx_index_object_stats_latest</c>'s leading <c>server_id</c> column (a Filter there costs one
+    /// server's history, not the fleet's), which is why only the <c>snaps</c> step gets a new index.
+    ///
+    /// <para><b>No SQL text changes.</b> The <c>snaps</c> CTE already has the ideal shape for this index
+    /// (<c>DISTINCT</c> + <c>ORDER BY</c> + <c>LIMIT</c> on exactly the sort key, filtered on exactly the
+    /// leading equality column) — it only lacked the index. Measured on a rig seeded with three chunks (one at
+    /// real fleet-daily scale: 43 servers, ~12,000 index/table rows each, matching the issue's own ~11,900
+    /// rows/server/day measurement, plus two smaller older chunks, one compressed): before this index, the
+    /// <c>snaps</c> read for one server was <c>Custom Scan (SkipScan)</c> over the chunk's bare
+    /// <c>collection_time</c> index with <c>Filter: (server_id = $1)</c>, <c>Rows Removed by Filter: 36000</c>,
+    /// <c>Buffers: shared hit=92 read=972</c>, 18.5 ms. After, the same read is <c>Index Only Scan</c> using
+    /// this index with <c>Index Cond: (server_id = $1) AND (collection_time &lt; ...)</c>, no Filter line,
+    /// <c>Buffers: shared hit=33 read=4</c>, 0.4 ms — roughly 29x fewer buffers and 44x faster on this seed; the
+    /// ratio widens on a bigger fleet since the old plan's cost scales with the WHOLE fleet's newest-chunk rows
+    /// and the new plan's does not.</para>
+    ///
+    /// <para><b>Locking — plain <c>CREATE INDEX</c>, in the ladder, deliberately.</b> <c>CREATE INDEX
+    /// CONCURRENTLY</c> is refused outright on a TimescaleDB hypertable ("hypertables do not support concurrent
+    /// index creation" — see <see cref="PgTableTuning"/>'s <c>ForcePlanFailuresIndexName</c> finding for the
+    /// same limitation on a much bigger table), and <c>MigrateAsync</c> wraps every rung in a transaction, which
+    /// also rules out the per-chunk <c>WITH (timescaledb.transaction_per_chunk)</c> form. So this rung takes the
+    /// ordinary ShareLock on the hypertable root for its build's duration, same as V22's index on this same
+    /// table. Unlike <c>PgTableTuning</c>'s query_store_stats index — 8-16 million rows/DAY, big enough that the
+    /// build was moved out of the ladder into the runtime Tuning stage — <c>index_object_stats</c> is the daily
+    /// object-stats collector: roughly half a million rows/day fleet-wide per the issue's own measurement, and
+    /// <see cref="TimescaleSupport.CompressAfterDays"/> = 1 means only about one day's chunk is ever uncompressed
+    /// at migration time; every older chunk's decompressed relation is an empty shell (a compressed chunk's
+    /// <c>CREATE INDEX</c> cost is one 8 KB page, not a function of the rows inside it — the same property
+    /// <c>PgTableTuning</c> measured). Measured on the same three-chunk rig: 228 ms end to end for the whole
+    /// build (one 516,000-row uncompressed chunk plus two smaller chunks, one compressed) — small enough,
+    /// against this table's daily write rate, to stay in the ladder rather than needing the Tuning-stage
+    /// treatment.</para>
+    ///
+    /// <para>Additive and idempotent like V22 (<c>CREATE INDEX IF NOT EXISTS</c>): a fresh store gets it at
+    /// V142 like every other rung, an upgraded store gets it exactly once, a re-run is a no-op. Explicitly
+    /// <c>collect.</c>-qualified like V21/V22/V23. No table shape change, so nothing to refresh for the binary
+    /// COPY.</para>
+    /// </summary>
+    private const string V142Sql = @"
+CREATE INDEX IF NOT EXISTS idx_index_object_stats_server_time ON collect.index_object_stats (server_id, collection_time DESC);";
+
+    /// <summary>
+    /// V143 — the latest Query Store snapshot per interval, kept as it is written (#3953), so PLAN_REGRESSION and its
+    /// drill-down read one row per interval instead of deduplicating the whole raw <c>query_store_stats</c> slice on
+    /// every pass. Three new tables, all engine-plain here (the <c>PgMigrations</c> rule); nothing on an existing
+    /// table changes, and there is no backfill.
+    ///
+    /// <para><b><c>collect.query_store_interval_latest</c></b>: one row per Regular interval identity, the dedup's
+    /// <c>GROUP BY</c> plus <c>server_id</c>, holding the snapshot the raw read's
+    /// <c>ORDER BY collection_time DESC, execution_count DESC</c> would keep. Its columns are exactly what the two reads
+    /// consume, and their types and nullability mirror raw's, so the table can never refuse a row raw accepted. One
+    /// unique index, <c>NULLS NOT DISTINCT</c> because <c>replica_role</c> is NULL off an availability group and must
+    /// still collapse (PostgreSQL 15+; the product minimum is 17). The column order is the writer's: a batch is one
+    /// database's rows for one or two interval ids, so each batch's entries form one contiguous run.
+    /// <c>fillfactor = 50</c> was measured (99% HOT against 56-59% at 70). The hypertable conversion, compression and
+    /// retention are runtime work in <c>collection_log</c>'s shape, not this rung's.</para>
+    ///
+    /// <para><b><c>collect.query_store_interval_latest_coverage</c></b>: per server, <c>filled_since</c> (every raw
+    /// snapshot at or after it is represented, except the pending batches below) and <c>applied_through</c> (the
+    /// newest batch accounted for). The reader uses the table only where that claim covers everything the raw read
+    /// would read.</para>
+    ///
+    /// <para><b><c>collect.query_store_interval_latest_pending</c></b>: one row per raw batch whose apply failed. The
+    /// apply runs behind a savepoint in the raw COPY's transaction, so a fault rolls back only the apply, records the
+    /// batch here, and raw still commits: raw ingestion never depends on this table. The next apply for the server
+    /// replays the row, and a server with any pending row reads raw. Empty in steady state.</para>
+    /// </summary>
+    private const string V143Sql = @"
+/* One row per Regular Query Store interval identity: the raw dedup's GROUP BY plus server_id. Types and nullability
+   mirror query_store_stats exactly, so no row raw accepts can be refused here. fillfactor 50 keeps the open
+   interval's refreshes HOT (measured, #3953). */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest
+(
+    server_id integer NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    replica_role text,
+    runtime_stats_interval_id bigint,
+    first_execution_time timestamp NOT NULL,
+    collection_time timestamp NOT NULL,
+    query_plan_hash text,
+    query_hash text,
+    execution_count bigint,
+    avg_cpu_time_us bigint,
+    avg_duration_us bigint,
+    last_execution_time timestamp,
+    is_forced_plan boolean,
+    force_failure_count bigint,
+    query_text text
+)
+WITH (fillfactor = 50);
+
+/* NULLS NOT DISTINCT: replica_role is NULL off an availability group, and a NULL-role re-collection must update its
+   row, not insert a second one. Column order is the writer's locality, not the reader's. */
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_latest
+ON collect.query_store_interval_latest
+(
+    server_id,
+    database_name,
+    runtime_stats_interval_id,
+    plan_id,
+    query_id,
+    replica_role,
+    first_execution_time
+)
+NULLS NOT DISTINCT;
+
+/* Per server: every raw snapshot at or after filled_since is represented (except the pending batches), and
+   applied_through is the newest batch accounted for. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_coverage
+(
+    server_id integer NOT NULL,
+    filled_since timestamp NOT NULL,
+    applied_through timestamp NOT NULL,
+    CONSTRAINT pk_query_store_interval_latest_coverage PRIMARY KEY (server_id)
+);
+
+/* One row per raw batch whose apply failed; it commits with that batch's raw rows, and the next apply for the
+   server replays it. Empty in steady state. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending
+(
+    server_id integer NOT NULL,
+    collection_time timestamp NOT NULL,
+    database_name text NOT NULL,
+    recorded_at timestamp NOT NULL,
+    failure text,
+    CONSTRAINT pk_query_store_interval_latest_pending PRIMARY KEY (server_id, collection_time, database_name)
+);";
+
+    /// <summary>
+    /// V144 (#4211) — the rung history <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalReconciler"/>
+    /// both writes to and reads <c>IntervalLastChangedUtc</c> back from, plus a small per-run record of WAL
+    /// volume (ruling decision 8, review finding L4: stage 1 records WAL volume so a later stage can correlate
+    /// it against interval moves). Two engine-plain tables, the <c>collect.store_log_events</c> /
+    /// <c>collect.store_log_captures</c> shape (V111): plain tables, no serial id, a time index, naive-UTC
+    /// <c>timestamp</c> columns per the store's cross-engine contract. Neither table is purged — the run
+    /// table gains one row per daily pass (about 365 a year) and the history one row per move, and the
+    /// history has to keep at least
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.MinimumDaysBetweenMoves"/> days
+    /// anyway, because the next pass reads <c>MAX(changed_at)</c> from it. Like store_log's tables, these are
+    /// self-telemetry about the store's OWN tuning, not collected monitoring data, so they are deliberately
+    /// outside <c>CollectorCatalog.All</c>.
+    ///
+    /// <para><b><c>raw_chunk_interval_rung_history</c></b>: one row per rung CHANGE (not per table per run) —
+    /// table, when, the interval it moved from and to, the reason text
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.Decision"/> already built, and the
+    /// three inputs the decision was made from (ingest rate, budget B, the store-wide open-chunk total). The
+    /// reconciler's own <c>MAX(changed_at)</c> per table is what feeds
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.TableInput.IntervalLastChangedUtc"/>
+    /// back into the next run, which is what makes <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.MinimumDaysBetweenMoves"/>
+    /// hold across restarts and not just within one process's lifetime.</para>
+    ///
+    /// <para><b><c>raw_chunk_interval_reconcile_runs</c></b>: one row per reconcile RUN, whether or not it
+    /// changed anything — <c>wal_bytes</c> is <c>numeric</c> because that is <c>pg_stat_wal.wal_bytes</c>'s own
+    /// type (a lifetime counter PostgreSQL does not bound to bigint).</para>
+    /// </summary>
+    private const string V144Sql = @"
+CREATE TABLE IF NOT EXISTS collect.raw_chunk_interval_rung_history
+(
+    changed_at timestamp NOT NULL,
+    table_name text NOT NULL,
+    from_interval_hours integer NOT NULL,
+    to_interval_hours integer NOT NULL,
+    reason text NOT NULL,
+    ingest_bytes_per_hour double precision NOT NULL,
+    budget_bytes double precision NOT NULL,
+    store_total_bytes double precision NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_chunk_interval_rung_history_table_time
+    ON collect.raw_chunk_interval_rung_history(table_name, changed_at DESC);
+
+CREATE TABLE IF NOT EXISTS collect.raw_chunk_interval_reconcile_runs
+(
+    run_at timestamp NOT NULL,
+    wal_bytes numeric
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_chunk_interval_reconcile_runs_time
+    ON collect.raw_chunk_interval_reconcile_runs(run_at);";
+
+    /// <summary>
+    /// V145 — the wide latest-snapshot-per-interval table beside V143's (#3953, review D4R + F1 measurement,
+    /// ruled issuecomment-5836972848): every outcome (Regular, Aborted, Exception), every raw column the three new
+    /// reads need except <c>collection_id</c>, <c>server_name</c> and <c>query_plan_text</c> (57 columns). V143's
+    /// own table, coverage and pending tables are untouched — this is three MORE tables, the same shape as V143's
+    /// three, engine-plain, with no backfill. Kept 9 days (F1: the 7-day preset plus a day of margin for an
+    /// interval that can span a day) by the service's retention sweep, on <c>first_execution_time</c>, not this
+    /// migration's concern.
+    ///
+    /// <para><b><c>collect.query_store_interval_wide</c></b>: identity is V143's identity plus
+    /// <c>execution_type_desc</c>, because two outcomes can share every other key. <c>first_execution_time</c>
+    /// stays <c>NOT NULL</c> (M2, ruled) even though this table carries every outcome. <c>fillfactor = 50</c>,
+    /// same as V143's and measured the same way. NO secondary index: F1 measured a window index on this shape
+    /// taking HOT updates to 0%, and every read that would use one is slower on it than the split's plain scan.</para>
+    ///
+    /// <para><b><c>collect.query_store_interval_wide_coverage</c></b> and
+    /// <b><c>collect.query_store_interval_wide_pending</c></b>: column-for-column copies of V143's coverage and
+    /// pending tables, so a later gate can parametrize V143's own decision on the table rather than duplicate it
+    /// (ruling, item 5).</para>
+    ///
+    /// </summary>
+    private const string V145Sql = @"
+/* One row per Query Store interval identity, every outcome. Types and nullability mirror query_store_stats except
+   first_execution_time, which stays NOT NULL here (M2, ruled): the writer's IS NOT NULL filter and coverage-reset
+   safeguard mean the table never silently drops a row raw accepted. fillfactor 50 keeps the open interval's
+   refreshes HOT, as V143's. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide
+(
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    execution_type_desc text,
+    first_execution_time timestamp NOT NULL,
+    last_execution_time timestamp,
+    module_name text,
+    query_text text,
+    query_hash text,
+    execution_count bigint,
+    avg_duration_us bigint,
+    min_duration_us bigint,
+    max_duration_us bigint,
+    avg_cpu_time_us bigint,
+    min_cpu_time_us bigint,
+    max_cpu_time_us bigint,
+    avg_logical_io_reads bigint,
+    min_logical_io_reads bigint,
+    max_logical_io_reads bigint,
+    avg_logical_io_writes bigint,
+    min_logical_io_writes bigint,
+    max_logical_io_writes bigint,
+    avg_physical_io_reads bigint,
+    min_physical_io_reads bigint,
+    max_physical_io_reads bigint,
+    avg_clr_time_us bigint,
+    min_clr_time_us bigint,
+    max_clr_time_us bigint,
+    min_dop bigint,
+    max_dop bigint,
+    avg_query_max_used_memory bigint,
+    min_query_max_used_memory bigint,
+    max_query_max_used_memory bigint,
+    avg_rowcount bigint,
+    min_rowcount bigint,
+    max_rowcount bigint,
+    avg_num_physical_io_reads bigint,
+    min_num_physical_io_reads bigint,
+    max_num_physical_io_reads bigint,
+    avg_log_bytes_used bigint,
+    min_log_bytes_used bigint,
+    max_log_bytes_used bigint,
+    avg_tempdb_space_used bigint,
+    min_tempdb_space_used bigint,
+    max_tempdb_space_used bigint,
+    plan_type text,
+    plan_forcing_type text,
+    is_forced_plan boolean,
+    force_failure_count bigint,
+    last_force_failure_reason text,
+    compatibility_level integer,
+    query_plan_hash text,
+    replica_role text,
+    runtime_stats_interval_id bigint,
+    interval_start_time_utc timestamp
+)
+WITH (fillfactor = 50);
+
+/* NULLS NOT DISTINCT, same reason as V143's: replica_role is NULL off an availability group. execution_type_desc
+   joins the identity because this table, unlike V143's, holds every outcome. No secondary index (F1, measured). */
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_wide
+ON collect.query_store_interval_wide
+(
+    server_id,
+    database_name,
+    runtime_stats_interval_id,
+    plan_id,
+    query_id,
+    replica_role,
+    first_execution_time,
+    execution_type_desc
+)
+NULLS NOT DISTINCT;
+
+/* Column-for-column copy of V143's coverage table: this table's own claim, independent of V143's. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_coverage
+(
+    server_id integer NOT NULL,
+    filled_since timestamp NOT NULL,
+    applied_through timestamp NOT NULL,
+    CONSTRAINT pk_query_store_interval_wide_coverage PRIMARY KEY (server_id)
+);
+
+/* Column-for-column copy of V143's pending table: one row per raw batch whose apply to THIS table failed. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending
+(
+    server_id integer NOT NULL,
+    collection_time timestamp NOT NULL,
+    database_name text NOT NULL,
+    recorded_at timestamp NOT NULL,
+    failure text,
+    CONSTRAINT pk_query_store_interval_wide_pending PRIMARY KEY (server_id, collection_time, database_name)
+);";
+
+    /// <summary>
+    /// V146 — <c>collect.managed_conf_verdicts</c> (#4215, #4251's managed-store part): the per-key
+    /// verdict a managed store's OWNER connection computes once at every service-owned start, replacing the
+    /// previous start's rows. <c>DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync</c> is the
+    /// only writer.
+    ///
+    /// <para><b>Why a table instead of <c>collect.collector_state</c>'s existing key/value shape</b> (the
+    /// <c>PgSelfAlertDeliveryStampStore</c>/#3580 precedent). That table holds ONE opaque text value per
+    /// (server, collector, key) — right for a stamp or a token, wrong here: a verdict row carries nine
+    /// distinct fields a reader filters and displays independently (current value, derived value, source,
+    /// file, line, verdict, detail), and cramming them into one text column would mean every reader,
+    /// including a remote MCP caller, parses app-defined JSON instead of running SQL against typed columns.</para>
+    ///
+    /// <para><b>Why the owner must compute and store it, not a live per-read check</b> (#4215). The
+    /// <c>mcp</c> and <c>viewer</c> roles get a NULL <c>pg_settings.sourcefile</c> and cannot read
+    /// <c>pg_file_settings</c> at all (superuser/<c>pg_read_all_settings</c> only) — see
+    /// <c>DarlingStoreMetricsReader.JobExecutionLoggingSql</c>'s remarks for the same wall on a different GUC.
+    /// The owner (<c>darling</c>, the managed store's bootstrap superuser) computes the verdict once, right
+    /// after start, and every other reader — <c>--check-settings</c> included, which is why it prints
+    /// <c>computed_at</c> rather than a fresh timestamp — reads these rows back instead of re-deriving
+    /// something it cannot see.</para>
+    ///
+    /// <para><b>Keyed on <c>setting_name</c> alone, replaced wholesale each start.</b> One managed store has
+    /// exactly one owner connection computing exactly one verdict set; there is no <c>server_id</c> to key on
+    /// (this is the store's own settings, not a monitored target's), and the write is DELETE-then-INSERT in
+    /// one round trip rather than an UPSERT so a key a future version stops owning does not linger as a stale
+    /// row forever: a future version that stops owning a key must not leave a stale row behind.</para>
+    ///
+    /// <para><b><c>collect</c>-qualified, plain table, not a hypertable</b> — like <c>collector_state</c> and
+    /// <c>analysis_state</c>, not like the catalog-driven collector tables: <c>TimescaleSupport.HypertableTables</c>
+    /// is <c>CollectorCatalog.All</c>, and this is service-written state about the store's own conf file, not a
+    /// collector's payload. No <c>v_</c> passthrough view: the <c>collect</c> schema's existing blanket
+    /// <c>GRANT SELECT ON ALL TABLES</c> to <c>admin</c>, <c>viewer</c> and <c>mcp</c> (<c>provision-roles.sql</c>)
+    /// already covers a bare table, the same grant every other <c>collect</c> table added since V44 has relied
+    /// on without restating it.</para>
+    ///
+    /// <para><c>computed_at</c>/<c>postmaster_start_time</c> are naive UTC, written
+    /// <c>AT TIME ZONE 'UTC'</c> like every other postmaster-start column since V139 — never a bare cast, which
+    /// renders in the writer's session zone.</para>
+    /// </summary>
+    private const string V146Sql = @"
+CREATE TABLE IF NOT EXISTS collect.managed_conf_verdicts
+(
+    setting_name text NOT NULL,
+    current_value text NOT NULL,
+    derived_value text NOT NULL,
+    source_description text NOT NULL,
+    source_file text,
+    source_line integer,
+    verdict text NOT NULL,
+    detail text,
+    computed_at timestamp NOT NULL,
+    postmaster_start_time timestamp NOT NULL,
+    CONSTRAINT pk_managed_conf_verdicts PRIMARY KEY (setting_name)
+);";
+
+    /// <summary>
+    /// V147 — raises the shipped default for <c>config.config_service.compose_statement_timeout_seconds</c>
+    /// from 15 s to 60 s (#4442 scope 1), and moves any row still sitting at the old shipped default.
+    /// An operator-set value other than 15 (including one that happens to equal the OLD default exactly at
+    /// a moment nobody touched it, indistinguishable from "never touched") is left alone; a store at 45
+    /// stays at 45. This mirrors the same shipped-value-move-only shape every other default-raise rung
+    /// uses: the column default changes for future rows, and the one-time UPDATE only ever touches rows
+    /// still at the value nobody chose.
+    /// </summary>
+    private const string V147Sql = @"
+ALTER TABLE config.config_service ALTER COLUMN compose_statement_timeout_seconds SET DEFAULT 60;
+UPDATE config.config_service SET compose_statement_timeout_seconds = 60 WHERE compose_statement_timeout_seconds = 15;";
+
+    /// <summary>
+    /// V148 — <c>collect.read_latency</c>, the hourly histogram of <c>/api/read/*</c> and composed-panel
+    /// read durations (#4442 scope 2), the <c>collector_cost</c> (V105) shape applied to reads instead of
+    /// collector runs. NOT a collector: it is INTERNAL self-telemetry, written by the worker's hourly
+    /// self-metrics sweep on the same tick as <c>collector_cost</c>'s flush, so it is deliberately absent
+    /// from <c>CollectorCatalog.All</c> and from the generator-parity pins, and needs no per-table GRANT (the
+    /// <c>collect</c> schema's blanket <c>GRANT … ON ALL TABLES IN SCHEMA collect</c> covers it the moment
+    /// provisioning re-runs). Hand-written DDL, a plain table (not a hypertable — the accumulator aggregates
+    /// to one row per (surface, route, outcome) per hour before it ever reaches this table, and its own
+    /// bounded retention DELETE keeps it small, the same shape <c>collector_cost</c> and <c>store_metrics</c>
+    /// use). <c>bucket_counts</c> is the fixed log-scale histogram <c>ReadLatencyAccumulator.BucketUpperBoundsMs</c>
+    /// produces — the same array's length for every row, so two rows can be summed element-wise across a
+    /// window without knowing which release wrote which. The primary key is <c>(metric_time, surface, route,
+    /// outcome)</c> — the accumulator drains and flushes at most once per key per hour, and the flush's own
+    /// <c>ON CONFLICT</c> upsert relies on exactly this key existing twice only when two flushes land in the
+    /// same hour.
+    /// </summary>
+    private const string V148Sql = @"
+CREATE TABLE IF NOT EXISTS collect.read_latency
+(
+    metric_time timestamp NOT NULL,
+    surface text NOT NULL,
+    route text NOT NULL,
+    outcome text NOT NULL,
+    run_count integer NOT NULL,
+    total_ms bigint NOT NULL,
+    max_ms bigint NOT NULL,
+    bucket_counts bigint[] NOT NULL,
+    PRIMARY KEY (metric_time, surface, route, outcome)
+);
+
+CREATE INDEX IF NOT EXISTS idx_read_latency_time
+    ON collect.read_latency(metric_time);";
+
+    /// <summary>
+    /// V149 — the Query Store liveness touch becomes a HOT update on <c>collect.query_store_plan_map</c> and
+    /// <c>collect.query_store_text</c> (#4250): drops each table's <c>last_seen</c> btree index and sets
+    /// <c>fillfactor = 90</c>. <c>TouchAndProbeSql</c> on both tables (<see cref="QueryStorePlanMap"/>,
+    /// <see cref="QueryStoreTextStore"/>) only ever writes <c>last_seen</c> and, conditionally, an
+    /// unindexed hash column — so once the index is gone, no indexed column the touch changes remains, and a
+    /// page with fillfactor headroom lets the new tuple stay on its old page: both conditions Postgres's HOT
+    /// optimization needs. Confirmed by <c>git grep</c> against the service and storage code: the only other
+    /// reader of either index was each table's own <c>PruneSql</c> time-sliced <c>DELETE ... WHERE last_seen &lt;
+    /// $1</c> — no reader orders, filters, or range-scans <c>last_seen</c> for anything else. This change
+    /// replaces that prune on both tables with <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.UnorderedRowCappedDeleteSql"/>:
+    /// one capped sequential pass per batch, with no ordering or subquery over <c>last_seen</c> to lose by
+    /// dropping the index. See that builder's summary for the shape and the measured cost.
+    ///
+    /// <para>Plain <c>DROP INDEX</c> and <c>ALTER TABLE ... SET (fillfactor = ...)</c>, not <c>CONCURRENTLY</c>:
+    /// <c>MigrateAsync</c> wraps every rung in a transaction, and <c>CREATE/DROP INDEX CONCURRENTLY</c> cannot
+    /// run inside one. Both operations here are metadata-only — the index drop does not touch the heap, and
+    /// the fillfactor change only affects pages written from here on — so the short <c>ACCESS EXCLUSIVE</c>
+    /// each takes is a catalog update, not a rewrite; nothing else in the migrate session holds a competing
+    /// lock on either table at that moment.</para>
+    ///
+    /// <para>Fillfactor 90 is prospective only: existing pages, packed at the old default of 100, do not gain
+    /// HOT headroom until they are rewritten by organic churn (the tables are continuously purged) or a
+    /// deliberate rewrite. No rewrite ships in this rung.</para>
+    /// </summary>
+    private const string V149Sql = @"
+DROP INDEX IF EXISTS collect.idx_query_store_plan_map_last_seen;
+DROP INDEX IF EXISTS collect.idx_query_store_text_last_seen;
+ALTER TABLE collect.query_store_plan_map SET (fillfactor = 90);
+ALTER TABLE collect.query_store_text SET (fillfactor = 90);";
+
+    /// <summary>
+    /// V150 — two indexes, added additively for both #4469 and #4477:
+    /// <list type="bullet">
+    /// <item><c>idx_collection_log_watermark</c> on <c>collect.collection_log (server_id, collector_name,
+    /// collection_time DESC)</c> so <see cref="PerformanceMonitor.Darling.Service.DarlingWorker.ReadCollectorWatermarksSql"/>
+    /// can look up each collector's newest run with one index-only descent per collector instead of a
+    /// bitmap heap scan of the newest chunks. Measured on a rig shaped like the field (43 servers, ~40
+    /// collectors, 15M rows, 9 of 11 chunks compressed): the per-collector lookup runs ~0.65 ms against
+    /// the old statement's ~24 ms, cold and warm alike, because it turns the read from a scan of every
+    /// row in the newest chunks into one index-only descent per collector name. Costs: ~0.94 s to build
+    /// on 2.4M uncompressed rows (well inside <c>MigrationCommandTimeoutSeconds</c>), ~115 MB, and +38%
+    /// wall time on a 100,000-row bulk COPY into the newest chunk (0.353 s -&gt; 0.487 s median of 3) —
+    /// one more btree every future <c>collection_log</c> write maintains.</item>
+    /// <item><c>idx_job_history_server_run</c> on <c>collect.job_history (server_id, run_datetime DESC,
+    /// instance_id DESC)</c> for the Viewer's Job History tab
+    /// (<see cref="PerformanceMonitor.Darling.Viewer.ViewerDataService.BuildJobHistorySql"/>), matching that
+    /// read's own <c>ORDER BY run_datetime_utc DESC, instance_id DESC</c> tie-break so a per-server
+    /// top-N lookup needs no additional sort on the indexed columns. Measured on a rig shaped like the
+    /// field (43 servers, ~28,000 rows/server over 4 days, 3 of 5 chunks compressed): the base row
+    /// selection this index serves reads ~1,506 buffers cold against the unindexed scan's ~6,883 (about
+    /// 4.6x fewer), and the full Job History read (including the per-job stats aggregate this index does
+    /// not cover) runs ~721 ms cold against ~1,362 ms (about 1.9x) — the win is smaller than the
+    /// watermark index's because the read's other half, <c>job_stats</c>, still scans every matching row
+    /// in the window to compute an average/max per job and this index does not help that half.</item>
+    /// </list>
+    /// Both are plain <c>CREATE INDEX IF NOT EXISTS</c> (mirroring V149's shape): <c>MigrateAsync</c> wraps
+    /// every rung's whole SQL in one transaction, and <c>CREATE INDEX ... WITH
+    /// (timescaledb.transaction_per_chunk)</c> cannot run inside one — measured, it raises
+    /// <c>CREATE INDEX ... WITH (timescaledb.transaction_per_chunk) cannot run inside a transaction
+    /// block</c>. Each build takes a <c>ShareLock</c> for its duration (confirmed via <c>pg_locks</c>),
+    /// blocking concurrent inserts/updates/deletes to that table until the build finishes — acceptable at
+    /// the measured field-store extrapolation of well under 2 seconds each, but a store whose uncompressed
+    /// chunks have grown unusually large (a long compression-policy gap, or a raised
+    /// <c>CompressAfterDays</c>) would make this rung's lock window grow linearly with the uncompressed
+    /// row count. <c>IF NOT EXISTS</c> makes both idempotent on a FRESH store too: <c>PgSchemaGenerator</c>
+    /// does not build either index on a fresh install today, so this rung is the real create on both
+    /// paths, with no fresh-vs-upgraded shape divergence to special-case.
+    /// </summary>
+    private const string V150Sql = @"
+CREATE INDEX IF NOT EXISTS idx_collection_log_watermark
+    ON collect.collection_log (server_id, collector_name, collection_time DESC);
+CREATE INDEX IF NOT EXISTS idx_job_history_server_run
+    ON collect.job_history (server_id, run_datetime DESC, instance_id DESC);";
+
+    /// <summary>
+    /// V151 — <c>sys.availability_groups.group_id</c> on both AG collector tables (#4475): the GUID the engine
+    /// stamps identically on every replica of one Availability Group, appended LAST as text (the collector
+    /// column vocabulary has no uuid type; <c>AgDatabaseReplicaStatesCollector</c>'s <c>last_hardened_lsn</c> /
+    /// <c>last_commit_lsn</c> already store a wide identifier the same way). <see cref="AgTopology.CountDistinctGroups"/>
+    /// uses it to close the one gap the name-plus-replica-overlap rule (#4475) could not: two monitored
+    /// SECONDARIES of one AG, with its primary unmonitored, share no replica name with each other (each reports
+    /// only itself under <c>sys.dm_hadr_availability_replica_states</c>'s local-only rule) and so counted as two
+    /// groups. The group_id is the same on both replicas' rows, so a member carrying one groups by it exactly;
+    /// a member from a row collected before this rung carries none and falls back to the pre-existing name +
+    /// overlap rule among the other id-less members; and a with-id member and a without-id member of the same
+    /// name whose replica sets overlap still join (the same AG, seen before and after the upgrade landed on that
+    /// reporter). Stated in <see cref="AgTopology.CountDistinctGroups"/>'s own doc, not restated as a second
+    /// source of truth here.
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, the V127/V128/V132/V133/V150 shape for every column-adding
+    /// rung on a collector table: a row collected before this rung never asked the engine for its AG's
+    /// group_id, and NULL is the honest value — a reader treats it as "fall back to the pre-#4475 name + overlap
+    /// rule", exactly today's behavior. Both tables are compressed hypertables on the fleet; a nullable,
+    /// default-less <c>ADD COLUMN</c> is catalog-only in PostgreSQL and TimescaleDB accepts it on a compressed
+    /// hypertable with a compression policy attached, the shape V127/V128/V132/V133 used and verified live each
+    /// time. No view to refresh: the AG collector tables have been view-less since V34 (no <c>v_</c> passthrough
+    /// was ever created for either), so this rung is two ALTERs and nothing else.</para>
+    ///
+    /// <para>A fresh store gets the column from the generated CREATE TABLE
+    /// (<see cref="AgReplicaStatesCollector"/> / <see cref="AgDatabaseReplicaStatesCollector"/> carry it,
+    /// appended last in <c>PayloadColumns</c>) and the ALTER no-ops there — the V101 rule, pinned by
+    /// <c>PgSchemaGeneratorTests</c> reconstructing the current shape from V34/V36/V37/this rung and comparing it
+    /// to the generator's current output.</para>
+    ///
+    /// <para>Lite's DuckDB twin gets the same column the same way (schema version bump, additive <c>ALTER TABLE
+    /// ... ADD COLUMN IF NOT EXISTS</c>), and the shared <see cref="AgTopology.CountDistinctGroups"/> is what
+    /// both Lite's AG tab and Darling's Viewer/MCP/web reads call, so the fallback rule cannot drift apart
+    /// between stores.</para>
+    /// </summary>
+    private const string V151Sql = @"
+ALTER TABLE collect.ag_replica_states
+    ADD COLUMN IF NOT EXISTS group_id text;
+
+ALTER TABLE collect.ag_database_replica_states
+    ADD COLUMN IF NOT EXISTS group_id text;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -1557,7 +3632,7 @@ ALTER TABLE analysis_findings
     /// V53 — the store self-metrics table (#2068): the hourly fleet-level sweep
     /// (<see cref="StoreSelfMetrics"/>) persists the store's OWN size/compression/growth series here — one
     /// row per hypertable (total / pre- / post-compression bytes, chunk count), one per payload dimension
-    /// table (total bytes, row count), and one whole-store summary row (pg_database_size + the
+    /// table (total bytes, row count), and one whole-store summary row (pg_database_size_stats + the
     /// enabled-server count) per run — so capacity forecasting is a stored query instead of ad-hoc
     /// archaeology over a chunk catalog whose raw window is 4 days.
     /// <para>Deliberately a PLAIN table, and deliberately NOT a collector: it is not in
@@ -1815,7 +3890,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_wait_stats (
     waits bigint,
     wait_time_us bigint,
     delta_waits bigint,
-    delta_wait_time_us bigint
+    delta_wait_time_us bigint,
+    sample_interval_seconds integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_wait_stats_time
@@ -1878,7 +3954,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
     max_exec_peakmem_bytes bigint,
     delta_calls bigint,
     delta_total_exec_time_ms bigint,
-    delta_rows bigint
+    delta_rows bigint,
+    sample_interval_seconds integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time
@@ -2260,6 +4337,14 @@ ALTER TABLE collect.servers
     /// <para>Additive and view-less exactly like V63-V69 and V71: a fresh store gets the table from V1's
     /// generated schema, and this rung is what an already-existing store gets. A store monitoring no
     /// PostgreSQL target carries one more empty table and nothing else changes.</para>
+    ///
+    /// <para><b>The column after <c>stats_reset</c> is V133's (#3691), and it is here for the V101 rule.</b>
+    /// A store's tables come from one of two texts: a fresh store builds every table from the generated schema
+    /// at V1 (this CREATE then no-ops, <c>IF NOT EXISTS</c>), while a store that climbed through V83 before
+    /// V133 existed has the nine-payload-column table this text built at the time.
+    /// <c>PgSchemaGeneratorTests</c> requires this rung to be the generator's output column for column, and
+    /// the generator emits the collector's CURRENT columns — so this text carries <c>numbackends</c> for the
+    /// fresh population, and V133's ALTER carries it for the existing one. Neither is redundant.</para>
     /// </summary>
     private const string V83Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_database_stats (
@@ -2275,7 +4360,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_database_stats (
     temp_files bigint,
     temp_bytes bigint,
     deadlocks bigint,
-    stats_reset timestamp
+    stats_reset timestamp,
+    numbackends integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_database_stats_time
@@ -2523,6 +4609,14 @@ CREATE INDEX IF NOT EXISTS idx_pg_plan_capture_readiness_time
     /// <para>All THREE <c>stats_reset</c> stamps are stored. <c>pg_stat_reset_shared</c> takes a target, so
     /// they can be reset independently — a read differencing across a reset it could not see would report a
     /// negative interval as an enormous positive one.</para>
+    ///
+    /// <para><b>The column after <c>wal_stats_reset</c> is V139's (#3955), and it is here for the V101 rule.</b>
+    /// A fresh store builds the table from the generated schema at V1 (this CREATE then no-ops,
+    /// <c>IF NOT EXISTS</c>); a store that climbed through V88 before V139 existed has the twenty-six-payload-column
+    /// table this text built at the time. <c>PgSchemaGeneratorTests</c> requires this rung to be the generator's
+    /// output column for column, and the generator emits the collector's CURRENT columns, so this text carries
+    /// <c>postmaster_start_time</c> for the fresh population and V139's ALTER carries it for the existing one.
+    /// Neither is redundant.</para>
     /// </summary>
     private const string V88Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_write_stats (
@@ -2555,7 +4649,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_write_stats (
     wal_sync bigint,
     wal_write_time_ms double precision,
     wal_sync_time_ms double precision,
-    wal_stats_reset timestamp
+    wal_stats_reset timestamp,
+    postmaster_start_time timestamp
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_write_stats_time
@@ -2988,7 +5083,9 @@ CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collect
     /// lines are actually asked ("did the rate move") without producing 1,100 rows a day nobody reads.
     /// <c>message_text</c> and <c>sample_line</c> are NULL for the classes that are counted only, and that
     /// NULL is the record that the class is a counted floor rather than a missing measurement — see
-    /// <see cref="StoreLogClassifier"/> for the class-by-class argument.</para>
+    /// <see cref="StoreLogClassifier"/> for the class-by-class argument. Since #3944 a retained row's
+    /// <c>message_text</c> is its message's grouping key (<see cref="StoreLogClassifier.GroupingKeyOf"/>) and its
+    /// <c>sample_line</c> the entry as PostgreSQL wrote it, its SQL normalized.</para>
     ///
     /// <para><b>Why <c>store_log_captures</c> is its own table.</b> Every other sampled read in the product
     /// borrows its denominator from <c>collection_log</c> — <c>get_pg_blocking</c> reports
@@ -3018,7 +5115,8 @@ CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collect
     /// log's. That is deliberate: PostgreSQL renders <c>%m</c> in <c>log_timezone</c>, which
     /// <c>DarlingManagedPostgres</c>' v9 block leaves to the host (it pins the session <c>timezone</c> only,
     /// asserted by <c>DarlingManagedPostgresTests</c>), so the store's own log stamps are host-local. The
-    /// server's own rendering survives verbatim inside <c>sample_line</c>, uninterpreted.</para>
+    /// server's own rendering survives inside <c>sample_line</c>, uninterpreted, with only its SQL normalized
+    /// (#3915, #3944).</para>
     /// </summary>
     private const string V111Sql = @"
 CREATE TABLE IF NOT EXISTS collect.store_log_events
@@ -3451,7 +5549,13 @@ CREATE TABLE IF NOT EXISTS collect.pg_cpu_utilization (
     cpu_percent double precision,
     acu_utilization_percent double precision,
     serverless_capacity_acu double precision,
-    max_configured_acu double precision
+    max_configured_acu double precision,
+    memory_total_bytes bigint,
+    memory_free_bytes bigint,
+    memory_cached_bytes bigint,
+    memory_buffers_bytes bigint,
+    memory_active_bytes bigint,
+    configured_memory_bytes bigint
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_cpu_utilization_time
@@ -3506,7 +5610,9 @@ CREATE TABLE IF NOT EXISTS collect.pg_server_config (
     sourcefile text,
     sourceline integer,
     pending_restart boolean,
-    short_desc text
+    short_desc text,
+    database_name text,
+    role_name text
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_server_config_time
@@ -3754,6 +5860,14 @@ CREATE INDEX IF NOT EXISTS idx_pg_kernel_stats_time
     /// <para><c>event_type = 'Activity'</c> never reaches this table: those are background processes idling,
     /// and they dominate a raw profile permanently BECAUSE nothing is happening. A backend that was not
     /// waiting is stored as <c>CPU</c>/<c>Running</c> rather than as a blank row.</para>
+    ///
+    /// <para><b>The column after <c>backend_count</c> is V133's (#3691), and it is here for the V101 rule.</b>
+    /// A fresh store builds the table from the generated schema at V1 (this CREATE then no-ops,
+    /// <c>IF NOT EXISTS</c>); a store that climbed through V96 before V133 existed has the six-payload-column
+    /// table this text built at the time. <c>PgSchemaGeneratorTests</c> requires this rung to be the
+    /// generator's output column for column, and the generator emits the collector's CURRENT columns — so
+    /// this text carries <c>sampled_ms</c> for the fresh population, and V133's ALTER carries it for the
+    /// existing one. Neither is redundant.</para>
     /// </summary>
     private const string V96Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_wait_sampling (
@@ -3766,7 +5880,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_wait_sampling (
     query_id bigint,
     sample_count bigint,
     profile_period_ms integer,
-    backend_count integer
+    backend_count integer,
+    sampled_ms integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_wait_sampling_time
@@ -3922,7 +6037,7 @@ CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_st
     /// <para><b>Which collectors, and it is two mechanisms rather than one.</b> Five drive the fan-out from
     /// an ENUMERATION on any SQL Server target — <c>query_store</c>, <c>plan_correction</c>,
     /// <c>query_store_health</c>, <c>index_object_stats</c>, <c>database_scoped_config</c>. Separately,
-    /// <c>RunsPerDatabase</c> puts eight on a per-database CONNECTION loop when the target is Azure SQL DB,
+    /// <c>RunsPerDatabase</c> puts eleven on a per-database CONNECTION loop when the target is Azure SQL DB,
     /// and <c>pg_autovacuum_stats</c> on one always. Both mechanisms feed the same accumulator, which is the
     /// point: <c>query_store</c> uses the first on-prem and the second on Azure, so a rollup wired to only
     /// one of them would report a different notion of a slow database depending on where it ran.</para>
@@ -3966,9 +6081,12 @@ CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collect
     /// constraint that shapes this, since <c>config_alert_settings</c> is a single global row and an absolute MB
     /// threshold is unusable when normal tempdb sizes differ by an order of magnitude: set it low enough for the
     /// small instances and the large ones alert constantly. The RISE gate is primary (this file grew N MB inside
-    /// the window), following #2157's reasoning that a level alone pages forever about a size that has been true
-    /// since Tuesday; the LEVEL gate is the file as a share of its VOLUME, which self-scales to each server's
-    /// disk layout whether or not the file has a dedicated one.</para>
+    /// the window — superseded by #3631, which made <c>file_growth_rise_mb</c> a RATE, megabytes per HOUR
+    /// averaged over the lookback, so the same 10240 means 10 GB/hr on any lookback rather than 10 GB per
+    /// window; the column and its default are unchanged, only what the number means), following #2157's
+    /// reasoning that a level alone pages forever about a size that has been true since Tuesday; the LEVEL
+    /// gate is the file as a share of its VOLUME, which self-scales to each server's disk layout whether or
+    /// not the file has a dedicated one.</para>
     ///
     /// <para>Ships OFF. A new alert that starts firing on upgrade is a bad citizen, and the right thresholds are
     /// a property of the fleet rather than of the product.</para>
@@ -4043,6 +6161,14 @@ DELETE FROM collector_state WHERE collector_name = 'query_store_text' AND state_
     /// generate from the catalog) and upgraded stores (which run this rung) agree byte-for-byte.
     /// Hypertable conversion is automatic from CollectorCatalog on the next service start, the same
     /// path pvs_stats took in V47. The v_ passthrough keeps the two viewers' SQL byte-identical.
+    ///
+    /// <para><b>The two columns after <c>interval_length_minutes</c> are V137's (#3796), and they are here for
+    /// the V101 rule.</b> A fresh store builds the table from the generated schema at V1 (this CREATE then
+    /// no-ops, <c>IF NOT EXISTS</c>); a store that climbed through V76 before V137 existed has the
+    /// ten-payload-column table this text built at the time. <c>PgSchemaGeneratorTests</c> requires this rung
+    /// to be the generator's output column for column, and the generator emits the collector's CURRENT
+    /// columns — so this text carries <c>query_capture_mode</c> and <c>wait_stats_capture_mode</c> for the
+    /// fresh population, and V137's ALTER carries them for the existing one. Neither is redundant.</para>
     /// </summary>
     private const string V76Sql = @"
 CREATE TABLE IF NOT EXISTS collect.query_store_health (
@@ -4059,7 +6185,9 @@ CREATE TABLE IF NOT EXISTS collect.query_store_health (
     size_based_cleanup_mode text,
     stale_query_threshold_days bigint,
     max_plans_per_query bigint,
-    interval_length_minutes bigint
+    interval_length_minutes bigint,
+    query_capture_mode text,
+    wait_stats_capture_mode text
 );
 
 CREATE INDEX IF NOT EXISTS idx_query_store_health_time ON collect.query_store_health(server_id, capture_time);

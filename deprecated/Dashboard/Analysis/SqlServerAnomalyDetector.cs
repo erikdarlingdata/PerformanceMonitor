@@ -35,7 +35,12 @@ public class SqlServerAnomalyDetector
     /// <summary>
     /// Default ratio threshold for the wait-profile detector (peak window all-types ms/sec ÷ baseline
     /// mean). On the HONEST per-second scale now, so far below the old 5.0 that assumed a ~240x-inflated
-    /// input; matches the FactScorer WaitProfileRatioFloor. CALIBRATE ON THE SQL2025/HAMMERDB BOX.
+    /// input; matches the FactScorer WaitProfileRatioFloor. Still uncalibrated as of the 2026-09 dogfood
+    /// measurement (#3538 A5, #3616), which read each wait TYPE's fraction of a 4-hour window on the
+    /// Darling store and not the all-types ms/sec peak-over-baseline ratio this cutoff gates; unmeasured
+    /// on the Dashboard tier altogether (no Full-edition store was in that pass). The read that would
+    /// calibrate it is that ratio's own distribution over a fleet, one more column on the same pass.
+    /// Mirrors PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.DefaultRatioThreshold (#3653).
     /// </summary>
     private const double DefaultRatioThreshold = 4.0;
 
@@ -71,7 +76,9 @@ public class SqlServerAnomalyDetector
     // all-types wait ms/sec (PEAK across collections, matching the z-detectors) is compared to the
     // WaitMsPerSec baseline. DefaultRatioThreshold and the FactScorer wait slope are on the HONEST
     // per-second scale now (the old 5×/20× was calibrated to a ~240×-inflated per-hour-vs-per-interval
-    // input) — a sensible starting point; CALIBRATE ON THE SQL2025/HAMMERDB BOX.
+    // input) — a sensible starting point, still uncalibrated: see DefaultRatioThreshold for what the
+    // 2026-09 fleet pass measured instead, that it never reached the Dashboard tier, and which read would
+    // calibrate these. The fallback exceedance is what a YOUNG store produces, and no measured store was one.
     private const double WaitProfileFallbackMsPerSec = 250.0;  // untrustworthy-baseline absolute bar
     private const double NoBaselineRatio = 100.0;             // scoring sentinel for a first-occurrence (is_new)
 
@@ -832,6 +839,24 @@ AND   (num_of_reads_delta > 0 OR num_of_writes_delta > 0);";
         }
     }
 
+    // Batch-request window: per-second rate per sample (#3527) — cntr_value_delta spans one collection
+    // interval, so divide by the row's MEASURED sample_interval_seconds. Interval <= 0 marks an
+    // unknowable delta (first sighting/reset/gap) and the row is skipped, never read as 0. Keeps the
+    // window statistic in the same requests/sec unit as the baseline and the
+    // BatchRequestFloor/Fallback thresholds.
+    public const string BatchRequestWindowSql = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    AVG(cntr_value_delta * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
+    MAX(cntr_value_delta * 1.0 / NULLIF(sample_interval_seconds, 0)) AS peak_batch,
+    COUNT(*) AS sample_count
+FROM collect.perfmon_stats
+WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
+AND   counter_name = 'Batch Requests/sec'
+AND   cntr_value_delta >= 0
+AND   sample_interval_seconds > 0;";
+
     /// <summary>
     /// Detects batch requests/sec anomalies using z-score against time-bucketed baseline.
     /// </summary>
@@ -849,17 +874,7 @@ AND   (num_of_reads_delta > 0 OR num_of_writes_delta > 0);";
             await connection.OpenAsync();
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT
-    AVG(cntr_value_delta) AS avg_batch,
-    MAX(cntr_value_delta) AS peak_batch,
-    COUNT(*) AS sample_count
-FROM collect.perfmon_stats
-WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
-AND   counter_name = 'Batch Requests/sec'
-AND   cntr_value_delta >= 0;";
+            cmd.CommandText = BatchRequestWindowSql;
 
             cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
             cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));

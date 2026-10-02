@@ -155,6 +155,11 @@ public partial class ViewerServerTab
         PgCollectorHealthGrid.ItemsSource =
             ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts);
 
+        /* #3691 part a2: the persisted analysis collection caveats, as on the SQL Server Collection Health tab. */
+        var caveats = await _dataService.GetCollectionCaveatsAsync(_server.ServerId);
+        PgCollectionCaveatsGrid.ItemsSource = caveats;
+        PgCollectionCaveatsExpander.Visibility = caveats.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
         await LoadPgExtensionsAsync(startUtc, endUtc);
         await LoadPgServerConfigAsync();
         await LoadPgCpuUtilizationAsync(startUtc, endUtc);
@@ -280,7 +285,7 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(5);
+        using var readFanOut = ViewerReadFanOut.Of(6);
 
         var countsTask = _dataService.GetPgBlockingCaptureCountsAsync(_server.ServerId, startUtc, endUtc);
         var chainsTask = _dataService.GetPgBlockingChainsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
@@ -296,7 +301,13 @@ public partial class ViewerServerTab
 
         var databasesTask = _dataService.GetPgDatabaseStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask);
+        /* #4677: the eviction inputs behind the caveat under the statement grid. Not read when the collector is
+           gated off: there are no statements to qualify. */
+        var evictionsTask = statementsGatedOff
+            ? Task.FromResult(new DarlingPgStatementReader.PgEvictionInfo(false, null, null))
+            : _dataService.GetPgStatementEvictionsAsync(_server.ServerId, startUtc, endUtc);
+
+        await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask, evictionsTask);
 
         /* Released here rather than at the closing brace: the four sub-tab loads at the end of this method
            run after these five have finished, so they do not contend with them. */
@@ -326,6 +337,11 @@ public partial class ViewerServerTab
         PgTopQueriesGrid.ItemsSource = statementsTask.Result.Select(PgDisplay.Statement).ToList();
         PgStatementsNote.Text = PanelNote("pg_statement_stats", statementsTask.Result.Count,
             "No statement accumulated execution time in this window.");
+        /* Same wording as get_pg_top_queries' evictions.note: unknown says so, a counter read as 0 says nothing. */
+        if (!statementsGatedOff && PgStatementEvictionNote.Build(evictionsTask.Result) is { } evictionNote)
+        {
+            PgStatementsNote.Text += " " + evictionNote;
+        }
 
         PgDatabaseStatsGrid.ItemsSource = databasesTask.Result.Select(PgDisplay.Database).ToList();
         PgDatabasesNote.Text = PanelNote("pg_database_stats", databasesTask.Result.Count,
@@ -335,6 +351,41 @@ public partial class ViewerServerTab
         await LoadPgKernelStatsAsync(startUtc, endUtc);
         await LoadPgPlanCaptureAsync(startUtc, endUtc);
         await LoadPgDeadlocksAsync(startUtc, endUtc);
+        await LoadPgLogEventsAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// The classified log events (#3601), under the deadlocks grid on the Blocking sub-tab: the window's
+    /// newest 200 distinct entries across every family. The family and severity filters are the MCP read's
+    /// (<c>get_pg_log_events</c>); this grid is the glance, and the note names which setting a quiet family
+    /// depends on, because an all-off target looks exactly like a quiet one here.
+    /// </summary>
+    private async Task LoadPgLogEventsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_log_events"))
+        {
+            PgLogEventsGrid.ItemsSource = null;
+            PgLogEventsNote.Text = PanelNote("pg_log_events", 0, string.Empty);
+            return;
+        }
+
+        var page = await _dataService.GetPgLogEventsAsync(_server.ServerId, startUtc, endUtc);
+
+        PgLogEventsGrid.ItemsSource = page.Rows;
+
+        PgLogEventsNote.Text = PanelNote("pg_log_events", page.Rows.Count,
+            "No classified log event was stored in this window. That is the healthy answer for the error "
+            + "and lock-wait families, and it is also what a target with the relevant settings off looks "
+            + "like: connection lines need log_connections / log_disconnections, lock waits need "
+            + "log_lock_waits, spills need log_temp_files, autovacuum runs need log_autovacuum_min_duration. "
+            + "It is also what an unreadable log, a non-UTC log_timezone or a non-English lc_messages looks "
+            + "like — the Vacuum tab's plan-capture readiness panel reads the same file and reports those.")
+            + (page.Rows.Count == 0
+                ? string.Empty
+                : $"  Showing {page.Rows.Count} of {page.WindowTotal} distinct entries in the window, newest "
+                  + "first; messages are as PostgreSQL wrote them with the SQL in them normalized, and the "
+                  + "statement text is never stored, only fingerprinted. Sightings counts how often the "
+                  + "collector saw the SAME line while it stayed inside the log tail it re-reads.");
     }
 
     /// <summary>
@@ -361,7 +412,9 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgLockStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        PgLockStatsGrid.ItemsSource = rows;
+        /* The display row, not the reader's: its Last Seen follows the display mode and sorts by its UTC instant
+           (#4766). The counts below read the reader rows, which are unchanged. */
+        PgLockStatsGrid.ItemsSource = PgDisplay.LockStatRows(rows);
 
         var queued = rows.Where(r => !r.Granted).ToList();
         var totalCaptures = rows.Count == 0 ? 0 : rows[0].TotalCaptures;
@@ -398,19 +451,38 @@ public partial class ViewerServerTab
         }
 
         var rows = await _dataService.GetPgWaitSamplingAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        /* #3604: the arm that fed the grid, off the collector's own state — the same disclosure the MCP read
+           makes, because the same table now holds two grains and the note is where this panel says which. */
+        var instrument = await _dataService.GetPgWaitInstrumentAsync(_server.ServerId);
+        var serviceTier = instrument is not null
+            && string.Equals(instrument.Instrument, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal);
 
-        PgWaitSamplingGrid.ItemsSource = rows;
+        PgWaitSamplingGrid.ItemsSource = PgDisplay.WaitSamplingRows(rows);
 
         var attributed = rows.Count(r => r.QueryId != 0);
         var reset = rows.Any(r => r.CounterReset);
 
         PgWaitSamplingNote.Text = rows.Count == 0
             ? PanelNote("pg_wait_sampling", 0,
-                "No wait samples for this server in this window. The usual cause is that "
-                + "pg_wait_sampling is not in shared_preload_libraries — check the Extensions panel, "
-                + "which says whether it is installed, available or absent. If it IS loaded, an empty "
-                + "grid means the server waited on nothing worth sampling, which is the healthy answer.")
+                serviceTier
+                    ? "No wait samples for this server in this window. This server is on the service-sampled "
+                      + "tier (pg_wait_sampling is not installed), so the service polled pg_stat_activity once a "
+                      + "second for a 30-second window each cycle and found nothing worth counting — the healthy "
+                      + "answer at that grain, which under-counts waits shorter than a second."
+                    : "No wait samples for this server in this window. The usual cause is that "
+                      + "pg_wait_sampling is not in shared_preload_libraries — check the Extensions panel, "
+                      + "which says whether it is installed, available or absent. If it IS loaded, an empty "
+                      + "grid means the server waited on nothing worth sampling, which is the healthy answer.")
             : $"{rows.Count:N0} wait event(s), {attributed:N0} attributed to a query. "
+              + (serviceTier
+                  ? "Instrument: SERVICE SAMPLER — pg_wait_sampling is not installed, so this is the "
+                    + "service polling pg_stat_activity once a second for a 30-second window every five "
+                    + "minutes. A floor, not parity: waits shorter than a second are under-counted and "
+                    + "nothing between windows is seen. Installing the extension moves this server to "
+                    + "the 10 ms tier. "
+                  : instrument is not null
+                      ? "Instrument: pg_wait_sampling extension (10 ms in-engine profiler). "
+                      : string.Empty)
               + "Est. Wait is samples multiplied by the profile period — an estimate from a sampling "
               + "profiler, not a measured duration, so treat it as a ranking rather than a stopwatch. "
               + "A Query ID of 0 is a background process rather than an unknown query, and CPU/Running "
@@ -770,7 +842,9 @@ public partial class ViewerServerTab
     /// <para>Three states, and they must not read alike. A gated-off collector says so; a null read means
     /// fewer than two samples, which is a real and temporary state on a freshly added server rather than a
     /// quiet one; and a row whose <c>ResetDuringWindow</c> is set has had at least one statistics family
-    /// reset underneath it, so those metrics are blank rather than wrong.</para>
+    /// reset underneath it, so those metrics are blank rather than wrong. A row whose
+    /// <c>PostmasterRestartedDuringWindow</c> is set (#3955) spans a restart, which leaves the reset stamps alone
+    /// and blanks the checkpoint figures the shutdown checkpoint lands in, so the note says that separately.</para>
     /// </summary>
     private async Task LoadPgWriteStatsAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -788,7 +862,7 @@ public partial class ViewerServerTab
             ? "Write-side counters need TWO collections before a change exists between them, so a server "
               + "added in the last cycle has nothing here yet. This is not the same as a quiet server, "
               + "which would show zeroes."
-            : row.ResetDuringWindow
+            : (row.ResetDuringWindow
                 ? "At least one statistics family was RESET inside this window, so its counters went "
                   + "backwards. Those metrics are left blank rather than differenced across the reset — a "
                   + "difference taken across one reports an enormous number that looks like a catastrophe "
@@ -797,7 +871,13 @@ public partial class ViewerServerTab
                 : "Change across the window, not the counters' cumulative levels. Requested checkpoints "
                   + "climbing against timed ones is the max_wal_size-too-small signal; full-page images "
                   + "spiking right after each checkpoint points at checkpoint_timeout instead. A blank "
-                  + "value is a metric this PostgreSQL version does not expose, which is not zero.";
+                  + "value is a metric this PostgreSQL version does not expose, which is not zero.")
+              + (row.PostmasterRestartedDuringWindow
+                  /* #3955: a restart leaves the reset stamps alone, so it needs its own sentence. */
+                  ? " PostgreSQL RESTARTED inside this window: the shutdown checkpoint is counted as requested and its "
+                    + "own write, sync and buffer work lands in the same counters, so the checkpoint Requested, Write "
+                    + "Time, Sync Time and buffer figures are left blank rather than read as the workload's."
+                  : string.Empty);
     }
 
     /// <summary>Replication — slot WAL retention and the xmin each slot pins.</summary>
@@ -838,7 +918,7 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgReplicationStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        PgReplicationStatsGrid.ItemsSource = rows;
+        PgReplicationStatsGrid.ItemsSource = PgDisplay.ReplicationStatRows(rows);
 
         var worst = rows.Count == 0 ? 0L : rows.Max(r => r.WorstReplayBytesBehind ?? 0L);
         var flapping = rows.Count(r => r.TotalSamples > 0 && r.Samples < r.TotalSamples);
@@ -1017,7 +1097,7 @@ public partial class ViewerServerTab
 
         var rows = page.Rows;
 
-        PgIndexBloatGrid.ItemsSource = rows;
+        PgIndexBloatGrid.ItemsSource = PgDisplay.IndexBloatRows(rows);
 
         /* The SAME classifier the MCP tool calls, deliberately (#3278). The panel and the tool answering
            the same question differently is how a defect gets fixed in one surface and left in the other,
@@ -1089,7 +1169,7 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgColumnStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        PgColumnStatsGrid.ItemsSource = rows;
+        PgColumnStatsGrid.ItemsSource = PgDisplay.ColumnStatRows(rows);
 
         var skewed = rows.Count(r => r.TopValueFrequency >= 0.25);
 

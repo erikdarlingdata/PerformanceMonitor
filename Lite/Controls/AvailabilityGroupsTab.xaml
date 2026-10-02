@@ -38,8 +38,26 @@
                    Foreground="{DynamicResource ForegroundMutedBrush}"
                    Text="No Availability Groups observed. The AG collector writes no rows for an instance that hosts none, and it does not run against Azure SQL Database."/>
 
-        <ScrollViewer Grid.Row="1" x:Name="CardScroller" VerticalScrollBarVisibility="Auto">
-            <ItemsControl x:Name="AgCards">
+        <!-- #4238: AgCards virtualizes (ScrollViewer moved INSIDE the ItemsControl's own template, around an
+             ItemsPresenter whose panel is a VirtualizingStackPanel) so only on-screen cards realize their
+             Border/replica-chip/DataGrid subtree, instead of every card in the fleet on every refresh. -->
+        <ItemsControl x:Name="AgCards" Grid.Row="1"
+                      VirtualizingPanel.IsVirtualizing="True"
+                      VirtualizingPanel.VirtualizationMode="Recycling"
+                      VirtualizingPanel.ScrollUnit="Pixel"
+                      ScrollViewer.CanContentScroll="True">
+            <ItemsControl.Template>
+                <ControlTemplate TargetType="ItemsControl">
+                    <ScrollViewer CanContentScroll="True" VerticalScrollBarVisibility="Auto">
+                        <ItemsPresenter/>
+                    </ScrollViewer>
+                </ControlTemplate>
+            </ItemsControl.Template>
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <VirtualizingStackPanel/>
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
                         <Border Margin="0,0,0,12" Padding="12" CornerRadius="4"
@@ -161,7 +179,6 @@
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
-            </ItemsControl>
-        </ScrollViewer>
+        </ItemsControl>
     </Grid>
 </UserControl>

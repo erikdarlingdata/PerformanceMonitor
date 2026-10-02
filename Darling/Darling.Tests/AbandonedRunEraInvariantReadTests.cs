@@ -108,11 +108,11 @@ public sealed class AbandonedRunEraInvariantReadTests
     {
         Assert.Equal(CollectorHealthClassifier.Healthy, CollectorHealthClassifier.Classify(
             totalRuns: 205, successCount: 204, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
-            abandonedCount: 1, hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
+            abandonedCount: 1, hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1));
 
         Assert.Equal(CollectorHealthClassifier.Warning, CollectorHealthClassifier.Classify(
             totalRuns: 205, successCount: 202, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
-            abandonedCount: 3, hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
+            abandonedCount: 3, hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1));
     }
 
     /* ---------------- live: the two-era window, against a real store ---------------- */

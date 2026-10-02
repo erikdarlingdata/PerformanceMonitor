@@ -110,20 +110,110 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfReaders =
     {
+        /* Its fieldRow pin takes the text from that function's declaration to the closing brace on the next
+           line start, and its stylesheet pins anchor rule bodies across the lines they span. */
+        "AlertHistoryDetailLabelsTests.cs",
+        /* #4194: its live-mount-guard pin anchors the `if (live …) { … return; }` block in renderAlerts across
+           its four source lines as one literal, so the guard's return is told apart from just those words
+           appearing somewhere else in the file. */
+        "AlertHistoryLazyRenderTests.cs",
+        /* #4368: its innerHTML-ban pin anchors renderAlertHeaderCell's own function body across the lines
+           between its declaration and the next top-level function, so the ban is scoped to real code and
+           not tripped by the file's own prose comment saying "never innerHTML". */
+        "AlertNotebookRenderClientTests.cs",
         "BuiltinAlertPersistenceRungTests.cs",
+        /* Its count-chart pins anchor the `COUNT_SERIES, {` panels' option blocks across their line breaks (the
+           subtitle line and the format line that follows it) and slice niceScale's own body, so the panels that
+           chart counts are told apart from the constant's prose and the function from its callers. */
+        "ChartIntegerTicksPinTests.cs",
         "ChartWindowDomainTests.cs",
+        /* #4887: its StoredEventCopies census takes each helper's table from that class's own source, on an anchor
+           that runs from the helper's `=>` across the line break to the `Read("v_` on the next line. */
+        "ConsumedTimestampFrameDisciplineTests.cs",
         "DarlingPathFilterGateTests.cs",
+        /* #3653 (A8e, PostgreSQL host): its per-arm fire-site pin anchors `Severity: null,` on the line break
+           that follows it, so the CODE spelling is told apart from the same words inside the arms' own
+           comments, which continue on the same line. */
+        "DarlingPgOperationalAlertTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
+        /* #3735: its source pin anchors the collection-health statement's tail across three line breaks
+           (`FROM v_collection_log` / `WHERE` / `AND` / `GROUP BY`) and the CreateCommand line on the
+           CommandTimeout line that follows it — the two facts the memo promised not to touch, asserted as
+           the exact shape they were in, which a single-line anchor could not tell from a rewrite. */
+        "FleetCollectionHealthMemoTests.cs",
+        /* #3856: its tool and reader anchors span line breaks (the nowUtc-then-memoized-call pair, the
+           CreateCommand-plus-CommandTimeout shape, and the statement's own WHERE/AND tail) — the same
+           reasoning as the fleet twin above, which is the file this one was written beside. */
+        "PerServerCollectionHealthMemoTests.cs",
         "FleetPageAttentionFilterTests.cs",
+        /* Its every-site pins match each `new AlertMuteContext { ... };` initializer across its line breaks in
+           AlertEngine.cs and the Darling producers, and assert each one sets ServerId. */
+        "MuteRuleServerIdTests.cs",
+        /* Its store-SQL pin slices PgMuteRuleStore's SELECT, INSERT and UPDATE texts across their line breaks. */
+        "MuteRuleServerIdRungTests.cs",
+        /* #4731: its twin pin slices EventBaselineSql out of both products' provider SOURCES (from the signature
+           line to the SQL's closing `GROUP BY hh, dw";`) and asserts the two multi-line bodies are byte-identical. */
+        "DarlingEventBaselineCoveredDaysTests.cs",
+        /* #3653 item 12 (Q6): its cross-SKU pin slices the multi-line `keyed` CTE out of the Darling provider's
+           SOURCE (from `keyed AS (` to `FROM clean` + `)` on the next line) and asserts Lite's source carries the
+           identical text; the clock-read twin pin likewise compares a multi-line const body one token apart. */
+        "LocalClockBucketKeyTests.cs",
         "LockedModeRestoreCoverageTests.cs",
+        /* #3541 A10: its top-level-key discriminator anchors on the line break BEFORE the key (a per-row
+           collection_time inside a Select is indented deeper and must not match), and its tool-body slicing
+           keys on attribute text either side of one. */
+        "McpLatestSnapshotStampTests.cs",
+        /* #3541 A3: its Lite-description anchor spans the line break between `Description(` and the
+           string on get_plan_corrections, and its tool-body slicing keys on attribute text either side of
+           one. */
+        "McpPageContractTests.cs",
         "NightlyVersionInjectionTests.cs",
         "PgCpuCapacityHeadroomTests.cs",
         "PgIndexBloatGridReachTests.cs",
         "PgLoggingCollectorOffTests.cs",
+        /* #3691 (V138): its V102-restatement pin anchors the generated column tail across two line breaks
+           (`short_desc text,` / `database_name text,` / `role_name text`), its tool pin anchors the override
+           section's null else-arm on the key that follows it on the next line, and its rung-doc and
+           reader-census arms slice LF-normalised source. */
+        /* #4004 review, round 3: its rotation-note pin anchors the collection-log write in RunOneAsync on the
+           call and its argument list on the NEXT line, so the note is proven applied before THAT row is written. */
+        "PgLogHashKeyTests.cs",
+        "PgServerConfigScopeRungTests.cs",
+        /* Reads the lineage comment blocks above the flipped PostgreSQL bars; a block is several lines and
+           is collapsed to one before its citation is matched, so the read has to be LF-normalised first. */
+        "PgTargetMeasuredLineageTests.cs",
+        /* #4825: its source pins slice the Collection Health tab's purge members (PurgeNow_Click, StartPurgeWatch,
+           RunPurgeWatchAsync, the unload handler) by brace balance, and compare the order of calls inside them. */
+        "PurgeNowTotalsWatchTests.cs",
+        /* #3797: its viewer-surface pins slice regions out of ViewerServerTab.xaml and server-tabs.js between
+           anchors several lines apart (the Queries group's sub-tab block, a column array, one DataGrid's
+           column list), and its dispatch pin anchors `case QueryStoreClutterSubTabIndex:` on the awaited
+           loader call on the NEXT line — anchors that a CRLF read would miss on every arm. */
+        "QueryStoreClutterViewerSurfacesTests.cs",
+        /* #4231: its web source pin counts noteKey: "truncation_note" occurrences across server-tabs.js and
+           view-templates.js, which an LF-normalised read makes exact instead of CRLF-fragile. */
+        /* #4427: its wiring pins slice RunPurgeNowBackgroundAsync's body by brace balance and matches calls that span line breaks. */
+        "RawPurgeNowWiringTests.cs",
+        "RawWindowFloorViewerPortTests.cs",
+        /* #3653 item 3: its twin pin extracts the multi-line GetPriorOccurrencesSql const body from BOTH finding
+           stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
+           call sites that sit on their own lines — anchors spanning line breaks on every arm. */
+        "RecurrenceLabelStoreReadTests.cs",
+        /* Its heading pin slices fillServerHead's body out of server.js, from its declaration to the closing brace
+           on its own line, and asserts the display-name assignment sits inside it and ahead of the dot update. */
+        "ServerPageTitlePinTests.cs",
         "ServerPageTabsTests.cs",
+        // #4218: reads build.yml to pin the SignPath action version.
+        "SignPathActionVersionTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",
+        /* #3754: its reconcile and worker pins anchor multi-statement arms across their line breaks - the
+           `if (enabled) { attempted++; }` and `if (enabled) { failed++; … }` blocks in DarlingXeSessions,
+           and the pre-dispatch `if (…LongQueryTraceFault is { } traceFault) { throw … }` in RunOneAsync - so
+           the CODE shape is told apart from the same words inside the comments beside it. */
+        "SwallowedItemFailureTests.cs",
         "ViewTemplatesTests.cs",
+        "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
     };
 
@@ -145,6 +235,10 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfSubjects =
     {
+        /* #4198 (lane W2): its source-text pin asserts a single-line entry in the endpoint dispatch
+           table (the `get_active_queries` row in DarlingWebEndpoints.cs) — the pin contains no line
+           break, so LF normalization does not affect what the assertion can match. */
+        "DarlingWebEndpointsTests.cs",
         /* The equivalence test FOR the reader, parameterised over both spellings and calling each of them
            directly. It compares the reader's output against the bytes on disk put through the same
            transform, so it performs the CRLF-to-LF normalisation itself rather than depending on the

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
@@ -20,8 +21,10 @@ namespace PerformanceMonitor.Alerting;
 /// put the highest-blast-radius file on this branch in the path of every PostgreSQL change. This is a pure
 /// function of (rows, settings) instead — no I/O, no state — so it is exhaustively testable and the host
 /// keeps ownership of delivery and dedup.</para>
-/// <para><b>Thresholds are constants here, on purpose, for this first cut.</b> Every one is derived from
-/// PostgreSQL's own mechanics rather than picked — see each constant — so there is no obvious knob a user
+/// <para><b>Thresholds are constants, on purpose, for this first cut</b> — the three outage predictors'
+/// on <see cref="PostgresOutagePredictorThresholds"/> (shared with the analysis scorer, #3542 D9), the
+/// poison-wait ones on <see cref="PoisonWaitEvaluator"/>, aliased here under their original names. Every
+/// one is derived from PostgreSQL's own mechanics rather than picked — see each constant — so there is no obvious knob a user
 /// would set differently, and the product's stated position is to add configuration when it is genuinely
 /// needed rather than speculatively (the same reasoning as having no collection-schedule settings). Making
 /// them configurable means new columns on <c>config_alert_settings</c>, a migration, and Settings-window
@@ -29,65 +32,49 @@ namespace PerformanceMonitor.Alerting;
 /// </summary>
 public static class PostgresAlertEvaluator
 {
-    /* Wraparound. The wall is 2 billion transactions, but the number that matters first is the server's
-       OWN autovacuum_freeze_max_age: at that age autovacuum force-starts a wraparound-prevention vacuum
-       whether or not a table is otherwise due, so crossing it means the server has begun defending itself.
-       Critical fires at 2x it, which on a stock 200-million setting is 400 million: comfortably clear of
-       the 2-billion stop, but far enough past the engine's own line to mean its defence is not keeping up.
-       Both are ratios of a setting the row carries, so a cluster tuned to 1.5 billion gets thresholds
-       scaled to its own configuration rather than to a constant that would never fire for it.
+    /* #3542 D9: the wraparound, xmin and slot bars below are ALIASES of PostgresOutagePredictorThresholds
+       (PerformanceMonitor.Analysis), the one definition both this evaluator and the PostgreSQL-target
+       analysis scorer grade on — so the surface that pages and the surface that narrates cannot disagree by
+       construction. Each constant's derivation (why 1.0x / 2x the setting, why 74.5% of the ceiling, why 50
+       million and a majority over at least five observations, why 10 GB) moved with the definition; the
+       names are kept here so the read adapter, the host, the MCP wraparound tool and the tests that cite
+       them keep compiling — the same shape the poison-wait constants take from PoisonWaitEvaluator. A
+       source pin holds that this file carries none of those literals itself. */
 
-       #2689: Warning used to fire at 90% of freeze_max_age unconditionally, and that is a ROUTINE operating
-       point — every healthy database climbs to ~that age on every freeze cycle and is reset, the expected
-       sawtooth. Firing there paged on essentially every healthy database, permanently (one fleet database
-       re-fired the identical alert every ~5-minute cycle at 9% of the way to actual wraparound). The real
-       risk is not "approaching freeze_max_age", it is "age has REACHED freeze_max_age and autovacuum is not
-       bringing it back down" - i.e. the forced vacuum this crossing itself triggers is not winning. So the
-       relative Warning arm now sits AT the setting (1.0x, the crossing point itself) and is gated by
-       FreezingIsKeepingUp: a database sitting above its own setting but coming back down each cycle does not
-       warn; one stuck at or above it, never seen lower within the window, does. */
-    public const double WraparoundWarningFractionOfFreezeMaxAge = 1.0;
-    public const double WraparoundCriticalMultipleOfFreezeMaxAge = 2.0;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundWarningFractionOfFreezeMaxAge"/>.</summary>
+    public const double WraparoundWarningFractionOfFreezeMaxAge = PostgresOutagePredictorThresholds.WraparoundWarningFractionOfFreezeMaxAge;
 
-    /// <summary>
-    /// The 32-bit comparison space both counters age within — the same denominator the collector stores its
-    /// percentages against, so the alert and <c>pct_toward_wraparound</c> can never disagree.
-    /// </summary>
-    public const long WraparoundCeiling = 2_147_483_648L;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundCriticalMultipleOfFreezeMaxAge"/>.</summary>
+    public const double WraparoundCriticalMultipleOfFreezeMaxAge = PostgresOutagePredictorThresholds.WraparoundCriticalMultipleOfFreezeMaxAge;
 
-    /// <summary>
-    /// The absolute Critical arm, as a fraction of <see cref="WraparoundCeiling"/>: PostgreSQL's own
-    /// <c>vacuum_failsafe_age</c> (1.6B by default) is ~74.5% of the space, and past it the engine abandons
-    /// cost limits and skips index cleanup to catch up. Matching the ladder
-    /// <c>DarlingMcpPgWraparoundTools</c> already classifies against.
-    /// <para>This exists because the RELATIVE arm alone leaves Critical unreachable on exactly the clusters
-    /// most at risk: <c>criticalAt = 2 x setting</c> exceeds the 2^31 wall once the setting passes ~1.07B, and
-    /// the setting is tunable to 2B. A tuned cluster would have warned and then never escalated.</para>
-    /// </summary>
-    public const double WraparoundCriticalFractionOfCeiling = 0.745;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundCeiling"/>.</summary>
+    public const long WraparoundCeiling = PostgresOutagePredictorThresholds.WraparoundCeiling;
+
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundCriticalFractionOfCeiling"/>.</summary>
+    public const double WraparoundCriticalFractionOfCeiling = PostgresOutagePredictorThresholds.WraparoundCriticalFractionOfCeiling;
+
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundWarningFractionOfCeiling"/>.</summary>
+    public const double WraparoundWarningFractionOfCeiling = PostgresOutagePredictorThresholds.WraparoundWarningFractionOfCeiling;
+
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.XminAgeWarningThreshold"/>.</summary>
+    public const long XminAgeWarningThreshold = PostgresOutagePredictorThresholds.XminAgeWarningThreshold;
+
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.XminPersistenceFraction"/>.</summary>
+    public const double XminPersistenceFraction = PostgresOutagePredictorThresholds.XminPersistenceFraction;
+
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.XminMinimumObservations"/>.</summary>
+    public const int XminMinimumObservations = PostgresOutagePredictorThresholds.XminMinimumObservations;
 
     /// <summary>
-    /// #2689: an absolute early-Warning arm, the same reasoning as <see cref="WraparoundCriticalFractionOfCeiling"/>
-    /// applied one severity down. On a cluster tuned high enough (past ~1.07B), the RELATIVE Warning arm
-    /// (1.0x setting) can land beyond or right at the Critical ceiling arm, robbing the operator of any
-    /// early warning at all. Unconditional (no FreezingIsKeepingUp gate) like the Critical ceiling arm,
-    /// because half the true wraparound space is already such a rare, high-consequence number that no
-    /// healthy database reaches it under a routine sawtooth regardless of oscillation history.
+    /// The stable subject a horizon-arm fire carries when no single holder owns the incident (#3537). A
+    /// constant, like the metric names above, because the host's per-subject cooldown and history dedup
+    /// key on it: subjecting each parade member in turn would present every rotation as a brand-new
+    /// incident and page once per member for one continuously-pinned horizon.
     /// </summary>
-    public const double WraparoundWarningFractionOfCeiling = 0.5;
+    public const string XminRotatingHoldersSubject = "rotating holders";
 
-    /* xmin horizon. 50 million transactions of held-back horizon is roughly where bloat becomes visible
-       rather than theoretical on a busy database. The persistence gate is what makes it actionable: a
-       holder seen in a majority of the window's observations is chronic, while one seen once is a query
-       that ran long, and only the first is worth waking anyone for. */
-    public const long XminAgeWarningThreshold = 50_000_000;
-    public const double XminPersistenceFraction = 0.5;
-
-    /* Replication slots. No byte threshold for the terminal states — `lost` and `unreserved` are failures
-       that have already happened, at any size. For a slot merely retaining WAL, 10 GB is the point where
-       an unbounded pile stops being noise on any volume worth monitoring; growth is what escalates it,
-       since max_slot_wal_keep_size defaults to -1 and nothing will stop it. */
-    public const long SlotRetainedWalWarningBytes = 10L * 1024 * 1024 * 1024;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.SlotRetainedWalWarningBytes"/>.</summary>
+    public const long SlotRetainedWalWarningBytes = PostgresOutagePredictorThresholds.SlotRetainedWalWarningBytes;
 
     /* Poison waits (#2711). SQL Server's Poison Wait alert fires on THREADPOOL / RESOURCE_SEMAPHORE /
        RESOURCE_SEMAPHORE_QUERY_COMPILE because all three share one defining trait: near-zero in healthy
@@ -98,35 +85,38 @@ public static class PostgresAlertEvaluator
        that no other alert covers. The other candidate there, Lock/Relation, was rejected because a
        relation-level lock wait IS blocking and the #2713 Blocking alert already owns that ground.
 
-       The THRESHOLD SHAPE is deliberately not the SQL Server one. That research also showed why: these
-       events average 1-2 ms per wait at six-figure volumes, so SQL Server's avg-ms-per-wait bar
-       (PoisonWaitThresholdMs) is meaningless against them — high-volume tiny waits never move an average.
-       What identifies the poison state is TOTAL accumulated wait time crossing a bar, normalized to the
-       window so the number reads as "how many backends were continuously stuck, on average". */
+       The THRESHOLD SHAPE was deliberately not the SQL Server one of the time. That research also showed
+       why: these events average 1-2 ms per wait at six-figure volumes, so the avg-ms-per-wait bar SQL
+       Server then used (PoisonWaitThresholdMs) is meaningless against them — high-volume tiny waits never
+       move an average. What identifies the poison state is TOTAL accumulated wait time crossing a bar,
+       normalized to the window so the number reads as "how many backends were continuously stuck, on
+       average".
+
+       #3539 A4 ported this shape BACK to SQL Server — the per-wait average had the mirror-image failure
+       there (one 600 ms wait paged, a storm of short waits slept) — and the three constants below are now
+       ALIASES of the shared definitions on PoisonWaitEvaluator, kept under their old names so the read
+       adapter, the host and the tests that cite them keep compiling. One alert name under one mute key
+       means one thing on both engines; both engines' calibration margins are documented on the shared
+       constants. */
 
     /// <summary>
-    /// The evaluation window, matching the SQL Server poison-wait read's own 10-minute recency window so
-    /// the two engines' alerts answer over the same horizon. The read side sums deltas whose
-    /// collection_time falls inside it; partial coverage (service just started, collector gap) undercounts
-    /// and therefore under-fires — the correct failure direction for an alert that pages.
+    /// The evaluation window — shared with SQL Server; see <see cref="PoisonWaitEvaluator.WindowMinutes"/>
+    /// for the coverage/under-fire reasoning. The read side sums deltas whose collection_time falls inside it.
     /// </summary>
-    public const int PoisonWaitWindowMinutes = 10;
+    public const int PoisonWaitWindowMinutes = PoisonWaitEvaluator.WindowMinutes;
 
     /// <summary>
-    /// Warning fires when accumulated wait time averages one backend continuously stuck across the whole
-    /// window (600 seconds of wait per 10 minutes). Calibrated against the #2711 fleet data: the WORST
-    /// server observed averaged ~0.006 concurrently-waiting backends on IPC:BtreePage over 24h
-    /// (538,850 ms / 86,400 s), so this bar sits ~160x above the worst healthy baseline seen anywhere on
-    /// the fleet — nothing measured to date would have fired it, which is the point: these events are
-    /// near-zero when healthy, and a full backend pinned for ten straight minutes is categorically not that.
+    /// Warning at one backend continuously stuck across the whole window (600 seconds of wait per 10
+    /// minutes) — shared with SQL Server; both engines' measured margins (~160x here, ~100x there) are on
+    /// <see cref="PoisonWaitEvaluator.WarningAvgWaiters"/>.
     /// </summary>
-    public const double PoisonWaitWarningAvgWaiters = 1.0;
+    public const double PoisonWaitWarningAvgWaiters = PoisonWaitEvaluator.WarningAvgWaiters;
 
     /// <summary>
-    /// Critical at ten backends continuously stuck on average — an active contention collapse, where the
-    /// pile-up itself is throttling throughput rather than merely taxing it.
+    /// Critical at ten backends continuously stuck on average — shared with SQL Server; see
+    /// <see cref="PoisonWaitEvaluator.CriticalAvgWaiters"/>.
     /// </summary>
-    public const double PoisonWaitCriticalAvgWaiters = 10.0;
+    public const double PoisonWaitCriticalAvgWaiters = PoisonWaitEvaluator.CriticalAvgWaiters;
 
     /// <summary>
     /// #3444 (V122): the shipped default for <c>deadlocks.pg_count_threshold</c> — how many distinct
@@ -138,16 +128,17 @@ public static class PostgresAlertEvaluator
     /// product opinion this change is revising.</para>
     ///
     /// <para><b>Its own knob rather than SQL Server's <c>deadlocks.count_threshold</c>.</b> The two
-    /// engines' counts are tuned against different evidence and, decisively, against different
-    /// SURFACES: the reason to move the SQL Server figure is agreement with
-    /// <c>health_bands.deadlock_warn_per_hour</c>, and a PostgreSQL server has no deadlock band to agree
-    /// with — <c>DarlingFleetReader.FleetDeadlockSql</c> reads <c>v_deadlocks</c>, which is
-    /// structurally zero for a PostgreSQL server, and <c>ServerMetricSources.DmvSourced</c> nulls the
-    /// reading before it reaches the band. Reusing the key would import a number whose whole
-    /// justification is agreement with a surface the importing engine does not have. The <c>enabled</c>
-    /// switch IS shared, matching <see cref="PoisonWaitMetric"/>'s own split: whether the condition is
-    /// worth alerting on at all is one preference, and the volume at which it is worth a page is
-    /// not.</para>
+    /// engines' counts are tuned against different evidence: SQL Server's is captured deadlock GRAPHS, this
+    /// one is distinct deadlocks parsed from the server log, and an operator tuning one should not silently
+    /// move the other (#3444). When V122 shipped this column there was a second reason — a PostgreSQL server
+    /// had no deadlock BAND to agree with, because the fleet card read <c>v_deadlocks</c> and nulled the
+    /// structural zero — and that reason is gone: since #3539 the PostgreSQL card bands its own
+    /// <c>pg_stat_database.deadlocks</c> counter difference through the SAME
+    /// <c>health_bands.deadlock_warn_per_hour</c> tiers. So the #3444 move (raise the fire gate to meet the
+    /// band's Warning bar, so a page and an amber dot describe the same server) is now available on this
+    /// knob too; the knob stays separate so making it is a choice. The <c>enabled</c> switch IS shared,
+    /// matching <see cref="PoisonWaitMetric"/>'s own split: whether the condition is worth alerting on at
+    /// all is one preference, and the volume at which it is worth a page is not.</para>
     /// </summary>
     public const int DeadlockCountThresholdDefault = 1;
 
@@ -395,30 +386,83 @@ public static class PostgresAlertEvaluator
             return null;
         }
 
-        /* The persistence gate. Without it this fires on any long-running report, which is how an alert
-           earns a mute rule instead of a response. */
-        var persistent = xmin.ObservationsTotal > 0
+        /* The persistence gate, two arms (#3537). Without any gate this fires on any long-running report,
+           which is how an alert earns a mute rule instead of a response.
+
+           The IDENTITY arm is the original: THIS holder won a majority of the collections that recorded
+           any holder — the chronic-holder shape, and the arm that can name the thing to kill. Its
+           denominator counts holder-bearing collections only (deliberately: see the read adapter), which
+           is why it also needs the observation floor — the first holder after quiet hours is 1 win in 1
+           observation, and 100% of one sample is not "chronic" however the fraction reads.
+
+           The HORIZON arm covers what the identity fraction structurally cannot see: a horizon pinned
+           past the age threshold in a majority of the window's REAL captures while the holder identity
+           rotates. Each parade member is individually transient, so no identity fraction ever accumulates
+           — but the alert's own claim ("vacuum is reclaiming nothing cluster-wide") is about the horizon,
+           not the holder, and it is continuously true. Same majority standard, honest denominator for
+           each claim: the identity claim is about the collections that had a holder, the horizon claim is
+           about every time the collector looked. A capture count of 0 — an adapter that supplied none, or
+           a log write that failed — floors the arm out rather than firing, the conservative default. */
+        var identityFractionHolds = xmin.ObservationsTotal > 0
             && (double)xmin.ObservationsHeld / xmin.ObservationsTotal >= XminPersistenceFraction;
 
-        if (!persistent)
+        var identityArm = identityFractionHolds && xmin.ObservationsTotal >= XminMinimumObservations;
+
+        var horizonArm = xmin.CapturesInWindow >= XminMinimumObservations
+            && (double)xmin.ObservationsAboveThreshold / xmin.CapturesInWindow >= XminPersistenceFraction;
+
+        if (!identityArm && !horizonArm)
         {
             return null;
         }
 
-        var subject = string.IsNullOrWhiteSpace(xmin.Identifier)
+        var holder = string.IsNullOrWhiteSpace(xmin.Identifier)
             ? xmin.Source
             : $"{xmin.Source}:{xmin.Identifier}";
+
+        if (identityArm)
+        {
+            return new Finding(
+                XminHorizonMetric,
+                AlertSeverityLevel.Warning,
+                holder,
+                $"{xmin.XminAge:N0} transactions held by {holder}",
+                $"{XminAgeWarningThreshold:N0} transactions, held in at least "
+                    + $"{XminPersistenceFraction:P0} of observations",
+                $"Vacuum is reclaiming nothing cluster-wide: {holder} is holding the xmin horizon "
+                    + $"{xmin.XminAge:N0} transactions back, in {xmin.ObservationsHeld} of "
+                    + $"{xmin.ObservationsTotal} observations. {RemedyFor(xmin.Source)}"
+                    + (string.IsNullOrWhiteSpace(xmin.Detail) ? string.Empty : $" ({xmin.Detail})"),
+                xmin.XminAge,
+                XminAgeWarningThreshold);
+        }
+
+        /* Horizon-arm fire. Two shapes reach here, told apart by the identity FRACTION alone (the floor
+           is what a freshly-started window cannot yet satisfy): when the fraction holds, the latest
+           holder has won the collections that recorded one — a chronic holder observed through a window
+           still too young for the identity arm, so it keeps the subject and the naming. When it does not,
+           the holders are rotating, and the subject must NOT be the latest member: the incident is the
+           horizon, and a per-member subject would sidestep the host's per-subject cooldown to page once
+           per parade member. The remedy still names the latest holder's cause — it is the one thing
+           currently actionable either way. */
+        var rotating = !identityFractionHolds;
+        var subject = rotating ? XminRotatingHoldersSubject : holder;
+        var holderClause = rotating
+            ? $"by a succession of different holders rather than one chronic one — the latest is {holder}"
+            : $"by {holder}, the winner in {xmin.ObservationsHeld} of the {xmin.ObservationsTotal} "
+                + "collections that recorded a holder";
 
         return new Finding(
             XminHorizonMetric,
             AlertSeverityLevel.Warning,
             subject,
             $"{xmin.XminAge:N0} transactions held by {subject}",
-            $"{XminAgeWarningThreshold:N0} transactions, held in at least "
-                + $"{XminPersistenceFraction:P0} of observations",
-            $"Vacuum is reclaiming nothing cluster-wide: {subject} is holding the xmin horizon "
-                + $"{xmin.XminAge:N0} transactions back, in {xmin.ObservationsHeld} of "
-                + $"{xmin.ObservationsTotal} observations. {RemedyFor(xmin.Source)}"
+            $"{XminAgeWarningThreshold:N0} transactions, behind in at least "
+                + $"{XminPersistenceFraction:P0} of the window's captures",
+            $"Vacuum is reclaiming nothing cluster-wide: the xmin horizon has been at least "
+                + $"{XminAgeWarningThreshold:N0} transactions behind in {xmin.ObservationsAboveThreshold} of "
+                + $"the window's {xmin.CapturesInWindow} collections, held {holderClause}; it currently "
+                + $"stands {xmin.XminAge:N0} back. {RemedyFor(xmin.Source)}"
                 + (string.IsNullOrWhiteSpace(xmin.Detail) ? string.Empty : $" ({xmin.Detail})"),
             xmin.XminAge,
             XminAgeWarningThreshold);

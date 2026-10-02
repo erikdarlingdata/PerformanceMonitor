@@ -83,6 +83,12 @@ public sealed class AlertDeliveryChannelTests
     /// excluding them from the parity comparison costs nothing real, and
     /// <see cref="EveryDisagreement_IsUnreachableOrTheDeliberateChange"/> holds the exclusion to exactly
     /// this predicate plus the one deliberate change, <see cref="WebhookFailureNowNamed"/>.</para>
+    ///
+    /// <para>The last clause is the shape that stores <c>undelivered</c>: a configured channel that nothing
+    /// consulted. Lite's settings still cannot produce it, because Lite has no notification routes and a
+    /// configured channel is always consulted there. Darling can (#4751): an alert no route covers, on a
+    /// deployment whose email is set up only through routes. <c>Darling.Tests.AlertDeliveryChannelTests</c>
+    /// and <c>EmailRouteRecipientsTests</c> pin that side.</para>
     /// </summary>
     private static bool Unreachable(EmailFanoutResult result, bool muted)
         => (result.SendError is not null) != (result.EmailOutcome == AlertChannelOutcome.Failed)
@@ -298,17 +304,25 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
-    /// Lite's producer states <c>trayChannelPresent: true</c> — the named argument, so the answer cannot be
-    /// flipped by a positional edit, and the divergence from Darling is declared at the call site rather
-    /// than inferred.
+    /// Lite's producer states its tray channel with the named argument, so the answer cannot be flipped by
+    /// a positional edit, and the divergence from Darling is declared at the call site rather than inferred.
+    /// <para>#3916 moved this pin: the answer is now <c>trayShown</c>, TRUE by default for the engine path
+    /// (LiteAlertDeliverer shows a balloon on the same call) and FALSE on exactly one caller — the analysis
+    /// finding arm, because Lite wires no tray sink into AnalysisNotificationService and a finding row stored
+    /// <c>tray</c> read "Shown" for a toast nobody saw. Neither literal answer is hard-coded any more.</para>
     /// </summary>
     [Fact]
     public void TheLiteProducer_DeclaresItsTrayChannel()
     {
         var text = File.ReadAllText(RepoPath("Lite/Services/EmailAlertService.cs"));
 
-        Assert.Contains("trayChannelPresent: true", text, StringComparison.Ordinal);
+        Assert.Contains("trayChannelPresent: trayShown)", text, StringComparison.Ordinal);
+        /* #4752: the cancellation token is now the last parameter, so the default is followed by a comma
+           instead of the closing parenthesis. The pin is the same fact as before: the declared default. */
+        Assert.Contains("bool trayShown = true,", text, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(text, @"trayShown: false\)"));
         Assert.DoesNotContain("trayChannelPresent: false", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("trayChannelPresent: true)", text, StringComparison.Ordinal);
 
         /* And it is the only FromFanout caller under Lite, so that one file is the whole population. */
         var callers = Directory
@@ -502,6 +516,7 @@ public sealed class AlertDeliveryChannelTests
 
         public double AnalysisNotifySeverity => 1.5;
         public int AnalysisNotifyCooldownMinutes => 360;
+        public int AnalysisPageCap => 10;
         public string TriageBaseUrl => "";
     }
 

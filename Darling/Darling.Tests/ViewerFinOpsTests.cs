@@ -122,12 +122,23 @@ public sealed class ViewerFinOpsSqlTests
         }
     }
 
+    /// <summary>
+    /// #4227: the total and average grids used to be two statements, each with its own SQL-side
+    /// ORDER BY/LIMIT and, for the average grid, a HAVING that excluded zero-execution databases. Merged into
+    /// one statement, both grids rank and LIMIT client-side (<c>ViewerDataService.GetTopResourceConsumersAsync</c>),
+    /// so the SQL now returns every database and marks a zero-execution one with a NULL avg_cpu_ms instead.
+    /// </summary>
     [Fact]
-    public void TopResourceConsumersSql_ParameterizeTheLimit()
+    public void TopResourceConsumersSql_ReturnsEveryDatabase_RankingAndZeroExecutionExclusionMoveToTheCaller()
     {
-        Assert.Contains("LIMIT $3", ViewerDataService.TopResourceConsumersByTotalSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $3", ViewerDataService.TopResourceConsumersByAvgSql, StringComparison.Ordinal);
-        Assert.Contains("HAVING SUM(delta_execution_count) > 0", ViewerDataService.TopResourceConsumersByAvgSql, StringComparison.Ordinal);
+        var sql = ViewerDataService.TopResourceConsumersSql;
+        Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("HAVING", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN c.execution_count > 0 THEN CAST(c.cpu_time_ms * 1.0 / c.execution_count AS DECIMAL(19,2)) END", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN c.execution_count > 0 THEN CAST(c.io_total_mb * 1.0 / c.execution_count AS DECIMAL(19,4)) END", sql, StringComparison.Ordinal);
+        /* The ByTotal grid's NULL-database_name exclusion is NOT baked in here — see the constant's remarks —
+           because the ByAvg grid never had it; both stay client-side in GetTopResourceConsumersAsync. */
+        Assert.DoesNotContain("database_name IS NOT NULL", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -193,7 +204,9 @@ public sealed class ViewerFinOpsSqlTests
     public void DatabaseSizeReads_ReadColumnsThatExistInTheGeneratedTable()
     {
         Assert.Contains("FROM v_database_size_stats", ViewerDataService.DatabaseSizeLatestSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $2", ViewerDataService.DatabaseSizeSummarySql, StringComparison.Ordinal);
+        /* #4245: topN moved from $2 to $3 - $2 is now the resolved snapshot's collection_time, the windowed
+           probe-then-fallback bound that replaced the unbounded correlated MAX subquery. */
+        Assert.Contains("LIMIT $3", ViewerDataService.DatabaseSizeSummarySql, StringComparison.Ordinal);
 
         var ddl = PgSchemaGenerator.CreateTable(DatabaseSizeStatsCollector.Instance);
         Assert.Equal("database_size_stats", DatabaseSizeStatsCollector.Instance.TargetTable);
@@ -212,8 +225,12 @@ public sealed class ViewerFinOpsSqlTests
     public void StorageGrowthSql_ComparesLatestTo7dAnd30dAgo()
     {
         var sql = ViewerDataService.StorageGrowthSql;
-        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
+        /* #4245: all three CTEs bind a literal collection_time now ($2 latest, $3 at-or-before-7d,
+           $4 at-or-before-30d), each resolved by GetDatabaseSizeSnapshotAtOrBeforeAsync before this statement
+           runs, rather than each CTE re-deriving its own bound-free "<= cutoff" MAX subquery. */
+        Assert.Contains("collection_time = $2", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time = $3", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time = $4", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY growth_30d_mb DESC", sql, StringComparison.Ordinal);
     }
 
@@ -221,11 +238,30 @@ public sealed class ViewerFinOpsSqlTests
     public void ObjectGrowthReads_RankTopN_AndBuildDailySeries()
     {
         Assert.Contains("FROM v_index_object_stats", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $5", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('day', ios.collection_time)", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $6", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
         Assert.Contains("GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
             ViewerDataService.ObjectIndexDetailSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4227: the summary and series statements each used to recompute their own <c>bounds</c> CTE
+    /// (<c>MAX</c>/<c>MIN(collection_time)</c>) — 89ms and 21.3k buffers apiece on a seeded store, because no
+    /// index led (server_id, collection_time). <see cref="ViewerDataService.GetObjectGrowthHeatmapDataAsync"/>
+    /// now computes it once via <see cref="ViewerDataService.ObjectGrowthBoundsSql"/> and passes both instants
+    /// down as plain parameters, so neither statement's own SQL text may still compute MAX/MIN(collection_time).
+    /// </summary>
+    [Fact]
+    public void ObjectGrowthSummaryAndSeriesSql_DoNotRecomputeTheirOwnBounds()
+    {
+        Assert.DoesNotContain("MAX(collection_time)", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(collection_time)", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(collection_time)", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(collection_time)", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+
+        Assert.Contains("MAX(collection_time)", ViewerDataService.ObjectGrowthBoundsSql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time)", ViewerDataService.ObjectGrowthBoundsSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -254,13 +290,49 @@ public sealed class ViewerFinOpsSqlTests
 
     // ── Locking ──
 
+    /// <summary>
+    /// #3878 moved all three locking reads off per-<c>database_name</c> "latest" groups and onto the server's
+    /// newest capture, so what these fragments assert changed with them. The <c>$2</c>/<c>$3</c> positions and
+    /// the relation are unchanged parity facts; the ANCHOR is now pinned in all three, because it is the
+    /// property the fix is: a per-name <c>MAX(collection_time)</c> group makes every name the store ever saw
+    /// immortal, and a renamed-away database renders (and is selectable) forever. The grid, its filtered arm
+    /// and its DB selector are asserted together on purpose — fixing fewer than all three leaves the dead name
+    /// reachable through the ones left behind.
+    ///
+    /// <para>The database filter goes through <see cref="SqlTextPin"/> rather than a plain substring: the fix
+    /// qualified it to <c>ios.database_name</c> when the CTE that referenced the bare name went away, and
+    /// #3217's whole point is that a pin asserting a read still FILTERS must not red merely because an alias
+    /// appeared in front of the column.</para>
+    /// </summary>
     [Fact]
-    public void IndexLockingReads_AllAndByDbVariants_ReadColumnsThatExist()
+    public void IndexLockingReads_AllAndByDbVariants_AnchorOnServerLatest_ReadColumnsThatExist()
     {
+        const string serverLatestAnchor =
+            "collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)";
+
         Assert.Contains("LIMIT $2", ViewerDataService.IndexLockingAllSql, StringComparison.Ordinal);
-        Assert.Contains("AND database_name = $2", ViewerDataService.IndexLockingByDbSql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(serverLatestAnchor, ViewerDataService.IndexLockingAllSql,
+            "the locking grid no longer anchors on the server's latest capture — #3878's immortal per-name groups are back");
+
+        SqlTextPin.AssertExpresses("AND database_name = $2", ViewerDataService.IndexLockingByDbSql,
+            "the single-database arm no longer filters on the name it was handed");
         Assert.Contains("LIMIT $3", ViewerDataService.IndexLockingByDbSql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(serverLatestAnchor, ViewerDataService.IndexLockingByDbSql,
+            "the filtered arm can resurrect a renamed-away database the grid and the selector have dropped (#3878)");
+
         Assert.Contains("FROM v_index_object_stats", ViewerDataService.IndexLockingDatabasesSql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(serverLatestAnchor, ViewerDataService.IndexLockingDatabasesSql,
+            "the DB selector no longer anchors on the server's latest capture — it will OFFER names that no longer exist (#3878)");
+
+        /* The shape the fix retired, in all three: a name-keyed "latest" group rejoined to the rows. */
+        foreach (var sql in new[]
+        {
+            ViewerDataService.IndexLockingAllSql, ViewerDataService.IndexLockingByDbSql,
+            ViewerDataService.IndexLockingDatabasesSql,
+        })
+        {
+            Assert.DoesNotContain("GROUP BY database_name", sql, StringComparison.Ordinal);
+        }
 
         var ddl = PgSchemaGenerator.CreateTable(IndexObjectStatsCollector.Instance);
         Assert.Equal("index_object_stats", IndexObjectStatsCollector.Instance.TargetTable);
@@ -378,14 +450,18 @@ public sealed class ViewerFinOpsSqlTests
     [InlineData(nameof(ViewerDataService.MemoryGrantEfficiencySql))]
     [InlineData(nameof(ViewerDataService.DatabaseResourceUsageSql))]
     [InlineData(nameof(ViewerDataService.ApplicationConnectionsSql))]
-    [InlineData(nameof(ViewerDataService.TopResourceConsumersByTotalSql))]
-    [InlineData(nameof(ViewerDataService.TopResourceConsumersByAvgSql))]
+    [InlineData(nameof(ViewerDataService.TopResourceConsumersSql))]
     [InlineData(nameof(ViewerDataService.WaitCategorySummarySql))]
     [InlineData(nameof(ViewerDataService.ExpensiveQueriesSql))]
     [InlineData(nameof(ViewerDataService.HighImpactQueriesSql))]
     [InlineData(nameof(ViewerDataService.DatabaseSizeLatestSql))]
     [InlineData(nameof(ViewerDataService.DatabaseSizeSummarySql))]
     [InlineData(nameof(ViewerDataService.StorageGrowthSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeSnapshotWindowedProbeSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeSnapshotFallbackProbeSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeLatestSnapshotWindowedProbeSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeLatestSnapshotFallbackProbeSql))]
+    [InlineData(nameof(ViewerDataService.ObjectGrowthBoundsSql))]
     [InlineData(nameof(ViewerDataService.ObjectGrowthSummarySql))]
     [InlineData(nameof(ViewerDataService.ObjectGrowthSeriesSql))]
     [InlineData(nameof(ViewerDataService.ObjectIndexDetailSql))]

@@ -225,8 +225,14 @@ public class ScenarioTests : IClassFixture<SharedDuckDbFixture>
     {
         var (stories, _) = await RunFullPipelineAsync(s => s.SeedLogWritePressureServerAsync());
 
-        // 34.7% of period, concerning = 10% → severity = 1.0 (capped)
-        Assert.Equal(1.0, stories[0].Severity, precision: 1);
+        // 34.7% of period against the #3538 A5 re-derived WRITELOG pair (0.25, 0.50): on the ramp arm,
+        // 0.5 + 0.5 * (0.3472 - 0.25) / 0.25 = 0.694 — a WARNING that roots, not a saturated 1.0. (Was
+        // pinned 1.0 against the inherited (0.10, null); updated deliberately: that bar saturated on 31.5% of
+        // the measured fleet's routine windows, and 34.7% is above p99.9 of them but under the 0.50 the
+        // fleet never reached.) WRITELOG has no amplifier arm, so the story's severity IS the base. A range
+        // rather than an exact value because the divisor is OBSERVED time, which the seeded series lands
+        // within one collection cadence of the nominal window (coverage 0.999-1.0).
+        Assert.InRange(stories[0].Severity, 0.69, 0.70);
     }
 
     /* ── Resource Semaphore Cascade ── */
@@ -489,6 +495,29 @@ public class ScenarioTests : IClassFixture<SharedDuckDbFixture>
         var (_, facts) = await RunFullPipelineWithAnomaliesAsync(s => s.SeedBlockingSpikeAnomalyAsync());
 
         Assert.True(facts.ContainsKey("ANOMALY_DEADLOCK_SPIKE"), "Should detect deadlock spike");
+    }
+
+    /// <summary>
+    /// #4731: the real detector path. The scenario's baseline holds no blocking or deadlock rows at all, and
+    /// the collection log holds no run of either collector, so no hour of the baseline window is covered and a
+    /// quiet history reaches the detector as an EMPTY bucket: not trustworthy, so both facts fire on the count
+    /// alone as first occurrences, and not a measured zero, so <c>baseline_zero_history</c> is stamped 0. The
+    /// measured-zero case, an hour the collector covered and saw nothing in, is pinned in
+    /// <c>EventBaselineCoveredDaysTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task BlockingSpikeAnomaly_OnAnEmptyBaseline_IsAFirstOccurrence_AndNotStampedZeroHistory()
+    {
+        var (_, facts) = await RunFullPipelineWithAnomaliesAsync(s => s.SeedBlockingSpikeAnomalyAsync());
+
+        foreach (var key in new[] { "ANOMALY_BLOCKING_SPIKE", "ANOMALY_DEADLOCK_SPIKE" })
+        {
+            var metadata = facts[key].Metadata;
+            Assert.Equal(1.0, metadata["is_new"]);
+            Assert.Equal(PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.NoBaselineRatio, metadata["ratio"]);
+            Assert.Equal(0.0, metadata["baseline_zero_history"]);
+            Assert.Equal(0.0, metadata["baseline_samples"]);
+        }
     }
 
     /* ── Anomaly Detection: Wait Spike ── */

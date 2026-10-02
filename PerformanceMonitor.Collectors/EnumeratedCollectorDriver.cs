@@ -15,17 +15,78 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
-/// <summary>Per-run outcome of the enumeration driver: rows written and the summed SQL/storage slice times.
+/// <summary>Per-run outcome of the enumeration driver: rows written, the summed SQL/storage slice times,
+/// and — since #3754 — the per-item FAILURE account the run's collection_log row is classified from.
 ///
 /// <para><see cref="SqlMs"/> is the SLICE, not a target-side total (#3192): it is the sum of each item's
 /// stopwatch around <c>perItemWatermark</c> plus <c>readItem</c>, and both of those legitimately touch the
 /// HOST STORE. See <c>RunAsync</c>'s <c>readItem</c> parameter for the measured magnitude and for the
 /// <see cref="CollectorContext"/> stamps that let a host attribute it.</para>
+///
+/// <para><b>Why the failure account rides the result rather than each host's <c>onItemError</c> closure
+/// (#3754).</b> The driver owns the per-item catch SHAPE — that is the seam #1556 drew — and until #3754
+/// the shape was: hand the exception to <c>onItemError</c>, leave the batch null, continue. Both hosts'
+/// closures then LOGGED it and nothing else, so a collector whose every item threw returned here with
+/// <see cref="Rows"/> = 0 and no other evidence, and each host recorded that as <c>SUCCESS</c> with zero
+/// rows. On Azure SQL DB <c>database_scoped_config</c> did exactly that on every monitored database every
+/// sweep — the per-item query is rejected there — and <c>get_collection_health</c> then reported it
+/// HEALTHY with <c>errors: 0</c> and a sentence saying it had read and found nothing. The SIBLING fan-out,
+/// each host's Azure per-database connection loop, had already been given the three things this needed
+/// (#2623): a count of attempted against failed, a partial-failure note naming the losers, and an
+/// all-failed rethrow so the run classifies ERROR / PERMISSIONS / SESSION_MISSING. The enumerated path
+/// never got them because its per-item catch lives HERE, where no host code runs. So the account is kept
+/// here, in the one place that sees every item's outcome, and handed back on the result: a host cannot
+/// forget to count what the driver counted for it, and the two hosts cannot drift on what "all failed"
+/// means. <c>onItemError</c> is unchanged and still fires per item — it remains the hosts' log line and
+/// query_store's adaptive-shrink stamp.</para>
 /// </summary>
-public readonly record struct EnumeratedRunResult(int Rows, long SqlMs, long StorageMs);
+/// <param name="Rows">Rows written across every item whose read AND flush succeeded.</param>
+/// <param name="SqlMs">Summed per-item read slices — see the type remarks for what that includes.</param>
+/// <param name="StorageMs">Summed per-item flush slices.</param>
+/// <param name="Attempted">Items the loop reached. Equal to the item list's count unless cancellation
+/// stopped the sweep, in which case the run is already propagating an exception and nothing reads this.</param>
+/// <param name="Failed">Items whose read faulted and were skipped — the routine per-item catch AND the #2150
+/// budget-expiry catch, both. OOM and cancellation propagate and are not counted: they end the run.</param>
+/// <param name="FailedItems">Those items by name, in loop order — the names <see cref="PartialFailureNote"/>
+/// spells out (capped) so an operator can see WHICH database was lost, not merely how many.</param>
+/// <param name="FirstError">The first failed item's exception, kept whole so the all-failed host rethrow
+/// (<see cref="AllItemsFailed"/>) surfaces the ORIGINAL type and stack for classification — a SqlException
+/// still classifies PERMISSIONS on its number, a TimeoutException still reads as a timeout. Null when
+/// nothing failed.</param>
+public readonly record struct EnumeratedRunResult(
+    int Rows,
+    long SqlMs,
+    long StorageMs,
+    int Attempted = 0,
+    int Failed = 0,
+    IReadOnlyList<string>? FailedItems = null,
+    Exception? FirstError = null)
+{
+    /// <summary>
+    /// True when the loop reached at least one item and EVERY item it reached faulted — the run stored
+    /// nothing because it could read nothing, which must not land as <c>SUCCESS</c> (#3754). Each host
+    /// rethrows <see cref="FirstError"/> on this, exactly as its Azure per-database loop already does, so
+    /// the run is classified from the real exception. The <c>FirstError is not null</c> clause is
+    /// belt-and-braces: a failed item always records its exception, but a host rethrowing null would
+    /// trade a classified fault for a NullReferenceException.
+    /// </summary>
+    public bool AllItemsFailed => Attempted > 0 && Failed == Attempted && FirstError is not null;
+
+    /// <summary>
+    /// The #2623 partial-failure note for this run — <see cref="EnumeratedCollectorDriver.PartialDatabaseFailureNoteFormat"/>
+    /// composed from this result's own counts — or null when nothing failed or when EVERYTHING did (the
+    /// all-failed case rethrows and an ERROR row carries the error message instead). Composed HERE rather
+    /// than at each host so the enumerated fan-out and the Azure per-database fan-out cannot come to word
+    /// the same loss differently: one format string, one composer, two paths.
+    /// </summary>
+    public string? PartialFailureNote =>
+        EnumeratedCollectorDriver.BuildPartialFailureNote(
+            Failed, Attempted, FailedItems ?? Array.Empty<string>(), FirstError?.Message);
+}
 
 /// <summary>
 /// What a per-database fan-out cost, rolled up to the one thing a blended <c>collection_log</c> row cannot
@@ -173,8 +234,10 @@ public sealed class CycleProbeFailures
 /// removes the duplicate that let the same defect live in two runners.
 ///
 /// <para>
-/// The driver owns only the control flow — iteration, cancellation, the per-item catch SHAPE, the
-/// per-item flush, and the interleaved SQL/storage timing. Everything app-specific stays in the
+/// The driver owns only the control flow — iteration, cancellation, the per-item catch SHAPE (and, since
+/// #3754, the per-item failure ACCOUNT that shape produces: attempted, failed, which items, the first
+/// error — see <see cref="EnumeratedRunResult"/>), the per-item flush, and the interleaved SQL/storage
+/// timing. Everything app-specific stays in the
 /// caller's delegates: the SQL connection and per-item query (readItem), the storage engine
 /// (writeBatch), the host store's per-database watermark read and its catch-up clamp (perItemWatermark),
 /// and the log text / display name (onItemComplete / onItemError). This is the seam the plan required:
@@ -299,6 +362,16 @@ public static class EnumeratedCollectorDriver
     /// constraint, so no migration rung is needed. The self-alert's consecutive-failure fast path is
     /// server-scoped across every collector, so one collector abandoning among ~40 healthy ones cannot
     /// empty its success window.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This status word (through
+    /// <see cref="AbandonedRunPredicateSql"/>) is baked, at materialization time, into
+    /// <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves
+    /// the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week of
+    /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
+    /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedStatus = "ABANDONED";
 
@@ -319,6 +392,16 @@ public static class EnumeratedCollectorDriver
     /// <c>query_stats</c> and <c>plan_correction</c> carry 120 s while <c>query_store</c> carries the 600 s
     /// <c>QueryStoreCollector.PerDatabaseWallClockBudget</c> - so equality against any one rendered sentence
     /// matches one collector and silently misses the rest.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This pattern (through
+    /// <see cref="AbandonedByNotePredicateSql"/>) is baked, at materialization time, into
+    /// <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves
+    /// the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week of
+    /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
+    /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string WholeCycleBudgetNoteSqlPattern = "wall-clock budget (%s) reached; cycle abandoned";
 
@@ -336,6 +419,15 @@ public static class EnumeratedCollectorDriver
     /// <para><c>COALESCE</c> rather than a bare <c>LIKE</c>: <c>NULL LIKE</c> is NULL, and this predicate is
     /// also used under a <c>NOT</c>, where a NULL would drop an ordinary empty run out of the success count
     /// instead of leaving it there.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This predicate (success_count, abandoned_count and
+    /// last_zero_row_streak_break_time) is baked, at materialization time, into <c>collect.collection_health_hourly</c>
+    /// (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves the fleet collection-health read.
+    /// Changing it no longer changes only the SQL a read sends: a week of already-materialized buckets keeps the OLD
+    /// meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ... IF NOT EXISTS</c> will not re-define it) or
+    /// the fleet card bands a week under the old predicate while every per-server surface uses the new one. That is
+    /// #3698's known price for baking a row filter; <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions
+    /// to <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedByNotePredicateSql =
         "(rows_collected = 0 AND COALESCE(error_message, '') LIKE '" + WholeCycleBudgetNoteSqlPattern + "')";
@@ -350,6 +442,15 @@ public static class EnumeratedCollectorDriver
     /// drifted copy a build error rather than something a pin has to notice. What the pins still carry is
     /// the part no compiler can state: that every banding read selects the count at all, and that none of
     /// them has hand-rolled a status-only bucket beside the shared one.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This predicate (abandoned_count) is baked, at
+    /// materialization time, into <c>collect.collection_health_hourly</c>
+    /// (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves the fleet collection-health read.
+    /// Changing it no longer changes only the SQL a read sends: a week of already-materialized buckets keeps the OLD
+    /// meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ... IF NOT EXISTS</c> will not re-define it) or
+    /// the fleet card bands a week under the old predicate while every per-server surface uses the new one. That is
+    /// #3698's known price for baking a row filter; <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions
+    /// to <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedRunPredicateSql =
         "(status = '" + AbandonedStatus + "' OR " + AbandonedByNotePredicateSql + ")";
@@ -362,6 +463,37 @@ public static class EnumeratedCollectorDriver
     /// separately-maintained SQL strings.
     /// </summary>
     public static readonly IReadOnlyList<string> FreshnessSuccessStatuses = new[] { "SUCCESS", "SKIPPED" };
+
+    /// <summary>
+    /// Every value <c>collection_log.status</c> can carry, as the CLOSED SET a caller filtering the log is
+    /// allowed to name (#3869). The vocabulary was previously spread across the writers as bare literals —
+    /// <see cref="ClassifyReturnedRun"/>'s <c>SUCCESS</c> and <see cref="AbandonedStatus"/>, Lite's
+    /// <c>RemoteCollectorService</c> (<c>SKIPPED</c>, <c>YIELDED</c>, <c>ERROR</c>),
+    /// <c>DarlingWorker.PostgresFaultOutcome</c> and its sibling catch arms (<c>PERMISSIONS</c>,
+    /// <c>SESSION_MISSING</c>, <c>ERROR</c>, <c>YIELDED</c>),
+    /// <see cref="CollectorRuntimePrecondition.ExtensionMissingStatus"/>, and the two fleet-maintenance
+    /// passes, whose partial-failure rollup writes <c>WARNING</c> (<c>DarlingRetention</c>,
+    /// <c>OversizedPlanBacklogSweep</c>) — so nothing could state the set, and a status filter had no
+    /// authority to validate against.
+    ///
+    /// <para><b>Ordered by what a triage caller reaches for</b>, not alphabetically: the successes first, then
+    /// the guards, then the faults. The order is what a refusal prints, and a refusal is read by someone who
+    /// is hunting failures.</para>
+    ///
+    /// <para><b>WARNING is in the set because the store WRITES it</b>, on a fleet-maintenance pass whose
+    /// tables partly failed — and those rows are reachable through the reserved <c>(fleet)</c> server name.
+    /// A vocabulary that omitted it would refuse a value the log genuinely carries, which is the same defect
+    /// as accepting one it does not.</para>
+    ///
+    /// <para>Declared HERE, beside the statuses this type already owns, rather than in an MCP helper: the
+    /// writers are collectors and both SKUs' readers already link this assembly, so the set sits with the
+    /// thing it describes and neither reader can hold a private copy.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> CollectionLogStatuses = new[]
+    {
+        "SUCCESS", "SKIPPED", "YIELDED", "ABANDONED", "ERROR",
+        "PERMISSIONS", "EXTENSION_MISSING", "SESSION_MISSING", "WARNING"
+    };
 
     /// <summary>
     /// How a run that RETURNED (rather than threw) becomes a collection_log status, shared by both hosts so
@@ -396,11 +528,13 @@ public static class EnumeratedCollectorDriver
     /// usually a few specific databases and the name is the whole lead. Capped for the case where it
     /// is not.
     /// </para>
+    ///
+    /// <para>
+    /// The text lives in <see cref="PartialDatabaseFailureNote.Format"/> (#4748), beside the reader that
+    /// the health band uses to find the counts again, so the writer and the reader cannot drift apart.
+    /// </para>
     /// </summary>
-    public const string PartialDatabaseFailureNoteFormat =
-        "{0} of {1} database(s) failed and were skipped ({2}) - any rows this cycle are from the "
-        + "survivors ONLY, so a low or zero row count here is not evidence the server is quiet; "
-        + "first error: {3}";
+    public const string PartialDatabaseFailureNoteFormat = PartialDatabaseFailureNote.Format;
 
     /// <summary>
     /// How many failed database names <see cref="BuildPartialFailureNote"/> spells out before collapsing
@@ -694,9 +828,22 @@ public static class EnumeratedCollectorDriver
         long sqlMs = 0;
         long storageMs = 0;
 
+        /* #3754: the per-item failure account, kept beside the per-item catch that produces it. Before
+           this the two catch arms below handed the exception to onItemError and forgot it, so a run in
+           which EVERY item faulted returned Rows = 0 and nothing else, and both hosts wrote SUCCESS. The
+           Azure per-database loop in each host already counts attempted/failed/firstFailure for its own
+           fan-out (#2623); this is the enumerated fan-out's copy of the same three facts, returned on the
+           result so the hosts compose the note and rethrow from shared numbers instead of each re-deriving
+           them inside a closure. */
+        var attempted = 0;
+        var failed = 0;
+        var failedItems = new List<string>();
+        Exception? firstError = null;
+
         foreach (var item in items)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            attempted++;
 
             List<TRow>? batch = null;
             long itemSqlMs = 0;
@@ -738,13 +885,29 @@ public static class EnumeratedCollectorDriver
                    in favour of the budget message: whatever the provider raised on cancellation is an
                    artifact of HOW it was cancelled, not why. */
                 _ = ex;
-                onItemError(item, ItemBudgetException(perItemBudget!.Value));
+                var budgetFailure = ItemBudgetException(perItemBudget!.Value);
+                /* #3754: counted as a failed item like the generic arm below, with the BUDGET exception as
+                   the recorded error for the same reason it is the logged one — it says why, where the
+                   provider's cancellation artifact says only how. Named before the hook so the account
+                   cannot depend on what the host's closure does with the exception. */
+                failed++;
+                failedItems.Add(item);
+                firstError ??= budgetFailure;
+                onItemError(item, budgetFailure);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* One item failing is routine (an offline/mid-restore database, a permissions oddity, a
                    timeout) — skip it and keep collecting the rest, matching the original per-item loop.
-                   OCE and OOM deliberately propagate (they are not per-item faults). */
+                   OCE and OOM deliberately propagate (they are not per-item faults).
+
+                   #3754: and COUNTED. Skipping the item is still right; skipping it with no trace on the
+                   run is what let an every-item failure record SUCCESS. The exception is kept whole (not
+                   its message) so the host's all-failed rethrow surfaces the original type for
+                   classification. */
+                failed++;
+                failedItems.Add(item);
+                firstError ??= ex;
                 onItemError(item, ex);
             }
             finally
@@ -776,7 +939,7 @@ public static class EnumeratedCollectorDriver
             onItemComplete(item, batch.Count, itemSqlMs, itemStorageMs);
         }
 
-        return new EnumeratedRunResult(totalRows, sqlMs, storageMs);
+        return new EnumeratedRunResult(totalRows, sqlMs, storageMs, attempted, failed, failedItems, firstError);
     }
 
     /// <summary>

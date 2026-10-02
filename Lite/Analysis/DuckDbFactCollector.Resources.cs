@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
@@ -13,8 +14,12 @@ namespace PerformanceMonitorLite.Analysis;
 public partial class DuckDbFactCollector
 {
     /// <summary>
-    /// Collects memory stats: total physical RAM, buffer pool size, target memory.
-    /// These facts enable edition-aware memory recommendations in the config audit.
+    /// Collects memory stats: total physical RAM, buffer pool size, target memory — the newest sample
+    /// within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's end (#3896).
+    /// These facts enable RESOURCE-based memory recommendations in the config audit: max server memory is
+    /// sized against the server's physical RAM (on an Azure SQL Database the collector stores the database's own memory limit in
+    /// that column, not the host's RAM), and no check in that audit branches on the edition (which the payload reports for
+    /// context only).
     /// </summary>
     private async Task CollectMemoryFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -24,16 +29,22 @@ public partial class DuckDbFactCollector
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
+            /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor). ORDER BY ... LIMIT 1 cannot
+               stop early across the hot table UNION the parquet archive, so without the bound this sorted the
+               server's whole archive to return one row; a memory collector dead for a day now reads as no fact
+               rather than a stale one. */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT total_physical_memory_mb, buffer_pool_mb, target_server_memory_mb
 FROM v_memory_stats
 WHERE server_id = $1
-AND   collection_time <= $2
+AND   collection_time >= $2
+AND   collection_time <= $3
 ORDER BY collection_time DESC
 LIMIT 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(MemoryStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -71,6 +82,9 @@ LIMIT 1";
     /// absent and the amplifier no-ops). The read is window-bounded to [TimeRangeStart, TimeRangeEnd]
     /// (a lower bound, not just &lt;= end, matching CpuUtilizationSql) so a lapsed collection surfaces
     /// no stale snapshot from outside the window — the fact is then absent and the amplifier no-ops.
+    /// #3936: the query's tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c> — see
+    /// Darling's twin (PgFactCollector.Resources.RunnableTaskStatsSql) for why a same-instant collision
+    /// needs a deterministic tiebreak here too.
     /// </summary>
     private async Task CollectRunnableTaskFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -87,7 +101,7 @@ FROM v_cpu_scheduler_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY collection_time DESC
+ORDER BY collection_time DESC, collection_id DESC
 LIMIT 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -189,7 +203,9 @@ AND   collection_time <= $3";
     }
 
     /// <summary>
-    /// Collects top memory clerks by size. Context for understanding where memory is allocated.
+    /// Collects top memory clerks by size, each clerk's newest sample within
+    /// <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's end (#3896). Context for
+    /// understanding where memory is allocated.
     /// </summary>
     private async Task CollectMemoryClerkFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -199,6 +215,8 @@ AND   collection_time <= $3";
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
+            /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor); unbounded, the window
+               function numbered every clerk row in the hot table and the parquet archive to keep ten. */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 WITH latest AS (
@@ -206,7 +224,8 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY clerk_type ORDER BY collection_time DESC) AS rn
     FROM v_memory_clerks
     WHERE server_id = $1
-    AND   collection_time <= $2
+    AND   collection_time >= $2
+    AND   collection_time <= $3
 )
 SELECT clerk_type, memory_mb
 FROM latest WHERE rn = 1 AND memory_mb > 0
@@ -214,6 +233,7 @@ ORDER BY memory_mb DESC
 LIMIT 10";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(MemoryClerksCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -339,6 +359,8 @@ AND   collection_time <= $3";
     /// <summary>
     /// Collects key perfmon throughput counters: Batch Requests/sec, compilations, recompilations.
     /// Unscored context that distinguishes a busy server from a sick one (used by the AI surfaces).
+    /// Fact values are per-second rates: the per-interval delta divided by the row's measured
+    /// sample_interval_seconds (#3527); the raw delta and the divisor ride the metadata.
     /// </summary>
     private async Task CollectPerfmonFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -349,17 +371,23 @@ AND   collection_time <= $3";
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
+            /* #3527: delta_cntr_value spans one COLLECTION INTERVAL, not one second — at a 60s cadence the
+               raw delta is 60x the true rate. The honest rate divides by the row's MEASURED
+               sample_interval_seconds (#2234); interval <= 0 marks an unknowable delta (first sighting,
+               counter reset, gap past the policy), so those rows are filtered rather than emitted as 0 —
+               rn = 1 lands on the newest row a rate can honestly be derived from. */
             cmd.CommandText = @"
 WITH latest AS (
-    SELECT counter_name, cntr_value, delta_cntr_value,
+    SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds,
            ROW_NUMBER() OVER (PARTITION BY counter_name ORDER BY collection_time DESC) AS rn
     FROM v_perfmon_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   counter_name IN ('Batch Requests/sec', 'SQL Compilations/sec', 'SQL Re-Compilations/sec')
+    AND   sample_interval_seconds > 0
 )
-SELECT counter_name, cntr_value, delta_cntr_value
+SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
 FROM latest WHERE rn = 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -372,6 +400,7 @@ FROM latest WHERE rn = 1";
                 var counterName = reader.GetString(0);
                 var cntrValue = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
                 var deltaValue = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
+                var intervalSeconds = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
 
                 var (factKey, source) = counterName switch
                 {
@@ -383,8 +412,11 @@ FROM latest WHERE rn = 1";
 
                 if (factKey == null) continue;
 
-                // All remaining counters are per-second rates — use the delta.
-                var value = (double)deltaValue;
+                /* The delta spans one collection interval — divide by the measured interval for the
+                   per-second rate (#3527). The SQL already filters interval <= 0 (unknowable delta);
+                   this guard keeps a raw or zero value from ever escaping if that filter regresses. */
+                if (intervalSeconds <= 0) continue;
+                var value = deltaValue / (double)intervalSeconds;
 
                 facts.Add(new Fact
                 {
@@ -395,7 +427,8 @@ FROM latest WHERE rn = 1";
                     Metadata = new Dictionary<string, double>
                     {
                         ["cntr_value"] = cntrValue,
-                        ["delta_cntr_value"] = deltaValue
+                        ["delta_cntr_value"] = deltaValue,
+                        ["sample_interval_seconds"] = intervalSeconds
                     }
                 });
             }
@@ -413,8 +446,10 @@ FROM latest WHERE rn = 1";
     /// Collects the plan-cache single-use bloat signal from the LATEST plan_cache_stats snapshot. Mirrors
     /// the Dashboard's report.plan_cache_bloat (install/47_create_reporting_views.sql:1456-1496), which
     /// SUMs single_use_plans / total_plans / single_use_size_mb / total_size_mb over the newest
-    /// collection_time and derives single_use_percent. Read as a point-in-time state (no lower time bound,
-    /// just &lt;= TimeRangeEnd, like CollectMemoryFactsAsync / the config reads); DENSE_RANK() picks every
+    /// collection_time and derives single_use_percent. Read as a point-in-time state like
+    /// CollectMemoryFactsAsync: the newest snapshot within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see>
+    /// of the window's end (#3896 — the lookback start binds as $2; it was &lt;= TimeRangeEnd alone, which
+    /// read the whole parquet archive); DENSE_RANK() picks every
     /// row of the newest collection (avoiding QUALIFY, which is DuckDB-only and banned in the shared PG
     /// dialect). The fact is emitted whenever a real cache exists (total_plans &gt; 0); the FactScorer
     /// applies the &gt; 50/30/20% bloat tiers AND the single_use_size_mb &gt;= 100 noise guard, so a
@@ -435,7 +470,8 @@ WITH ranked AS (
            DENSE_RANK() OVER (ORDER BY collection_time DESC) AS rnk
     FROM v_plan_cache_stats
     WHERE server_id = $1
-    AND   collection_time <= $2
+    AND   collection_time >= $2
+    AND   collection_time <= $3
 )
 SELECT
     COALESCE(SUM(total_plans), 0) AS total_plans,
@@ -446,6 +482,7 @@ FROM ranked
 WHERE rnk = 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(PlanCacheStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -39,6 +40,102 @@ public sealed record AdviceBlock(
 public static class FactAdvice
 {
     /// <summary>
+    /// The ONE caveat sentence that rides with every missing-index suggestion this engine delivers (#3805) —
+    /// the MISSING_INDEX card's investigation opens with it, both the static block and the composed one, so the
+    /// drill-down's CREATE statements never reach a reader without it. Fixed text, verbatim from the maintainer,
+    /// byte-identical to <c>McpPlanAnalysisFormatter.MissingIndexCaveat</c> in <c>PerformanceMonitor.PlanAnalysis</c>,
+    /// which every <c>analyze_*_plan</c> tool puts on its <c>missing_indexes[]</c> rows as <c>caveat</c>. Duplicated
+    /// rather than referenced because this assembly references no project (it is the shared engine every SKU
+    /// builds on), and <c>McpPlanAnalysisEnvelopeTests</c> pins the two strings equal so the duplication cannot
+    /// drift. The maintainer's position the sentence carries: a request is corroboration for a statement already
+    /// measured slow, never a diagnosis and never a finding's driver; its counters are plan-cache-bounded and its
+    /// impact is one operator's statement-scoped estimate; an index is a per-table commitment with write cost and
+    /// regression risk for other plans. <c>FactScorer</c> demotes the fact to the Information rung for the same
+    /// reason.
+    /// </summary>
+    public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost — test it.";
+
+    /// <summary>
+    /// The ONE clause a card gains when its fact ranked more objects than its own subject (#3691 lane 43):
+    /// <c>"; and two more: public.orders (3.1× for 5 hours), public.events (1.4× for 2 hours)"</c>. Appends to
+    /// the sentence that states the SUBJECT's figures, because <see cref="Fact.Ranked"/>[0] IS the subject — so
+    /// "two more" is literally "besides the one just described" and can never be read as two more than the
+    /// population count a card states separately.
+    ///
+    /// <para><b>Empty string below two ranked objects</b>, which is the byte-identity arm and the reason this
+    /// returns a clause rather than composing a sentence: a caller interpolates it into the prose it already
+    /// had, so every fact that ranks nothing (nearly all of them, and every SQL Server fact — no SQL Server
+    /// collector sets <see cref="Fact.Ranked"/>) renders the characters it rendered before. Pinned by
+    /// <c>FactRankedTests</c>.</para>
+    ///
+    /// <para><b>Why the figures come from a callback.</b> Each family states its rank in its own units and its
+    /// own words — a ratio and a duration here, bytes and a percentage there — and the numbers live in
+    /// <see cref="RankedObject.Figures"/> under that family's own metadata names. A shared formatter would
+    /// either have to know every family or print raw doubles, so the family passes its own one-line formatter
+    /// and this owns only the grammar. Return an empty string from it for an object whose name is the whole
+    /// statement and the parentheses are omitted.</para>
+    ///
+    /// <para>Lives in this shared file rather than in <c>PgTargetAdvice</c> because the seam it reads is shared:
+    /// <see cref="Fact.Ranked"/> is on <see cref="Fact"/>, and the first SQL Server family that ranks objects
+    /// must not have to grow a second copy of this grammar to say the same thing. Today's three callers are all
+    /// PostgreSQL-target.</para>
+    /// </summary>
+    public static string NameTheRest(Fact fact, Func<RankedObject, string> figures)
+    {
+        var named = NameTheRestList(fact, figures, separator: ", ");
+        if (named.Length == 0)
+            return string.Empty;
+
+        /* Spelled out to three, which is FactRanked.MaxObjects — the numeral arm exists so a cap raised without
+           touching this file reads as English rather than as "and 4 more" beside spelled-out siblings. */
+        var rest = fact.Ranked.Count - 1;
+        var count = rest switch
+        {
+            1 => "one",
+            2 => "two",
+            3 => "three",
+            _ => rest.ToString(CultureInfo.InvariantCulture),
+        };
+
+        return $"; and {count} more: {named}";
+    }
+
+    /// <summary>
+    /// The NAMED LIST alone — <c>"public.orders (300 MB, 40%), sales.ledger (10 MB)"</c> — without the clause
+    /// grammar <see cref="NameTheRest"/> wraps it in, for a family whose card states the rest in a SENTENCE of
+    /// its own rather than as a clause on the subject's. Empty string under two ranked objects, same rule and
+    /// same reason (#3691 lane 43).
+    ///
+    /// <para>Two entry points and one formatter, because the alternative is two grammars: the bloat cards state
+    /// the subject's figures across several sentences and could not append "and two more" to any one of them
+    /// without reading as a comment on that sentence, while the autovacuum-disabled card states its subject in
+    /// one sentence and wants the clause there. What must not differ between them is how an object and its
+    /// figures are rendered, and that lives here.</para>
+    ///
+    /// <para><paramref name="separator"/> is the caller's because it is a property of the FIGURES, not a
+    /// preference: the bloat families state three figures per object ("300 MB, 40%, 20,000 dead tuples now"),
+    /// so a comma between objects would be one comma among four and the list would stop parsing to a human;
+    /// the clause form's figures carry none, so a comma is right there. Both spellings are pinned.</para>
+    /// </summary>
+    public static string NameTheRestList(Fact fact, Func<RankedObject, string> figures, string separator)
+    {
+        ArgumentNullException.ThrowIfNull(fact);
+        ArgumentNullException.ThrowIfNull(figures);
+        ArgumentException.ThrowIfNullOrEmpty(separator);
+
+        if (fact.Ranked.Count < 2)
+            return string.Empty;
+
+        var named = fact.Ranked.Skip(1).Select(o =>
+        {
+            var text = figures(o) ?? string.Empty;
+            return text.Length == 0 ? o.ObjectName : $"{o.ObjectName} ({text})";
+        });
+
+        return string.Join(separator, named);
+    }
+
+    /// <summary>
     /// Looks up advice for a fact-key. Returns null if the key is unknown.
     /// </summary>
     public static AdviceBlock? GetForFactKey(string? factKey)
@@ -48,6 +145,12 @@ public static class FactAdvice
 
         if (_byKey.TryGetValue(factKey, out var direct))
             return direct;
+
+        /* #3542: the PostgreSQL-target vocabulary has its own static table, in PgTargetAdvice — one arm
+           here, so the content lanes never touch this file. Before any SQL Server prefix arm, because
+           ANOMALY_PG_* must not reach the ANOMALY_WAIT_ composer below. */
+        if (PgTargetAdvice.IsPgKey(factKey))
+            return PgTargetAdvice.Static(factKey);
 
         if (factKey.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase))
             return _byKey.GetValueOrDefault("BAD_ACTOR");
@@ -137,6 +240,10 @@ public static class FactAdvice
     {
         if (string.IsNullOrEmpty(rootFactKey))
             return null;
+        /* #3542: the PostgreSQL-target vocabulary composes in PgTargetAdvice — one delegating arm, so the
+           content lanes never edit this switch. */
+        if (PgTargetAdvice.IsPgKey(rootFactKey))
+            return PgTargetAdvice.Compose(rootFactKey, factsByKey);
         // BAD_ACTOR facts are keyed BAD_ACTOR_{query_hash}; compose from that fact directly.
         if (rootFactKey.StartsWith("BAD_ACTOR_", StringComparison.Ordinal))
             return ComposeBadActor(rootFactKey, factsByKey);
@@ -172,9 +279,12 @@ public static class FactAdvice
             "MEMORY_GRANT_PENDING" => ComposeMemoryGrantPending(factsByKey),
             "QUERY_SPILLS" => ComposeQuerySpills(factsByKey),
             // Simple wait-type blocks: each states its own wait totals, with a clean concept + fix.
-            "RESOURCE_SEMAPHORE" or "RESOURCE_SEMAPHORE_QUERY_COMPILE" or "WRITELOG"
-                or "LATCH_EX" or "LATCH_SH" or "PAGELATCH_UP" or "LCK_M_S" or "LCK_M_IS"
+            "RESOURCE_SEMAPHORE" or "RESOURCE_SEMAPHORE_QUERY_COMPILE" or "WRITELOG" or "HADR_SYNC_COMMIT"
+                or "LATCH_EX" or "LATCH_SH" or "PAGELATCH_EX" or "PAGELATCH_UP" or "LCK_M_S" or "LCK_M_IS"
                 => ComposeWaitByKey(rootFactKey, factsByKey),
+            // #3538 A9: schema-modification waits name the long-running job when RUNNING_JOBS fired — the
+            // same window the SCH_M → RUNNING_JOBS graph edge folds the two cards into one incident.
+            "SCH_M" => ComposeSchM(factsByKey),
             // Query-level: state the cost-swing ratio / regression factor / tempdb driver the engine
             // measured, and permute on the discriminating flag (forced-plan-failing, dominant consumer).
             "PARAMETER_SENSITIVITY" => ComposeParameterSensitivity(factsByKey),
@@ -193,14 +303,18 @@ public static class FactAdvice
             "DISK_SPACE" => ComposeDiskSpace(factsByKey),
             "CONFIG_IFI_DISABLED" or "CONFIG_LPIM_DISABLED" or "SERVER_MEMORY_DUMPS"
                 => ComposeServerHealth(rootFactKey, factsByKey),
+            // #3653 A10 (Q2): a server configuration change observed inside the window, with the ±4 h
+            // before/after compare frozen on the fact — states the setting, old → new, when it was first
+            // observed, and which metrics moved beyond their band (or that none did).
+            ConfigChangeAttribution.FactKey => ComposeConfigChanged(factsByKey),
             // Anomaly facts: state the observed value, how many σ above the hour-of-week baseline, and
             // the baseline itself — "X is Nσ above its M baseline for this time of week".
-            "ANOMALY_CPU_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_CPU_SPIKE", "peak_cpu", "SQL CPU", Pct, "A brief CPU burst well above what this hour-of-week normally sees."),
-            "ANOMALY_READ_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_READ_LATENCY", "current_latency_ms", "Read latency", Ms, "Storage reads ran slower than this hour-of-week normally does."),
-            "ANOMALY_WRITE_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_WRITE_LATENCY", "current_latency_ms", "Write latency", Ms, "Storage writes ran slower than this hour-of-week normally does."),
-            "ANOMALY_BATCH_REQUESTS" => ComposeAnomaly(factsByKey, "ANOMALY_BATCH_REQUESTS", "peak_batch_requests", "Batch requests/sec", Rate, "Throughput jumped well above the usual level for this hour-of-week."),
-            "ANOMALY_SESSION_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_SESSION_SPIKE", "peak_connections", "Connection count", Num, "Far more sessions connected than this hour-of-week normally sees — often a connection-pool leak or a retry storm."),
-            "ANOMALY_QUERY_DURATION" => ComposeAnomaly(factsByKey, "ANOMALY_QUERY_DURATION", "peak_total_elapsed_us", "Total query duration", Micros, "Queries ran far longer in aggregate than this hour-of-week normally does."),
+            "ANOMALY_CPU_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_CPU_SPIKE", "peak_cpu", "SQL CPU", Pct, "A brief CPU burst well above what this hour-of-week normally sees.", "avg_cpu_in_window"),
+            "ANOMALY_READ_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_READ_LATENCY", "current_latency_ms", "Read latency", Ms, "Storage reads ran slower than this hour-of-week normally does.", "avg_latency_ms"),
+            "ANOMALY_WRITE_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_WRITE_LATENCY", "current_latency_ms", "Write latency", Ms, "Storage writes ran slower than this hour-of-week normally does.", "avg_latency_ms"),
+            "ANOMALY_BATCH_REQUESTS" => ComposeAnomaly(factsByKey, "ANOMALY_BATCH_REQUESTS", "peak_batch_requests", "Batch requests/sec", Rate, "Throughput jumped well above the usual level for this hour-of-week.", "avg_batch_requests"),
+            "ANOMALY_SESSION_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_SESSION_SPIKE", "peak_connections", "Connection count", Num, "Far more sessions connected than this hour-of-week normally sees — often a connection-pool leak or a retry storm.", "avg_connections"),
+            "ANOMALY_QUERY_DURATION" => ComposeAnomaly(factsByKey, "ANOMALY_QUERY_DURATION", "peak_total_elapsed_us", "Total query duration", Micros, "Queries ran far longer in aggregate than this hour-of-week normally does.", "avg_total_elapsed_us"),
             "ANOMALY_MEMORY_PRESSURE" => ComposeAnomalyMemoryPressure(factsByKey),
             "ANOMALY_WAIT_PROFILE" => ComposeAnomalyWaitProfile(factsByKey),
             "ANOMALY_BLOCKING_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_BLOCKING_SPIKE", "blocking event"),
@@ -235,9 +349,68 @@ public static class FactAdvice
             if (story is null || story.IsAbsolution)
                 continue;
             var advice = Compose(story.RootFactKey, byKey);
-            if (advice is not null)
-                story.StoryText = SerializeForStoryText(advice);
+            if (advice is null)
+                continue;
+            advice = WithNamedHops(advice, story, byKey);
+            advice = WithSideLeaves(advice, story, byKey);
+            story.StoryText = SerializeForStoryText(advice);
         }
+    }
+
+    /// <summary>
+    /// #3691: appends one sentence per identity-bearing hop the engine recorded on the story
+    /// (<see cref="AnalysisStory.NamedHops"/>) to the root's INVESTIGATION — "Behind it: `PG_IDLE_IN_TRANSACTION`
+    /// (severity 1.20) — billing-worker as billing idle in transaction for 15 min …" — so the operator reading the
+    /// root card learns WHO was behind the chain without opening a card the traversal never made. Investigation,
+    /// not Remediation: the hop's name is where to look; the hop's own remediation stays the hop's (the reverse
+    /// links the symptom composers already carry — LinkedJobClause, the PostgreSQL co-fire clauses — keep saying
+    /// what to do about the sibling in their own family's words). Each hop's composed headline is read from the
+    /// FULL fact set here, the one place both are in scope, the same way the root's values are. A story with no
+    /// named hops returns the block untouched — the byte-identity pin for every chain this does not concern.
+    /// </summary>
+    private static AdviceBlock WithNamedHops(AdviceBlock advice, AnalysisStory story, IReadOnlyDictionary<string, Fact> byKey)
+    {
+        if (story.NamedHops is null || story.NamedHops.Count == 0)
+            return advice;
+        var investigation = new StringBuilder(advice.Investigation ?? string.Empty);
+        foreach (var hop in story.NamedHops)
+        {
+            var sentence = FactIdentity.Sentence(hop, Compose(hop.Key, byKey)?.Headline);
+            if (investigation.Length == 0)
+                sentence = sentence.TrimStart();
+            investigation.Append(sentence);
+        }
+        return advice with { Investigation = investigation.ToString() };
+    }
+
+    /// <summary>
+    /// #3691, #4730: appends the config lever(s) hanging off this story
+    /// (<see cref="AnalysisStory.SideLeafKeys"/>) to the root's advice, after the named-hop sentences. Each lever
+    /// gets one INVESTIGATION sentence carrying its own composed headline, and its composed remediation joins the
+    /// root's REMEDIATION under its key ("For `CONFIG_PG_MAINT_WORK_MEM`: …"). Before this, the lever rooted a card
+    /// of its own beside the incident; the walk now consumes it, and only <c>analyze_server</c> renders the
+    /// lever's card (the payload's <c>side_leaves</c>). <c>get_analysis_findings</c>, the viewer and the e-mail
+    /// render this frozen StoryText alone, so the advice has to be in it: the sentence used to say "see its card",
+    /// a pointer to a card those surfaces never show, and the lever's fix stayed on that card. Each lever is
+    /// composed from the FULL fact set here, the one place both are in scope, the same way
+    /// <see cref="WithNamedHops"/> reads its hops. A story with no side leaves returns the block untouched — the
+    /// byte-identity arm for every chain this does not concern, which is nearly all of them.
+    /// </summary>
+    private static AdviceBlock WithSideLeaves(AdviceBlock advice, AnalysisStory story, IReadOnlyDictionary<string, Fact> byKey)
+    {
+        var sentence = StorySideLeaves.Sentence(story.SideLeafKeys, byKey);
+        if (sentence is null)
+            return advice;
+        var investigation = advice.Investigation ?? string.Empty;
+        var remediation = advice.Remediation ?? string.Empty;
+        var remediationClauses = StorySideLeaves.RemediationSentence(story.SideLeafKeys, byKey);
+        if (remediationClauses is not null)
+            remediation = remediation.Length == 0 ? remediationClauses.TrimStart() : remediation + remediationClauses;
+        return advice with
+        {
+            Investigation = investigation.Length == 0 ? sentence.TrimStart() : investigation + sentence,
+            Remediation = remediation
+        };
     }
 
     /// <summary>Serializes an advice block's prose to the compact {h,i,r} JSON stored in StoryText.</summary>
@@ -277,14 +450,6 @@ public static class FactAdvice
         facts.TryGetValue(key, out var f) ? (long)Math.Round(f.Value) : (long?)null;
 
     /// <summary>
-    /// Cores-per-socket from SERVER_HARDWARE metadata — the per-NUMA-node proxy MAXDOP guidance keys
-    /// on (NUMA node count itself is not collected). 0 when absent.
-    /// </summary>
-    private static int CoresPerSocket(IReadOnlyDictionary<string, Fact> facts) =>
-        facts.TryGetValue("SERVER_HARDWARE", out var hw)
-            && hw.Metadata.TryGetValue("cores_per_socket", out var c) ? (int)c : 0;
-
-    /// <summary>
     /// The collection-gap caveat appended to every THREADPOOL-family block: under live thread
     /// exhaustion the collector is itself a query waiting for a worker, so a gap in Collection Health
     /// around the window corroborates the event rather than being a separate problem.
@@ -309,9 +474,9 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
-        return fallback with { Remediation = ParallelGuardCore(maxdop, ctfp, cores, rec) + CollectionGapNote };
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
+        return fallback with { Remediation = ParallelGuardCore(maxdop, ctfp, basis, rec) + CollectionGapNote };
     }
 
     /// <summary>
@@ -327,14 +492,14 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
         var remediation =
             "Collapse the blocking first — workers parked on locks are not running, so it is the " +
             "faster win: if the chain was headed by a sleeping/abandoned transaction, fix the code " +
             "path that leaves a BEGIN TRAN open (and SET XACT_ABORT ON so an aborted batch rolls " +
             "back); otherwise fix the slow operation under the held lock. Then guard parallelism. " +
-            ParallelGuardCore(maxdop, ctfp, cores, rec) + CollectionGapNote;
+            ParallelGuardCore(maxdop, ctfp, basis, rec) + CollectionGapNote;
         return fallback with { Remediation = remediation };
     }
 
@@ -346,7 +511,7 @@ public static class FactAdvice
     /// guard harder for the concurrency level. Does NOT include the collection-gap note (the caller
     /// appends it once).
     /// </summary>
-    private static string ParallelGuardCore(long? maxdop, long? ctfp, int cores, long rec)
+    private static string ParallelGuardCore(long? maxdop, long? ctfp, FactRemediation.MaxdopBasis basis, long rec)
     {
         var sb = new StringBuilder();
 
@@ -355,7 +520,7 @@ public static class FactAdvice
           .Append(maxdop?.ToString() ?? "not readable this window")
           .Append(" and cost threshold for parallelism is ")
           .Append(ctfp?.ToString() ?? "not readable this window")
-          .Append(cores > 0 ? $" (cores per socket {cores})." : ".");
+          .Append(basis.Cores > 0 ? $" {basis.Note}." : ".");
 
         var ctfpGuarded = ctfp is >= 50;
         var maxdopGuarded = maxdop is > 0 && maxdop <= rec;
@@ -381,9 +546,9 @@ public static class FactAdvice
                 sb.Append(" cost threshold for parallelism is already past the trivial-query cutoff");
 
             if (maxdop is 0)
-                sb.Append($", and cap MAXDOP at {rec} (this server's per-NUMA-node processor count, capped at 8) instead of unlimited");
+                sb.Append($", and cap MAXDOP at {rec} ({basis.Source}, capped at 8) instead of unlimited");
             else if (maxdop > rec)
-                sb.Append($", and lower MAXDOP from {maxdop} to {rec} (the per-NUMA-node processor count, capped at 8)");
+                sb.Append($", and lower MAXDOP from {maxdop} to {rec} ({basis.Bare}, capped at 8)");
             else
                 sb.Append($"; MAXDOP at {maxdop} is already within the ≤ {rec} guidance");
             sb.Append(". Then go after the specific high-DOP offenders");
@@ -414,18 +579,27 @@ public static class FactAdvice
         if (maxdop is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
-        var coresNote = cores > 0 ? $" (cores per socket {cores})" : string.Empty;
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
+        var coresNote = basis.Cores > 0 ? $" {basis.Note}" : string.Empty;
+        var cappedFrom = basis.FromVcores ? "vCores" : "cores-per-socket";
+        /* MAXDOP is an instance option (sp_configure) everywhere except an Azure SQL Database, which has no instance setting for it:
+           there it is the database-scoped MAXDOP, set with ALTER DATABASE SCOPED CONFIGURATION. Only that engine carries vCores
+           instead of cores per socket, so the vCores basis is the one that names the database-scoped statement. */
+        var applySentence = basis.FromVcores
+            ? $"An Azure SQL Database has no instance setting for it; set it per database with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}, an online change."
+            : "The Apply button runs sp_configure + RECONFIGURE, an online metadata change.";
+        var viaClause = basis.FromVcores
+            ? $"with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}"
+            : "via sp_configure + RECONFIGURE";
 
         string headline, remediation;
         if (maxdop == 0)
         {
             headline = "MAXDOP is 0 — a single query can fan out across every scheduler (up to 64)";
             remediation =
-                $"Set MAXDOP to {rec} — this server's cores-per-socket capped at 8{coresNote}, the per-NUMA-node " +
-                "proxy; the SKU is irrelevant to the right value. The Apply button runs sp_configure + " +
-                "RECONFIGURE, an online metadata change. On hardware with more than 16 logical processors " +
+                $"Set MAXDOP to {rec} — this {(basis.FromVcores ? "database" : "server")}'s {cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
+                $"proxy; the SKU is irrelevant to the right value. {applySentence} On hardware with more than 16 logical processors " +
                 "per NUMA node you can raise it by hand. Raise Cost Threshold for Parallelism in the same pass " +
                 "if its companion finding fired.";
         }
@@ -435,15 +609,14 @@ public static class FactAdvice
             remediation =
                 $"MAXDOP 1 forces every query serial: large analytical queries, index rebuilds, and DBCC run " +
                 $"far slower. Unless this was set deliberately to fix a specific parallelism problem, set MAXDOP " +
-                $"to {rec} (cores-per-socket capped at 8{coresNote}) via sp_configure + RECONFIGURE, an online change.";
+                $"to {rec} ({cappedFrom} capped at 8{coresNote}) {viaClause}, an online change.";
         }
         else
         {
-            headline = $"MAXDOP is {maxdop} — above this server's topology-based guidance of {rec}";
+            headline = $"MAXDOP is {maxdop} — above this {(basis.FromVcores ? "database" : "server")}'s topology-based guidance of {rec}";
             remediation =
-                $"Lower MAXDOP from {maxdop} to {rec} (cores-per-socket capped at 8{coresNote}, the per-NUMA-node " +
-                "proxy; the SKU is irrelevant). The Apply button runs sp_configure + RECONFIGURE, an online " +
-                "metadata change. On hardware with more than 16 logical processors per NUMA node a higher value " +
+                $"Lower MAXDOP from {maxdop} to {rec} ({cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
+                $"proxy; the SKU is irrelevant). {applySentence} On hardware with more than 16 logical processors per NUMA node a higher value " +
                 "can be justified by hand. Pair it with a sane Cost Threshold for Parallelism if that finding fired.";
         }
 
@@ -488,8 +661,8 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return string.Empty;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
         var sb = new StringBuilder("This server's MAXDOP is ")
             .Append(maxdop?.ToString() ?? "not readable this window")
             .Append(" and cost threshold for parallelism is ")
@@ -502,7 +675,7 @@ public static class FactAdvice
         else if (ctfp is not null && ctfp < 50)
             recs.Add($"raise cost threshold for parallelism from {ctfp} toward 50");
         if (maxdop is 0)
-            recs.Add($"cap MAXDOP at {rec} (the per-NUMA-node processor count, ≤ 8)");
+            recs.Add($"cap MAXDOP at {rec} ({basis.Bare}, ≤ 8)");
         else if (maxdop is not null && maxdop > rec)
             recs.Add($"lower MAXDOP from {maxdop} to {rec}");
 
@@ -528,6 +701,263 @@ public static class FactAdvice
             : fallback with { Remediation = clause + fallback.Remediation };
     }
 
+    /// <summary>
+    /// CONFIG_CHANGED composed (#3653 A10, Q2): the setting(s), old → new, when the change was FIRST
+    /// OBSERVED, how much of the ±4 h compare exists yet, and the metrics that moved beyond their band —
+    /// or the sentence that none did, which is the finding's other value. Every number is read off the
+    /// fact <see cref="ConfigChangeAttribution"/> built; the setting names ride in ObjectName and the
+    /// values in the doubles-only metadata under the keys that class spells.
+    ///
+    /// <para><b>The words are chosen against three lies.</b> (1) "changed at" on a clock that only saw the
+    /// value — the config snapshot runs on connect, so on the observation anchor the time on the fact is when
+    /// the new value was first SEEN; the prose says "first observed" and states the span since the previous
+    /// snapshot, and when that span exceeds the before-window it says the before half may already hold the
+    /// new value. When the fact is anchored on the default trace instead
+    /// (<see cref="ConfigChangeAttribution.MetaAnchorClock"/> = <see cref="ConfigChangeAttribution.AnchorSourceDefaultTrace"/>,
+    /// #3740), "changed at" is TRUE — the sp_configure line was stamped at the instant of the change — so the
+    /// prose says it, names the source, states how much later the snapshot first saw it, and drops the span
+    /// sentences, whose premise (the change landed somewhere in a span) no longer holds; a setting the trace
+    /// did not date on a multi-setting event is named as riding the event's anchor. (2) A full four hours after
+    /// — when the change is younger than that, the after half is a partial and the prose says how much of
+    /// it exists and that later passes complete it. (3) Cause — a before/after is not a causal test; the
+    /// remediation says so in the compare tool's own terms and offers the reads that would firm it up.
+    /// A non-dynamic setting whose configured value moved while in-use did not gets its own sentence:
+    /// the engine is still running the old value, so nothing should have moved yet.</para>
+    ///
+    /// <para><b>Slice two: three families, one grammar.</b> Each change on the fact is decoded from its
+    /// ObjectName segment (<see cref="ConfigChangeAttribution.Changes"/>) and described in its family's own
+    /// words — a server setting exactly as above (that prose is pinned and unchanged), a database option as
+    /// "<c>`AdventureWorks` recovery_model FULL → SIMPLE</c>" (set to / cleared when one side was NULL), a
+    /// trace flag as "<c>trace flag 4199 enabled (GLOBAL)</c>" / "disabled (was GLOBAL)" / "scope changed (now
+    /// …)". The headline names the family ("Database configuration changed", "Trace flag changed") or, for an
+    /// event folded across families at one connect, "Configuration changed: N configuration changes observed
+    /// together" — the folded card exists precisely because the data cannot say which of them moved a metric,
+    /// and the prose does not pretend otherwise. The observation, span, after-half and compare sentences are
+    /// the same words for every family (the snapshot cadence and the compare are the same). The remediation
+    /// points at the history tool(s) of the families present and adds the grading tool that exists for each:
+    /// <c>audit_config</c> for a server setting, the standing <c>DB_CONFIG</c> advisory for a database option,
+    /// <c>get_trace_flags</c> for what is on now.</para>
+    ///
+    /// <para>Falls back to the static block when the fact is absent (a finding persisted before the
+    /// composer existed, or a story whose root the lookup cannot find).</para>
+    /// </summary>
+    private static AdviceBlock ComposeConfigChanged(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var fallback = _byKey[ConfigChangeAttribution.FactKey];
+        if (!facts.TryGetValue(ConfigChangeAttribution.FactKey, out var fact))
+            return fallback;
+
+        var changes = ConfigChangeAttribution.Changes(fact);
+        if (changes.Count == 0)
+            return fallback;
+
+        var families = changes.Aggregate((ConfigChangeAttribution.ChangeFamily)0, (acc, c) => acc | c.Family);
+        var hasServer = (families & ConfigChangeAttribution.ChangeFamily.ServerConfig) != 0;
+        var hasDatabase = (families & ConfigChangeAttribution.ChangeFamily.DatabaseConfig) != 0;
+        var hasTraceFlags = (families & ConfigChangeAttribution.ChangeFamily.TraceFlags) != 0;
+        var mixed = (hasServer ? 1 : 0) + (hasDatabase ? 1 : 0) + (hasTraceFlags ? 1 : 0) > 1;
+
+        // ── the change itself: `name` old → new, per setting, in its family's words ──
+        var described = new List<string>(changes.Count);
+        var pendingRestart = new List<string>();
+        foreach (var change in changes)
+        {
+            var name = change.Name;
+            switch (change.Family)
+            {
+                case ConfigChangeAttribution.ChangeFamily.DatabaseConfig:
+                {
+                    var db = $"`{change.DatabaseName}`";
+                    described.Add(change.OldText is null && change.NewText is not null
+                        ? $"{db} {change.Setting} set to {change.NewText}"
+                        : change.OldText is not null && change.NewText is null
+                            ? $"{db} {change.Setting} cleared (was {change.OldText})"
+                            : $"{db} {change.Setting} {change.OldText ?? "(none)"} → {change.NewText ?? "(none)"}");
+                    break;
+                }
+                case ConfigChangeAttribution.ChangeFamily.TraceFlags:
+                {
+                    described.Add(change.ChangeType switch
+                    {
+                        "enabled" => $"trace flag {change.Setting} enabled ({change.Scope})",
+                        "disabled" => $"trace flag {change.Setting} disabled (was {change.Scope})",
+                        "modified" => $"trace flag {change.Setting} scope changed (now {change.Scope})",
+                        _ => $"trace flag {change.Setting} changed",
+                    });
+                    break;
+                }
+                default:
+                {
+                    var oldInUse = fact.Metadata.TryGetValue(ConfigChangeAttribution.OldInUseKey(name), out var oi) ? oi : (double?)null;
+                    var newInUse = fact.Metadata.TryGetValue(ConfigChangeAttribution.NewInUseKey(name), out var ni) ? ni : (double?)null;
+                    var oldCfg = fact.Metadata.TryGetValue(ConfigChangeAttribution.OldConfiguredKey(name), out var oc) ? oc : (double?)null;
+                    var newCfg = fact.Metadata.TryGetValue(ConfigChangeAttribution.NewConfiguredKey(name), out var nc) ? nc : (double?)null;
+                    var restart = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.RequiresRestartKey(name)) > 0;
+
+                    if (oldInUse is not null && newInUse is not null && oldInUse != newInUse)
+                        described.Add($"`{name}` {Num(oldInUse.Value)} → {Num(newInUse.Value)}");
+                    else if (oldCfg is not null && newCfg is not null && oldCfg != newCfg)
+                    {
+                        described.Add($"`{name}` configured {Num(oldCfg.Value)} → {Num(newCfg.Value)}" + (restart ? " (in use unchanged until restart)" : " (in use unchanged)"));
+                        if (restart) pendingRestart.Add(name);
+                    }
+                    else
+                        described.Add($"`{name}` changed");
+                    break;
+                }
+            }
+        }
+        var changeList = string.Join(", ", described);
+
+        // ── when, and how honest "when" is ──
+        var changeUnix = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaChangeTimeUnix);
+        var changeAt = changeUnix > 0 ? DateTimeOffset.FromUnixTimeSeconds((long)changeUnix).UtcDateTime : (DateTime?)null;
+        var traceAnchored = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaAnchorClock) == ConfigChangeAttribution.AnchorSourceDefaultTrace;
+        var gapHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaObservationGapHours);
+        var beforeHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaBeforeHours);
+        if (beforeHours <= 0) beforeHours = ConfigChangeAttribution.CompareWindowHours;
+
+        var inv = new StringBuilder();
+        inv.Append(changeList);
+        if (traceAnchored && changeAt is not null)
+        {
+            /* #3740: the default trace saw the change happen, so "changed at" is the truth and the snapshot's
+               lateness is a fact about this card's arrival, not about the compare's windows. */
+            inv.Append($" — changed at {changeAt.Value:yyyy-MM-dd HH:mm} UTC (default trace: the sp_configure line, msg {ConfigChangeAttribution.ReconfigureMessageNumber}).");
+            var lagHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaObservedLagHours);
+            var observedUnix = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaObservedAtUnix);
+            var observedAt = observedUnix > 0 ? DateTimeOffset.FromUnixTimeSeconds((long)observedUnix).UtcDateTime : (DateTime?)null;
+            if (observedAt is not null)
+            {
+                inv.Append(lagHours >= 0.1
+                    ? $" The configuration snapshot (taken on connect) first observed it {lagHours:0.#} h later, at {observedAt.Value:yyyy-MM-dd HH:mm} UTC; the compare below is anchored on the trace's time, not on that observation."
+                    : $" The configuration snapshot first observed it at {observedAt.Value:yyyy-MM-dd HH:mm} UTC, within minutes of the change.");
+            }
+            var undated = changes.Where(c => !fact.Metadata.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(c.Name))).ToList();
+            if (undated.Count > 0 && undated.Count < changes.Count)
+                inv.Append($" The trace dated {changes.Count - undated.Count} of the {changes.Count} settings; {string.Join(", ", undated.Select(c => $"`{c.Name}`"))} had no matching line in the span between snapshots and shares this anchor.");
+        }
+        else
+        {
+            inv.Append(changeAt is null
+                ? " — first observed by the configuration snapshot this window."
+                : $" — first observed by the configuration snapshot at {changeAt.Value:yyyy-MM-dd HH:mm} UTC.");
+            if (gapHours > 0)
+            {
+                inv.Append($" The snapshot runs on connect, so the change itself landed somewhere in the {gapHours:0.#} h since the previous snapshot; this finding's time is when it was seen, not when it was made.");
+                if (gapHours > beforeHours)
+                    inv.Append($" That span is longer than the {beforeHours:0} h before-window, so the \"before\" half may already reflect the new value and a null result here does not mean the change had no effect.");
+            }
+        }
+
+        // ── the compare ──
+        var unavailable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaCompareUnavailable) > 0;
+        var afterHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaAfterHoursObserved);
+        var afterClamped = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaAfterWindowClamped) > 0;
+        var earlier = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaEarlierEventsInWindow);
+        var moved = ConfigChangeAttribution.MovedKeys(fact);
+        var stable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaStable);
+        var omitted = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaMovedKeysOmitted);
+        /* #4729: presence-only rows a young after half cannot judge yet. The minutes are rounded and held one
+           under the floor's own, so an after half of 59.7 minutes never reads "60 minutes" beside a "1 h" floor. */
+        var notYetComparable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
+        var afterMinutes = Math.Min(Math.Round(afterHours * 60), Math.Ceiling(ConfigChangeAttribution.MinComparableAfterHours * 60) - 1);
+        /* An after half under 30 seconds rounds to 0 minutes, and "covers only 0 minutes" reads as no data at all. */
+        var afterCovers = afterMinutes < 1 ? "under a minute" : $"only {Plural(afterMinutes, "minute")}";
+        var youngAfterClause = $"the after half covers {afterCovers}, under the {ConfigChangeAttribution.MinComparableAfterHours:0.#} h the compare needs before a missing metric means anything";
+
+        string verdict;
+        if (unavailable)
+        {
+            verdict = "The before/after compare could not run this pass (the store read failed on both sides), so this card records the change and nothing about its effect; the next pass retries while the change stays inside the window.";
+        }
+        else
+        {
+            var afterClause = afterClamped
+                ? $"the {afterHours:0.#} h after it that exist so far — the after half is still filling in, and later passes complete it"
+                : $"the {afterHours:0.#} h after it";
+            inv.Append($" The engine compared the {beforeHours:0} h before the {(traceAnchored ? "change" : "observation")} with {afterClause}.");
+
+            if (pendingRestart.Count == changes.Count)
+            {
+                verdict = "Nothing should have moved yet: the engine is still running the old value until the next restart, and the compare is a control for that pass, not a verdict on this one.";
+            }
+            else if (moved.Count == 0 && notYetComparable > 0)
+            {
+                var one = notYetComparable == 1;
+                verdict = $"{Plural(notYetComparable, "metric")} appeared in or vanished from the compare, but {youngAfterClause}, so {(one ? "it is" : "they are")} not yet comparable and later passes compare {(one ? "it" : "them")}.";
+            }
+            else if (moved.Count == 0)
+            {
+                verdict = "No metric in the compare moved beyond its dispersion band — that is the finding: at this window's grain the change had no measurable effect.";
+            }
+            else
+            {
+                var parts = new List<string>(moved.Count);
+                foreach (var key in moved)
+                {
+                    var worse = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.StatusKey(key)) > 0;
+                    var sigma = fact.Metadata.TryGetValue(ConfigChangeAttribution.DeltaSigmaKey(key), out var ds) ? ds : (double?)null;
+                    var rel = fact.Metadata.TryGetValue(ConfigChangeAttribution.RelativeMoveKey(key), out var rm) ? rm : (double?)null;
+                    var magnitude = sigma is not null
+                        ? $"{(sigma.Value >= 0 ? "+" : string.Empty)}{sigma.Value:0.#}σ"
+                        : rel is not null && rel.Value < 1.0
+                            ? $"{(worse ? "+" : "−")}{rel.Value * 100:0}%"
+                            : worse ? "appeared" : "resolved";
+                    parts.Add($"{key} {magnitude} ({(worse ? "worse" : "better")})");
+                }
+                verdict = $"Moved beyond its band after the change: {string.Join("; ", parts)}"
+                          + (omitted > 0 ? $"; and {Plural(omitted, "more key")} (see the fact's metadata)" : string.Empty)
+                          + (stable > 0 ? $". {Plural(stable, "other compared key")} stayed inside band." : ".");
+                if (notYetComparable > 0)
+                    verdict += $" {Plural(notYetComparable, "more metric")} appeared in or vanished from the compare and {(notYetComparable == 1 ? "is" : "are")} not yet comparable: {youngAfterClause}.";
+            }
+        }
+        inv.Append(' ').Append(verdict);
+        if (earlier > 0)
+            inv.Append($" {Plural(earlier, "earlier configuration change")} also sat inside this pass's window and is not compared here — the passes that ran while it was the most recent change carried its own compare.");
+
+        // ── headline: the family names itself; a folded event says it was observed together ──
+        var family = mixed ? "Configuration changed"
+            : hasDatabase ? "Database configuration changed"
+            : hasTraceFlags ? (changes.Count == 1 ? "Trace flag changed" : "Trace flags changed")
+            : "Server configuration changed";
+        var subject = changes.Count == 1 ? described[0]
+            : mixed ? $"{Plural(changes.Count, "configuration change")} observed together"
+            : hasDatabase ? $"{Plural(changes.Count, "database setting")} changed together"
+            : hasTraceFlags ? $"{Plural(changes.Count, "trace flag")} changed together"
+            : $"{Plural(changes.Count, "server setting")} changed together";
+        var headline = unavailable
+            ? $"{family}: {subject} — effect not yet compared"
+            : pendingRestart.Count == changes.Count
+                ? $"{family}: {subject} — takes effect at the next restart"
+                : moved.Count == 0 && notYetComparable > 0
+                    ? $"{family}: {subject} — effect not yet comparable"
+                    : moved.Count == 0
+                        ? $"{family}: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
+                        : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
+
+        // ── remediation: the history read(s) of the families present, the compare, and each family's grader ──
+        var historyTools = new List<string>(3);
+        if (hasServer) historyTools.Add("`get_server_config_changes`");
+        if (hasDatabase) historyTools.Add("`get_database_config_changes`");
+        if (hasTraceFlags) historyTools.Add("`get_trace_flag_changes`");
+        var graders = new List<string>(3);
+        if (hasServer) graders.Add("`audit_config` grades the new value against guidance");
+        if (hasDatabase) graders.Add("the standing `DB_CONFIG` advisory grades the database options this engine has an opinion on (auto-shrink, auto-close, RCSI, auto-stats, page verify)");
+        if (hasTraceFlags) graders.Add("`get_trace_flags` lists what is on now");
+        var rem =
+            "This is an attribution, not an accusation: one window against one window cannot show that a change CAUSED anything " +
+            "(DB time on an unchanged server routinely varies severalfold day to day), and a metric that moved may have moved for " +
+            "reasons of its own. Read it as a pointer. If something moved the wrong way and stays moved on later passes, the " +
+            $"{(mixed ? "changes are" : "setting is")} the first suspect: {string.Join(" / ", historyTools)} {(historyTools.Count == 1 ? "lists" : "list")} the change with its old and new values, " +
+            "`compare_analysis` reruns the compare over any pair of windows (a wider one, or the same hour yesterday), and " +
+            $"{string.Join("; ", graders)}. If nothing moved, there is nothing to do; the card recurs " +
+            "on each pass while the change sits inside the analysis window and stops on its own.";
+
+        return fallback with { Headline = headline, Investigation = inv.ToString(), Remediation = rem };
+    }
+
     /// <summary>A fact's metadata value, or null when the fact or the metadata key is absent.</summary>
     private static double? FactMeta(IReadOnlyDictionary<string, Fact> facts, string key, string metaKey) =>
         facts.TryGetValue(key, out var f) && f.Metadata.TryGetValue(metaKey, out var v) ? v : (double?)null;
@@ -549,7 +979,7 @@ public static class FactAdvice
         if (Fired(facts, "PARAMETER_SENSITIVITY"))
             bits.Add("parameter sensitivity — a plan is far more expensive for some parameter values (that finding has the figures)");
         if (Fired(facts, "MISSING_INDEX"))
-            bits.Add("missing indexes — that finding lists the ones that would cut this work");
+            bits.Add("missing-index requests — the missing-index card lists the optimizer's suggestions from this window's top plans as corroboration, with its caveat");
         if (Fired(facts, "PLAN_WARNING"))
             bits.Add("plan warnings — check those plans for implicit conversions and spills");
         return bits.Count == 0 ? string.Empty : " Co-fired this window: " + string.Join("; ", bits) + ".";
@@ -561,9 +991,32 @@ public static class FactAdvice
         : ms < 60000 ? $"{ms / 1000.0:0.#} s"
         : $"{ms / 60000.0:0.#} min";
 
-    /// <summary>"{n} {noun}" with a plural "s" unless n == 1, e.g. "1 deadlock" / "47 deadlocks".</summary>
-    private static string Plural(double n, string noun) =>
-        $"{n:N0} {noun}{(Math.Abs(n - 1) < 0.5 ? string.Empty : "s")}";
+    /// <summary>"{n} {noun}" pluralized unless n == 1, e.g. "1 deadlock" / "47 deadlocks", "1 query" / "3 queries"
+    /// (#4478 — a bare trailing-"s" rule wrote "querys"). A noun ending in a consonant + "y" drops the "y" for
+    /// "ies" ("query" → "queries"); every other noun this file passes just takes "s". Internal, not private,
+    /// so <c>Darling.Tests</c>/<c>Lite.Tests</c> (InternalsVisibleTo) can pin the pluralization directly.</summary>
+    internal static string Plural(double n, string noun) =>
+        $"{n:N0} {PluralNoun(noun, Math.Abs(n - 1) < 0.5)}";
+
+    /// <summary>The irregular half of <see cref="Plural"/>: a noun ending in a consonant immediately before a
+    /// trailing "y" pluralizes to "ies", not "ys" ("query" → "queries", not "querys"). A vowel before the "y"
+    /// ("day") keeps the plain "s" rule, which is every other noun <see cref="Plural"/>'s callers pass.</summary>
+    private static string PluralNoun(string noun, bool isSingular)
+    {
+        if (isSingular)
+        {
+            return noun;
+        }
+
+        if (noun.Length > 1 && noun[^1] == 'y' && !IsVowel(noun[^2]))
+        {
+            return noun[..^1] + "ies";
+        }
+
+        return noun + "s";
+    }
+
+    private static bool IsVowel(char c) => "aeiouAEIOU".Contains(c);
 
     // Anomaly value formatters (passed to ComposeAnomaly as the observed/baseline renderer).
     private static string Pct(double v) => $"{v:0.#}%";
@@ -851,7 +1304,7 @@ public static class FactAdvice
         else
             rem.Append("Neither a plan regression nor parameter sensitivity fired this window, so the burst is most likely ad-hoc or scheduled work — the sessions active at the peak are attached; Resource Governor or moving that work off-peak is the durable fix.");
         if (Fired(facts, "MISSING_INDEX"))
-            rem.Append(" The missing-index finding also fired — adding those indexes cuts the work the spike is doing.");
+            rem.Append(" Missing-index requests co-fired — the missing-index card lists the optimizer's suggestions from this window's top plans; they corroborate this measured spike rather than diagnose it, and each carries its caveat.");
 
         return fallback with
         {
@@ -897,7 +1350,8 @@ public static class FactAdvice
     /// <summary>
     /// Per-key clean text for the simple wait-type blocks, routed through ComposeSimpleWait so each
     /// states its own wait totals. Bodies are tool-name-free and preserve the audited corrections
-    /// (LATCH_EX → OPTIMIZE_FOR_SEQUENTIAL_KEY, range locks → SERIALIZABLE only).
+    /// (range locks → SERIALIZABLE only; #4149 moved last-page-insert / OPTIMIZE_FOR_SEQUENTIAL_KEY OFF
+    /// LATCH_EX — that guidance belongs to PAGELATCH_EX, a page latch, not a non-buffer LATCH_EX).
     /// </summary>
     private static AdviceBlock ComposeWaitByKey(string key, IReadOnlyDictionary<string, Fact> facts) => key switch
     {
@@ -909,18 +1363,34 @@ public static class FactAdvice
             "Queries are queuing for compile memory — RESOURCE_SEMAPHORE_QUERY_COMPILE",
             "This is memory pressure during query COMPILATION, not execution — too many concurrent compilations competing for compile memory, typically a flood of unparameterized ad-hoc queries each compiling its own plan.",
             "Parameterize the ad-hoc queries so they reuse cached plans instead of compiling fresh, enable 'optimize for ad hoc workloads' so one-off plans stop bloating the cache, and address whatever generates the compile storm (an ORM emitting literal values, or unnecessary recompiles)."),
+        // #3538 A9: the WRITELOG → RUNNING_JOBS edge's prose — a fully logged rebuild or reload while a job
+        // runs long is the log-flush driver, so the job is named beside the storage advice.
         "WRITELOG" => ComposeSimpleWait(facts, key, "Log-flush waits",
             "Transaction log flushes are slow — WRITELOG",
             "WRITELOG is time spent waiting for the transaction log to harden to disk on commit. Sustained WRITELOG points at slow log storage or a commit-heavy workload doing many tiny transactions, each forcing its own flush.",
-            "Put the transaction log on the fastest storage available — write latency matters far more than throughput here — and batch tiny transactions where the application allows, so fewer, larger commits flush less often. Confirm the log is not autogrowing in small increments under load."),
+            "Put the transaction log on the fastest storage available — write latency matters far more than throughput here — and batch tiny transactions where the application allows, so fewer, larger commits flush less often. Confirm the log is not autogrowing in small increments under load." + LinkedJobClause(facts)),
+        "HADR_SYNC_COMMIT" => ComposeSimpleWait(facts, key, "Synchronous-commit waits",
+            "Commits are waiting on a synchronous availability-group secondary — HADR_SYNC_COMMIT",
+            "HADR_SYNC_COMMIT is the time a committing transaction on the primary spends waiting for a synchronous-commit secondary to acknowledge that it has hardened the log block. It is the availability-group half of commit latency — the local log flush is WRITELOG — so on a synchronous AG every commit pays both. Sustained HADR_SYNC_COMMIT means the round trip to the secondary is slow: the secondary's own log write, the network between the replicas, or a secondary that is busy with redo or with readable-secondary queries and is slow to harden.",
+            "Measure the replica side before touching the primary: the secondary's transaction-log write latency and its redo queue, and the network latency between the replicas. A secondary whose log sits on slower storage than the primary's, or in another region, sets the primary's commit latency — fix that, not the primary. Then review which databases actually need synchronous commit: it is a durability and failover-readiness POLICY (zero data loss on failover), and only the databases whose recovery-point objective requires it should carry it; the rest can be asynchronous by design, not as a performance shortcut. Do NOT switch a database from synchronous to asynchronous commit to make this wait disappear — that trades away the guarantee the setting exists for, and the decision belongs to whoever owns the recovery-point objective, not to a wait-stats finding."),
+        // #4149: LATCH_EX/LATCH_SH are NOT page latches — sys.dm_os_wait_stats documents LATCH_EX as
+        // excluding buffer and transaction-mark latches. The class decides the cause, so the first step
+        // is get_latch_stats, not tempdb or last-page-insert guesswork (that advice moved to
+        // PAGELATCH_EX/PAGELATCH_UP below, where the wait type actually implicates it).
         "LATCH_EX" => ComposeSimpleWait(facts, key, "Exclusive latch waits",
-            "Exclusive latch contention — often last-page insert hotspots (LATCH_EX)",
-            "LATCH_EX is contention on in-memory structures, not row locks. The most common cause is last-page insert contention: many sessions inserting into an index with an ever-increasing key (an identity or a datetime) all fight for the latch on the final page.",
-            "For last-page insert contention on SQL Server 2019 and later, enable OPTIMIZE_FOR_SEQUENTIAL_KEY on the hot index — it is purpose-built for exactly this. Otherwise spread the inserts across more pages (a hash or reversed key, or partitioning). Do NOT add a clustered index expecting it to fix this — a sequential clustered key is what CREATES the hotspot."),
+            "Exclusive latch contention on a non-buffer resource — LATCH_EX",
+            "LATCH_EX is contention on in-memory structures OTHER than buffer-pool pages or transaction-mark latches — sys.dm_os_wait_stats excludes both from this wait type. It is not last-page insert contention or tempdb allocation contention; those surface as PAGELATCH_EX and PAGELATCH_UP. Find the latch class first: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR point at parallel scan coordination, FGCB_ADD_REMOVE points at file growth or shrink, and LOG_MANAGER points at log growth.",
+            "Get the latch class before acting — the fix depends entirely on which one is hot. For ACCESS_METHODS_DATASET_PARENT or ACCESS_METHODS_SCAN_RANGE_GENERATOR, reduce unnecessary parallelism (cost threshold for parallelism, MAXDOP) or address why the optimizer is choosing wide parallel scans. For FGCB_ADD_REMOVE, fix file autogrowth (larger fixed increments, pre-size the file) so the file stops growing or shrinking under load. For LOG_MANAGER, address log growth directly — pre-size the log and fix whatever is generating excess log records."),
         "LATCH_SH" => ComposeSimpleWait(facts, key, "Shared latch waits",
-            "Shared latch contention — LATCH_SH",
-            "LATCH_SH is shared-latch contention on in-memory structures, and it frequently accompanies heavy parallelism or specific internal hotspots rather than user row contention.",
-            "Narrow it by the latch sub-type — common drivers are heavy concurrent reads of the same pages or parallelism overhead. Reducing unnecessary parallelism (cost threshold for parallelism, MAXDOP) often relieves the parallelism-driven cases."),
+            "Shared latch contention on a non-buffer resource — LATCH_SH",
+            "LATCH_SH is shared-latch contention on in-memory structures OTHER than buffer-pool pages — sys.dm_os_wait_stats excludes buffer latches from this wait type. It is not concurrent readers hitting the same hot page (that is a buffer-pool page latch, tracked separately); it frequently accompanies heavy parallelism or specific internal hotspots. Find the latch class first: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR point at parallel scan coordination, FGCB_ADD_REMOVE points at file growth or shrink, and LOG_MANAGER points at log growth.",
+            "Get the latch class before acting — the fix depends entirely on which one is hot. For ACCESS_METHODS_DATASET_PARENT or ACCESS_METHODS_SCAN_RANGE_GENERATOR, reduce unnecessary parallelism (cost threshold for parallelism, MAXDOP) or address why the optimizer is choosing wide parallel scans. For FGCB_ADD_REMOVE, fix file autogrowth. For LOG_MANAGER, address log growth directly."),
+        // #4149: last-page-insert / OPTIMIZE_FOR_SEQUENTIAL_KEY belongs here, not on LATCH_EX — the
+        // wait CREATE INDEX's own docs name for it is PAGELATCH_EX.
+        "PAGELATCH_EX" => ComposeSimpleWait(facts, key, "Exclusive page-latch waits",
+            "Exclusive page-latch contention — often last-page insert hotspots (PAGELATCH_EX)",
+            "PAGELATCH_EX is contention on in-memory buffer-pool pages, not row locks. The most common cause is last-page insert contention: many sessions inserting into an index with an ever-increasing key (an identity or a datetime) all fight for the latch on the final page.",
+            "For last-page insert contention on SQL Server 2019 and later, enable OPTIMIZE_FOR_SEQUENTIAL_KEY on the hot index — it is purpose-built for exactly this. Otherwise spread the inserts across more pages (a hash or reversed key, or partitioning). Do NOT add a clustered index expecting it to fix this — a sequential clustered key is what CREATES the hotspot."),
         "PAGELATCH_UP" => ComposeSimpleWait(facts, key, "Tempdb allocation page-latch waits",
             "Tempdb allocation contention — PFS/GAM/SGAM page latches (PAGELATCH_UP)",
             "PAGELATCH_UP is contention on tempdb's allocation bitmap pages (PFS/GAM/SGAM): sessions that rapidly create and drop temp tables, or spill sorts and hashes to tempdb, all latch the same small set of allocation pages in each data file. It is an in-memory latch — not disk I/O (that is PAGEIOLATCH) and not row locks — and it is the classic 'too few tempdb data files for the core count' signal.",
@@ -1027,7 +1497,7 @@ public static class FactAdvice
         {
             rem.Append("Two angles: cut the read volume by fixing the scans that pull more data than needed and give the buffer pool enough memory to keep hot pages cached; and check the storage itself — sustained high read latency on a quiet workload is a storage problem, not a SQL one.");
             if (Fired(facts, "MISSING_INDEX"))
-                rem.Append(" The missing-index finding fired this window — those indexes would cut the reads.");
+                rem.Append(" Missing-index requests co-fired this window — the missing-index card lists them as corroboration for the read volume, with its caveat; an index that covers a scan cuts its reads, and every write then pays for it.");
             if (Fired(facts, "PAGEIOLATCH_SH") || Fired(facts, "PAGEIOLATCH_EX"))
                 rem.Append(" PAGEIOLATCH co-fired, confirming reads are stalling on disk.");
         }
@@ -1036,6 +1506,9 @@ public static class FactAdvice
             rem.Append("Write latency is usually the storage or the log path: confirm the data and log files are on adequately fast storage, watch for autogrowth events stalling writes, and check whether a backup, CHECKDB, or index maintenance overlapped the window.");
             if (Fired(facts, "WRITELOG"))
                 rem.Append(" WRITELOG co-fired, pointing specifically at the log.");
+            // #3538 A9: when the IO_WRITE_LATENCY_MS → RUNNING_JOBS edge fired, the "check whether index
+            // maintenance overlapped the window" above is no longer a guess — say which job.
+            rem.Append(LinkedJobClause(facts));
         }
 
         return fallback with
@@ -1105,7 +1578,7 @@ public static class FactAdvice
             $"PAGEIOLATCH waits are time spent waiting for a data page to be read from disk into the buffer pool (here, to {purpose} it) — the page was not cached, so SQL Server had to fetch it. Sustained PAGEIOLATCH usually means the working set does not fit in memory, so pages are evicted and re-read, or that the storage is slow.";
         var rem = new StringBuilder("Two levers: give the buffer pool more memory so hot pages stay cached, and reduce the pages read by fixing the scans that pull more data than needed.");
         if (Fired(facts, "MISSING_INDEX"))
-            rem.Append(" The missing-index finding fired — those indexes cut the pages read.");
+            rem.Append(" Missing-index requests co-fired — the missing-index card lists them as corroboration for the pages read, with its caveat.");
         if (Fired(facts, "IO_READ_LATENCY_MS"))
             rem.Append(" Read latency also fired this window, so the storage is part of the problem, not just memory.");
         if (mem.Length > 0)
@@ -1243,7 +1716,14 @@ public static class FactAdvice
             inv.Append($" ({Micros(latest.Value)} vs {Micros(best.Value)} of CPU per execution)");
         if (offenders is > 0)
             inv.Append($"; {Plural(offenders.Value, "query")} regressed this window");
-        inv.Append(". Query Store has the faster plan on record, so this is a plan choice that got worse — not a query that inherently costs more.");
+        /* #3953: the window reaches a full 14 days, so the faster plan can be two weeks old; say how old. */
+        var bestAge = FactMeta(facts, "PLAN_REGRESSION", "best_plan_age_days");
+        var bestAgeText = bestAge is null
+            ? ""
+            : bestAge.Value < 1
+                ? " (it last ran within the past day)"
+                : $" (it last ran {Plural(Math.Floor(bestAge.Value), "day")} ago)";
+        inv.Append($". Query Store has the faster plan on record{bestAgeText}, so this is a plan choice that got worse — not a query that inherently costs more.");
         if (forceFailing && forceFails is not null)
             inv.Append($" A forced plan is in place but failing to apply ({Plural(forceFails.Value, "failure")}), so SQL Server is silently falling back to the regressed plan — the force is not actually protecting you.");
 
@@ -1325,8 +1805,23 @@ public static class FactAdvice
     /// <paramref name="observedKey"/> is the metadata key holding the observed peak/current value;
     /// <paramref name="fmt"/> renders both it and the baseline in the metric's unit. Falls back to the
     /// static block when the deviation/baseline metadata is absent.
+    /// <para>
+    /// #3653 (A8): when the fact carries the window MEAN (<paramref name="windowMeanKey"/>) and its
+    /// deviation (<c>mean_deviation_sigma</c>) — every fact the pair-gated detectors emit — the sentence
+    /// carries both deviations ("peak 6.1σ … the window mean 2.4σ"), because the gate now fired on both
+    /// and an operator reading one number would take a peak-sized σ for the whole window's. A fact from
+    /// before the pair (no mean sigma) keeps the single-deviation sentence verbatim.
+    /// </para>
+    /// <para>
+    /// #3691 lane 41: a <c>baseline_zero_history</c> fact gets a THIRD shape, before the σ sentence is built —
+    /// the SQL Server half of the same fix (one engine, one truth; the PostgreSQL twin is
+    /// <c>PgTargetAdvice.ComposeDeviation</c>). The bucket cleared its tier's sample and distinct-day floors and
+    /// held nothing but zeros, so the finding is an EXTREMITY against the strongest baseline statement there is,
+    /// not a deviation measured in sigmas — and the stored <c>deviation_sigma</c> is the display cap rather than a
+    /// measurement, so no σ figure is printed on this arm at all. The trusted sentence below is untouched.
+    /// </para>
     /// </summary>
-    private static AdviceBlock ComposeAnomaly(IReadOnlyDictionary<string, Fact> facts, string key, string observedKey, string noun, Func<double, string> fmt, string meaning)
+    private static AdviceBlock ComposeAnomaly(IReadOnlyDictionary<string, Fact> facts, string key, string observedKey, string noun, Func<double, string> fmt, string meaning, string? windowMeanKey = null)
     {
         var fallback = _byKey[key];
         var observed = FactMeta(facts, key, observedKey);
@@ -1336,9 +1831,34 @@ public static class FactAdvice
             return fallback;
 
         var samples = FactMeta(facts, key, "baseline_samples");
+
+        if ((FactMeta(facts, key, "baseline_zero_history") ?? 0) >= 1)
+        {
+            var restsOn = ZeroHistoryRestsOn(samples, FactMeta(facts, key, "baseline_distinct_days"));
+            return fallback with
+            {
+                Headline = $"{noun} reached {fmt(observed.Value)} — against a month in which this hour saw none",
+                Investigation =
+                    $"{noun} reached {fmt(observed.Value)} this window. This server's baseline for this hour-of-week is not " +
+                    $"thin — it is a measured ZERO: {restsOn}, not one of them above zero. {meaning} That makes this an " +
+                    "extremity rather than a deviation: the quantity went from never-happens to this, and there is no " +
+                    "dispersion to divide by precisely because there was nothing to divide. Beyond any σ — no deviation " +
+                    "figure is printed, because none would be honest against a history of zeros. Check whether it lines up " +
+                    "with a workload change, a deploy, or a one-off job before treating it as chronic.",
+                Remediation =
+                    "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
+                    "changed. If it was a one-time event — a report run, a backfill, a deploy — awareness is enough, but a " +
+                    "quantity that was reliably zero and now is not will usually recur; the standard threshold finding will " +
+                    "pick it up on a later window with its own detail, and treat it then with the matching wait or resource advice."
+            };
+        }
         var inv = new StringBuilder($"{noun} reached {fmt(observed.Value)} this window, {sigma.Value:0.#}σ above its {fmt(mean.Value)} baseline for this hour-of-week");
         if (samples is > 0)
             inv.Append($" (over {samples.Value:N0} baseline samples)");
+        var windowMean = windowMeanKey is null ? null : FactMeta(facts, key, windowMeanKey);
+        var meanSigma = FactMeta(facts, key, "mean_deviation_sigma");
+        if (windowMean is not null && meanSigma is not null)
+            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {meanSigma.Value:0.#}σ above it (the detector fires only when the mean clears its bar as well, so this is the window running high, not one hot sample)");
         inv.Append($". {meaning} This is a deviation from normal for this time of day and week, not necessarily a sustained problem — check whether it lines up with a workload change, a deploy, or a one-off job before treating it as chronic.");
 
         var rem =
@@ -1355,9 +1875,32 @@ public static class FactAdvice
     }
 
     /// <summary>
+    /// The clause every zero-history shape rests its claim on: the baseline's sample count and the distinct
+    /// days behind it, or the plain "this server's hour-of-week baseline" when the fact carries no sample
+    /// count. One spelling for <see cref="ComposeAnomaly"/>, <see cref="ComposeAnomalyRatio"/> and the
+    /// PostgreSQL-target composers in <c>PgTargetAdvice</c> (#4731), so no two of them can word the same
+    /// measurement two ways. <paramref name="provider"/> is the number format: null keeps the current culture
+    /// this class has always used, and the PostgreSQL composers pass the invariant culture their other figures
+    /// are written in.
+    /// </summary>
+    internal static string ZeroHistoryRestsOn(double? samples, double? days, IFormatProvider? provider = null) =>
+        samples is > 0
+            ? $"{samples.Value.ToString("N0", provider)} baseline sample{(samples.Value == 1 ? "" : "s")}" +
+              (days is > 0 ? $" across {days.Value.ToString("N0", provider)} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
+            : "this server's hour-of-week baseline";
+
+    /// <summary>
     /// Ratio-anomaly composed (BLOCKING / DEADLOCK spike): states the event count this window and how
     /// many times the hour-of-week baseline rate it represents. Falls back to the static block when
     /// the count/ratio metadata is absent.
+    /// <para>
+    /// #4731: a <c>baseline_zero_history</c> fact gets the gate families' third shape (see
+    /// <see cref="ComposeAnomaly"/>), checked BEFORE <c>is_new</c>. A zero-history bucket is never trustworthy,
+    /// so the detector stamps it <c>is_new = 1</c> as well, and read in the old order it was worded "first
+    /// occurrence, no baseline yet" — the words for a baseline the engine has not built, said about a month it
+    /// measured as empty. The zero-history shape prints no multiple: <c>ratio</c> on such a fact is the
+    /// first-occurrence sentinel, and any multiple of a zero rate would be infinite.
+    /// </para>
     /// </summary>
     private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun)
     {
@@ -1366,6 +1909,28 @@ public static class FactAdvice
         var ratio = FactMeta(facts, key, "ratio");
         if (current is null || ratio is null)
             return fallback;
+
+        if ((FactMeta(facts, key, "baseline_zero_history") ?? 0) >= 1)
+        {
+            var restsOn = ZeroHistoryRestsOn(FactMeta(facts, key, "baseline_samples"), FactMeta(facts, key, "baseline_distinct_days"));
+            var invZero =
+                $"{Plural(current.Value, noun)} this window. This server's baseline for this hour-of-week is not thin — " +
+                $"it is a measured ZERO: {restsOn}, not one of them above zero. That makes this an extremity rather than " +
+                "a multiple of a normal rate: the count went from never-happens to this, and a rate that is zero has no " +
+                "multiple to print. Check whether it lines up with a workload change, a deploy, or a one-off job before " +
+                "treating it as chronic.";
+            var remZero =
+                "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
+                "changed. If it was a one-time event — a report run, a backfill, a deploy — awareness is enough, but a count " +
+                "that was reliably zero and now is not will usually recur; if it recurs or sustains, it will cross the standard " +
+                $"{noun} threshold and surface as a first-class finding with its chain or graph detail on a later window; treat it then.";
+            return fallback with
+            {
+                Headline = $"{Plural(current.Value, noun)} this window — against a month in which this hour saw none",
+                Investigation = invZero,
+                Remediation = remZero
+            };
+        }
 
         // is_new = the baseline was too thin to trust a ratio (the detector fell back to the absolute
         // count). Render it as a first occurrence — never the dishonest "spiked to 100×" the sentinel
@@ -1411,6 +1976,16 @@ public static class FactAdvice
     /// Names the top contributing wait types (from the contrib_&lt;TYPE&gt; metadata keys — the type
     /// name lives in the KEY since the metadata dictionary values are doubles), and states the current
     /// vs baseline per-second rate. When is_new (thin baseline), renders it as a first occurrence.
+    /// <para>
+    /// #3741: when the fact carries the window MEAN rate (<c>avg_ms_per_sec</c>) the sentence names it
+    /// beside the peak, as #3724's <see cref="ComposeAnomaly"/> does for every other family — the
+    /// detector now fires the trusted arms only when the mean clears its bar too, and an operator reading
+    /// the peak alone would take one hot collection's number for the whole window's. On the trusted arms
+    /// the clause says so and carries the mean's robust deviation (<c>mean_modified_z</c>) when the bucket
+    /// had one, or the mean's multiple of the baseline when it did not (the ratio arm). On is_new the bar
+    /// is on the peak ALONE, so the mean is stated as plain context — the sentence must not claim a gate
+    /// the detector did not apply. A pre-#3741 fact (no mean) keeps its sentence verbatim.
+    /// </para>
     /// </summary>
     private static AdviceBlock ComposeAnomalyWaitProfile(IReadOnlyDictionary<string, Fact> facts)
     {
@@ -1420,10 +1995,15 @@ public static class FactAdvice
 
         // Top contributors: metadata keys "contrib_<TYPE>" → value = the type's total wait ms; name
         // them in descending order.
+        // A contributor the firing young-baseline bar left out (bar_excluded_<TYPE>) is ranked after the ones that counted
+        // and labelled; with no marker the order and text are unchanged.
         var contributors = f.Metadata
             .Where(kvp => kvp.Key.StartsWith("contrib_", StringComparison.Ordinal))
-            .OrderByDescending(kvp => kvp.Value)
-            .Select(kvp => kvp.Key.Substring("contrib_".Length))
+            .Select(kvp => (Type: kvp.Key.Substring("contrib_".Length), kvp.Value))
+            .Select(c => (c.Type, c.Value, Excluded: PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.IsBarExcluded(f.Metadata, c.Type)))
+            .OrderBy(c => c.Excluded)
+            .ThenByDescending(c => c.Value)
+            .Select(c => c.Excluded ? c.Type + " (not counted toward the threshold on Azure SQL Database)" : c.Type)
             .ToList();
         var topList = contributors.Count == 0
             ? "the collected wait types"
@@ -1433,14 +2013,20 @@ public static class FactAdvice
         var current = f.Metadata.GetValueOrDefault("current_ms_per_sec");
         var mean = f.Metadata.GetValueOrDefault("baseline_mean");
         var ratio = f.Metadata.GetValueOrDefault("ratio");
+        /* #3741: the window mean beside the peak. Nullable: absent on a fact from before the pair. */
+        double? windowMean = f.Metadata.TryGetValue("avg_ms_per_sec", out var avg) ? avg : null;
+        var meanModifiedZ = f.Metadata.GetValueOrDefault("mean_modified_z");
 
         string inv;
         string headline;
         if (isNew)
         {
             headline = "The server's wait profile is heavy, with no baseline yet to compare against";
+            var meanClause = windowMean is null
+                ? ""
+                : $" (the window's mean was about {windowMean.Value:0.#} ms/sec)";
             inv =
-                $"The all-types wait rate peaked at about {current:0.#} ms/sec this window, led by {topList}. There is no " +
+                $"The all-types wait rate peaked at about {current:0.#} ms/sec this window{meanClause}, led by {topList}. There is no " +
                 "established wait-rate baseline for this hour-of-week yet, so this is flagged on its absolute level, not a " +
                 "proven deviation — treat it as a first look at where the server spends its wait time, and check whether it " +
                 "lines up with a workload change or a one-off job.";
@@ -1448,9 +2034,21 @@ public static class FactAdvice
         else
         {
             headline = $"The server's wait profile shifted to about {ratio:0.#}× its baseline for this time of week";
+            /* The trusted arms fire only when the mean clears its bar as well — say so, with the mean's own
+               deviation: its robust modified z when the bucket had a median/MAD (the gate arm), otherwise its
+               multiple of the baseline mean (the ratio arm, where the modified z is 0 by construction). */
+            var meanClause = windowMean is null
+                ? ""
+                : meanModifiedZ > 0
+                    ? $"; the window's mean of {windowMean.Value:0.#} ms/sec sat {meanModifiedZ:0.#} robust σ above the baseline median " +
+                      "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
+                    : mean > 0
+                        ? $"; the window's mean of {windowMean.Value:0.#} ms/sec was roughly {windowMean.Value / mean:0.#}× that baseline " +
+                          "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
+                        : "";
             inv =
                 $"The all-types wait rate peaked at about {current:0.#} ms/sec this window — roughly {ratio:0.#}× the " +
-                $"{mean:0.#} ms/sec normal for this hour-of-week — led by {topList}. This is a shift in the overall wait " +
+                $"{mean:0.#} ms/sec normal for this hour-of-week — led by {topList}{meanClause}. This is a shift in the overall wait " +
                 "profile, not necessarily a sustained problem: check whether it coincides with a workload change, a deploy, " +
                 "or a one-off event before treating it as chronic.";
         }
@@ -1475,7 +2073,7 @@ public static class FactAdvice
     private static AdviceBlock ComposeAnomalyMemoryPressure(IReadOnlyDictionary<string, Fact> facts)
     {
         var a = ComposeAnomaly(facts, "ANOMALY_MEMORY_PRESSURE", "peak_memory_pressure_pct", "Memory pressure", Pct,
-            "Total server memory fell relative to its target — the OS may be reclaiming memory from SQL Server, or the buffer pool grew unusually fast.");
+            "Total server memory fell relative to its target — the OS may be reclaiming memory from SQL Server, or the buffer pool grew unusually fast.", "avg_memory_pressure_pct");
         var mem = MaxMemorySentence(facts);
         return mem.Length == 0 ? a : a with { Remediation = a.Remediation + " " + mem };
     }
@@ -1566,10 +2164,14 @@ public static class FactAdvice
             return fallback;
 
         var impact = FactMeta(facts, "MISSING_INDEX", "max_impact");
-        var inv = new StringBuilder($"{Plural(count.Value, "missing-index suggestion")} from the plans of this window's top queries");
+        /* #3805: the caveat opens the composed investigation, as it opens the static one — the composed block
+           REPLACES the static Investigation, so a caveat on the static block alone would vanish the moment the
+           fact carried metadata, which it always does. */
+        var inv = new StringBuilder(MissingIndexCaveat);
+        inv.Append($" {Plural(count.Value, "missing-index suggestion")} from the plans of this window's top queries");
         if (impact is > 0)
             inv.Append($", the strongest with an estimated {impact.Value:0.#}% improvement");
-        inv.Append(". These come from the optimizer's own missing-index data — it noticed a query would have benefited from an index that does not exist.");
+        inv.Append(". These come from the optimizer's own missing-index data — it noticed, while costing one statement, that an index it could not find would have lowered that statement's estimated cost; the top plans are the ones this window measured most expensive, which is the only sense in which a request here is traced from a measured-slow query.");
 
         var rem =
             "Treat these as candidates, not commands: the optimizer suggests a wide covering index per query and " +
@@ -1614,7 +2216,82 @@ public static class FactAdvice
         };
     }
 
-    /// <summary>RUNNING_JOBS composed: states how many jobs overran and by how much.</summary>
+    /// <summary>
+    /// #3538 A9: the sentence that ties a symptom card to the long-running job when RUNNING_JOBS FIRED
+    /// this window (running-long count above zero — the same predicate the maintenance edges in
+    /// <see cref="RelationshipGraph"/> use, so the prose and the incident clustering agree on when the
+    /// link exists). States the job facts the engine collected (count, worst overrun, longest runtime)
+    /// rather than re-describing the symptom. Empty when the fact is absent or no job is running long,
+    /// so a caller can append it unconditionally. Leading space included. The RUNNING_JOBS fact's
+    /// metadata is counts and durations; since #3653 the collectors also put the worst job's NAME on the
+    /// fact's ObjectName, and the job card (<see cref="ComposeRunningJobs"/>) states it. This clause is
+    /// the symptom cards' text (SCH_M, IO_WRITE_LATENCY_MS, WRITELOG) and still points at the Running Jobs
+    /// view for the name; carrying the name into it is those cards' change, not the job card's.
+    /// </summary>
+    private static string LinkedJobClause(IReadOnlyDictionary<string, Fact> facts)
+    {
+        if (!Fired(facts, "RUNNING_JOBS"))
+            return string.Empty;
+        var longCount = FactMeta(facts, "RUNNING_JOBS", "running_long_count");
+        if (longCount is not > 0)
+            return string.Empty;
+
+        var pct = FactMeta(facts, "RUNNING_JOBS", "max_percent_of_average");
+        var dur = FactMeta(facts, "RUNNING_JOBS", "max_duration_seconds");
+        var sb = new StringBuilder($" RUNNING_JOBS fired in the same window — {Plural(longCount.Value, "Agent job")} running well past normal duration");
+        if (pct is > 0)
+            sb.Append($", the worst at {pct.Value:N0}% of its historical average");
+        if (dur is > 0)
+            sb.Append($" (about {Duration(dur.Value * 1000)} so far)");
+        sb.Append(" — so this finding and that job are ONE incident, not two: the Running Jobs view names the job, and moving or shortening it is the fix for both cards.");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// SCH_M composed (#3538 A9): states the schema-lock wait totals and, when RUNNING_JOBS fired, names
+    /// the long-running job as the likely holder instead of telling the operator to go and look for one.
+    /// Falls back to the static block when the wait metadata is absent AND no job is running long.
+    /// </summary>
+    private static AdviceBlock ComposeSchM(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var fallback = _byKey["SCH_M"];
+        var numbers = WaitNumbers(facts, "SCH_M", "Schema-modification lock waits");
+        var linked = LinkedJobClause(facts);
+        if (numbers.Length == 0 && linked.Length == 0)
+            return fallback;
+
+        var concept =
+            "SCH-M is the most exclusive lock SQL Server takes — it is incompatible with everything, including the IS lock a SELECT requires, so a session holding SCH-M on a hot table blocks the entire workload against that table. Sources: `ALTER TABLE`, `CREATE/DROP INDEX`, partition operations, and certain statistics updates.";
+        var inv = new StringBuilder(numbers).Append(concept);
+        if (linked.Length > 0)
+            inv.Append(linked);
+        else
+            inv.Append(" No Agent job was running past its normal duration this window, so look for ad-hoc DDL or an index operation issued outside the job schedule.");
+
+        return fallback with
+        {
+            Headline = linked.Length > 0
+                ? "Schema-modification lock waits while an Agent job runs long — its index maintenance is blocking the workload"
+                : fallback.Headline,
+            Investigation = inv.ToString()
+        };
+    }
+
+    /// <summary>
+    /// RUNNING_JOBS composed: states how many jobs overran and by how much, and (#3653) WHICH one.
+    /// <para>The collectors put the name of the job furthest past its own history on the fact's
+    /// ObjectName (both SKUs, one name, running-long rows only — the SQL comment there states the choice).
+    /// When it is present the headline, the first sentence and the remediation name the job; when it is
+    /// absent — a finding persisted before the collectors carried it, or a window where jobs ran but none
+    /// ran long — every sentence is the pre-#3653 one, so the frozen text of old findings and the
+    /// nothing-long case read exactly as before. The name is guarded on the count as well as the slot:
+    /// a name with a zero count cannot come from the collectors (the FILTER yields NULL) and naming a job
+    /// that did not run long would be the lie this arm exists to stop. The overrun figures stay attributed
+    /// to "the worst", not to the named job, because <c>max_percent_of_average</c> and
+    /// <c>max_duration_seconds</c> are window maxima over EVERY running row, long or not, while the name
+    /// is chosen among the long rows only; the two coincide in the ordinary case and the wording does not
+    /// depend on it.</para>
+    /// </summary>
     private static AdviceBlock ComposeRunningJobs(IReadOnlyDictionary<string, Fact> facts)
     {
         var fallback = _byKey["RUNNING_JOBS"];
@@ -1624,22 +2301,46 @@ public static class FactAdvice
 
         var pct = FactMeta(facts, "RUNNING_JOBS", "max_percent_of_average");
         var dur = FactMeta(facts, "RUNNING_JOBS", "max_duration_seconds");
-        var inv = new StringBuilder($"{Plural(longCount.Value, "Agent job")} ran well past normal duration this window");
+        var name = longCount.Value > 0 && facts.TryGetValue("RUNNING_JOBS", out var jobFact) && !string.IsNullOrEmpty(jobFact.ObjectName)
+            ? jobFact.ObjectName
+            : null;
+        var others = longCount.Value - 1;
+        var inv = new StringBuilder(name is null
+            ? $"{Plural(longCount.Value, "Agent job")} ran well past normal duration this window"
+            : others > 0
+                ? $"{Plural(longCount.Value, "Agent job")} ran well past normal duration this window, `{name}` the furthest past its own history (the Running Jobs view lists the {Plural(others, "other")})"
+                : $"Agent job `{name}` ran well past normal duration this window");
         if (pct is > 0)
             inv.Append($", the worst at {pct.Value:N0}% of its historical average");
         if (dur is > 0)
             inv.Append($" (longest current runtime about {Duration(dur.Value * 1000)})");
         inv.Append(". A job running far past its average is usually stuck — blocked, waiting on a resource, or hung — rather than simply busy.");
+        // #3538 A9: the reverse link — the job card names the symptoms whose graph edges point at it, so
+        // whichever card the operator opens first says the incident is one thing. "Fired" here is the
+        // scorer's >0 working set (the same set the edge predicates evaluate against); a symptom that also
+        // ROOTED its own finding is clustered with this one, a trace-level one is merely linked.
+        var symptoms = new List<string>();
+        if (longCount.Value > 0 && Fired(facts, "SCH_M")) symptoms.Add("SCH_M (schema-modification lock waits — the job is probably index maintenance holding schema locks)");
+        if (longCount.Value > 0 && Fired(facts, "IO_WRITE_LATENCY_MS")) symptoms.Add("IO_WRITE_LATENCY_MS (its write volume is a candidate for the latency)");
+        if (longCount.Value > 0 && Fired(facts, "WRITELOG")) symptoms.Add("WRITELOG (a fully logged rebuild or reload drives log flushes)");
+        if (symptoms.Count > 0)
+            inv.Append($" Also elevated this window and linked to this job by the engine: {string.Join("; ", symptoms)}. Where one of them rooted its own finding, it and this card are ONE incident, not two.");
 
         var rem =
-            "Check the long-running jobs in Agent history: one at several times its normal runtime is typically " +
+            (name is null
+                ? "Check the long-running jobs in Agent history: one at several times its normal runtime is typically "
+                : $"Check `{name}` in Agent history first{(others > 0 ? ", then the others" : string.Empty)}: a job at several times its normal runtime is typically ") +
             "blocked (look for it in the blocking findings) or waiting on a resource. Decide whether to let it finish " +
             "or stop it, and address the cause — a job that regularly overruns its window usually needs its schedule " +
             "or its workload rethought.";
 
         return fallback with
         {
-            Headline = $"{Plural(longCount.Value, "Agent job")} running well past normal — likely stuck, not busy",
+            Headline = name is null
+                ? $"{Plural(longCount.Value, "Agent job")} running well past normal — likely stuck, not busy"
+                : others > 0
+                    ? $"Agent job `{name}` and {Plural(others, "other")} running well past normal — likely stuck, not busy"
+                    : $"Agent job `{name}` running well past normal — likely stuck, not busy",
             Investigation = inv.ToString(),
             Remediation = rem
         };
@@ -2121,7 +2822,7 @@ public static class FactAdvice
             Investigation:
                 "SELECT queries are queueing behind UPDATE/INSERT/DELETE transactions on the same rows or pages. The per-mode breakdown shows LCK_M_S ranked against the other lock modes for the window; when DB_CONFIG co-fired, the databases where RCSI is off are the candidates for the fix. Open Configuration → Database Configuration in-app to see the full per-database RCSI/auto-shrink/auto-close/page-verify state. Reader/writer deadlocks are the same pattern escalated — if DEADLOCKS co-fired, the graph will show shared-lock victims.",
             Remediation:
-                "Enable READ_COMMITTED_SNAPSHOT on the affected database: `ALTER DATABASE <db> SET READ_COMMITTED_SNAPSHOT ON;`. Readers stop taking shared locks and instead read the previous-committed row version, which eliminates the entire wait class for everything running at READ COMMITTED or below. The ALTER needs a brief exclusive lock on the database, so do it at a quiet moment. If the application uses NOLOCK / READUNCOMMITTED hints to work around this same problem today, RCSI is strictly better — it returns committed data instead of dirty reads — but test on a copy first if any code relies on dirty-read behaviour.");
+                "Enable READ_COMMITTED_SNAPSHOT on the affected database: `ALTER DATABASE <db> SET READ_COMMITTED_SNAPSHOT ON;`. Readers stop taking shared locks and instead read the previous-committed row version, which eliminates the entire wait class for everything running at READ COMMITTED or below. The ALTER needs a brief exclusive lock on the database, so do it at a quiet moment, and the versioning is not free: row versions live in tempdb, where a long-running reader can grow the version store. If the application uses NOLOCK / READUNCOMMITTED hints to work around this same problem today, RCSI is strictly better — it returns committed data instead of dirty reads — but test on a copy first if any code relies on dirty-read behaviour.");
 
         t["LCK_M_IS"] = new AdviceBlock(
             Headline:
@@ -2129,7 +2830,7 @@ public static class FactAdvice
             Investigation:
                 "Intent-shared locks are the page/table-level locks SELECT takes to declare 'I will be reading rows on this page'. Waiting on IS means the page or table is held in an incompatible mode by a writer — same reader-blocked-by-writer pattern as LCK_M_S, one level up the lock hierarchy. The per-mode breakdown shows LCK_M_IS ranked against the other lock modes for the window. When DB_CONFIG co-fired, the databases with RCSI off are the candidates. Open Configuration → Database Configuration to see the full per-database state.",
             Remediation:
-                "Enable READ_COMMITTED_SNAPSHOT on the affected database: `ALTER DATABASE <db> SET READ_COMMITTED_SNAPSHOT ON;`. This eliminates reader/writer blocking for everything at or below READ COMMITTED — the most common isolation level by far. If the application currently uses READ UNCOMMITTED with NOLOCK hints to avoid these waits, RCSI is the strictly better mechanism: it returns committed data rather than dirty reads, and you can remove the hints once it's enabled.");
+                "Enable READ_COMMITTED_SNAPSHOT on the affected database: `ALTER DATABASE <db> SET READ_COMMITTED_SNAPSHOT ON;`. This eliminates reader/writer blocking for everything at or below READ COMMITTED — the most common isolation level by far. The ALTER needs a brief exclusive lock on the database, so do it at a quiet moment, and the versioning is not free: row versions live in tempdb, where a long-running reader can grow the version store. If the application currently uses READ UNCOMMITTED with NOLOCK hints to avoid these waits, RCSI is the strictly better mechanism — it returns committed data rather than dirty reads, and you can remove the hints once it's enabled — but test on a copy first if any code relies on dirty-read behaviour.");
 
         t["SCH_M"] = new AdviceBlock(
             Headline:
@@ -2188,25 +2889,52 @@ public static class FactAdvice
             Remediation:
                 "Storage fix: log file on its own low-latency device (NVMe, dedicated log-tier SAN), with no contention from data files or tempdb. Workload fix: batch many small writes into fewer larger transactions where the consistency model allows — turning 1000 single-row inserts per second into ten 100-row batches collapses WRITELOG dramatically. `ALTER DATABASE ... SET DELAYED_DURABILITY = FORCED` trades durability for latency and is appropriate when losing the last few committed transactions on a crash is acceptable; not appropriate for financial or audit workloads.");
 
+        // #3538 A5: the availability-group half of commit latency. Advise-only and evidence-gated
+        // (ComposeWaitByKey prepends the measured totals); the remediation names the counter-objective
+        // out loud — synchronous commit is a recovery-point policy, and the OtterTune doctrine the
+        // engine review graded against forbids advising a durability trade for speed — so the block
+        // points at the replica and at which databases NEED the guarantee, never at flipping the mode.
+        t["HADR_SYNC_COMMIT"] = new AdviceBlock(
+            Headline:
+                "HADR_SYNC_COMMIT waits — commits are waiting on a synchronous availability-group secondary",
+            Investigation:
+                "HADR_SYNC_COMMIT is the time a committing transaction on the primary waits for a synchronous-commit secondary to acknowledge that it has hardened the log block. It is the availability-group half of commit latency (the local log flush is WRITELOG), so on a synchronous AG every commit pays both. Sustained HADR_SYNC_COMMIT means the round trip to the secondary is slow — its own log write, the network between the replicas, or a secondary busy with redo or readable-secondary queries. Open the Wait Stats tab for the HADR_SYNC_COMMIT series over the window and compare it with WRITELOG: if WRITELOG is low and HADR_SYNC_COMMIT high, the primary's log is fine and the replica path is the cost.",
+            Remediation:
+                "Measure the replica side first: the secondary's transaction-log write latency and redo queue, and the network latency between the replicas — a secondary on slower storage or in another region sets the primary's commit latency, and that is where the fix is. Then review which databases actually need synchronous commit: it is a durability and failover-readiness POLICY (zero data loss on failover), so only the databases whose recovery-point objective requires it should carry it, and the rest can be asynchronous by design. Do NOT switch a database to asynchronous commit to make this wait disappear — that trades away the guarantee the setting exists for, and the decision belongs to whoever owns the recovery-point objective, not to a wait-stats finding.");
+
         // ─────────────────────────────────────────────────────────────────
         // Latch contention
         // ─────────────────────────────────────────────────────────────────
 
+        // #4149: LATCH_EX excludes buffer and transaction-mark latches (sys.dm_os_wait_stats), so the
+        // headline and body no longer describe page latches or point straight at tempdb/last-page-insert
+        // — those are PAGELATCH_EX/PAGELATCH_UP's territory below. The class from get_latch_stats decides
+        // the cause.
         t["LATCH_EX"] = new AdviceBlock(
             Headline:
-                "Exclusive page-latch contention — in-memory contention on hot pages, often tempdb allocation or last-page insert hotspots",
+                "Exclusive latch contention on a non-buffer resource — the class decides the cause (LATCH_EX)",
             Investigation:
-                "Page latches are short-term synchronization on individual buffer-pool pages. EX latch waits usually mean parallel inserts into a heap or narrow index (every session contending for the same allocation page), tempdb allocation contention on GAM/SGAM/PFS pages (the `2:1:1` family of resource waits), or insert hotspots on tables with monotonically increasing keys. Co-elevated TEMPDB_USAGE, CXPACKET, or SOS_SCHEDULER_YIELD tells you which shape this is. Open the Latch Stats sub-tab under Resource Metrics for the per-latch-class breakdown over the window, and the TempDB tab to confirm or rule out the tempdb-allocation shape.",
+                "LATCH_EX is contention on in-memory structures OTHER than buffer-pool pages or transaction-mark latches — it is not last-page insert contention or tempdb allocation contention, which surface as PAGELATCH_EX and PAGELATCH_UP. Get the latch class with get_latch_stats first: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR point at parallel scan coordination, FGCB_ADD_REMOVE points at file growth or shrink, and LOG_MANAGER points at log growth. Co-elevated CXPACKET or SOS_SCHEDULER_YIELD corroborates the parallelism shape.",
             Remediation:
-                "For tempdb allocation contention, confirm at least 4 tempdb data files of equal size (8 if cores >= 8) and that `MIXED_PAGE_ALLOCATION` is `OFF` (the default since 2016). For a last-page insert hotspot — an ever-increasing (IDENTITY / sequential) leading key on a B-tree, where every insert latches the same trailing page — the direct fix is `OPTIMIZE_FOR_SEQUENTIAL_KEY = ON` on that index (2019+); otherwise a non-sequential leading key, hash partitioning, or in-memory OLTP. Adding a clustered index on a sequential key CREATES this contention rather than relieving it, so that is not the fix. For parallel inserts contending on a heap's allocation pages (PFS/IAM), spread or partition the insert workload — a sequential clustered key will only move the contention to the index's last page.");
+                "Act on the class, not on the wait type. For ACCESS_METHODS_DATASET_PARENT or ACCESS_METHODS_SCAN_RANGE_GENERATOR, reduce unnecessary parallelism (cost threshold for parallelism, MAXDOP) or fix why the optimizer is choosing wide parallel scans. For FGCB_ADD_REMOVE, pre-size the file and fix small autogrowth increments. For LOG_MANAGER, pre-size the transaction log and address whatever is generating excess log records.");
 
         t["LATCH_SH"] = new AdviceBlock(
             Headline:
-                "Shared page-latch contention — concurrent readers contending for the same hot pages",
+                "Shared latch contention on a non-buffer resource — the class decides the cause (LATCH_SH)",
             Investigation:
-                "Less common than EX, but shows up when many parallel readers hit the same small set of pages — root pages of busy indexes, single-page tables that everyone reads. Open the Latch Stats sub-tab under Resource Metrics for the breakdown by latch class. PAGE class points at the buffer pool; ACCESS_METHODS_HOBT_VIRTUAL_ROOT is the famously hot root-page latch on heavily-read indexes. CXPACKET co-elevation means parallel operations are amplifying the contention.",
+                "LATCH_SH is shared-latch contention on in-memory structures OTHER than buffer-pool pages — sys.dm_os_wait_stats excludes buffer latches from this wait type, so it is not concurrent readers thrashing a hot page. Get the latch class with get_latch_stats first: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR point at parallel scan coordination, FGCB_ADD_REMOVE points at file growth or shrink, and LOG_MANAGER points at log growth. CXPACKET co-elevation means parallel operations are amplifying the contention.",
             Remediation:
-                "Architectural problem, not a configuration one. If a single hot page is being thrashed by small lookups, partition the index so the hot data spans multiple pages, denormalize the lookup into a wider structure, or cache at the application layer. There's no `sp_configure` setting that fixes this — the schema or workload has to change. If the contention is on a queue-table or status-flag pattern that everyone polls, switching that hot pattern to a service broker queue or an event-driven design is usually the durable answer.");
+                "Act on the class, not on the wait type. For ACCESS_METHODS_DATASET_PARENT or ACCESS_METHODS_SCAN_RANGE_GENERATOR, reduce unnecessary parallelism (cost threshold for parallelism, MAXDOP) or fix why the optimizer is choosing wide parallel scans. For FGCB_ADD_REMOVE, pre-size the file and fix small autogrowth increments. For LOG_MANAGER, pre-size the transaction log and address whatever is generating excess log records.");
+
+        // #4149: last-page-insert / OPTIMIZE_FOR_SEQUENTIAL_KEY moved here from LATCH_EX — CREATE INDEX's
+        // own docs name PAGELATCH_EX as the wait type this guidance is for.
+        t["PAGELATCH_EX"] = new AdviceBlock(
+            Headline:
+                "Exclusive page-latch contention — in-memory contention on hot pages, often last-page insert hotspots",
+            Investigation:
+                "Page latches are short-term synchronization on individual buffer-pool pages. PAGELATCH_EX waits usually mean parallel inserts into a heap or narrow index (every session contending for the same allocation page), or insert hotspots on tables with monotonically increasing keys. Co-elevated CXPACKET or SOS_SCHEDULER_YIELD tells you which shape this is. Open the Latch Stats sub-tab under Resource Metrics for the per-latch-class breakdown over the window.",
+            Remediation:
+                "For a last-page insert hotspot — an ever-increasing (IDENTITY / sequential) leading key on a B-tree, where every insert latches the same trailing page — the direct fix is `OPTIMIZE_FOR_SEQUENTIAL_KEY = ON` on that index (2019+); otherwise a non-sequential leading key, hash partitioning, or in-memory OLTP. Adding a clustered index on a sequential key CREATES this contention rather than relieving it, so that is not the fix. For parallel inserts contending on a heap's allocation pages (PFS/IAM), spread or partition the insert workload — a sequential clustered key will only move the contention to the index's last page.");
 
         t["PAGELATCH_UP"] = new AdviceBlock(
             Headline:
@@ -2362,6 +3090,19 @@ public static class FactAdvice
             Remediation:
                 "Dumps mean investigate, not a setting to flip — so there is nothing to Apply. First, get current on Cumulative Updates: a large share of dump-producing bugs are already fixed in later builds, and 'apply the latest CU and re-evaluate' resolves many cases outright. If dumps continue on a current build, match the ERRORLOG failure type to a known issue or open a case with Microsoft and attach the dump files — they are the artifact support needs. Watch the volume holding the dump directory: repeated large dumps can themselves fill the disk. Do not delete the dump files until you (or support) have read them.");
 
+        // #3653 A10 (Q2, and slice two): the static fallback for CONFIG_CHANGED — a finding persisted before
+        // the composer existed, or a read that cannot find the fact. The composed block (ComposeConfigChanged)
+        // states the setting, the values, the observation time and the compare; this one only says what the
+        // family is — all three of them, since slice two the fact covers a server setting, a database option
+        // or a trace flag (or several observed at one connect).
+        t[ConfigChangeAttribution.FactKey] = new AdviceBlock(
+            Headline:
+                "A configuration setting changed inside the analysis window — a server setting, a database option or a trace flag",
+            Investigation:
+                "A configuration snapshot (taken on each connect) observed a value that differs from the previous snapshot's — a sys.configurations setting, a sys.databases option on one database, or a trace flag enabled or disabled — and the engine compared the four hours before the change with the four hours after it, banding each metric's move on the server's own dispersion where a baseline exists and on the scorer's ladder otherwise. A server setting is anchored on the default trace's sp_configure line (msg 15457) when the store holds one for that option; every other change is anchored on the snapshot that first observed it, and the prose says which. The frozen finding text states what changed, old → new, when it changed or was first observed, and which metrics moved beyond their band — or that none did. `get_server_config_changes`, `get_database_config_changes` and `get_trace_flag_changes` list the change; `compare_analysis` reruns the compare over any pair of windows.",
+            Remediation:
+                "An attribution, not an accusation: a before/after around one change is not a causal test. If a metric moved the wrong way and stays moved on later passes, the change is the first suspect; `audit_config` grades a new server value against guidance, the DB_CONFIG advisory grades the database options this engine has an opinion on, and `get_trace_flags` lists what is on now. If nothing moved, there is nothing to do.");
+
         // ─────────────────────────────────────────────────────────────────
         // Query-plan advisories (WS4) — advise-only: missing indexes, plan warnings.
         // Parsed from the already-collected plans of the top queries by cost. The
@@ -2369,11 +3110,15 @@ public static class FactAdvice
         // no Apply (index + query changes are judgement calls, tested per workload).
         // ─────────────────────────────────────────────────────────────────
 
+        // #3805: the card is CORROBORATION, never a diagnosis and never the engine's headline. It opens with the
+        // one fixed caveat sentence (MissingIndexCaveat, byte-identical to the plan tools' per-row caveat) in
+        // both the static and the composed block, and FactScorer roots it at the Information rung, below every
+        // standing misconfiguration — a request never outranks a setting that is wrong today.
         t["MISSING_INDEX"] = new AdviceBlock(
             Headline:
                 "The optimizer asked for indexes that don't exist — top queries are scanning where they could seek",
             Investigation:
-                "SQL Server records a missing-index request in the query plan whenever the optimizer believes an index it couldn't find would have materially lowered a query's cost. This finding parsed the actual plans of your most expensive queries and collected those requests; the drill-down lists each one with its table, the optimizer's estimated impact %, and the suggested CREATE INDEX. Treat them as a STARTING POINT, not a prescription: the engine's suggestions are naive — it proposes one index per query in isolation, often with the key column order wrong, with wide INCLUDE lists, and with no awareness of indexes you already have or of the write cost. Weigh each by impact AND by how often the query actually runs.",
+                MissingIndexCaveat + " SQL Server records a missing-index request in the query plan whenever the optimizer believes an index it couldn't find would have materially lowered a query's cost. This finding parsed the actual plans of your most expensive queries and collected those requests; the drill-down lists each one with its table, the optimizer's estimated impact %, and the suggested CREATE INDEX. Treat them as a STARTING POINT, not a prescription: the engine's suggestions are naive — it proposes one index per query in isolation, often with the key column order wrong, with wide INCLUDE lists, and with no awareness of indexes you already have or of the write cost. Weigh each by impact AND by how often the query actually runs.",
             Remediation:
                 "Evaluate and test — there is nothing to auto-Apply, because a wrong index is worse than a missing one (every INSERT and DELETE pays to maintain it, as does any UPDATE that touches one of its columns). Consolidate overlapping suggestions into the fewest indexes that cover them, get the key-column order right (equality before inequality, then by selectivity), keep INCLUDE lists lean, and check the suggestion against your existing indexes so you don't create a near-duplicate. Validate the chosen index against the real plan on a copy of the data before it goes to production. The drill-down's CREATE statements are the raw optimizer text — refine them, don't paste them blind.");
 

@@ -166,9 +166,13 @@ public sealed class FactCollectorFailureReportingTests
     {
         var root = RepoRoot();
 
-        var darling = Directory.GetFiles(
-            Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Analysis"),
-            "PgFactCollector.*.cs");
+        /* #3542: the PostgreSQL-target family (PgTargetFactCollector.*.cs) is swept too. It copies the
+           three-outcome ReportCollectionFailure verbatim and has no Lite twin (D1), so this is the one place
+           its degrade posture is held: a content lane's catch that swallows without reporting fails here. */
+        var analysis = Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Analysis");
+        var darling = Directory.GetFiles(analysis, "PgFactCollector.*.cs")
+            .Concat(Directory.GetFiles(analysis, "PgTargetFactCollector.*.cs"))
+            .ToArray();
 
         var lite = Directory.GetFiles(
             Path.Combine(root, "Lite", "Analysis"),

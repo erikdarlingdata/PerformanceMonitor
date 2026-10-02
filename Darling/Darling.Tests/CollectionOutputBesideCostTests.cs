@@ -137,11 +137,15 @@ public sealed class CollectionOutputBesideCostTests
     /// (#3160). Both rows here are the same collector with the same spend and the same zero output; the ONLY
     /// input that differs is how many runs recorded a note about what they found.
     ///
-    /// <para><b>Same collector on both rows on purpose.</b> The mechanism is keyed on the row's counts and
-    /// never on the collector's NAME. A name list is what #2511 exists to refuse, because it goes stale in
-    /// the direction that makes it pass: the next periodic collector to break gets the event-collector
-    /// sentence until somebody remembers to add it. Driving both readings out of one name is the assertion
-    /// that no name list is consulted.</para>
+    /// <para><b>Same collector on both rows on purpose.</b> The note mechanism is keyed on the row's counts
+    /// and never on the collector's NAME, and driving both readings out of one name is the assertion that
+    /// the note branch consults no list. #3754 did add a name set beside it — the closed set of EVENT
+    /// collectors the resting-state sentence is offered to — but with the opposite polarity from the list
+    /// #2511 refuses: that one named the periodic collectors to withhold the sentence from and went stale
+    /// in the direction that makes it pass; this one names the collectors to offer it to, so an omission
+    /// fails loud (the non-reassuring sentence) rather than silent. <c>pg_deadlocks</c> is on it, which is
+    /// why the unnoted row below still keeps the category reading; <c>SwallowedItemFailureTests</c> pins
+    /// the set against the catalog and the snapshot branch for a collector that is not on it.</para>
     ///
     /// <para>The measured subject was <c>query_store</c>, which is not an event collector and stored zero
     /// rows on 11,728 consecutive runs on a read-replica fleet, every one carrying an empty-enumeration
@@ -189,10 +193,13 @@ public sealed class CollectionOutputBesideCostTests
     }
 
     /// <summary>
-    /// The finding's signature read off the TYPE rather than asserted over a hand-written list, so a FIFTH
-    /// parameter reports itself here instead of passing unnoticed — the discipline
+    /// The finding's signature read off the TYPE rather than asserted over a hand-written list, so a
+    /// SEVENTH parameter reports itself here instead of passing unnoticed — the discipline
     /// <see cref="TheBandingSignature_TakesNoOutputAndNoDenialCurrency"/> applies to the band, one method
-    /// over.
+    /// over. Six since #3754: the faulted-run count (a RUN-CLASS count, like the note count beside it) and
+    /// the event-collector bool, which is computed by the caller from the name on
+    /// <see cref="CollectorHealthClassifier.IsEventCollector"/>'s own name-list pattern precisely so that
+    /// this method still takes no string.
     ///
     /// <para><b>The load-bearing half is that none of it is a string.</b> The note's prose has exactly one
     /// home, <see cref="CollectorHealthClassifier.FormatCollectionNote"/>. A finding that took the note TEXT
@@ -212,10 +219,10 @@ public sealed class CollectionOutputBesideCostTests
 
         /* The precondition, named so a signature change reports itself rather than turning the assertions
            below into a vacuous pass over a list that no longer means what this test thinks. */
-        Assert.Equal(4, parameters.Length);
+        Assert.Equal(6, parameters.Length);
 
         Assert.Equal(
-            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount" },
+            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector" },
             parameters.Select(p => p.Name!).ToArray());
 
         Assert.DoesNotContain(parameters, p => p.ParameterType == typeof(string));
@@ -256,7 +263,7 @@ public sealed class CollectionOutputBesideCostTests
     /// the predicate. #3017 consumes the predicate for the first time, so the risk it introduces is exactly
     /// that consumption leaking into the banding chain. This reads
     /// <see cref="CollectorHealthClassifier.Classify"/>'s parameter list off the TYPE rather than asserting
-    /// over a hand-written list of what it takes today, so a TENTH parameter — an output count, a denial
+    /// over a hand-written list of what it takes today, so a NINTH parameter — an output count, a denial
     /// flag, anything — fails here instead of passing unnoticed.</para>
     /// </summary>
     [Fact]
@@ -269,16 +276,20 @@ public sealed class CollectionOutputBesideCostTests
             .ToArray();
 
         /* The precondition, named so a signature change reports itself instead of turning the assertions
-           below into a vacuous pass over a list that no longer means what this test thinks. 10 since
-           #3240 added extensionMissingCount — a RUN-CLASS count like the two beside it, not an output or
-           denial-currency term, which is what this pin refuses. */
+           below into a vacuous pass over a list that no longer means what this test thinks. 10 after #3240
+           added extensionMissingCount (a RUN-CLASS count like the two beside it, not an output or
+           denial-currency term, which is what this pin refuses); #4000 then removed isOnLoad, netting 9 -
+           an on-load collector is no longer a distinct input to the ladder, only a distinct CADENCE the
+           caller resolves (to CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes) before calling
+           in, so the ladder itself needs one fewer parameter to describe it. #4748 then appended latestRunNote - the newest run's own partial-failure
+           note, a text input that is neither an output count nor denial currency - netting 10. */
         Assert.Equal(10, parameters.Length);
 
         Assert.Equal(
             new[]
             {
                 "totalRuns", "successCount", "errorCount", "permissionDeniedCount", "extensionMissingCount",
-                "abandonedCount", "hoursSinceLastSuccess", "hoursSinceLastRun", "frequencyMinutes", "isOnLoad",
+                "abandonedCount", "hoursSinceLastSuccess", "hoursSinceLastRun", "frequencyMinutes", "latestRunNote",
             },
             parameters);
 
@@ -423,17 +434,24 @@ public sealed class CollectionOutputBesideCostTests
             Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs"),
             "public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync");
 
-        /* The precondition. 25 columns since #3240's extension_missing_count - 16 at #2460, plus #2472's
-           four fan-out columns, #2804's abandoned_count, #3010's last_denied_time and #3017's two. A
+        /* The precondition. 31 columns since #4748's one (latest_run_note, the newest run's note the band
+           reads) - 30 at #3885's, 16 at #2460, plus #2472's four fan-out
+           columns, #2804's abandoned_count, #3010's last_denied_time, #3017's two, #3240's
+           extension_missing_count, #3754's session_missing_count, #3819's current_status,
+           last_non_skip_time and last_productive_time, and #3885's trailing_zero_row_success_runs. A
            parse that stopped finding them would otherwise turn the comparison below into two empty maps
-           agreeing. */
-        Assert.Equal(25, darling.Count);
-        Assert.Equal(25, lite.Count);
+           agreeing.
 
-        /* No gaps and no duplicates: ordinals 0..24 exactly once each. A duplicate would let two fields
+           #3885 is the case this pin is FOR: the produced-then-stopped arm is not a Darling-only class -
+           both SKUs dedup on watermarks - so the column had to land on both readers at the same ordinal,
+           and this count is what would have failed had only one been widened. */
+        Assert.Equal(31, darling.Count);
+        Assert.Equal(31, lite.Count);
+
+        /* No gaps and no duplicates: ordinals 0..30 exactly once each. A duplicate would let two fields
            read one column while a third read nothing, which compiles and is silently wrong. */
-        Assert.Equal(Enumerable.Range(0, 25), darling.Values.OrderBy(o => o));
-        Assert.Equal(Enumerable.Range(0, 25), lite.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 31), darling.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 31), lite.Values.OrderBy(o => o));
 
         /* And the same field at the same ordinal on both sides. */
         Assert.Equal(
@@ -448,6 +466,13 @@ public sealed class CollectionOutputBesideCostTests
         Assert.Equal(23, darling["RunsWithRows"]);
         Assert.Equal(21, darling["LastDeniedTime"]);
         Assert.Equal(24, darling["ExtensionMissingCount"]);
+        Assert.Equal(25, darling["SessionMissingCount"]);
+        /* #3819's three, appended together at the top of the range. */
+        Assert.Equal(26, darling["CurrentStatus"]);
+        Assert.Equal(27, darling["LastNonSkipTime"]);
+        Assert.Equal(28, darling["LastProductiveTime"]);
+        /* #4748's one, appended last: the newest run's note, the band's text input. */
+        Assert.Equal(30, darling["LatestRunNote"]);
     }
 
     /// <summary>
@@ -558,7 +583,10 @@ public sealed class CollectionOutputBesideCostTests
             var source = ReadRepoFile(relative);
 
             Assert.Contains("what it BOUGHT", source, StringComparison.Ordinal);
-            Assert.Contains("that zero was CORRECT", source, StringComparison.Ordinal);
+            /* #3898: the pg_deadlocks anecdote that used to carry "that zero was CORRECT" moved to the
+               CHANGELOG (D4); the rule it taught - a zero can be the healthy reading - stays in the tail
+               right after it, so the pin re-points to that rule instead of the story. */
+            Assert.Contains("would fire on the healthy quiet install", source, StringComparison.Ordinal);
             Assert.Contains("deliberately NOT a band", source, StringComparison.Ordinal);
             Assert.Contains("needs a grant", source, StringComparison.Ordinal);
         }

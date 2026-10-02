@@ -330,10 +330,10 @@ public class DarlingNetworkBlockLifetimeTests
     [Fact]
     public void TheExposedLine_QuotesTheAddressAndCidrItIsHolding()
     {
-        var report = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", true, true, "10.197.53.214", "10.197.0.0/16");
+        var report = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", true, true, "10.0.0.26", "10.0.0.0/16");
 
-        Assert.Contains("10.197.53.214", report, StringComparison.Ordinal);
-        Assert.Contains("10.197.0.0/16", report, StringComparison.Ordinal);
+        Assert.Contains("10.0.0.26", report, StringComparison.Ordinal);
+        Assert.Contains("10.0.0.0/16", report, StringComparison.Ordinal);
         Assert.Contains("FIXED for the lifetime of this process", report, StringComparison.Ordinal);
     }
 

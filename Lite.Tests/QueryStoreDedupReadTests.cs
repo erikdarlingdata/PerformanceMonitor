@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -83,6 +84,10 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
     /// When the interval STARTED (UTC). NULL alongside a NULL id is the legacy shape; the reads fall back
     /// to collection_time placement for exactly these rows.
     /// </param>
+    /// <param name="intervalEnd">
+    /// When the interval ENDED (UTC, #4765). NULL is a row collected before the column existed; the duration
+    /// trend then rates the point over the spacing to the previous stored point, as it always did.
+    /// </param>
     private async Task SeedAsync(
         DateTime collectionTime,
         long queryId,
@@ -94,7 +99,12 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
         long avgReads,
         string queryHash,
         long? intervalId = null,
-        DateTime? intervalStart = null)
+        DateTime? intervalStart = null,
+        DateTime? intervalEnd = null,
+        long avgWrites = 0,
+        long avgPhysicalReads = 0,
+        string executionType = "Regular",
+        string? moduleName = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -103,11 +113,11 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name,
      query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
-     query_text, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+     module_name, query_text, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
      query_plan_hash, is_forced_plan, force_failure_count,
-     runtime_stats_interval_id, interval_start_time_utc)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)";
+     runtime_stats_interval_id, interval_start_time_utc, interval_end_time_utc)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -115,22 +125,24 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = Db });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
         cmd.Parameters.Add(new DuckDBParameter { Value = planId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executionType });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)firstExecutionTime ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)moduleName ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = $"SELECT {queryId}" });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
         cmd.Parameters.Add(new DuckDBParameter { Value = executionCount });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgCpuUs });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgDurationUs });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgReads });
-        cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
-        cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = avgWrites });
+        cmd.Parameters.Add(new DuckDBParameter { Value = avgPhysicalReads });
         cmd.Parameters.Add(new DuckDBParameter { Value = $"0xPLAN{planId}" });
         cmd.Parameters.Add(new DuckDBParameter { Value = false });
         cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalId ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalStart ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalEnd ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -195,6 +207,39 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(TrueBucketReads, bucket.TotalReads, precision: 6);
     }
 
+    /// <summary>
+    /// #3530: the slicer's reader mapped BOTH read fields to ordinal 4 and never read ordinal 6, so the
+    /// SELECT's total_physical_reads was computed and dropped on the floor. The seed's three I/O columns
+    /// carry values no other column can reproduce — equal fixture values are exactly how the slip stayed
+    /// invisible, so distinct-per-column is the point of this test, not a nicety.
+    /// </summary>
+    [Fact]
+    public async Task SlicerBucket_MapsWritesAndPhysicalReads_ToTheirOwnColumns()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), queryId: 7, planId: 77, FirstExecA,
+            executionCount: 10, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 11, queryHash: "0xIOMAP",
+            intervalId: 9301, intervalStart: BucketStart, avgWrites: 3, avgPhysicalReads: 5);
+
+        var service = new LocalDataService(_duckDb);
+        var bucket = Assert.Single(await service.GetQueryStoreSlicerDataAsync(ServerId, hoursBack: 24));
+
+        /* 10 executions x the averages: logical 110, writes 30, physical 50 — all pairwise distinct.
+           TotalReads and TotalLogicalReads are deliberate aliases of the LOGICAL aggregate (ordinal 4),
+           the same shape the query-stats slicer maps; physical rides its own column at ordinal 6. */
+        Assert.Equal(110.0, bucket.TotalReads, precision: 6);
+        Assert.Equal(110.0, bucket.TotalLogicalReads, precision: 6);
+        Assert.Equal(30.0, bucket.TotalWrites, precision: 6);
+        Assert.Equal(50.0, bucket.TotalPhysicalReads, precision: 6);
+
+        /* #3547's data half: the slicer OVERLAY reads the same rows through the timeline, whose SELECT
+           carried no physical column at all — so a physical-sorted chart had nothing honest to draw.
+           Same distinct values, so a logical/physical swap on either side goes red here. (The overlay's
+           metric->field switch itself is WPF code-behind, untestable here like its sibling arms.) */
+        var point = Assert.Single(await service.GetQueryStoreItemTimelineAsync(ServerId, Db, queryId: 7, planId: 77, hoursBack: 24));
+        Assert.Equal(110.0, point.Reads, precision: 6);
+        Assert.Equal(50.0, point.PhysicalReads, precision: 6);
+    }
+
     [Fact]
     public async Task TopQueries_ReportTheLatestCumulativeExecutionCount_NotTheSumOfSnapshots()
     {
@@ -215,6 +260,111 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(2.0, a.AvgDurationMs, precision: 6);
         Assert.Equal(7.0, b.AvgDurationMs, precision: 6);
         Assert.Equal(0.3, b.AvgCpuTimeMs, precision: 6);
+    }
+
+    [Fact]
+    public async Task TopQueries_ExecutionTypeFilterSeparatesOutcomesBeforeRanking()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 201, 2001, FirstExecA, 100, 1_000, 2_000, 1,
+            "0xREG", intervalId: 9401, intervalStart: BucketStart, executionType: "Regular");
+        await SeedAsync(BucketStart.AddMinutes(6), 202, 2002, FirstExecB, 3, 200, 500, 1,
+            "0xABORT", intervalId: 9402, intervalStart: BucketStart, executionType: "Aborted");
+        await SeedAsync(BucketStart.AddMinutes(7), 203, 2003, FirstExecB.AddMinutes(1), 2, 300, 700, 1,
+            "0xEX", intervalId: 9403, intervalStart: BucketStart, executionType: "Exception");
+
+        var service = new LocalDataService(_duckDb);
+        var aborted = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Aborted"));
+        var exception = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Exception"));
+
+        Assert.Equal("Aborted", aborted.ExecutionTypeDesc);
+        Assert.Equal("Exception", exception.ExecutionTypeDesc);
+    }
+
+    /// <summary>
+    /// The case the outcome split exists for: ONE plan, ONE interval, two outcomes. Query Store writes a
+    /// runtime-stats row per (plan, interval, execution type), and the grouping used to MAX() the outcome, so
+    /// this pair came back as one "Regular" row of 103 executions whose average blended the aborted executions'
+    /// 30-second duration into the plan's 2 ms one. The test above seeds one outcome per query and cannot see
+    /// that; this one fails on the old grouping.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_OnePlanWithTwoOutcomes_ReturnsOneRowPerOutcome()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 301, 3001, FirstExecA, 100, 1_000, 2_000, 1,
+            "0xMIXED", intervalId: 9501, intervalStart: BucketStart, executionType: "Regular");
+        await SeedAsync(BucketStart.AddMinutes(5), 301, 3001, FirstExecA, 3, 30_000, 30_000_000, 1,
+            "0xMIXED", intervalId: 9501, intervalStart: BucketStart, executionType: "Aborted");
+
+        var service = new LocalDataService(_duckDb);
+        var rows = (await service.GetQueryStoreTopQueriesAsync(ServerId, 24)).Where(r => r.QueryId == 301).ToList();
+
+        Assert.Equal(2, rows.Count);
+        var regular = Assert.Single(rows, r => r.ExecutionTypeDesc == "Regular");
+        var abortedRow = Assert.Single(rows, r => r.ExecutionTypeDesc == "Aborted");
+        Assert.Equal(100L, regular.TotalExecutions);
+        Assert.Equal(2.0, regular.AvgDurationMs, precision: 6);
+        Assert.Equal(3L, abortedRow.TotalExecutions);
+        Assert.Equal(30_000.0, abortedRow.AvgDurationMs, precision: 6);
+
+        /* Filtered, the plan's aborted executions alone: the filter runs before the dedup's ROW_NUMBER, which
+           cannot change the winner because the outcome is in the partition. */
+        var onlyAborted = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Aborted"));
+        Assert.Equal(3001L, onlyAborted.PlanId);
+        Assert.Equal(3L, onlyAborted.TotalExecutions);
+    }
+
+    [Fact]
+    public async Task TopQueries_ModuleFilterRunsBeforeRankingAndReturnsModuleName()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 101, 1001, FirstExecA, 100, 20_000, 50_000, 1,
+            "0xHIGH", intervalId: 9301, intervalStart: BucketStart, moduleName: "dbo.usp_HighCost");
+        await SeedAsync(BucketStart.AddMinutes(6), 102, 1002, FirstExecB, 2, 100, 200, 1,
+            "0xTARGET", intervalId: 9302, intervalStart: BucketStart, moduleName: "dbo.usp_Target");
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(
+            ServerId, hoursBack: 24, top: 1, moduleName: "dbo.usp_Target");
+
+        var row = Assert.Single(rows);
+        Assert.Equal(102L, row.QueryId);
+        Assert.Equal("dbo.usp_Target", row.ModuleName);
+    }
+
+    [Fact]
+    public async Task TopQueries_ModuleFilterRunsAfterIntervalDedup()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 104, 1004, FirstExecA, 10, 100, 200, 1,
+            "0xRENAMED", intervalId: 9304, intervalStart: BucketStart, moduleName: "dbo.usp_OldName");
+        await SeedAsync(BucketStart.AddMinutes(10), 104, 1004, FirstExecA, 40, 200, 300, 1,
+            "0xRENAMED", intervalId: 9304, intervalStart: BucketStart, moduleName: "dbo.usp_NewName");
+
+        var service = new LocalDataService(_duckDb);
+        Assert.Empty(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, moduleName: "dbo.usp_OldName"));
+        var current = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, moduleName: "dbo.usp_NewName"));
+        Assert.Equal(40L, current.TotalExecutions);
+        Assert.Equal("dbo.usp_NewName", current.ModuleName);
+    }
+
+    /// <summary>
+    /// Both filters at once, behind a database list (#4057 on top of #4060). DuckDB binds $N by position, so the
+    /// database names, the outcome and the module must each land in their own slot; one slot off binds the module
+    /// name to execution_type_desc and nothing matches.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_DatabaseOutcomeAndModuleFilters_EachBindTheirOwnSlot()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 401, 4001, FirstExecA, 50, 1_000, 2_000, 1,
+            "0xTARGET2", intervalId: 9601, intervalStart: BucketStart, moduleName: "dbo.usp_Target");
+        await SeedAsync(BucketStart.AddMinutes(5), 401, 4001, FirstExecA, 2, 30_000, 30_000_000, 1,
+            "0xTARGET2", intervalId: 9601, intervalStart: BucketStart, executionType: "Aborted", moduleName: "dbo.usp_Target");
+        await SeedAsync(BucketStart.AddMinutes(6), 402, 4002, FirstExecB, 9, 1_000, 60_000_000, 1,
+            "0xOTHER2", intervalId: 9602, intervalStart: BucketStart, executionType: "Aborted", moduleName: "dbo.usp_Other");
+
+        var row = Assert.Single(await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(
+            ServerId, 24, databaseNames: new[] { Db }, executionType: "Aborted", moduleName: "dbo.usp_Target"));
+        Assert.Equal(401L, row.QueryId);
+        Assert.Equal("Aborted", row.ExecutionTypeDesc);
+        Assert.Equal("dbo.usp_Target", row.ModuleName);
+        Assert.Equal(2L, row.TotalExecutions);
     }
 
     [Fact]
@@ -285,14 +435,17 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(h0, points[0].CollectionTime);
         Assert.Equal(h1, points[1].CollectionTime);
 
-        /* The first point has no predecessor, so its rate is 0 — the same convention the query_stats and
-           procedure_stats trends have always used, not a Query Store quirk. */
-        Assert.Equal(0d, points[0].Value);
+        /* The first point has no predecessor, so its rate is UNKNOWABLE — null, not the 0 the query_stats and
+           procedure_stats trends (and this one) used to fabricate (#3541 A12). The point itself is kept:
+           the interval ran, only its rate is undefined. */
+        Assert.False(points[0].HasRate);
+        Assert.Null(points[0].Value);
+        Assert.Null(points[0].ExecutionsPerSecond);
 
         /* Interval 2's FINAL snapshot only: 9 executions x 2,000us = 18 ms of work, over the 3,600s
            between interval starts. Un-deduped this point would also carry interval 2's earlier 3x1,000us
            restatement AND interval 1's rows that were collected in this hour. */
-        Assert.Equal(18.0 / 3600.0, points[1].Value, precision: 9);
+        Assert.Equal(18.0 / 3600.0, points[1].Value!.Value, precision: 9);
     }
 
     [Fact]
@@ -326,6 +479,128 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(h0.AddMinutes(10), points[0].CollectionTime);   /* legacy, at collection_time */
         Assert.Equal(h0.AddMinutes(20), points[1].CollectionTime);   /* legacy, still restated */
         Assert.Equal(h1, points[2].CollectionTime);                  /* identified, at its interval START */
+    }
+
+    /// <summary>
+    /// #4765: an interval that follows a quiet one is rated over ITS OWN length. Query Store stores no row for
+    /// an interval with no executions, so the previous STORED interval is two hours back, and the spacing to it
+    /// is the interval's own hour plus the quiet hour before it: dividing by that read the interval at half its
+    /// true rate. Both intervals here store their end, so each is rated over its own 3,600 seconds, and the
+    /// window's first point has a rate too (a spacing to a previous point would open it unrated).
+    /// </summary>
+    [Fact]
+    public async Task DurationTrend_AnIntervalAfterAQuietOne_IsRatedOverItsOwnLength()
+    {
+        var h0 = BucketStart;
+        var h2 = BucketStart.AddHours(2);   /* h1 is QUIET: Query Store stores no row for it */
+
+        await SeedAsync(h0.AddMinutes(50), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 30, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xR1",
+            intervalId: 7401, intervalStart: h0, intervalEnd: h0.AddHours(1));
+        await SeedAsync(h2.AddMinutes(50), queryId: 2, planId: 22, FirstExecB,
+            executionCount: 36, avgCpuUs: 100, avgDurationUs: 2_000, avgReads: 0, queryHash: "0xR2",
+            intervalId: 7402, intervalStart: h2, intervalEnd: h2.AddHours(1));
+
+        var points = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(2, points.Count);
+        Assert.Equal(h0, points[0].CollectionTime);
+        Assert.Equal(h2, points[1].CollectionTime);
+
+        /* 30 executions x 1,000us = 30 ms of work over the interval's own 3,600 seconds. */
+        Assert.Equal(30.0 / 3600.0, points[0].ExecutionsPerSecond!.Value, precision: 9);
+        Assert.Equal(30.0 / 3600.0, points[0].Value!.Value, precision: 9);
+
+        /* THE assertion: 36 executions x 2,000us = 72 ms over the interval's own 3,600 seconds, not over the
+           7,200 since the previous stored interval. */
+        Assert.Equal(36.0 / 3600.0, points[1].ExecutionsPerSecond!.Value, precision: 9);
+        Assert.Equal(72.0 / 3600.0, points[1].Value!.Value, precision: 9);
+    }
+
+    /// <summary>
+    /// #4765, the other half: a row that stored no interval end (collected before the column existed) has no
+    /// length of its own, so it keeps the seconds since the previous stored point, exactly as it did before.
+    /// The first interval stores its end and is rated over its own hour; the second stores none and follows a
+    /// quiet hour, so it reads 36 / 7,200. Only the row without an end falls back.
+    /// </summary>
+    [Fact]
+    public async Task DurationTrend_ARowWithNoStoredEnd_KeepsTheGapToThePreviousInterval()
+    {
+        var h0 = BucketStart;
+        var h2 = BucketStart.AddHours(2);   /* h1 is QUIET: Query Store stores no row for it */
+
+        await SeedAsync(h0.AddMinutes(50), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 30, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xR3",
+            intervalId: 7411, intervalStart: h0, intervalEnd: h0.AddHours(1));
+        await SeedAsync(h2.AddMinutes(50), queryId: 2, planId: 22, FirstExecB,
+            executionCount: 36, avgCpuUs: 100, avgDurationUs: 2_000, avgReads: 0, queryHash: "0xR4",
+            intervalId: 7412, intervalStart: h2);
+
+        var points = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(2, points.Count);
+
+        /* Has an end: its own hour. */
+        Assert.Equal(30.0 / 3600.0, points[0].ExecutionsPerSecond!.Value, precision: 9);
+
+        /* No end: the 7,200 seconds between the two interval starts, as before the column existed. */
+        Assert.Equal(36.0 / 7200.0, points[1].ExecutionsPerSecond!.Value, precision: 9);
+        Assert.Equal(72.0 / 7200.0, points[1].Value!.Value, precision: 9);
+    }
+
+    /// <summary>
+    /// #4765: an interval's length is counted in WHOLE seconds. The read truncates the start and the end each to
+    /// its second before it subtracts, so a stored fraction of a second moves the length by up to a second in
+    /// either direction: a true 3,599.000002 seconds reads 3,600, a true 58.2 reads 59, and a true 0.8 reads 0,
+    /// which leaves the point unrated (a NULL rate, never a divide by zero). Query Store intervals are whole
+    /// minutes, so the product never stores a fraction and the read stays as it is; this pins what it does with
+    /// one, so changing it is a decision and not an accident. DuckDB TIMESTAMP keeps microseconds, so every
+    /// seeded instant is a whole number of them.
+    /// </summary>
+    [Fact]
+    public async Task DurationTrend_AFractionalSecondLength_IsRatedOverWholeSeconds()
+    {
+        var h0 = BucketStart;
+        var h1 = BucketStart.AddHours(1);
+        var h2 = BucketStart.AddHours(2);
+
+        /* 3,599.000002 seconds long: starts 0.999999 s past the hour, ends 3,600.000001 s past it. The whole
+           seconds are 0 and 3,600, so it reads 3,600. */
+        var start1 = h0.AddTicks(9_999_990);
+        await SeedAsync(h0.AddMinutes(50), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 30, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xF1",
+            intervalId: 7421, intervalStart: start1, intervalEnd: start1.AddTicks(35_990_000_020));
+
+        /* 58.2 seconds long: starts 0.9 s past the hour, ends 59.1 s past it. The whole seconds are 0 and 59,
+           so it reads 59. */
+        var start2 = h1.AddTicks(9_000_000);
+        await SeedAsync(h1.AddMinutes(50), queryId: 2, planId: 22, FirstExecB,
+            executionCount: 118, avgCpuUs: 100, avgDurationUs: 2_000, avgReads: 0, queryHash: "0xF2",
+            intervalId: 7422, intervalStart: start2, intervalEnd: start2.AddTicks(582_000_000));
+
+        /* 0.8 seconds long: starts 0.1 s past the hour and ends 0.9 s past it. Both are second 0, so it reads 0. */
+        var start3 = h2.AddTicks(1_000_000);
+        await SeedAsync(h2.AddMinutes(50), queryId: 3, planId: 33, FirstExecA,
+            executionCount: 5, avgCpuUs: 100, avgDurationUs: 3_000, avgReads: 0, queryHash: "0xF3",
+            intervalId: 7423, intervalStart: start3, intervalEnd: start3.AddTicks(8_000_000));
+
+        var points = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(3, points.Count);
+
+        /* Over 3,600 whole seconds, not the true 3,599.000002. */
+        Assert.Equal(30.0 / 3600.0, points[0].ExecutionsPerSecond!.Value, precision: 12);
+        Assert.Equal(30.0 / 3600.0, points[0].Value!.Value, precision: 12);
+
+        /* 118 executions x 2,000us = 236 ms, over 59 whole seconds, not the true 58.2. */
+        Assert.Equal(118.0 / 59.0, points[1].ExecutionsPerSecond!.Value, precision: 12);
+        Assert.Equal(236.0 / 59.0, points[1].Value!.Value, precision: 12);
+
+        /* A length that truncates to 0 has no denominator: unrated, and it does NOT fall back to the gap to the
+           previous interval (the length is stored, it is just under a second). */
+        Assert.False(points[2].HasRate);
+        Assert.Null(points[2].ExecutionsPerSecond);
+        Assert.Null(points[2].Value);
     }
 
     [Fact]

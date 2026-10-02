@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
@@ -140,28 +141,126 @@ public sealed class DarlingMcpCustomViewToolsSurfaceTests
     }
 
     [Fact]
-    public async Task DescribeCustomViewCatalog_ReturnsTheComposeVocabulary()
+    public async Task DescribeCustomViewCatalog_DefaultIsCompact_GroupedBySource()
     {
         /* The catalog tool exists so an LLM composes a valid panel WITHOUT reading source or guessing names — it
-           must surface every vocabulary a panel draws from, plus a known measure with its composable fields. */
+           must surface every vocabulary a panel draws from, plus a known measure with its composable fields.
+           #4198: the full catalog is 98 KB, so the DEFAULT call groups measures by source and keeps only the
+           fields a panel spec actually names (key/displayName/kind/unitFamily/validAggregates); source=/
+           full_detail= reach the rest. Byte-budget coverage of this default lives in
+           DarlingMcpCustomViewCatalogSizeTests (#4198 exempt from McpReadToolBudgetLiveTests — no server/store
+           argument to seed). */
         var result = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog();
         using var doc = JsonDocument.Parse(result);
         var root = doc.RootElement;
 
-        foreach (var section in new[] { "measures", "dimensions", "unitFamilies", "aggregates", "timeBuckets", "filterOps", "viz" })
+        foreach (var section in new[] { "sources", "annotationSources", "unitFamilies", "aggregates", "timeBuckets", "filterOps", "viz" })
         {
-            Assert.True(root.TryGetProperty(section, out _), $"catalog is missing the '{section}' vocabulary");
+            Assert.True(root.TryGetProperty(section, out _), $"compact catalog is missing the '{section}' vocabulary");
         }
 
-        /* A known measure is discoverable with the fields a panel binds from it (source + valid aggregates). */
-        var waitTime = root.GetProperty("measures").EnumerateArray()
-            .Single(m => m.GetProperty("key").GetString() == "wait_time_ms");
-        Assert.Equal("wait_stats", waitTime.GetProperty("source").GetString());
+        Assert.True(root.GetProperty("compact").GetBoolean());
+
+        /* A known measure is discoverable, grouped under its source, with the fields a panel binds from it. */
+        var waitStats = root.GetProperty("sources").EnumerateArray().Single(s => s.GetProperty("source").GetString() == "wait_stats");
+        var waitTime = waitStats.GetProperty("measures").EnumerateArray().Single(m => m.GetProperty("key").GetString() == "wait_time_ms");
+        Assert.Equal("scalar", waitTime.GetProperty("kind").GetString());
         Assert.Contains("sum", waitTime.GetProperty("validAggregates").EnumerateArray().Select(a => a.GetString()));
 
         /* The scalar vocabularies the panel's aggregate + viz fields draw from. */
         Assert.Contains("sum", root.GetProperty("aggregates").EnumerateArray().Select(a => a.GetString()));
         Assert.Contains("bar", root.GetProperty("viz").EnumerateArray().Select(v => v.GetString()));
+    }
+
+    [Fact]
+    public async Task DescribeCustomViewCatalog_FullDetail_ReturnsTodaysOriginalShape()
+    {
+        /* full_detail=true is the #4198 escape hatch: the exact flat shape (and every field) this tool always
+           returned, byte-for-byte what BuildComposeCatalogNode / the web /api/catalog compose section serve. */
+        var result = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(full_detail: true);
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+
+        foreach (var section in new[] { "measures", "dimensions", "annotationSources", "universalDimensions", "unitFamilies", "aggregates", "timeBuckets", "filterOps", "viz" })
+        {
+            Assert.True(root.TryGetProperty(section, out _), $"full_detail catalog is missing the '{section}' vocabulary");
+        }
+
+        Assert.False(root.TryGetProperty("compact", out _), "full_detail must not carry the compact-mode marker");
+
+        var waitTime = root.GetProperty("measures").EnumerateArray()
+            .Single(m => m.GetProperty("key").GetString() == "wait_time_ms");
+        Assert.Equal("wait_stats", waitTime.GetProperty("source").GetString());
+        Assert.Contains("sum", waitTime.GetProperty("validAggregates").EnumerateArray().Select(a => a.GetString()));
+        Assert.True(waitTime.TryGetProperty("appliesTo", out _), "full_detail must keep appliesTo per measure");
+        Assert.True(waitTime.TryGetProperty("allowedDimensions", out _), "full_detail must keep allowedDimensions per measure");
+    }
+
+    [Fact]
+    public async Task DescribeCustomViewCatalog_Source_DrillsIntoOneSource_FullDetail()
+    {
+        var result = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(source: "wait_stats");
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+
+        Assert.Equal("wait_stats", root.GetProperty("source").GetString());
+        var measures = root.GetProperty("measures").EnumerateArray().ToList();
+        Assert.NotEmpty(measures);
+        Assert.All(measures, m => Assert.Equal("wait_stats", m.GetProperty("source").GetString()));
+
+        var waitTime = measures.Single(m => m.GetProperty("key").GetString() == "wait_time_ms");
+        Assert.True(waitTime.TryGetProperty("appliesTo", out _), "source drill-down must keep appliesTo per measure");
+        Assert.True(waitTime.TryGetProperty("allowedDimensions", out _), "source drill-down must keep allowedDimensions per measure");
+
+        var dimensions = root.GetProperty("dimensions").EnumerateArray().ToList();
+        Assert.NotEmpty(dimensions);
+        Assert.All(dimensions, d => Assert.Equal("wait_stats", d.GetProperty("source").GetString()));
+
+        /* The small shared vocabularies still ride along, same as every other mode. */
+        Assert.Contains("sum", root.GetProperty("aggregates").EnumerateArray().Select(a => a.GetString()));
+    }
+
+    [Fact]
+    public async Task DescribeCustomViewCatalog_UnknownSource_ReturnsEmptyWithNote_NotAnError()
+    {
+        var result = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(source: "no_such_source");
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+
+        Assert.Empty(root.GetProperty("measures").EnumerateArray());
+        Assert.Empty(root.GetProperty("dimensions").EnumerateArray());
+        Assert.True(root.TryGetProperty("note", out var note), "an unmatched source should explain how to find the real names");
+        Assert.Contains("no_such_source", note.GetString());
+    }
+
+    [Fact]
+    public async Task DescribeCustomViewCatalog_CompactDefault_IsLosslessAndUnderBudget()
+    {
+        /* Every measure key the compact default advertises must be reachable, at full detail, either by drilling
+           into its source or by full_detail=true — the #4198 rule that a cut must never hide what an author
+           needs. Every source name the compact default lists must itself be a working source= filter. */
+        var compactResult = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog();
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(compactResult) < McpResponseBudget.DefaultBytes,
+            $"default describe_custom_view_catalog call is {System.Text.Encoding.UTF8.GetByteCount(compactResult):N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget");
+
+        using var compactDoc = JsonDocument.Parse(compactResult);
+        var compactKeys = compactDoc.RootElement.GetProperty("sources").EnumerateArray()
+            .SelectMany(s => s.GetProperty("measures").EnumerateArray().Select(m => m.GetProperty("key").GetString()!))
+            .ToHashSet();
+
+        var fullResult = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(full_detail: true);
+        using var fullDoc = JsonDocument.Parse(fullResult);
+        var fullKeys = fullDoc.RootElement.GetProperty("measures").EnumerateArray().Select(m => m.GetProperty("key").GetString()!).ToHashSet();
+
+        Assert.Equal(fullKeys, compactKeys);
+
+        foreach (var sourceElement in compactDoc.RootElement.GetProperty("sources").EnumerateArray())
+        {
+            var sourceName = sourceElement.GetProperty("source").GetString()!;
+            var drillResult = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(source: sourceName);
+            using var drillDoc = JsonDocument.Parse(drillResult);
+            Assert.NotEmpty(drillDoc.RootElement.GetProperty("measures").EnumerateArray());
+        }
     }
 
     [Fact]
@@ -181,6 +280,92 @@ public sealed class DarlingMcpCustomViewToolsSurfaceTests
         await using var dead = NpgsqlDataSource.Create(DeadStore);
         var result = await DarlingMcpCustomViewTools.UpdateCustomView(dead, 1, "cv-should-not-persist", BadDefinition, 1);
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
+    }
+
+    /* ---------------- #3541 A14: one write vocabulary for an optional text field ---------------- */
+
+    /// <summary>
+    /// The rule itself, as a truth table: omitted (null) keeps the current value — including a current null —
+    /// an empty or whitespace-only string clears, and text replaces. The helper is the alert-rule tool's, and
+    /// the census below pins that the view tool calls the same one.
+    /// </summary>
+    [Theory]
+    [InlineData(null, "kept", "kept")]
+    [InlineData(null, null, null)]
+    [InlineData("", "kept", null)]
+    [InlineData("   ", "kept", null)]
+    [InlineData("new", "kept", "new")]
+    [InlineData("new", null, "new")]
+    public void ResolveOptionalText_OmittedKeeps_EmptyClears_TextReplaces(string? sent, string? current, string? expected)
+    {
+        Assert.Equal(expected, DarlingMcpCustomAlertTools.ResolveOptionalText(sent, current));
+    }
+
+    /// <summary>
+    /// Both update tools route their optional description through the ONE helper — the cross-tool census the
+    /// contract asks for. Before this, the two tools disagreed (the view tool wrote an omitted description as
+    /// NULL; the rule tool kept it), and a reader of either description had no way to know which rule the other
+    /// followed. Read off the stripped source so a comment naming the helper cannot satisfy it; each tool's
+    /// UpdateAsync call must pass the helper's result where its description argument goes.
+    /// </summary>
+    [Fact]
+    public void BothUpdateTools_RouteDescriptionThroughTheSharedVocabulary()
+    {
+        var viewSource = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCustomViewTools.cs"));
+        var ruleSource = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCustomAlertTools.cs"));
+
+        /* The view tool: reads the row first (there is no "current" to keep without it), then passes the
+           helper's result — never the bare parameter — to the store. */
+        var viewUpdate = viewSource[viewSource.IndexOf("UpdateCustomView(", StringComparison.Ordinal)..];
+        viewUpdate = viewUpdate[..viewUpdate.IndexOf("DeleteCustomView(", StringComparison.Ordinal)];
+        Assert.Contains("store.GetAsync(view_id)", viewUpdate, StringComparison.Ordinal);
+        Assert.Contains("DarlingMcpCustomAlertTools.ResolveOptionalText(description, currentOk.View.Description)", viewUpdate, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"UpdateAsync\(\s*view_id,\s*name,\s*description,", viewUpdate);
+
+        /* The rule tool: the same helper over its own current row. */
+        var ruleUpdate = ruleSource[ruleSource.IndexOf("UpdateCustomAlertRule(", StringComparison.Ordinal)..];
+        ruleUpdate = ruleUpdate[..ruleUpdate.IndexOf("DeleteCustomAlertRule(", StringComparison.Ordinal)];
+        Assert.Contains("ResolveOptionalText(description, row.Description)", ruleUpdate, StringComparison.Ordinal);
+        Assert.DoesNotContain("description ?? row.Description", ruleUpdate, StringComparison.Ordinal);
+
+        /* And the helper is declared exactly once, in the rule tool (the newer contract's home). */
+        Assert.Single(Regex.Matches(ruleSource, @"internal static string\? ResolveOptionalText\("));
+        Assert.Empty(Regex.Matches(viewSource, @"static string\? ResolveOptionalText\("));
+    }
+
+    /// <summary>The two descriptions and their two `description` parameter descriptions tell the SAME story, in
+    /// the words a caller will search for. A vocabulary shared in code and not in prose is shared with nobody.</summary>
+    [Fact]
+    public void BothUpdateTools_DescribeTheSameDescriptionVocabulary()
+    {
+        static (string Tool, string Param) Prose<T>(string toolName)
+        {
+            var method = typeof(T)
+                .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == toolName);
+            var tool = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+            var param = method.GetParameters().Single(p => p.Name == "description").GetCustomAttribute<DescriptionAttribute>()!.Description;
+            return (tool, param);
+        }
+
+        var view = Prose<DarlingMcpCustomViewTools>("update_custom_view");
+        var rule = Prose<DarlingMcpCustomAlertTools>("update_custom_alert_rule");
+
+        foreach (var (tool, param) in new[] { view, rule })
+        {
+            Assert.Contains("write vocabulary", tool, StringComparison.Ordinal);
+            Assert.Contains("Omit to keep the current description; send an empty string \"\" to clear it.", param, StringComparison.Ordinal);
+        }
+
+        /* Each names the other, so a reader of one is pointed at the shared rule. */
+        Assert.Contains("update_custom_alert_rule", view.Tool, StringComparison.Ordinal);
+        Assert.Contains("update_custom_view", rule.Tool, StringComparison.Ordinal);
+
+        /* The release-old denial is gone: the rule tool no longer says the description cannot be cleared. */
+        Assert.DoesNotContain("cannot clear it", rule.Param, StringComparison.Ordinal);
+        Assert.DoesNotContain("full replacement of name/description/definition", view.Tool, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -321,6 +506,23 @@ public sealed class DarlingMcpCustomViewToolsLivePostgresTests
                 await DarlingMcpCustomViewTools.UpdateCustomView(postgres, id, name, GoodDashboardV2, 1, "edited over MCP")))
             {
                 Assert.Equal(2, updated.RootElement.GetProperty("version").GetInt32());
+                Assert.Equal("edited over MCP", updated.RootElement.GetProperty("description").GetString());
+            }
+
+            /* #3541 A14: an OMITTED description is unchanged — this exact call used to write NULL. Version 3. */
+            using (var kept = JsonDocument.Parse(
+                await DarlingMcpCustomViewTools.UpdateCustomView(postgres, id, name, GoodDashboardV2, 2)))
+            {
+                Assert.Equal(3, kept.RootElement.GetProperty("version").GetInt32());
+                Assert.Equal("edited over MCP", kept.RootElement.GetProperty("description").GetString());
+            }
+
+            /* ... and an EMPTY string is the explicit clear. Version 4. */
+            using (var cleared = JsonDocument.Parse(
+                await DarlingMcpCustomViewTools.UpdateCustomView(postgres, id, name, GoodDashboardV2, 3, "")))
+            {
+                Assert.Equal(4, cleared.RootElement.GetProperty("version").GetInt32());
+                Assert.Equal(JsonValueKind.Null, cleared.RootElement.GetProperty("description").ValueKind);
             }
 
             /* stale update (still presenting version 1) — conflict, not a silent clobber. */

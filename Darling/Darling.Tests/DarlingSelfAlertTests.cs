@@ -44,7 +44,7 @@ public sealed class DarlingSelfAlertTests
 
     /* ---------------- fakes ---------------- */
 
-    private sealed class FakeSettings : IAlertEngineSettings
+    internal sealed class FakeSettings : IAlertEngineSettings
     {
         public bool AlertsEnabled { get; set; } = true;
         public bool CpuEnabled { get; set; }
@@ -63,6 +63,7 @@ public sealed class DarlingSelfAlertTests
         public int BlockingCountThreshold { get; set; } = 1;
         public int BlockingWaitSecondsThreshold { get; set; }
         public int DeadlockCountThreshold { get; set; } = 1;
+        public DeadlockRateThresholds DeadlockRateThresholds => DeadlockRateThresholds.Default;
         public int PoisonWaitThresholdMs { get; set; } = 500;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30;
         public int LongRunningQueryMaxResults { get; set; } = 5;
@@ -71,6 +72,9 @@ public sealed class DarlingSelfAlertTests
         public bool LongRunningQueryExcludeBackups { get; set; } = true;
         public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
         public bool LongRunningQueryExcludeCdc { get; set; } = true;
+        /* #3653 (A5, Q5): the opt-out knob, empty in the fakes — every session evaluated; the hosts seed it, the engine does not. */
+        public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes { get; set; } = Array.Empty<string>();
+        public IReadOnlyList<string> LongRunningQueryExcludedLogins { get; set; } = Array.Empty<string>();
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
@@ -78,6 +82,7 @@ public sealed class DarlingSelfAlertTests
         public int DiskCriticalFreePercent { get; set; } = 3;
         public int DiskCriticalFreeGb { get; set; } = 2;
         public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int SelfDiskFreeWarnGb { get; set; } = 50;
         public int CollectionStaleMinutes { get; set; } = 30;
         public int CollectionFailureThreshold { get; set; } = 10;
         public int PvsThresholdPercent { get; set; } = 40;
@@ -96,7 +101,7 @@ public sealed class DarlingSelfAlertTests
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 
-    private sealed class RecordingDeliverer : IAlertDeliverer
+    internal sealed class RecordingDeliverer : IAlertDeliverer
     {
         public List<AlertOutcome> Outcomes { get; } = new();
 
@@ -105,9 +110,18 @@ public sealed class DarlingSelfAlertTests
             Outcomes.Add(outcome);
             return Task.CompletedTask;
         }
+
+        /* #3580: DeliverAndReportAsync is REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store
+           Parity), so every fake answers it by hand. This one reports nothing: null is "unreported", which the
+           two daily documents treat as delivered, exactly as every fire before #3580 was. */
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            await DeliverAsync(outcome, cancellationToken);
+            return null;
+        }
     }
 
-    private sealed class FakeHistoryStore : IAlertHistoryStore
+    internal sealed class FakeHistoryStore : IAlertHistoryStore
     {
         public List<AlertHistoryRecord> Records { get; } = new();
 
@@ -125,13 +139,14 @@ public sealed class DarlingSelfAlertTests
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
     }
 
     /// <summary>
     /// Minimal ILogger that records level + formatted message. #1681 pins that a self-alert FIRING reaches the
     /// service log, which for a long time only recoveries did.
     /// </summary>
-    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    internal sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
     {
         public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = new();
 
@@ -149,7 +164,7 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>One evaluator + fakes + a controllable clock per test.</summary>
-    private sealed class Harness
+    internal sealed class Harness
     {
         public FakeSettings Settings { get; } = new();
         public RecordingDeliverer Deliverer { get; } = new();
@@ -201,6 +216,11 @@ public sealed class DarlingSelfAlertTests
         /// harness IS the byte-identical arm every pre-#3500 pin in this suite runs on.</summary>
         public string? StoreName { get; set; }
 
+        /// <summary>#3013: the swallowed-read counter, null by default so most pins build an evaluator that
+        /// counts nothing (matching AlertEngineTests' ReadFailures seam). #4391 pins set it to see the Raw
+        /// Purge Over Horizon read-failure count.</summary>
+        public AlertReadFailureCounter? ReadFailures { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -221,6 +241,7 @@ public sealed class DarlingSelfAlertTests
             storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null,
             retentionHoldWarnRatio: WireRetentionHoldKnobs ? () => RetentionHoldWarnRatio : null,
             retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
+            readFailures: ReadFailures,
             storeName: StoreName);
     }
 
@@ -372,6 +393,204 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.True(fired.Muted); /* the deliverer skips channels but still records — same as the engine */
+    }
+
+    /* ---------------- collection-stopped across a service restart (#4757) ---------------- */
+
+    /// <summary>
+    /// One collection-stopped pass minus the store read: the judgement and the edge apply that
+    /// <c>EvaluateStoreAlertsAsync</c> runs on the signals it read, fed those signals directly. The default
+    /// recent-run window is ten runs of which nine succeeded, so only the staleness arm can decide it.
+    /// </summary>
+    private static async Task<bool> CollectionStoppedPassAsync(
+        DarlingSelfAlertEvaluator evaluator, DateTime? lastSuccess, int recentRuns = 10, int recentSuccess = 9)
+    {
+        var stopped = evaluator.JudgeCollectionStopped(ServerId, lastSuccess, recentRuns, recentSuccess, out var reason);
+        await evaluator.ApplyCollectionStoppedAsync(ServerId, Name, stopped, reason, Ct);
+        return stopped;
+    }
+
+    private static AlertOutcome SingleCollectionStopped(Harness h) =>
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+    [Fact]
+    public async Task CollectionStopped_ServerDownAcrossARestart_FiresOnceTheWindowPassesAfterTheStart()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The server went down three hours before the service restarted and has stayed down. Its recent
+           window still holds old successes, so the failure-streak arm cannot decide: only the staleness arm
+           can fire this one. */
+        var lastSuccess = start.AddHours(-3);
+
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        h.Now = start.AddMinutes(29);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = start.AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        var fired = SingleCollectionStopped(h);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.StartsWith("No successful collection in 30 minutes", fired.CurrentValue, StringComparison.Ordinal);
+
+        /* Still down a minute later: the cooldown holds the standing alert to the one fire. */
+        h.Now = start.AddMinutes(31);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        SingleCollectionStopped(h);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_HealthyServerWhoseLastSuccessPredatesTheRestart_StaysSilent()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The service was down for 45 minutes, so the server's newest success is 45 minutes older than the
+           start. It is stale only because Darling is the collector and was not running. */
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(-45)));
+
+        /* The first fresh collection lands ten minutes in, and successes keep landing after it. */
+        h.Now = start.AddMinutes(10);
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(10)));
+        h.Now = start.AddMinutes(40);
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(38)));
+        h.Now = start.AddHours(3);
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(178)));
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_ServerThatStopsAfterTheRestart_StillFiresFromItsLastSuccess()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The collectors were healthy for an hour after the start, then the server dropped out. The staleness
+           runs from that last success, not from the service start. */
+        var lastSuccess = start.AddMinutes(60);
+        h.Now = start.AddMinutes(89);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        h.Now = start.AddMinutes(90);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        Assert.StartsWith("No successful collection in 30 minutes", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_NeverSucceededServer_IsNotFlaggedByTheStalenessArm()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* No success row at all (freshly added, or never reachable): a null last success stays null however
+           long the service has been watching, and the connection-lost alert covers that server. */
+        Assert.False(await CollectionStoppedPassAsync(e, null, recentRuns: 0, recentSuccess: 0));
+        h.Now = start.AddHours(6);
+        Assert.False(await CollectionStoppedPassAsync(e, null, recentRuns: 0, recentSuccess: 0));
+        Assert.False(await CollectionStoppedPassAsync(e, null, recentRuns: 3, recentSuccess: 0));
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_StoredFailureStreak_WaitsForTheFirstOnlineEdge()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The last ten STORED runs all failed and no success is on record. Those are pre-restart rows until a
+           fresh run lands, so the streak stays quiet until the service has seen the server online. */
+        var streak = DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold;
+        Assert.False(await CollectionStoppedPassAsync(e, null, streak, recentSuccess: 0));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: true, error: null, Ct);
+        Assert.True(await CollectionStoppedPassAsync(e, null, streak, recentSuccess: 0));
+        Assert.StartsWith("The last 10 collector runs all failed", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_DownAcrossARestartWithAStoredFailureStreak_FiresFromTheStalenessArmAtStartPlusTheWindow()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The stored streak is the pre-restart rows again, and the server never comes online, so the streak
+           is never armed. The staleness arm still fires it one window after the start. */
+        var streak = DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold;
+        var lastSuccess = start.AddHours(-3);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
+        h.Now = start.AddMinutes(29);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = start.AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
+        Assert.StartsWith("No successful collection in 30 minutes", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_AfterForget_TheNextPassIsJudgedFromThatPassNotTheOldRows()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The service has been up for two hours when the server is removed and enabled again. It keeps its
+           server_id and its days-old collection_log rows, which must not page CRITICAL the moment it returns. */
+        h.Now = start.AddHours(2);
+        e.Forget(ServerId);
+        var oldRows = start.AddDays(-3);
+
+        Assert.False(await CollectionStoppedPassAsync(e, oldRows));
+        h.Now = start.AddHours(2).AddMinutes(29);
+        Assert.False(await CollectionStoppedPassAsync(e, oldRows));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* One window after that first pass with nothing collected, it fires. */
+        h.Now = start.AddHours(2).AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, oldRows));
+        SingleCollectionStopped(h);
+
+        /* The tombstone belongs to the forgotten server: a neighbour is still judged from the service start. */
+        Assert.True(e.JudgeCollectionStopped(ServerId + 1, oldRows, 10, 9, out _));
+    }
+
+    [Fact]
+    public async Task ReconcileServers_ServerEnabledWhileTheServiceRuns_IsWatchedFromItsFirstPassNotTheServiceStart()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
+        typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_selfAlerts", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, e);
+
+        /* Disabled across a restart, so no removal ever ran Forget in this process, then enabled five hours in. */
+        var loopState = typeof(DarlingWorker).GetNestedType("ServerLoopState", BindingFlags.NonPublic)!;
+        var servers = Activator.CreateInstance(typeof(List<>).MakeGenericType(loopState))!;
+        var enabledLater = new MonitoredServer { Name = Name, Host = "later.invalid", StoredServerId = ServerId };
+        h.Now = start.AddHours(5);
+        typeof(DarlingWorker).GetMethod("ReconcileServers", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(worker, new object[] { servers, new List<MonitoredServer> { enabledLater } });
+
+        var oldRows = start.AddDays(-2);
+        Assert.False(await CollectionStoppedPassAsync(e, oldRows));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = start.AddHours(5).AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, oldRows));
+        SingleCollectionStopped(h);
     }
 
     /* ---------------- capture-down edge ---------------- */
@@ -824,9 +1043,37 @@ public sealed class DarlingSelfAlertTests
     [Fact]
     public void IsDiskPressure_JustBelowThreshold_Pressure()
     {
-        /* 9.9% free trips it — the threshold is a real edge, not a wide band. */
-        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(99 * Gib, 1000 * Gib, out _, out var percentFree));
+        /* 9.9% free trips it — the threshold is a real edge, not a wide band. The volume is small enough
+           (100 GiB) that the #3528 GB floor is far above the free space, so the percent is what decides. */
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(
+            (long)(9.9 * Gib), 100 * Gib, out _, out var percentFree));
         Assert.Equal(9.9, percentFree, precision: 6);
+    }
+
+    [Fact]
+    public void IsDiskPressure_BigVolumeAtLowPercent_IsNotPressure_TheGbFloorQualifies()
+    {
+        /* #3528's own example, scaled: 99 GiB free on a 1000 GiB store volume is 9.9% — below the percent
+           threshold — but 99 GiB of runway is nothing to page CRITICAL about, and it is ABOVE the shipped
+           50 GB floor, so the composed shipped default stays quiet. Before #3528 this exact call fired. */
+        Assert.False(DarlingSelfAlertEvaluator.IsDiskPressure(99 * Gib, 1000 * Gib, out _, out var percentFree));
+
+        /* Measured whenever the total is usable, firing or not (#1881). */
+        Assert.Equal(9.9, percentFree, precision: 6);
+
+        /* The floor only QUALIFIES: once free space is genuinely below it too, the same volume fires. */
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(45 * Gib, 1000 * Gib, out _, out _));
+    }
+
+    [Fact]
+    public void IsDiskPressure_FloorOfZero_RestoresThePercentOnlyCondition()
+    {
+        /* 0 removes the floor (the pvs_floor_gb reading), so the pre-#3528 percent-only behaviour is one
+           setting away — and the percent-only overload is that same condition, pinned equal here. */
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(
+            99 * Gib, 1000 * Gib, DarlingSelfAlertEvaluator.DiskFreeWarnPercent, 0.0, out _, out _));
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(
+            99 * Gib, 1000 * Gib, DarlingSelfAlertEvaluator.DiskFreeWarnPercent, out _, out _));
     }
 
     [Fact]
@@ -890,6 +1137,36 @@ public sealed class DarlingSelfAlertTests
         h.Now = h.Now.AddMinutes(5);
         await e.ApplyDiskPressureAsync(35 * Gib, 1000 * Gib, null, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task DiskPressure_ReadsTheGbFloorThroughTheSettingsSeam()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 9% free on a 1 TiB store volume: the percent is breached, but ~92 GiB of runway sits above the
+           fake's 50 GB floor — the sweep stays quiet. This drives the SEAM (the store-backed knob the
+           sweep reads), not the constant the pure tests pin, and the fired threshold text below is what
+           proves which condition judged. */
+        await e.ApplyDiskPressureAsync(92 * Gib, 1024 * Gib, null, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* An operator setting the floor to 0 restores the percent-only condition on the next sweep —
+           read live through the by-reference seam, no rebuild. */
+        h.Settings.SelfDiskFreeWarnGb = 0;
+        await e.ApplyDiskPressureAsync(92 * Gib, 1024 * Gib, null, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Store Disk Pressure", fired.MetricName);
+        /* With the floor off the threshold string names the percent alone... */
+        Assert.Equal("10% free", fired.ThresholdValue);
+
+        /* ...and with it on, a breach BELOW both gates fires and the string names both. */
+        var h2 = new Harness();
+        var e2 = h2.Build();
+        await e2.ApplyDiskPressureAsync(40 * Gib, 1024 * Gib, null, Ct);
+        var both = Assert.Single(h2.Deliverer.Outcomes);
+        Assert.Equal("10% free and under 50 GB", both.ThresholdValue);
     }
 
     /* ---------------- custom-alert-rule health edge (#3304) ---------------- */
@@ -1057,16 +1334,403 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("never expires", fired.DetailText);
     }
 
+    /* ---------------- managed store settings needing attention (#4215) ---------------- */
+
+    private static DarlingSelfAlertEvaluator.StoreSettingsReport BuildStoreSettingsReport(
+        bool isManagedStore = true, bool usedLastGood = false, bool handEdited = false,
+        ManagedConfMigrationOutcome? verification = null,
+        params string[] rejected) =>
+        new(isManagedStore, usedLastGood, handEdited, rejected, verification);
+
+    [Fact]
+    public async Task StoreSettings_UsedLastGoodConf_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(usedLastGood: true), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsMetric, fired.MetricName);
+        Assert.Equal("storesettings", fired.ServerKey);        // fleet sentinel key, not a real server_id
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Contains("last-good copy", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_HandEdited_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("hand-edited", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_RejectedValue_Fires_AndNamesTheSetting()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("shared_buffers", fired.DetailText);
+        Assert.Contains("rejected", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_Fires_AndNamesTheFileAndKeys()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], "C:\\pgdata\\postgresql.conf.bak",
+            ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("darling-managed.conf", fired.DetailText);
+        Assert.Contains("shared_buffers", fired.DetailText);
+        Assert.Contains("restored", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationUnknown_Active_DoesNotResolve()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        var unknown = new ManagedConfMigrationOutcome(ManagedConfVerificationStatus.Unknown, [], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, [], unknown), Ct);
+
+        Assert.Single(h.Deliverer.Outcomes);   // no re-fire
+        Assert.Empty(h.History.Records);       // and no resolve
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationUnknown_Inactive_NeverFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var unknown = new ManagedConfMigrationOutcome(ManagedConfVerificationStatus.Unknown, [], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, [], unknown), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationUnknown_WithHandEdit_Fires_HandEditReasonOnly()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var unknown = new ManagedConfMigrationOutcome(ManagedConfVerificationStatus.Unknown, [], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, true, [], unknown), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("hand-edited", fired.DetailText);
+        Assert.DoesNotContain("pg_file_settings", fired.DetailText);
+        Assert.DoesNotContain("rejected", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_ThenClears_Resolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);       // unchanged: no re-fire on the resolving sweep
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    /// <summary>Fixes commit 9ae7410c: a Step B Failed verification's reason names that the running server
+    /// keeps the new values until its next restart; a Step A Failed reason does not carry that note (Step A
+    /// never leaves a mismatched write running -- the restore already happened before the server started on
+    /// it).</summary>
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_StepB_ReasonNamesRunningServerKeepsNewValues()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], "C:\\pgdata\\postgresql.conf.bak",
+            ManagedConfMigrationStep.B);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("the running server keeps the new values until its next restart", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_StepA_ReasonDoesNotNameRunningServer()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], "C:\\pgdata\\postgresql.conf.bak",
+            ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.DoesNotContain("the running server keeps the new values until its next restart", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_AllFourConditions_CurrentValueIsFour()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, true, true, ["work_mem"], verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("4", fired.CurrentValue);
+        Assert.Equal(4d, fired.NumericCurrentValue);
+    }
+
+    [Fact]
+    public async Task StoreSettings_ExternalStore_NeverFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        // Every condition true, but IsManagedStore is false — a BYO store never raises this.
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(false, true, true, ["shared_buffers"]), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StoreSettings_Resolves_WhenEveryConditionClears()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);       // unchanged: no re-fire on the resolving sweep
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task StoreSettings_Disabled_DoesNothing()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /* ---------------- #4215: a failed rejected-settings read must not false-resolve ---------------- */
+
+    /// <summary>
+    /// The rule this pins (#4215): an active alert whose ONLY
+    /// standing condition is a rejected setting must stay active — never resolve, and never re-fire with
+    /// stale names — when the next tick's read of the rejected-verdict names fails (<c>RejectedSettingNames</c>
+    /// null). Null means UNKNOWN, not empty: the rejected condition neither fires nor resolves on its own,
+    /// and with the other two conditions also false, the family keeps its CURRENT state exactly as it stood.
+    /// Before the fix, <c>ReadRejectedManagedConfSettingNamesAsync</c> collapsed a failed read to an empty
+    /// list, which made <c>RejectedSettingNames.Count == 0</c> read as "no rejected settings" —
+    /// indistinguishable from a genuine clear — and this test would have shown a false "Store Settings
+    /// Resolved" on the failed-read tick.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_RejectedValue_StaysActive_WhenTheNextReadFails()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        // Tick 1: a rejected setting is the ONLY condition standing. Fires.
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        // Tick 2 (past the refire interval): the read FAILED (null), not empty. Must stay active with
+        // NEITHER a resolve NOR a stale re-fire — the family's current state holds untouched.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+
+        Assert.Single(h.Deliverer.Outcomes);   // no re-fire on unknown-name data
+        Assert.Empty(h.History.Records);       // no resolution written
+    }
+
+    /// <summary>
+    /// The other half of the pin: the family DOES resolve, but only once a SUCCESSFUL read comes back with
+    /// no rejected rows — a failed read in between must not have resolved it, and must not have re-fired it
+    /// either.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_RejectedValue_Resolves_OnlyAfterASuccessfulEmptyRead()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // A failed read in between: still active, still not resolved, and not re-fired.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // A successful read that comes back empty: NOW it resolves.
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    /// <summary>
+    /// NEW pin (a): the hand-edit case. An alert active ONLY because of the hand-edit condition, with the
+    /// last good rejected read empty (no rejected names ever recorded). The hand edit clears AND the
+    /// rejected read fails in the same tick — this must NOT resolve, because the rejected
+    /// condition's unknown state can't decide anything either way and the family must keep its current
+    /// (active) state. The next tick, a SUCCESSFUL empty rejected read alongside the still-clear hand edit
+    /// resolves it.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_HandEditClears_ButRejectedReadFails_StaysActive_ThenResolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        // Tick 1: hand-edited only, rejected read succeeded empty. Fires.
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        // Tick 2: the hand edit is gone AND the rejected read failed (null). Must NOT resolve.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // Tick 3: the hand edit is still gone and a SUCCESSFUL empty rejected read arrives. Resolves.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    /// <summary>
+    /// NEW pin (b): no stale re-fire. An active alert (rejected-only), then consecutive FAILED rejected
+    /// reads across multiple refire intervals, must give no new fire or re-fire rows at all: unknown data
+    /// must never be re-stated as if it were current.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_RejectedValue_ConsecutiveFailedReads_NeverReFire()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        for (var i = 0; i < 3; i++)
+        {
+            h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+            await e.ApplyStoreSettingsAsync(
+                new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);   // no re-fire across any of the failed-read ticks
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// NEW pin (c): inactive stays inactive. A family with NOTHING standing (no last-good-conf fallback, no
+    /// hand edit) and a FAILED rejected read must not fire — unknown rejected names can't manufacture a
+    /// condition that was never there.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_Inactive_RejectedReadFails_NeverFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
     /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
 
     private static readonly DateTime CertClock = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>A SERVED certificate (the host's lifetime verdict was Usable): NotBefore a year back, the
+    /// given NotAfter. The expiry arms care only about NotAfter.</summary>
     private static DarlingSelfAlertEvaluator.WebTlsCertReport Cert(
         DateTime notAfterUtc, string subject = "CN=Darling Web", string thumbprint = "ABC123DEF456") =>
-        new(Configured: true, NotAfterUtc: new DateTimeOffset(notAfterUtc, TimeSpan.Zero), Subject: subject, Thumbprint: thumbprint);
+        new(
+            Configured: true,
+            NotBeforeUtc: new DateTimeOffset(CertClock.AddDays(-365), TimeSpan.Zero),
+            NotAfterUtc: new DateTimeOffset(notAfterUtc, TimeSpan.Zero),
+            Subject: subject,
+            Thumbprint: thumbprint,
+            RefusedNotYetValid: false);
+
+    /// <summary>A certificate the host REFUSED at load because its window had not opened (#3517): the host's
+    /// verdict rides the flag; NotAfter is far out, which is exactly what made it read as healthy before.</summary>
+    private static DarlingSelfAlertEvaluator.WebTlsCertReport NotYetValidCert(
+        DateTime notBeforeUtc, string thumbprint = "FUTURE0123") =>
+        new(
+            Configured: true,
+            NotBeforeUtc: new DateTimeOffset(notBeforeUtc, TimeSpan.Zero),
+            NotAfterUtc: new DateTimeOffset(notBeforeUtc.AddDays(365), TimeSpan.Zero),
+            Subject: "CN=Darling Web (rotation)",
+            Thumbprint: thumbprint,
+            RefusedNotYetValid: true);
 
     private static readonly DarlingSelfAlertEvaluator.WebTlsCertReport NoWebTlsCert =
-        new(Configured: false, NotAfterUtc: default, Subject: string.Empty, Thumbprint: string.Empty);
+        new(
+            Configured: false,
+            NotBeforeUtc: default,
+            NotAfterUtc: default,
+            Subject: string.Empty,
+            Thumbprint: string.Empty,
+            RefusedNotYetValid: false);
 
     private static double WebTlsWarnDays => DarlingSelfAlertEvaluator.WebTlsCertWarnWindow.TotalDays;
 
@@ -1203,14 +1867,25 @@ public sealed class DarlingSelfAlertTests
     {
         var none = DarlingWorker.BuildWebTlsCertReport(null);
         Assert.False(none.Configured);
+        Assert.False(none.RefusedNotYetValid);
 
+        var fromUtc = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
         var whenUtc = new DateTimeOffset(2027, 1, 2, 3, 4, 5, TimeSpan.Zero);
-        var snap = new WebTlsCertificateState.Snapshot(whenUtc, "CN=x", "THUMB");
+        var snap = new WebTlsCertificateState.Snapshot(fromUtc, whenUtc, "CN=x", "THUMB", RefusedNotYetValid: false);
         var report = DarlingWorker.BuildWebTlsCertReport(snap);
         Assert.True(report.Configured);
+        Assert.Equal(fromUtc, report.NotBeforeUtc);
         Assert.Equal(whenUtc, report.NotAfterUtc);
         Assert.Equal("CN=x", report.Subject);
         Assert.Equal("THUMB", report.Thumbprint);
+        Assert.False(report.RefusedNotYetValid);
+
+        /* #3517: the host's not-yet-valid verdict crosses the seam untouched — the builder neither drops it nor
+           re-derives it from the dates (here NotBefore is in the past relative to nothing; the flag is the
+           host's word and that is what the evaluator fires on). */
+        var refused = DarlingWorker.BuildWebTlsCertReport(
+            new WebTlsCertificateState.Snapshot(fromUtc, whenUtc, "CN=x", "THUMB", RefusedNotYetValid: true));
+        Assert.True(refused.RefusedNotYetValid);
     }
 
     /// <summary><c>WebTlsCertificateState</c> is the host→worker seam: Publish sets, Clear (the #3514 follow-up)
@@ -1221,11 +1896,156 @@ public sealed class DarlingSelfAlertTests
         var state = new WebTlsCertificateState();
         Assert.Null(state.Read());
 
-        state.Publish(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero), "CN=x", "THUMB");
+        state.Publish(
+            new DateTimeOffset(2029, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            "CN=x", "THUMB", refusedNotYetValid: false);
         Assert.NotNull(state.Read());
 
         state.Clear();
         Assert.Null(state.Read());
+    }
+
+    /* ---------------- web dashboard TLS certificate not yet valid (#3517) ---------------- */
+
+    /// <summary>
+    /// The #3517 gap: a certificate the host refused at load for a future <c>NotBefore</c> has a far-out
+    /// <c>NotAfter</c>, so on the expiry test alone it was the healthiest certificate imaginable while the LAN
+    /// dashboard sat loopback-only. The host's carried verdict fires the SAME family — same fleet key, same
+    /// metric, so an operator's mute rule for it still applies — at Critical, and the text says what happened
+    /// (not yet valid, until when, loopback-only), why (clock, or a future-dated certificate) and what to do
+    /// (fix it, then restart — the host will not re-decide on its own).
+    /// </summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_FiresCritical_UnderTheExpiryFamilyKey_NamingTheCauseAndTheRestart()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(CertClock.AddDays(3)), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric, fired.MetricName);   // the family, not a new metric
+        Assert.Equal("webtlscert", fired.ServerKey);                                          // the family's fleet key
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);                            // as unreachable as expired
+        Assert.Contains("NOT YET VALID", fired.ShortMessage);
+        Assert.Contains("loopback-only", fired.ShortMessage);
+        Assert.DoesNotContain("EXPIRED", fired.ShortMessage);
+        Assert.Contains($"{CertClock.AddDays(3):u}", fired.DetailText);   // until when
+        Assert.Contains("LOOPBACK-ONLY", fired.DetailText);               // what happened
+        Assert.Contains("clock", fired.DetailText);                       // why (likely)
+        Assert.Contains("future rotation", fired.DetailText);             // why (the other one)
+        Assert.Contains("restart the service", fired.DetailText);         // what to do
+        Assert.Contains("FUTURE0123", fired.DetailText);                  // ties to the host's own log line
+        Assert.Equal(0d, fired.NumericCurrentValue);   // state-only, like every firing of this family
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>The verdict is the host's, not the clock's: once <c>NotBefore</c> has passed the host is STILL
+    /// loopback-only (it decided at load and does not revisit), so the alert must keep standing rather than
+    /// resolve on the date — and its text switches to the fact that now matters, that a restart is needed.</summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_WindowOpensLater_StillFires_SaysTheHostDecidedAtLoad()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+        var notBefore = CertClock.AddHours(2);
+
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(notBefore), Ct);   // fires on entry
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The window opened and the daily refire has elapsed; the host has NOT restarted, so the snapshot it
+           published at load is unchanged and still says refused. */
+        h.Now = CertClock.Add(DarlingSelfAlertEvaluator.WebTlsCertRefire).AddMinutes(1);
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(notBefore), Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.History.Records);   // no false resolution on the date
+        var restated = h.Deliverer.Outcomes[1];
+        Assert.Equal(AlertSeverityLevel.Critical, restated.Severity);
+        Assert.Contains("after the service started", restated.DetailText);
+        Assert.Contains("until it is restarted", restated.DetailText);
+    }
+
+    /// <summary>A served certificate (the host's verdict was Usable) with a future-looking but past-relative
+    /// NotBefore and a far-out NotAfter is healthy — the arm keys off the carried verdict alone, so a Usable
+    /// verdict with any NotBefore raises nothing. The #3514 silence contract, restated over the new field.</summary>
+    [Fact]
+    public async Task WebTlsCert_ServedAndFarOut_StaysSilent_WhateverNotBeforeSays()
+    {
+        var h = new Harness { Now = CertClock };
+
+        /* NotBefore AHEAD of the clock but the host said Usable (it is the host's clock that decides, and the
+           evaluator must not second-guess it from the date). */
+        var servedDespiteDate = NotYetValidCert(CertClock.AddDays(3)) with { RefusedNotYetValid = false };
+        await h.Build().ApplyWebTlsCertificateAsync(servedDespiteDate, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>The transition the issue asked for: not-yet-valid → the host stops serving (Clear() on stop,
+    /// or the operator fixes the clock/certificate and the restart's stop half runs first) → the family's ONE
+    /// resolution, under the same metric pairing the triage endpoint and the history already know.</summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_ThenNoLongerServing_ResolvesUnderTheFamilyPairing()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(CertClock.AddDays(3)), Ct);   // fires
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);   // host Clear()ed the snapshot
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, resolution.MetricName);
+
+        /* Once resolved, a fresh usable publish (the restart's start half, same process — a dashboard toggle)
+           is healthy and writes nothing more. */
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(400)), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.History.Records);
+    }
+
+    /// <summary>The back-to-back rebind: Stop and Start ran inside one supervisor tick, so the sweep never saw
+    /// the null and goes straight from the refused snapshot to a served one. That is the Configured=true
+    /// resolution arm, and its line has to be true of THIS transition too — "being served", not only "outside
+    /// the expiry window".</summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_ThenServedDirectly_ResolvesWithALineTrueOfBothArms()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(CertClock.AddDays(3)), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(400)), Ct);   // re-published usable, no null in between
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, resolution.MetricName);
+        Assert.Contains("being served", resolution.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>Expired outranks not-yet-valid when a refused-at-start certificate is then outlived by the
+    /// process: a clock fix cannot cure an expired certificate, so that is the fact to lead with.</summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_ButNowAlsoExpired_ReadsAsExpired()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        /* NotBefore 400 days back, NotAfter 35 days back — a certificate that was not yet valid when this
+           (very long-lived) process started and has since expired outright. */
+        var refusedThenLapsed = NotYetValidCert(CertClock.AddDays(-400));   // NotAfter = NotBefore + 365 = 35 days ago
+        await e.ApplyWebTlsCertificateAsync(refusedThenLapsed, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("EXPIRED", fired.ShortMessage);
+        Assert.DoesNotContain("NOT YET VALID", fired.ShortMessage);
     }
 
     [Fact]
@@ -2203,16 +3023,35 @@ public sealed class DarlingSelfAlertTests
         };
     }
 
-    private static IReadOnlyList<StuckCompressionJob> Stuck(params long[] jobIds)
+    /// <summary>
+    /// The pre-#3816 fixture, now returning the whole pass (#3816): the same <c>-infinity</c> compression
+    /// rows, plus the census the evaluator's summary line and failure arm read. Both come from the same job
+    /// ids on purpose — a stuck job IS a job the pass read, so a census that omitted it would be a shape no
+    /// real read produces.
+    /// </summary>
+    private static StorePolicyJobHealth Stuck(params long[] jobIds) => Reading(StuckJobs(jobIds));
+
+    private static IReadOnlyList<StuckPolicyJob> StuckJobs(params long[] jobIds)
     {
-        var list = new List<StuckCompressionJob>();
+        var list = new List<StuckPolicyJob>();
         foreach (var id in jobIds)
         {
-            list.Add(new StuckCompressionJob(id, "wait_stats", "next_start is -infinity — the scheduler will never run it again"));
+            list.Add(new StuckPolicyJob(
+                id, "wait_stats", "next_start is -infinity — the scheduler will never run it again",
+                Arm: StuckPolicyJobArm.NextStartNegativeInfinity));
         }
 
         return list;
     }
+
+    /// <summary>One pass whose census is exactly its stuck jobs, plus any extra healthy rows a pin needs.</summary>
+    private static StorePolicyJobHealth Reading(
+        IReadOnlyList<StuckPolicyJob> stuck, params PolicyJobRunReading[] alsoRead) =>
+        new(stuck,
+            stuck.Select(j => new PolicyJobRunReading(
+                    j.JobId, j.Family, j.HypertableName, Held: false, LastRunStatus: null, TotalFailures: 0))
+                .Concat(alsoRead)
+                .ToList());
 
     [Fact]
     public async Task StoreUpgrade_Succeeded_FiresOnceNamingBothVersions()
@@ -2344,7 +3183,7 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         /* Re-armed exactly once. */
         Assert.Equal(1001L, Assert.Single(rearm.Calls));
@@ -2364,11 +3203,11 @@ public sealed class DarlingSelfAlertTests
         var rearm = new RearmRecorder();
 
         /* Check 1: detect + re-arm + fire. */
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         /* Check 2 (an hour later): STILL stuck = a re-hang. Escalate, and do NOT re-arm again. */
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         Assert.Single(rearm.Calls);  /* never re-armed a second time */
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
@@ -2384,20 +3223,20 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* detect + re-arm */
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* detect + re-arm */
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* escalate (fire) */
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* escalate (fire) */
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
 
         /* Inside the 5-minute cooldown after the escalation: no re-fire, no re-arm. */
         h.Now = h.Now.AddMinutes(1);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Single(rearm.Calls);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
 
         /* After the cooldown: re-fires (still no re-arm). */
         h.Now = h.Now.AddMinutes(5);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Single(rearm.Calls);
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
     }
@@ -2409,7 +3248,7 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder { Result = false };  /* alter_job fails (e.g. permission) */
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         /* Tried once, failed -> escalated with an "auto-re-arm FAILED" alert. */
         Assert.Single(rearm.Calls);
@@ -2419,7 +3258,7 @@ public sealed class DarlingSelfAlertTests
 
         /* Next check: never retries the re-arm (already escalated). */
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Single(rearm.Calls);
     }
 
@@ -2430,12 +3269,12 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* stuck */
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* stuck */
         Assert.Empty(h.History.Records);
 
         /* No longer stuck: exactly one "Compression Job Recovered" audit row (BuildResolutionRecord maps the
            resolution Title onto the history MetricName, mirroring the disk-pressure recovery). */
-        await e.ApplyCompressionJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
         var resolved = Assert.Single(h.History.Records);
         Assert.Equal("Compression Job Recovered", resolved.MetricName);
         Assert.False(resolved.AlertSent); /* #3169: a resolution has no send channel to have used */
@@ -2443,10 +3282,10 @@ public sealed class DarlingSelfAlertTests
 
         /* Still healthy next check — no duplicate resolution (edge-triggered), and a re-stuck job would be a
            fresh first-detection again (state was cleared) -> a new re-arm. */
-        await e.ApplyCompressionJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
         Assert.Single(h.History.Records);
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Equal(2, rearm.Calls.Count);  /* re-stuck after recovery -> re-armed fresh */
     }
 
@@ -2458,7 +3297,7 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         Assert.Empty(rearm.Calls);
         Assert.Empty(h.Deliverer.Outcomes);
@@ -2471,7 +3310,7 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001, 1002, 1003), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001, 1002, 1003), rearm.Delegate, Ct);
 
         Assert.Equal(new[] { 1001L, 1002L, 1003L }, rearm.Calls);
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
@@ -2487,12 +3326,526 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
 
         /* A throwing mute check (inside FireAsync, after a successful re-arm) is isolated. */
-        await e.EvaluateCompressionJobsAsync(Stuck(1001), _ => Task.FromResult(true), Ct);
+        await e.EvaluatePolicyJobsAsync(Stuck(1001), _ => Task.FromResult(true), Ct);
         Assert.Empty(h.Deliverer.Outcomes);
 
         /* A throwing re-arm delegate is isolated too. */
         var e2 = new Harness().Build();
-        await e2.EvaluateCompressionJobsAsync(Stuck(1002), _ => throw new InvalidOperationException("boom"), Ct);
+        await e2.EvaluatePolicyJobsAsync(Stuck(1002), _ => throw new InvalidOperationException("boom"), Ct);
+    }
+
+    /* ---------------- #3591: a crash-backoff row the scheduler recovers by itself ---------------- */
+
+    /// <summary>The 2.26.4+ shape of the -infinity row: the reader marks it SchedulerRetries with the version's sentence.</summary>
+    private static StorePolicyJobHealth CrashBackoff(params long[] jobIds) => Reading(CrashBackoffJobs(jobIds));
+
+    private static IReadOnlyList<StuckPolicyJob> CrashBackoffJobs(params long[] jobIds) =>
+        jobIds.Select(id => new StuckPolicyJob(
+            id, "wait_stats", TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, SchedulerRetries: true,
+            Arm: StuckPolicyJobArm.NextStartNegativeInfinity)).ToList();
+
+    [Fact]
+    public async Task CompressionJobs_SchedulerRetries_FirstSight_NoRearm_NoPage_LoggedAtInformation()
+    {
+        /* Measured on a 2.28.1 rig: alter_job(next_start => now()) against a job in crash backoff RESETS the
+           backoff (the retry moved from crash+5:00 to re-arm+5:04, for the re-armed job and its un-re-armed
+           sibling) and overwrites the -infinity, so a re-arm here would be a later retry and two untrue
+           messages. First sight is remembered and written to the log; the scheduler gets one check cadence. */
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+        /* #3816 added the unconditional per-pass summary line at Information, so this pin now names the
+           entry it is about instead of asserting that Information has exactly one member. The claim is
+           unchanged: the crash-backoff row produced a LOG line and no alert. */
+        var info = Assert.Single(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
+                && x.Message.Contains("crash backoff", StringComparison.Ordinal));
+        Assert.Contains("1001", info.Message, StringComparison.Ordinal);
+        Assert.Contains("not re-armed, not alerted", info.Message, StringComparison.Ordinal);
+        Assert.Contains("#3591", info.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CompressionJobs_SchedulerRetries_StillThereAnHourOn_EscalatesOnce_NeverRearms()
+    {
+        /* The scheduler's own retry did not clear it within a check cadence — the jittered backoff fell past
+           the check, or the job crashed again and its backoff doubled. Either is a human's to read about in
+           the PostgreSQL log; neither is helped by alter_job. One Critical page, then the escalated state's
+           cooldown re-fires, and no re-arm at any point. */
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Compression Job Stuck", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Equal("compressjob:1001", fired.ServerKey);
+        Assert.Contains("still in crash backoff", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("escalated", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("re-armed", fired.ShortMessage, StringComparison.Ordinal);
+
+        /* Escalated: an hour later, still there, still no re-arm; re-fires only on the cooldown. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Contains("after escalation", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CompressionJobs_SchedulerRetries_ClearsBeforeTheSecondCheck_NoResolutionRow_StateDropped()
+    {
+        /* The expected path on the fleet: the scheduler re-ran the job inside the hour. Nothing was paged, so
+           nothing is "Recovered" — a lone resolution with no alert before it is the message shape #3575
+           removed. The state is gone, so a later genuine sighting is a fresh first sight. */
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+        Assert.Contains(h.Log.Entries, x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
+            && x.Message.Contains("running on schedule again", StringComparison.Ordinal)
+            && x.Message.Contains("#3591", StringComparison.Ordinal));
+
+        /* Fresh first sight afterwards: deferred again, not escalated — the state was dropped. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(rearm.Calls);
+    }
+
+    [Fact]
+    public async Task CompressionJobs_PreFixRow_AndSchedulerRetriesRow_InOnePass_OnlyTheOldOneIsRearmedAndPaged()
+    {
+        /* The two kinds side by side, so the flag and not the position decides: the pre-2.26.4 row keeps every
+           #1581 semantic (re-armed once, paged Critical); the crash-backoff row is deferred. */
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        var both = new List<StuckPolicyJob>(CrashBackoffJobs(1001));
+        both.AddRange(StuckJobs(1002));
+        await e.ApplyPolicyJobsStuckAsync(Reading(both), rearm.Delegate, Ct);
+
+        Assert.Equal(1002L, Assert.Single(rearm.Calls));
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("compressjob:1002", fired.ServerKey);
+        Assert.Contains("auto-re-armed", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CompressionJobs_TheOldRowShape_DefaultsToTheRearmPath()
+    {
+        /* The three-argument record every pre-#3591 caller and pin builds is the old semantics, by default. */
+        Assert.False(new StuckPolicyJob(1L, "wait_stats", "next_start is -infinity — the scheduler will never run it again").SchedulerRetries);
+    }
+
+    /* ---------------- #3816: the self-heal covers every policy family ---------------- */
+
+    /// <summary>One dead job of a given family, as the reader would hand it over.</summary>
+    private static StorePolicyJobHealth DeadJob(
+        long jobId, TimescaleSupport.StorePolicyJobFamily family, string relation, bool schedulerRetries = false) =>
+        Reading(new[]
+        {
+            new StuckPolicyJob(
+                jobId, relation,
+                schedulerRetries
+                    ? TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason
+                    : TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                SchedulerRetries: schedulerRetries,
+                Family: family,
+                Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+        });
+
+    /// <summary>
+    /// THE per-family banding pin (#3816): one dead job of each family, one pass each, and every
+    /// operator-visible field that must differ — the persisted metric name, the alert key, the severity and
+    /// the sentence that says what stalled.
+    ///
+    /// <para>The metric names are asserted as LITERALS on purpose. They are persisted identities — the string
+    /// in every history row, the string a mute rule matches, the key a route resolves — so a pin that read
+    /// them from the same constant the fire site reads would pass through a rename that orphaned every
+    /// deployed store's rules and history.</para>
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_EachFamily_FiresItsOwnMetricSeverityAndSentence()
+    {
+        foreach (var (family, relation, metric, key, severity, sentence) in new[]
+        {
+            (TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats",
+                "Compression Job Stuck", "compressjob:9001", AlertSeverityLevel.Critical,
+                "halts the store's archival tier"),
+            (TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly",
+                "Refresh Job Stuck", "refreshjob:9001", AlertSeverityLevel.Critical,
+                "A rollup has stopped materializing"),
+            (TimescaleSupport.StorePolicyJobFamily.Retention, "wait_stats",
+                "Retention Job Stuck", "retentionjob:9001", AlertSeverityLevel.Warning,
+                "The archival tier is stalled"),
+        })
+        {
+            var h = new Harness();
+            var e = h.Build();
+            var rearm = new RearmRecorder();
+
+            await e.ApplyPolicyJobsStuckAsync(DeadJob(9001, family, relation), rearm.Delegate, Ct);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Equal(metric, fired.MetricName);
+            Assert.Equal(key, fired.ServerKey);
+            Assert.Equal(severity, fired.Severity);
+            Assert.Contains(sentence, fired.DetailText, StringComparison.Ordinal);
+            Assert.Contains(relation, fired.ShortMessage, StringComparison.Ordinal);
+
+            /* Every family is re-armed once on first sight, below 2.26.4 — the arm is proc-agnostic. */
+            Assert.Equal(9001L, Assert.Single(rearm.Calls));
+        }
+    }
+
+    /// <summary>
+    /// A dead refresh job's page has to name the loop #3816 exists to close: the retention hold an operator
+    /// meets first is this job's symptom, and the backfill they will be told to run clears the symptom and
+    /// leaves the cause. Asserted as words because that sentence IS the deliverable.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_DeadRefresh_NamesTheCoverageGateAndTheBackfillTrap()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            DeadJob(9002, TimescaleSupport.StorePolicyJobFamily.Refresh, "query_store_stats_hourly"),
+            new RearmRecorder().Delegate, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("stale", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("coverage gate", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("--backfill-rollups", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("query_store_stats_hourly", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A dead retention job's page must say it is NOT the #2813 hold, because the two look alike to an
+    /// operator and their remedies are opposites: a hold clears with a backfill and must never be armed by
+    /// hand, an abandoned armed policy needs the scheduler looked at and no backfill affects it.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_DeadRetention_SaysItIsNotARetentionHold()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            DeadJob(9003, TimescaleSupport.StorePolicyJobFamily.Retention, "wait_stats"),
+            new RearmRecorder().Delegate, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Retention Job Stuck", fired.MetricName);
+        Assert.Contains("NOT the #2813 Retention Held condition", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("scheduled = false", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// THE RISKIEST LINE IN #3816, at the evaluator (the reader has its own pin): a job reported stuck while
+    /// NOT scheduled is a HELD policy, and the one thing that must never happen to it is a re-arm —
+    /// <c>alter_job(next_start => now())</c> on a held retention policy drops the only copy of the history
+    /// the #1680/#1877 coverage gate is holding it for.
+    ///
+    /// <para>The row here is hand-built, deliberately: <c>ClassifyStuckPolicyJobs</c> cannot produce it
+    /// today, and that is exactly why this gate is pinned separately — it exists for the regression upstream
+    /// that WOULD produce it, and a gate only reachable through a defect is a gate no integration test
+    /// covers.</para>
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_AHeldPolicyReportedAsStuck_IsNeverRearmed_NeverPaged_AndSaysSo()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            Reading(new[]
+            {
+                new StuckPolicyJob(
+                    9100, "wait_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    Family: TimescaleSupport.StorePolicyJobFamily.Retention,
+                    Scheduled: false,
+                    Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+            }),
+            rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        var warned = Assert.Single(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
+        Assert.Contains("HELD", warned.Message, StringComparison.Ordinal);
+        Assert.Contains("#1680/#1877", warned.Message, StringComparison.Ordinal);
+        Assert.Contains("retention job 9100", warned.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4299: a raw job (<see cref="TimescaleSupport.RawRelations"/>) reported as "stuck" is NEVER re-armed
+    /// — the same second gate proven for a non-raw held policy above, exercised for one of the three raw
+    /// relations specifically, because the gate already structurally skips every <c>!Scheduled</c> row
+    /// regardless of WHY it is unscheduled. GREEN on both the pre-fix and post-fix commit: the fix changes
+    /// the WARNING text (see the next pin), not this gate.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_ARawJobReportedAsStuck_IsNeverRearmed_M4()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            Reading(new[]
+            {
+                new StuckPolicyJob(
+                    9200, "query_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    Family: TimescaleSupport.StorePolicyJobFamily.Retention,
+                    Scheduled: false,
+                    Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+            }),
+            rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// #4299: the not-scheduled line for one of the three raw relations must say it is unscheduled by
+    /// design (#4299), not the #1680/#1877 coverage-gate text a non-raw held policy gets — the OLD text logged
+    /// a false "detector defect" WARNING for every raw job, every hourly pass, forever. #4391 demotes this
+    /// expected-every-pass line to Debug (it is not a WARNING-worthy condition once it is known to be
+    /// by design), so this pin now also asserts no WARNING is logged for it.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_ARawJobReportedAsStuck_LogsUnscheduledByDesignAtDebug_NotACoverageHold()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            Reading(new[]
+            {
+                new StuckPolicyJob(
+                    9201, "procedure_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    Family: TimescaleSupport.StorePolicyJobFamily.Retention,
+                    Scheduled: false,
+                    Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+            }),
+            rearm.Delegate, Ct);
+
+        var warned = Assert.Single(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Debug);
+        Assert.Contains("#4299", warned.Message, StringComparison.Ordinal);
+        Assert.Contains("unscheduled by design", warned.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("detector defect", warned.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("drop history", warned.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
+    }
+
+    /// <summary>
+    /// #3591's version arm is INHERITED UNCHANGED by the families #3816 added (the brief's requirement, and
+    /// the REVIEW-TRAPS line behind #3629): on a store whose scheduler recovers a <c>-infinity</c> row by
+    /// itself, first sight of a dead refresh or retention job is NOT re-armed and NOT paged — because
+    /// <c>alter_job</c> RESETS the crash backoff rather than shortening it — and the second consecutive
+    /// sighting escalates under that family's own metric name.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_SchedulerRetries_AppliesPerFamily_NoRearmEver_EscalatesUnderItsOwnMetric()
+    {
+        foreach (var (family, metric, key) in new[]
+        {
+            (TimescaleSupport.StorePolicyJobFamily.Refresh, "Refresh Job Stuck", "refreshjob:9200"),
+            (TimescaleSupport.StorePolicyJobFamily.Retention, "Retention Job Stuck", "retentionjob:9200"),
+        })
+        {
+            var h = new Harness();
+            var e = h.Build();
+            var rearm = new RearmRecorder();
+
+            /* First sight: deferred to the scheduler, logged, nothing fired. */
+            await e.ApplyPolicyJobsStuckAsync(
+                DeadJob(9200, family, "wait_stats_hourly", schedulerRetries: true), rearm.Delegate, Ct);
+            Assert.Empty(rearm.Calls);
+            Assert.Empty(h.Deliverer.Outcomes);
+
+            /* Still there a check later: one page under its OWN name, still no re-arm. */
+            h.Now = h.Now.AddHours(1);
+            await e.ApplyPolicyJobsStuckAsync(
+                DeadJob(9200, family, "wait_stats_hourly", schedulerRetries: true), rearm.Delegate, Ct);
+
+            Assert.Empty(rearm.Calls);
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Equal(metric, fired.MetricName);
+            Assert.Equal(key, fired.ServerKey);
+            Assert.Contains("still in crash backoff", fired.ShortMessage, StringComparison.Ordinal);
+            Assert.Contains("#9360", fired.DetailText, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The recovery edge is addressed to the family that FIRED, not to whatever the current pass looks like:
+    /// a resolution written under the wrong metric name resolves nothing and leaves the real alert row open.
+    /// The job is by definition absent from the recovering pass, which is why the episode remembers its
+    /// family rather than re-deriving it.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_Recovery_IsWrittenUnderTheFamilyThatFired()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            DeadJob(9300, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly"), rearm.Delegate, Ct);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Refresh Job Recovered", resolved.MetricName);
+        Assert.Equal("refreshjob:9300", resolved.ServerId);
+    }
+
+    /// <summary>
+    /// #3756's discipline, this tick's third tenant (#3816): EVERY pass writes one Information summary, so a
+    /// tick that found nothing can still be shown to have run. Before it, "no alert" meant either "nothing is
+    /// wrong" or "the connection open threw, was swallowed at Debug, and nothing has been checked for days".
+    ///
+    /// <para>HELD is in the line and is never acted on, which is what makes the coverage gate legible on a
+    /// healthy store.</para>
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_EveryPass_WritesOneSummaryLine_CountingWhatItRead()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A clean store: two compression policies, one refresh, two retention — one of them HELD by the
+           coverage gate, which is the normal state of a fresh tier and not a fault. */
+        var clean = new StorePolicyJobHealth(
+            Array.Empty<StuckPolicyJob>(),
+            new[]
+            {
+                new PolicyJobRunReading(1, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats", false, "Success", 0),
+                new PolicyJobRunReading(2, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats_hourly", false, "Success", 0),
+                new PolicyJobRunReading(3, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly", false, "Success", 0),
+                new PolicyJobRunReading(4, TimescaleSupport.StorePolicyJobFamily.Retention, "wait_stats", false, "Success", 0),
+                new PolicyJobRunReading(5, TimescaleSupport.StorePolicyJobFamily.Retention, "query_store_stats", true, "Success", 0),
+            });
+
+        await e.ApplyPolicyJobsStuckAsync(clean, new RearmRecorder().Delegate, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        var summary = Assert.Single(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
+                && x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
+        Assert.Equal(
+            "Store job health: 5 jobs read (compression 2, refresh 1, retention 2), 0 dead, 0 stuck, 1 held, 0 re-armed, 0 alerted (#3816)",
+            summary.Message);
+    }
+
+    /// <summary>The summary still runs with alerts switched off, and says so — a pass that deliberately
+    /// judged nothing must not read like a pass that found nothing wrong.</summary>
+    [Fact]
+    public async Task PolicyJobs_AlertsDisabled_StillSummarises_AndNamesTheReason()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            DeadJob(9400, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly"), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        var summary = Assert.Single(
+            h.Log.Entries,
+            x => x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
+        Assert.Contains("1 dead", summary.Message, StringComparison.Ordinal);
+        Assert.Contains("alerts are DISABLED", summary.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The <c>total_failures</c> arm (#3816): a job that FAILS without ever going <c>-infinity</c> is
+    /// invisible to both stuck arms, to #2136's cadence read (successful runs only) and to #2813's hold
+    /// check. This is the whole arm's decision table in one pass sequence.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobFailures_FireOnlyOnAGrownCounterWithAFailingLastRun_AndNeverOnTheFirstPass()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        StorePolicyJobHealth Pass(long failures, string? status, bool held = false) => new(
+            Array.Empty<StuckPolicyJob>(),
+            new[]
+            {
+                new PolicyJobRunReading(
+                    7001, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly", held, status, failures),
+            });
+
+        /* Pass 1 — the BASELINE. total_failures is cumulative since the policy was created, so a first pass
+           that treated an absent baseline as 0 would page about the store's whole history. */
+        await e.ApplyPolicyJobsStuckAsync(Pass(12, "Failed"), rearm.Delegate, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Pass 2 — grew AND still failing: one Information alert naming both numbers. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(14, "Failed"), rearm.Delegate, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Store Job Failing", fired.MetricName);
+        Assert.Equal("jobfailing:7001", fired.ServerKey);
+        Assert.Null(fired.Severity);  /* no override: the DECLARED INFO arm in AlertSeverity.ForMetric decides */
+        Assert.Contains("2 new failure(s), 14 total", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("refresh job 7001 on wait_stats_hourly", fired.ShortMessage, StringComparison.Ordinal);
+
+        /* Pass 3 — the counter did NOT grow, and last_run_status is still 'Failed' (it says Failed until the
+           next run: a state, not an event). One failure must not re-fire hourly forever. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(14, "Failed"), rearm.Delegate, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Pass 4 — grew, but the retry SUCCEEDED. A job that fails and recovers is the scheduler working. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(15, "Success"), rearm.Delegate, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Pass 5 — grew and failing, but the policy is HELD: its counters are frozen because it is not being
+           run, and anything to say about a hold belongs to #2813, not to this arm. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(17, "Failed", held: true), rearm.Delegate, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     /* ---------------- #991 Availability Groups: sync-behind decision (pure) ---------------- */
@@ -3157,6 +4510,308 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(nodeB.ToString(System.Globalization.CultureInfo.InvariantCulture), fired.ServerKey);
     }
 
+    /* ---------------- #4795: a sweep that was reading when its server was removed ---------------- */
+
+    [Fact]
+    public void AgSweepGeneration_StartsAtZero_AndMovesOnlyForTheServerThatWasForgotten()
+    {
+        var e = new Harness().Build();
+        Assert.Equal(0, e.GenerationOf(ServerId));
+
+        e.Forget(ServerId);
+        e.Forget(ServerId);
+
+        Assert.Equal(2, e.GenerationOf(ServerId));
+        Assert.Equal(0, e.GenerationOf(ServerId + 1));
+    }
+
+    [Fact]
+    public async Task AgAlerts_AReplicaSweepThatWasReadingWhenItsServerWasRemoved_ClaimsNoGroup_SoASurvivorStillJudgesIt()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        const int nodeA = 100001;
+        const int nodeB = 100002;
+
+        /* NODE-A's sweep took its generation and went to read the store. NODE-A is removed meanwhile, and the rows
+           come back for a server that is gone. */
+        var generation = e.GenerationOf(nodeA);
+        e.Forget(nodeA);
+        await e.ApplyAgReplicaHealthAsync(
+            nodeA, "NODE-A", new[] { ReplicaRow(role: "PRIMARY") }, Ct, sweepGeneration: generation);
+
+        /* NODE-B sees the same group with the same view. Had the stale sweep claimed the group, an equal view could
+           not take it over (ties keep the incumbent), the removed server would never sweep again, and nobody would
+           judge the group: this failover would go unreported. */
+        await e.ApplyAgReplicaHealthAsync(nodeB, "NODE-B", new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+        await e.ApplyAgReplicaHealthAsync(nodeB, "NODE-B", new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Failover", fired.MetricName);
+        Assert.Equal(nodeB.ToString(CultureInfo.InvariantCulture), fired.ServerKey);
+    }
+
+    [Fact]
+    public async Task AgAlerts_ADatabaseSweepThatWasReadingWhenItsServerWasRemoved_ClaimsNoGroup_SoASurvivorStillJudgesIt()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        const int nodeA = 100001;
+        const int nodeB = 100002;
+
+        var generation = e.GenerationOf(nodeA);
+        e.Forget(nodeA);
+        await e.ApplyAgDatabaseHealthAsync(
+            nodeA, "NODE-A", new[] { DatabaseRow(suspended: false) }, Ct, sweepGeneration: generation);
+
+        await e.ApplyAgDatabaseHealthAsync(nodeB, "NODE-B", new[] { DatabaseRow(suspended: false) }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(nodeB, "NODE-B", new[] { DatabaseRow(suspended: true) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Database Suspended", fired.MetricName);
+        Assert.Equal(nodeB.ToString(CultureInfo.InvariantCulture), fired.ServerKey);
+    }
+
+    [Fact]
+    public async Task AgAlerts_ASweepThatPassesTheServersCurrentGeneration_JudgesLikeOneThatPassesNone()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Removed and added again once, so the current generation is not merely the unset one, and another server's
+           removal does not move this one. */
+        e.Forget(ServerId);
+        e.Forget(ServerId + 1);
+        var generation = e.GenerationOf(ServerId);
+        Assert.Equal(1, generation);
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct, sweepGeneration: generation);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct, sweepGeneration: generation);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: false) }, Ct, sweepGeneration: generation);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: true) }, Ct, sweepGeneration: generation);
+
+        Assert.Equal(new[] { "AG Failover", "AG Database Suspended" }, h.Deliverer.Outcomes.Select(o => o.MetricName).ToArray());
+    }
+
+    [Fact]
+    public async Task CollectionStopped_ASweepThatWasReadingWhenItsServerWasRemoved_SendsNothingAndLeavesNoState_SoAReAddedServerStartsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The sweep took its generation and went to read the store. The server is removed meanwhile, and the rows
+           come back for a server that is gone. */
+        var generation = e.GenerationOf(ServerId);
+        e.Forget(ServerId);
+        await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct, sweepGeneration: generation);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* The same server comes back under the same id. It finds no standing alert, so a healthy first judgment
+           writes no "Collection Resumed" row for an alert it never fired... */
+        await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: false, "", Ct);
+        Assert.Empty(h.History.Records);
+
+        /* ...and no cooldown stamp, so the first time it is stopped it is announced at once, as a new server's is. */
+        await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct);
+        Assert.Equal("Collection Stopped", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task CaptureDown_ASweepThatWasReadingWhenItsServerWasRemoved_SendsNothingAndLeavesNoState_SoAReAddedServerStartsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var generation = e.GenerationOf(ServerId);
+        e.Forget(ServerId);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct, sweepGeneration: generation);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Ct);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        Assert.Equal("Capture Down", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task AgentNotRunning_ASweepThatWasReadingWhenItsServerWasRemoved_SendsNothingAndLeavesNoState_SoAReAddedServerStartsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var generation = e.GenerationOf(ServerId);
+        e.Forget(ServerId);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct, sweepGeneration: generation);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
+        Assert.Equal("Agent Not Running", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task StoreAlerts_ASweepThatPassesTheServersCurrentGeneration_JudgesLikeOneThatPassesNone()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* One server forgotten once, so its current generation is 1 and not merely the unset 0; another server never
+           forgotten, judged with no generation at all. */
+        e.Forget(ServerId);
+        var generation = e.GenerationOf(ServerId);
+        Assert.Equal(1, generation);
+
+        foreach (var (serverId, sweepGeneration) in new (int, int?)[] { (ServerId, generation), (ServerId + 2, null) })
+        {
+            await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: true, "no recent collection", Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, new[] { "Blocking" }, Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
+
+            await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: false, "", Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, Array.Empty<string>(), Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
+        }
+
+        var fired = new[] { "Collection Stopped", "Capture Down", "Agent Not Running" };
+        var resolved = new[] { "Collection Resumed", "Capture Restored", "Agent Restarted" };
+        Assert.Equal(fired.Concat(fired).ToArray(), h.Deliverer.Outcomes.Select(o => o.MetricName).ToArray());
+        Assert.Equal(resolved.Concat(resolved).ToArray(), h.History.Records.Select(r => r.MetricName).ToArray());
+    }
+
+    [Fact]
+    public void TheStoreSweep_ReadsTheServersGenerationBeforeItsFirstAwait_AndHandsItToAllFiveJudgments()
+    {
+        var source = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"));
+        var start = source.IndexOf("public async Task EvaluateStoreAlertsAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the evaluator has no EvaluateStoreAlertsAsync");
+        var end = source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, "EvaluateStoreAlertsAsync has no closing brace");
+        var sweep = Regex.Replace(source[start..end], @"\s+", " ");
+
+        var capture = sweep.IndexOf("var generation = GenerationOf(serverId);", StringComparison.Ordinal);
+        var firstAwait = sweep.IndexOf("await ", StringComparison.Ordinal);
+        Assert.True(capture >= 0, "the sweep no longer reads the server's generation");
+        Assert.True(firstAwait > capture, "the generation must be read before the sweep's first await, or a removal during a read goes unseen");
+
+        Assert.Contains(
+            "await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4795: a server removed while its connect was queued or running must leave no alert state and send nothing,
+    /// on the failed connect exactly as on the successful one. The worker's Retired containment has no unit seam
+    /// (see the remark in DarlingSweepSchedulingTests), so this pins the shape: every connection alert in the
+    /// connect body sits behind a <c>server.Retired</c> re-check that returns, with no await between the check and
+    /// the call. Without the offline half, a removal landing in a failed connect is followed by an Offline write
+    /// under the removed server's key after <c>Forget</c> cleared it, and the re-added server, which hashes to
+    /// the same server_id, inherits it.
+    /// </summary>
+    [Fact]
+    public void TheConnectBody_ChecksRetiredRightBeforeEachConnectionAlert_WithNoAwaitBetween()
+    {
+        var source = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var start = source.IndexOf("private async Task TryConnectAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the worker has no TryConnectAsync");
+        var end = source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, "TryConnectAsync has no closing brace");
+        var body = Regex.Replace(source[start..end], @"\s+", " ");
+
+        var checks = Regex.Matches(body, @"if \(server\.Retired\) \{[^{}]*\breturn; \}");
+        var alerts = Regex.Matches(body, @"await _selfAlerts!\.ApplyConnectionOutcomeAsync\(");
+        Assert.Equal(Regex.Matches(body, @"ApplyConnectionOutcomeAsync\(").Count, alerts.Count);
+        Assert.Matches(@"ApplyConnectionOutcomeAsync\([^;]*online: true", body);
+        Assert.Matches(@"ApplyConnectionOutcomeAsync\([^;]*online: false", body);
+
+        foreach (Match alert in alerts)
+        {
+            var flavour = alert.Index + 160 < body.Length ? body.Substring(alert.Index, 160) : body[alert.Index..];
+            Match? check = null;
+            foreach (Match candidate in checks)
+            {
+                if (candidate.Index + candidate.Length <= alert.Index)
+                {
+                    check = candidate;
+                }
+            }
+
+            Assert.True(check is not null, "no server.Retired re-check that returns comes before the connection alert: " + flavour);
+            var between = body[(check.Index + check.Length)..alert.Index];
+            Assert.False(between.Contains("await ", StringComparison.Ordinal),
+                "an await sits between the server.Retired re-check and the connection alert, so a removal in that await goes unseen: " + flavour);
+        }
+    }
+
+    /// <summary>
+    /// #4795: the failed-connect handler returns for a removed server before it counts the failure, schedules the
+    /// backoff or logs "retrying in Ns", and not only before the Offline alert. A removed server is never retried,
+    /// so a "Connect failed, retrying" line for it, or a failure count and a <c>NextConnectAttempt</c> on state
+    /// nothing reads again, would say something that will not happen. <c>server.Runtime = null;</c> stays first,
+    /// so the removed server does not keep a half-built runtime. The source walker blanks literal text, so the
+    /// log lines are located in the raw source (which the walker leaves the same length, so offsets line up).
+    /// </summary>
+    [Fact]
+    public void TheConnectBody_OnAFailedConnect_ReturnsForARemovedServerBeforeCountingBackingOffOrLoggingARetry()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var source = CSharpSourceWalker.StripCommentsAndStrings(raw);
+        Assert.Equal(raw.Length, source.Length);
+        var start = source.IndexOf("private async Task TryConnectAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the worker has no TryConnectAsync");
+        var end = source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, "TryConnectAsync has no closing brace");
+
+        var handler = Regex.Match(source[start..end], @"catch \(Exception ex\) when \(ex is not OperationCanceledException\)\s*\{");
+        Assert.True(handler.Success, "TryConnectAsync has no failed-connect handler");
+        var handlerCode = source[(start + handler.Index)..end];
+        var handlerRaw = raw[(start + handler.Index)..end];
+
+        var cleared = handlerCode.IndexOf("server.Runtime = null;", StringComparison.Ordinal);
+        Assert.True(cleared >= 0, "the failed-connect handler no longer clears server.Runtime");
+        var check = Regex.Match(handlerCode, @"if \(server\.Retired\)\s*\{[^{}]*\breturn;\s*\}");
+        Assert.True(check.Success, "the failed-connect handler has no server.Retired re-check that returns");
+        Assert.True(check.Index > cleared,
+            "the server.Retired return comes before server.Runtime = null, so a removed server keeps a half-built runtime");
+        var checkEnd = check.Index + check.Length;
+
+        var firstLog = Regex.Match(handlerCode, @"_logger\.Log\w+\(");
+        var after = new (string What, int At)[]
+        {
+            ("the failure count", handlerCode.IndexOf("ConsecutiveConnectFailures++", StringComparison.Ordinal)),
+            ("the backoff", handlerCode.IndexOf("NextConnectAttempt =", StringComparison.Ordinal)),
+            ("the first log call", firstLog.Success ? firstLog.Index : -1),
+            ("the 'Connect failed, retrying' log line", handlerRaw.IndexOf("Connect failed, retrying in", StringComparison.Ordinal)),
+            ("the 'Connect still failing, retrying' log line", handlerRaw.IndexOf("Connect still failing, retrying in", StringComparison.Ordinal)),
+            ("the Offline alert", handlerCode.IndexOf("ApplyConnectionOutcomeAsync(", StringComparison.Ordinal)),
+        };
+
+        foreach (var (what, at) in after)
+        {
+            Assert.True(at >= 0, what + " is missing from the failed-connect handler, so this pin no longer sees it");
+            Assert.True(at >= checkEnd,
+                what + " comes before the server.Retired return, so a server removed during a failing connect is counted, backed off or logged as retrying");
+        }
+    }
+
     [Fact]
     public async Task AgAlerts_FireUnderTheRealServerKey_SoPerServerDeliveryAndHistoryStillCorrelate()
     {
@@ -3281,13 +4936,13 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult<CurrentBlockingWaitResult?>(null);
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DeadlockAlertRow>());
-        public Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(string serverKey, double thresholdMs, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<PoisonWaitDelta>());
-        public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+        public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<PoisonWaitAccumulation>());
+        public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
-            IReadOnlyList<string> excludedDatabases, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<LongRunningQueryInfo>());
+            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
+            Task.FromResult(LongRunningQueryReadResult.Empty);
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>());
 
@@ -3302,8 +4957,8 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new List<PvsPressureInfo>());
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             Task.FromResult(new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>()));
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<DatabaseStateInfo>());
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult<List<DatabaseStateInfo>?>(new List<DatabaseStateInfo>());
 
         public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<ForcePlanFailureInfo>());
@@ -3346,6 +5001,18 @@ public sealed class DarlingSelfAlertTests
 
     private const int LiveServerId = -770077;
 
+    /// <summary>
+    /// A bare evaluator for the live store reads, which became INSTANCE methods when #3854 routed them
+    /// through the shared retry seam — the counter and the pause live on the instance, so the reads cannot
+    /// be static any more. Nothing else on it is exercised by these fixtures: they assert the raw signals a
+    /// read returns from seeded rows, so the deliverer, the history store and the mute seam are inert.
+    /// </summary>
+    private static DarlingSelfAlertEvaluator LiveReadEvaluator()
+    {
+        var h = new Harness();
+        return new DarlingSelfAlertEvaluator(h.Settings, h.Deliverer, h.History, _ => false);
+    }
+
     [Fact]
     public async Task LiveStoreReads_ComputeCollectionStoppedAndCaptureDown()
     {
@@ -3374,7 +5041,7 @@ public sealed class DarlingSelfAlertTests
                 await InsertLogAsync(connection, ct, logId++, "wait_stats", utcNow.AddMinutes(-2), "ERROR");
             }
 
-            var (lastSuccess, recentRuns, recentSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+            var (lastSuccess, recentRuns, recentSuccess) = await LiveReadEvaluator().ReadCollectionSignalsAsync(
                 postgres, LiveServerId, DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold, ct);
 
             Assert.NotNull(lastSuccess);
@@ -3383,9 +5050,11 @@ public sealed class DarlingSelfAlertTests
             Assert.True(DarlingSelfAlertEvaluator.IsCollectionStopped(
                 lastSuccess, recentRuns, recentSuccess, DateTime.UtcNow, out _));
 
-            /* Full path: EvaluateStoreAlertsAsync must NOT fire collection-stopped until the server has been
-               online this run (the restart-staleness guard), then must fire once it has. Real-time clock so
-               the 45-minute-old success reads as stale against the seeded rows. */
+            /* Full path (#4757): the seeded 45-minute-old success and the stored failure streak are both
+               pre-restart rows to an evaluator that has just started, so at startup it must stay silent: the
+               staleness is judged from the service start (the later of the two), and the stored streak is
+               not armed until the server has been seen online. Once it has, the streak fires. Real-time
+               clock so the seeded rows read as stale in the store. */
             var h = new Harness { Now = DateTime.UtcNow };
             var evaluator = h.Build();
 
@@ -3396,11 +5065,25 @@ public sealed class DarlingSelfAlertTests
             await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: true, ct);
             Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
 
+            /* A second evaluator that never sees the server online is the server that stays down across a
+               restart: silent at the start, fired by the staleness arm once the window has passed since the
+               start. Taken before the capture-down rows below, which add a fresh success. */
+            var hDown = new Harness { Now = DateTime.UtcNow };
+            var downEvaluator = hDown.Build();
+
+            await downEvaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
+            Assert.DoesNotContain(hDown.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+            hDown.Now = hDown.Now.AddMinutes(31);
+            await downEvaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
+            var stoppedByStaleness = Assert.Single(hDown.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+            Assert.StartsWith("No successful collection in 31 minutes", stoppedByStaleness.CurrentValue, StringComparison.Ordinal);
+
             /* Capture-down: latest deadlocks run is SESSION_MISSING, latest blocked_process_report is fine. */
             await InsertLogAsync(connection, ct, logId++, "blocked_process_report", utcNow.AddMinutes(-1), "SUCCESS");
             await InsertLogAsync(connection, ct, logId++, "deadlocks", utcNow.AddMinutes(-1), "SESSION_MISSING");
 
-            var missing = await DarlingSelfAlertEvaluator.ReadMissingCaptureSessionsAsync(postgres, LiveServerId, ct);
+            var missing = await LiveReadEvaluator().ReadMissingCaptureSessionsAsync(postgres, LiveServerId, ct);
             Assert.Equal(new[] { "Deadlock" }, missing);
 
             await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: true, ct);
@@ -3476,7 +5159,7 @@ public sealed class DarlingSelfAlertTests
 
             /* Window 3, inside the tied instant: log_id DESC must pick the three HIGHEST ids — all
                SUCCESS. A missing or ascending tiebreak lets the tied instant's ERRORs leak in. */
-            var (_, tieRuns, tieSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+            var (_, tieRuns, tieSuccess) = await LiveReadEvaluator().ReadCollectionSignalsAsync(
                 postgres, LiveServerId, 3, ct);
             Assert.Equal(3, tieRuns);
             Assert.Equal(3, tieSuccess);
@@ -3484,7 +5167,7 @@ public sealed class DarlingSelfAlertTests
             /* Window 8, across both instants: all six newest-instant rows (3 ERROR + 3 SUCCESS) fill the
                window before ANY older row — time-first — leaving room for exactly two of the older
                SUCCESSes. 5 = 3 + 2 is only reachable by that fill order. */
-            var (lastSuccess, spanRuns, spanSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+            var (lastSuccess, spanRuns, spanSuccess) = await LiveReadEvaluator().ReadCollectionSignalsAsync(
                 postgres, LiveServerId, 8, ct);
             Assert.Equal(8, spanRuns);
             Assert.Equal(5, spanSuccess);
@@ -3544,7 +5227,7 @@ public sealed class DarlingSelfAlertTests
             await InsertAgReplicaAsync(connection, ct, utcNow, null, "NODE3", "SECONDARY", "CONNECTED");
 
             var (replicaTime, replicas) =
-                await DarlingSelfAlertEvaluator.ReadLatestAgReplicaStatesAsync(postgres, LiveServerId, ct);
+                await LiveReadEvaluator().ReadLatestAgReplicaStatesAsync(postgres, LiveServerId, ct);
 
             Assert.NotNull(replicaTime);
             Assert.Equal(2, replicas.Count);                       /* the un-keyable NULL row is dropped */
@@ -3556,7 +5239,7 @@ public sealed class DarlingSelfAlertTests
             await InsertAgDatabaseAsync(connection, ct, utcNow, "AG1", "Orders", "NODE2", null, null, true, "SUSPEND_FROM_USER");
 
             var (databaseTime, databases) =
-                await DarlingSelfAlertEvaluator.ReadLatestAgDatabaseReplicaStatesAsync(postgres, LiveServerId, ct);
+                await LiveReadEvaluator().ReadLatestAgDatabaseReplicaStatesAsync(postgres, LiveServerId, ct);
 
             Assert.NotNull(databaseTime);
             Assert.Equal(2, databases.Count);
@@ -3682,7 +5365,7 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
 
         var warnings = h.Log.Entries
             .Where(x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
@@ -3702,7 +5385,7 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var h = new Harness { Muted = true };
         var e = h.Build();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
 
         var warnings = h.Log.Entries
             .Where(x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
@@ -3736,18 +5419,23 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     }
 
     /// <summary>
-    /// #3297: the detail names WHEN the policy arms. It said the policy "arms ITSELF once its consumer covers
-    /// everything raw holds" and stopped there, which is true and one step short:
-    /// <c>TimescaleSupport.EnsureRetentionPoliciesAsync</c> is the only thing that arms a held policy and it
-    /// has exactly one call site, the service startup path. So arming happens on the next service START, not
-    /// when coverage catches up. An operator following the old wording runs the backfill, watches the hourly
-    /// Critical keep firing, and concludes the backfill failed — which is what happened on #3296, where the
-    /// reporter's own sequence included the restart and ours did not. Pinned here rather than only in
-    /// <c>docs/retention-hold-runbook.md</c> because the alert is what an operator sees first, and now that
-    /// every channel delivers the detail (#3297) it is what most of them will see at all.
+    /// #3297 made the detail name WHEN the policy arms; #3812 changed the answer, and this pin moved with it.
+    ///
+    /// <para>The #3297 wording was true and load-bearing: <c>TimescaleSupport.EnsureRetentionPoliciesAsync</c>
+    /// had exactly one call site, the service start path, so a held policy armed on the next service START
+    /// and not when coverage caught up — an operator who ran the backfill and skipped the restart watched the
+    /// hourly Critical keep firing and concluded the backfill had failed (#3296). The pin therefore demanded
+    /// "RESTART" and "STARTUP" in the detail. #3812 put the same sweep on the running service's hourly
+    /// maintenance tick, which makes that sentence a LIE in the other direction: an operator told the restart
+    /// is "not optional" restarts a service that would have released the hold within the hour on its own.
+    /// So the detail now names the hourly re-evaluation as the mechanism, the restart as optional ("only if
+    /// you want it armed immediately"), and the hourly <c>Retention re-evaluation:</c> log line as the
+    /// confirmation — and this pin holds each of those, plus the ABSENCE of the two phrases that made the
+    /// restart mandatory, so the old sentence cannot come back by a merge. Pinned here rather than only in
+    /// <c>docs/retention-hold-runbook.md</c> for the #3297 reason: the alert is what an operator sees first.</para>
     /// </summary>
     [Fact]
-    public async Task RetentionHeld_TheDetail_NamesTheRestartAsPartOfTheRemedy()
+    public async Task RetentionHeld_TheDetail_NamesTheHourlyReEvaluation_AndMakesTheRestartOptional()
     {
         var h = new Harness();
         var e = h.Build();
@@ -3756,11 +5444,26 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
 
         var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
         Assert.Contains("--backfill-rollups", detail, StringComparison.Ordinal);
-        Assert.Contains("RESTART", detail, StringComparison.Ordinal);
-        /* The reason the restart is not optional, so a future edit cannot drop it to a bare instruction. */
-        Assert.Contains("STARTUP", detail, StringComparison.Ordinal);
-        /* And the do-not-arm warning it must never displace. */
+
+        /* The mechanism, by cadence and by issue, and the confirmation line an operator can grep for. */
+        Assert.Contains("hourly maintenance tick", detail, StringComparison.Ordinal);
+        Assert.Contains("#3812", detail, StringComparison.Ordinal);
+        Assert.Contains("'Retention re-evaluation:'", detail, StringComparison.Ordinal);
+
+        /* The restart is OPTIONAL now, and said to be. The two #3297 phrases that made it mandatory must be
+           gone: "then RESTART" was the instruction, "not optional" was its justification. */
+        Assert.Contains("only if you want it armed immediately", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("then RESTART", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("not optional", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("start path and nowhere else", detail, StringComparison.Ordinal);
+
+        /* The one-tick lag on the resolution edge is stated rather than left for the operator to discover: the
+           Retention Held read rides the compression check that runs BEFORE the re-evaluation on the same tick. */
+        Assert.Contains("resolves on the tick after the one that arms it", detail, StringComparison.Ordinal);
+
+        /* And the do-not-arm warning it must never displace — now with the hourly consequence attached. */
         Assert.Contains("Do NOT", detail, StringComparison.Ordinal);
+        Assert.Contains("re-holds a hand-armed policy", detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -4038,6 +5741,212 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Null(new RetentionHoldReading(1, "t", false, "", 19, 1_561_449, null).OverHorizonRatio);
         Assert.Null(new RetentionHoldReading(1, "t", false, "0", 19, 1_561_449, 0).OverHorizonRatio);
         Assert.Equal(4.52, new RetentionHoldReading(1, "t", false, "4 days", 19, 1_561_449, 345_600).OverHorizonRatio!.Value, 2);
+    }
+
+    /* ---------------- #4299 Raw Purge Over Horizon ---------------- */
+
+    private static RawPurgeOverHorizonReading RawReading(
+        long jobId = 2001, string hypertable = "query_stats", string dropAfter = "4 days",
+        double? ratio = 4.5, RawLastPurgeRecord? lastPurge = null, bool lastPurgeReadFailed = false) =>
+        new(jobId, hypertable, dropAfter, ratio,
+            lastPurgeReadFailed ? null : lastPurge ?? new RawLastPurgeRecord(DateTime.UtcNow, "hole", null, null),
+            lastPurgeReadFailed);
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_OverHorizonWithAHole_Fires_AndSaysAHole()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric, fired.MetricName);
+        Assert.Contains("a hole was found in the range", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_UnderHorizon_DoesNotFire()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading(ratio: 0.5) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_LastOutcomeRan_DoesNotFire()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 1_234)) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_FiredThenRanAndUnder_Resolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(ratio: 0.5, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 1_234)) },
+            Ct);
+
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonClearedMetric, resolved.MetricName);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_RunFailed_NamesTheSqlState()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "run_failed", "55P03", null)) },
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("55P03", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_RecordStale_Fires_AndSaysNotRecordedSince()
+    {
+        /* #4391: an old "ran" record must not keep the alert quiet forever once the trigger itself has
+           stopped running. RED at 34064e99e: the evaluator only checks the outcome string, never the
+           record's age, so this stays silent on the pre-fix code. */
+        var h = new Harness();
+        var e = h.Build();
+        var staleAt = h.Now - TimeSpan.FromHours(3);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(staleAt, "ran", null, 1_234)) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("has not recorded a pass since", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_RecordRecent_DoesNotFire()
+    {
+        /* The companion to the stale pin: a record inside the staleness window still clears the alert on
+           "ran", same as before #4391. RED at 34064e99e would ALSO pass here (no alert either way) — this
+           pin exists to prove the new staleness check does not over-fire, not to distinguish the commits. */
+        var h = new Harness();
+        var e = h.Build();
+        var recentAt = h.Now - TimeSpan.FromMinutes(30);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(recentAt, "ran", null, 1_234)) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_ReadFailedWhileActive_NeitherFiresNorResolves_AndCountsTheFailure()
+    {
+        /* #4391: an unreadable record must not falsely clear a standing alert. Fire on a hole first, then
+           feed a read failure that WOULD resolve if read as "never written" (ratio under horizon) — the
+           active state must survive untouched, and the failure must be counted rather than silently
+           swallowed. This is compile-RED at 34064e99e: RawPurgeOverHorizonReading has no
+           LastPurgeReadFailed parameter on that commit. */
+        var readFailures = new AlertReadFailureCounter(() => DateTime.UtcNow);
+        var h = new Harness { ReadFailures = readFailures };
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(ratio: 0.5, lastPurgeReadFailed: true) }, Ct);
+
+        Assert.Empty(h.History.Records);
+        Assert.Equal(1, readFailures.ReadFor(null).InstanceReadFailures);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_ReadFailedWhileInactive_DoesNotFire_AndCountsTheFailure()
+    {
+        var readFailures = new AlertReadFailureCounter(() => DateTime.UtcNow);
+        var h = new Harness { ReadFailures = readFailures };
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurgeReadFailed: true) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(1, readFailures.ReadFor(null).InstanceReadFailures);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_GateUnknown_And_GateError_NameTheReason()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(jobId: 1, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "gate_unknown", null, null)) },
+            Ct);
+        var gateUnknown = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("could not be resolved", gateUnknown.DetailText, StringComparison.Ordinal);
+
+        h.Deliverer.Outcomes.Clear();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(jobId: 2, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "gate_error", null, null)) },
+            Ct);
+        var gateError = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("trigger's own gate check failed", gateError.DetailText, StringComparison.Ordinal);
+    }
+
+    /* Armed can't suppress this alert by construction: RawPurgeOverHorizonReading carries no armed flag at
+       all (unlike RetentionHoldReading) — ApplyRawPurgeOverHorizonAsync fires unconditionally on the
+       recorded outcome. There is nothing to pin here; a test that tried to pass an armed flag would not
+       compile, which IS the guarantee. */
+
+    [Fact]
+    public void RawCadenceReadings_OnlyRanWithElapsed_YieldsOneReadingAtTheTriggerInterval()
+    {
+        var readings = new[]
+        {
+            RawReading(jobId: 1, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 1_800_000)),
+            RawReading(jobId: 2, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "hole", null, null)),
+            RawReading(jobId: 3, lastPurge: null),
+        };
+
+        var result = DarlingWorker.RawCadenceReadings(readings, TimeSpan.FromHours(1));
+
+        var only = Assert.Single(result);
+        Assert.Equal(1_800_000, only.LastRunDurationMs);
+        Assert.Equal(3_600_000, only.ScheduleIntervalMs);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_RawReadingOverItsInterval_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var readings = new[]
+        {
+            RawReading(lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 5_400_000)),
+        };
+        var cadenceReadings = DarlingWorker.RawCadenceReadings(readings, TimeSpan.FromHours(1));
+
+        await e.ApplyStoreJobCadenceAsync(cadenceReadings, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.JobCadenceMetric, fired.MetricName);
     }
 
     /* ---------------- #2136 Store Job Over Cadence ---------------- */
@@ -4352,6 +6261,13 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Collector Cost Regression", fired.MetricName);
+
+        /* #4223 self-monitor notebook: the delivered context carries the collector name, through the
+           product's own fire path (ApplyCostRegressionsAsync -> FireAsync -> the deliverer), not a
+           direct call to the helper. RED on dev: before this PR FireAsync is never given a context here,
+           so fired.Context is null and this reads a NullReferenceException, not an assertion failure. */
+        Assert.NotNull(fired.Context);
+        Assert.Equal("query_store", fired.Context!.CollectorName);
 
         /* 2) still regressing on the next tick, inside the cooldown -> no new notification. */
         await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);

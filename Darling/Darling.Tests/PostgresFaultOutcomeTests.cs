@@ -34,6 +34,15 @@ public class PostgresFaultOutcomeTests
     /* A collector that does NOT opt into the lock-timeout yield, so 55P03 stays an error for it. */
     private const string PlainCollector = "pg_wait_stats";
 
+    /* The runtime the planted-byte sentence reads. Its storage name is never cached by any test, so the
+       sentence takes its UTF8 branch here whatever the statics collection is doing in parallel. */
+    private static readonly ServerRuntime FaultRuntime =
+        PgReadBinaryFileCapabilityTests.Runtime("fault-outcome-tests", connectedDatabase: "appdb");
+
+    /* The 42P01 the companion arm is written for, spelled once because #3830's pins assert whole
+       sentences and the message is the first clause of every one of them. */
+    private const string CompanionMissingMessage = "relation \"public.pg_stat_statements_info\" does not exist";
+
     /* The two origins whose sentences the pins in this class read. Constructed rather than classified,
        because these pins ask what a given origin RENDERS - what a given fault classifies AS is
        PostgresCancelOriginTests' question, and running the classifier here would make a rendering pin fail
@@ -95,6 +104,12 @@ public class PostgresFaultOutcomeTests
 
         /* And it must not repeat the sentence this fixes. */
         Assert.DoesNotContain("covers every collector", explanation, StringComparison.Ordinal);
+
+        /* #4046: whoever is granting pg_read_file for the first time is told to grant the binary twin in
+           the same breath, so a fresh setup never has to discover the 22021 byte the hard way. */
+        Assert.Contains(
+            "GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
+        Assert.Contains("#4046", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -170,6 +185,110 @@ public class PostgresFaultOutcomeTests
 
         Assert.Equal("ERROR", status);
         Assert.Contains("could not open file", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4046 part 1c (#4051 review M1): a 22021 on a log-tail reader gets no PostgresFaultOutcome arm. It
+    /// declines with ERROR, so the general handler records it and the blinding counts as an error there.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    [InlineData("pg_log_events")]
+    public void ALogReader22021KeepsErrorForTheGeneralHandler(string collectorName)
+    {
+        var (status, _) = DarlingWorker.PostgresFaultOutcome(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), collectorName, "appdb");
+
+        Assert.Equal("ERROR", status);
+    }
+
+    /// <summary>
+    /// The sentence the general handler records for that 22021: the SQLSTATE, the mechanism (pg_read_file
+    /// validates text against the database encoding before this process sees a row), and the exact grant that
+    /// switches the collector to the binary route on its own.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    [InlineData("pg_log_events")]
+    public void ALogReader22021NamesThePlantedByteAndTheBinaryGrant(string collectorName)
+    {
+        var explanation = DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), collectorName, FaultRuntime);
+
+        Assert.NotNull(explanation);
+        Assert.Contains("22021", explanation, StringComparison.Ordinal);
+        Assert.Contains("not valid UTF-8", explanation, StringComparison.Ordinal);
+        Assert.Contains("#4046", explanation, StringComparison.Ordinal);
+        Assert.Contains(
+            "EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
+        Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4051 round-2 review, L-1 (#4062 changed the sentence's own reasoning, not this pin): a 22P05 is a
+    /// WIN1252 byte with no UTF-8 equivalent, on a database whose encoding this collector does not map. The
+    /// sentence says that the grant does not help there, with no issue reference in the served text.
+    /// </summary>
+    [Fact]
+    public void ALogReader22P05SaysTheGrantDoesNotHelp()
+    {
+        var explanation = DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("22P05", "character with byte sequence 0x81 in encoding WIN1252 has no equivalent in encoding UTF8"),
+            "pg_log_events", FaultRuntime);
+
+        Assert.NotNull(explanation);
+        Assert.Contains("22P05", explanation, StringComparison.Ordinal);
+        Assert.Contains("does not help", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("#4062", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Grant EXECUTE", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sentence must not widen: a 22021 on a collector that is not one of the three log-tail readers, any
+    /// other SQLSTATE on one that is, and a fault that is not a PostgresException all keep the general
+    /// handler's own message.
+    /// </summary>
+    [Fact]
+    public void TheUndecodableByteSentenceIsForALogReadersPlantedByteFaultsOnly()
+    {
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), PlainCollector, FaultRuntime));
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("58P01", "could not open file"), "pg_log_events", FaultRuntime));
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
+            new InvalidOperationException("not a server fault"), "pg_log_events", FaultRuntime));
+    }
+
+    /// <summary>
+    /// #4051 review L3: a 22021 proven to come from a write to the STORE is not about the target's log, so it
+    /// keeps the general handler's own message (#3111's rule).
+    /// </summary>
+    [Fact]
+    public void AStoreWrites22021KeepsTheGeneralMessage()
+    {
+        var fault = Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0x00");
+        CollectorFaultCopyPhase.Stamp(fault, StoreCopyPhase.Data);
+
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(fault, "pg_log_events", FaultRuntime));
+    }
+
+    /// <summary>
+    /// The arm must not widen: a 22021 on any collector that is not one of the three log-tail readers has no
+    /// listing-then-reading shape to explain it, and stays on the loud default exactly as the classifier's
+    /// Unclassified answer intends — the same discipline <see cref="AMissingFileOnAnyOtherCollectorStaysLoud"/>
+    /// pins for 58P01.
+    /// </summary>
+    [Fact]
+    public void A22021OnAnyOtherCollectorStaysLoud()
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), PlainCollector);
+
+        Assert.Equal("ERROR", status);
+        Assert.Contains("invalid byte sequence", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_binary_file", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -355,6 +474,360 @@ public class PostgresFaultOutcomeTests
         Assert.DoesNotContain("database ''", declared, StringComparison.Ordinal);
         Assert.Contains("in the connected database", generic, StringComparison.Ordinal);
         Assert.DoesNotContain("database ''", generic, StringComparison.Ordinal);
+    }
+
+    /* ---- #3818: a missing COMPANION object is not the extension missing. ---- */
+
+    /// <summary>
+    /// #3818, the case that issue is about, and the sentence a fault carries when NOTHING has read the
+    /// catalog. On 23 of 50 clusters in one fleet the collector's read of <c>pg_stat_statements_info</c> -
+    /// created by the 1.9 update script - failed 42P01 every cycle for 25 hours with the base view readable.
+    /// The stored sentence was #3240's: "the pg_stat_statements extension this collector reads is not
+    /// installed on this target", with <c>CREATE EXTENSION</c> and a <c>shared_preload_libraries</c> restart as
+    /// the remedy, which is what the mapping says when the missing object is the extension's BASE object. The
+    /// declared companion (<see cref="PgExtensionDependency.Companions"/>) is what lets the mapping tell a
+    /// companion apart from a base object and say the two states that produce it instead.
+    ///
+    /// <para>WHICH of those two states that fleet was in is a separate question #3818 did not have an answer
+    /// to and guessed at; #3830 read <c>pg_extension_availability</c> and it was the other one. So this pin
+    /// now asserts the no-answer sentence specifically - a hedge, correct only because nothing here supplies
+    /// a row - and the four pins below assert the sentences a row produces.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("relation \"public.pg_stat_statements_info\" does not exist")]
+    [InlineData("relation \"pg_stat_statements_info\" does not exist")]
+    public void AMissingCompanionObject_IsNotRecordedAsTheExtensionMissing(string message)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", message), "pg_statement_stats", "appdb");
+
+        /* NOT EXTENSION_MISSING: that status word says the extension is absent and every health surface
+           bands it as an optional module left uninstalled - a legitimate resting state. The general
+           non-fatal bucket, with the text carrying the truth, is the shape the generic ObjectMissing arm has
+           always used. */
+        Assert.NotEqual(CollectorRuntimePrecondition.ExtensionMissingStatus, status);
+        Assert.Equal(CollectorRuntimePrecondition.DegradedStatus, status);
+        Assert.Equal("PERMISSIONS", status);
+
+        /* The server's own words survive, and the object it named is called out by its bare name. */
+        Assert.Contains(message, explanation, StringComparison.Ordinal);
+        Assert.Contains("42P01", explanation, StringComparison.Ordinal);
+        Assert.Contains("the missing object is pg_stat_statements_info", explanation, StringComparison.Ordinal);
+
+        /* The true statements: the extension is present, at a version below 1.9 or outside the schema the
+           query names, in the named database. */
+        Assert.Contains("extension IS installed in database 'appdb'", explanation, StringComparison.Ordinal);
+        Assert.Contains("this is not the extension missing", explanation, StringComparison.Ordinal);
+        Assert.Contains("catalog version below 1.9", explanation, StringComparison.Ordinal);
+        Assert.Contains("installed outside the schema the query text names", explanation, StringComparison.Ordinal);
+        Assert.Contains("ALTER EXTENSION pg_stat_statements UPDATE in database 'appdb'", explanation, StringComparison.Ordinal);
+        Assert.Contains("pg_extension.extversion and extnamespace", explanation, StringComparison.Ordinal);
+        Assert.Contains("NOT a missing grant", explanation, StringComparison.Ordinal);
+
+        /* The three lies the base sentence would have told here: not installed, CREATE EXTENSION, and a
+           preload restart to schedule. The update is a statement, and the sentence says so in as many words. */
+        Assert.DoesNotContain("is not installed on this target", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("CREATE EXTENSION", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("has to be in shared_preload_libraries", explanation, StringComparison.Ordinal);
+        Assert.Contains("a statement, with no restart and no shared_preload_libraries change", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The inference that motivated #3240 still holds when the object the server named IS the extension's
+    /// base object - the view itself on the vanilla flavor, Aurora's function on the other - and when the
+    /// message has no shape this can read (the bare "boom" every other pin here sends): both stay on the
+    /// EXTENSION_MISSING arm, exactly as before. #3818 narrows the claim; it does not remove it.
+    /// </summary>
+    [Theory]
+    [InlineData("42P01", "relation \"public.pg_stat_statements\" does not exist")]
+    [InlineData("42883", "function aurora_stat_statements(boolean) does not exist")]
+    [InlineData("42P01", "boom")]
+    public void TheBaseObjectMissing_StillRecordsExtensionMissing(string sqlState, string message)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(Pg(sqlState, message), "pg_statement_stats", "appdb");
+
+        Assert.Equal(CollectorRuntimePrecondition.ExtensionMissingStatus, status);
+        Assert.Contains("CREATE EXTENSION pg_stat_statements", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("the missing object is", explanation, StringComparison.Ordinal);
+    }
+
+    /* ---- #3830: the companion remedy is the state's, and the state ARRIVES. ---- */
+
+    /// <summary>
+    /// #3830, the defect. #3818's sentence had ONE remedy - <c>ALTER EXTENSION pg_stat_statements UPDATE</c> -
+    /// and reached it by inference: the base object resolved, so the extension is present, so it must be
+    /// present at an old version. The middle step is false on Aurora, where the base object that resolved is
+    /// <c>aurora_stat_statements()</c> - not the extension's, and needing none. The 23 clusters #3818 was
+    /// filed on are exactly that population: <c>pg_extension</c> has no row at all, the extension was never
+    /// created in any database, and they were being told to UPDATE it.
+    ///
+    /// <para>The remedy now follows the <c>pg_extension</c> row the connect-time read observed. This is the
+    /// Aurora arm of the no-row case: nothing to alter, the collector not waiting on anything, and the create
+    /// named as OPTIONAL with what it buys spelled out. Asserted as the whole sentence, because the defect
+    /// was a sentence that was individually-true-sounding and wrong as a whole.</para>
+    /// </summary>
+    [Fact]
+    public void NoPgExtensionRowOnAurora_SaysTheCreateIsOptional_AndNeverOffersAlterExtension()
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage),
+            "pg_statement_stats",
+            "appdb",
+            PgExtensionRowObservation.From(null, "appdb"),
+            isAurora: true);
+
+        Assert.Equal(CollectorRuntimePrecondition.DegradedStatus, status);
+
+        Assert.Equal(
+            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object. pg_extension has NO row for "
+            + "pg_stat_statements in database 'appdb': the extension was never created there, so it is not "
+            + "present at any version and there is nothing for ALTER EXTENSION pg_stat_statements UPDATE to "
+            + "update. This target is Aurora, where this collector's source is aurora_stat_statements() — "
+            + "which needs no extension — so the collector is not waiting on one: running CREATE EXTENSION "
+            + "pg_stat_statements in database 'appdb' is OPTIONAL, and what it buys is pg_stat_statements_info "
+            + "and nothing else. This is NOT a missing grant, and no GRANT will change it. Recorded as a "
+            + "non-fatal skip rather than an error so it does not fill the log every cycle; the collector "
+            + "retries every cycle.",
+            explanation);
+
+        /* The lie this arm exists to delete: an update of an extension that is not there. Asserted as an
+           absence as well, because the whole sentence above would still pass a reader who skimmed it. */
+        Assert.DoesNotContain("is at catalog version", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("extension IS installed", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same no-row state on a VANILLA target is a different remedy, and the difference is declared rather
+    /// than guessed: <c>PgExtensionDependency.AuroraNativeAlternative</c> says what the collector reads on
+    /// Aurora instead, and without that alternative in play the create is not optional. The preload sentence
+    /// comes back here - and only here - because <c>pg_stat_statements</c> declares
+    /// <c>SharedPreloadLibraries</c> and a <c>CREATE EXTENSION</c> before the module is loaded does nothing.
+    /// </summary>
+    [Fact]
+    public void NoPgExtensionRowOnVanilla_AsksForCreateExtension_AndSaysThePreloadComesFirst()
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage),
+            "pg_statement_stats",
+            "appdb",
+            PgExtensionRowObservation.From(null, "appdb"),
+            isAurora: false);
+
+        Assert.Equal(
+            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object. pg_extension has NO row for "
+            + "pg_stat_statements in database 'appdb': the extension was never created there, so it is not "
+            + "present at any version and there is nothing for ALTER EXTENSION pg_stat_statements UPDATE to "
+            + "update. The remedy is CREATE EXTENSION pg_stat_statements in database 'appdb', and "
+            + "pg_stat_statements has to be in shared_preload_libraries before that does anything — a "
+            + "parameter-group change and a restart. This is NOT a missing grant, and no GRANT will change it. "
+            + "Recorded as a non-fatal skip rather than an error so it does not fill the log every cycle; the "
+            + "collector retries every cycle.",
+            explanation);
+
+        /* The Aurora clause must not leak onto a target that is not Aurora - it would call a required
+           install optional. */
+        Assert.DoesNotContain("OPTIONAL", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("aurora_stat_statements()", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A row BELOW the companion's version is #3818's case, and it keeps #3818's remedy - now stated as a
+    /// fact read out of the catalog, with the version named, rather than as the first of two possibilities.
+    /// Still no <c>CREATE EXTENSION</c> and still no preload restart: the extension is there.
+    /// </summary>
+    [Fact]
+    public void AVersionBelowTheCompanions_NamesTheVersionAndKeepsAlterExtensionUpdate()
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage),
+            "pg_statement_stats",
+            "appdb",
+            PgExtensionRowObservation.From("1.8", "appdb"),
+            isAurora: true);
+
+        Assert.Equal(
+            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object: that resolved, so the extension IS "
+            + "installed in database 'appdb' and this is not the extension missing. pg_extension says it is at "
+            + "catalog version 1.8, below the 1.9 whose update script creates pg_stat_statements_info — an "
+            + "engine upgraded in place or restored keeps the version the extension was created at until "
+            + "someone runs ALTER EXTENSION pg_stat_statements UPDATE in database 'appdb' — a statement, "
+            + "with no restart and no shared_preload_libraries change; RDS and Aurora do not run it for you. "
+            + "This is NOT a missing grant, and no GRANT will change it. Recorded as a non-fatal skip rather "
+            + "than an error so it does not fill the log every cycle; the collector retries every cycle.",
+            explanation);
+
+        Assert.DoesNotContain("CREATE EXTENSION", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("shared_preload_libraries before", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// At or above the companion's version the update is already done, so recommending it is the same
+    /// wrong-remedy defect in its third form. 1.10 is the case that decides whether the comparison is
+    /// numeric: an ordinal string compare ranks <c>1.10</c> BELOW <c>1.9</c> and would send a fleet two
+    /// releases ahead back to run an update it ran twice.
+    /// </summary>
+    [Theory]
+    [InlineData("1.9")]
+    [InlineData("1.10")]
+    public void AVersionAtOrAboveTheCompanions_SaysNoUpdateIsOwed(string extversion)
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage),
+            "pg_statement_stats",
+            "appdb",
+            PgExtensionRowObservation.From(extversion, "appdb"),
+            isAurora: true);
+
+        Assert.Equal(
+            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object: that resolved, so the extension IS "
+            + "installed in database 'appdb' and this is not the extension missing. pg_extension says it is at "
+            + $"catalog version {extversion}, which already carries pg_stat_statements_info (1.9 and later), so "
+            + "no ALTER EXTENSION pg_stat_statements UPDATE is owed and it would change nothing. The object is "
+            + "installed outside the schema the query text names (a relocatable extension lives in whatever "
+            + "schema it was created in; check pg_extension.extnamespace), or the error text above names a "
+            + "reason of its own. This is NOT a missing grant, and no GRANT will change it. Recorded as a "
+            + "non-fatal skip rather than an error so it does not fill the log every cycle; the collector "
+            + "retries every cycle.",
+            explanation);
+    }
+
+    /// <summary>
+    /// Three ways to have no answer, all of which must produce #3818's two-possibilities sentence rather than
+    /// a confident one: nothing was read at all; the row was read in a DIFFERENT database than the fault came
+    /// from (<c>pg_extension</c> is per database, and a per-database collector faults in databases the
+    /// connect-time read never saw); and a version string nothing can rank, which <c>extversion</c> permits
+    /// because its format is the extension author's choice.
+    ///
+    /// <para>Asserted against the sentence #3824 shipped, verbatim, so "the fallback is the old sentence" is
+    /// a pinned fact rather than a comment.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("unobserved")]
+    [InlineData("other-database")]
+    [InlineData("unrankable")]
+    public void WithNoUsableRow_TheSentenceIsTheTwoPossibilitiesOne(string shape)
+    {
+        var row = shape switch
+        {
+            "unobserved" => PgExtensionRowObservation.NotObserved,
+            "other-database" => PgExtensionRowObservation.From(null, "otherdb"),
+            _ => PgExtensionRowObservation.From("release-candidate", "appdb"),
+        };
+
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage), "pg_statement_stats", "appdb", row, isAurora: true);
+
+        Assert.Equal(
+            DarlingWorker.PostgresFaultOutcome(
+                Pg("42P01", CompanionMissingMessage), "pg_statement_stats", "appdb").Explanation,
+            explanation);
+
+        Assert.Contains("so either the extension is present at a catalog version below 1.9", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_extension has NO row", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_extension says it is at catalog version", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The verdict is what the collector's own declaration says it is. The companion version comes off
+    /// <c>PgStatementStatsCollector</c>'s declaration rather than a literal here, so a declaration that moves
+    /// to 1.11 moves these answers with it instead of leaving a test asserting the old boundary.
+    /// </summary>
+    [Fact]
+    public void TheVerdictComesFromTheDeclaredCompanionVersion_NotALiteralHere()
+    {
+        var companion = PgStatementStatsCollector.Instance.RequiredPgExtensions[0].Companions[0];
+
+        Assert.Equal(
+            PgExtensionCompanionVerdict.Undetermined,
+            companion.VerdictFrom(PgExtensionRowObservation.NotObserved));
+        Assert.Equal(
+            PgExtensionCompanionVerdict.NoRow,
+            companion.VerdictFrom(PgExtensionRowObservation.From(null, "appdb")));
+        Assert.Equal(
+            PgExtensionCompanionVerdict.BelowCompanionVersion,
+            companion.VerdictFrom(PgExtensionRowObservation.From("1.8", "appdb")));
+        Assert.Equal(
+            PgExtensionCompanionVerdict.AtOrAboveCompanionVersion,
+            companion.VerdictFrom(PgExtensionRowObservation.From(companion.SinceExtensionVersion, "appdb")));
+    }
+
+    /// <summary>
+    /// The wiring #3830 stands on, pinned in source because no pure test reaches it: the row is read by the
+    /// PostgreSQL detection query, carried on the runtime, and handed to the fault mapping at the one call
+    /// site. Every one of those is an expression a call site passes rather than any logic - a revert that
+    /// dropped the argument would compile, run, and quietly go back to one remedy for three states, with the
+    /// sentence pins above still green because they call the mapping directly.
+    ///
+    /// <para>The extension the detection query names is compared against the DECLARATION rather than spelled
+    /// twice: the query is a <c>const</c> and cannot interpolate, so this is what keeps the literal and the
+    /// collector from drifting apart.</para>
+    /// </summary>
+    [Fact]
+    public void ThePgExtensionRowIsRead_CarriedOnTheRuntime_AndPassedToTheMapping()
+    {
+        var connector = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingServerConnector.cs"));
+        var worker = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        var declared = PgStatementStatsCollector.Instance.RequiredPgExtensions[0].ExtensionName;
+
+        /* Read on the statement that was already being made: a column on the detection query, not a probe
+           of its own. */
+        Assert.Contains("SELECT e.extversion", DarlingServerConnector.PostgresDetectionQueryText, StringComparison.Ordinal);
+        Assert.Contains(
+            $"WHERE e.extname = '{declared}'", DarlingServerConnector.PostgresDetectionQueryText, StringComparison.Ordinal);
+
+        /* Built from the ROW being present, never inferred from the value being null, and carried whole. */
+        Assert.Contains("PgExtensionRowObservation.From(", connector, StringComparison.Ordinal);
+        Assert.Contains("PgStatStatementsExtension = statementsExtension,", connector, StringComparison.Ordinal);
+
+        /* And handed to the mapping, beside the flavor, at the arm that renders the sentence. */
+        Assert.Contains("runtime.PgStatStatementsExtension,", worker, StringComparison.Ordinal);
+        Assert.Contains("runtime.Target.IsAurora)", worker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A companion name on a collector that declares NO companions routes as it always did: the declaration
+    /// is per collector, so pg_buffer_usage's 42P01 naming some other extension's info view is still, for
+    /// pg_buffer_usage, its declared extension missing. And the unknown-database fallback holds on the
+    /// companion arm too, without inventing a name.
+    /// </summary>
+    [Fact]
+    public void TheCompanionArm_IsScopedToTheDeclaringCollector_AndFallsBackOnAnUnknownDatabase()
+    {
+        var other = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", "relation \"public.pg_stat_statements_info\" does not exist"), "pg_buffer_usage");
+        Assert.Equal(CollectorRuntimePrecondition.ExtensionMissingStatus, other.Status);
+
+        var (_, unknownDb) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", "relation \"pg_stat_statements_info\" does not exist"), "pg_statement_stats", null);
+        Assert.Contains("extension IS installed in the connected database", unknownDb, StringComparison.Ordinal);
+        Assert.Contains("ALTER EXTENSION pg_stat_statements UPDATE in the connected database", unknownDb, StringComparison.Ordinal);
+        Assert.DoesNotContain("database ''", unknownDb, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// How the mapping reads the object out of the server's message: the quoted relation of a 42P01, the
+    /// function name of a 42883, the LAST segment when the query text qualified it, and null - never a
+    /// guess - for a message with neither shape. Npgsql's relation/function fields are not consulted, because
+    /// PostgreSQL fills them for constraint and datatype errors and not for an unresolved name.
+    /// </summary>
+    [Theory]
+    [InlineData("relation \"public.pg_stat_statements_info\" does not exist", "pg_stat_statements_info")]
+    [InlineData("relation \"pg_stat_statements_info\" does not exist", "pg_stat_statements_info")]
+    [InlineData("relation \"ext.pg_stat_statements\" does not exist", "pg_stat_statements")]
+    [InlineData("function aurora_stat_statements(boolean) does not exist", "aurora_stat_statements")]
+    [InlineData("function public.pg_stat_kcache() does not exist", "pg_stat_kcache")]
+    [InlineData("boom", null)]
+    [InlineData("column \"toplevel\" does not exist", null)]
+    public void TheMissingObjectIsReadOffTheMessage_OrNotAtAll(string message, string? expected)
+    {
+        Assert.Equal(expected, DarlingWorker.MissingObjectNamedBy(Pg("42P01", message)));
     }
 
     /// <summary>
@@ -634,8 +1107,9 @@ public class PostgresFaultOutcomeTests
         var worker = ReadSource(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
-        /* Exactly two fault arms name a database, and both read it through the helper. */
-        Assert.Equal(2, Regex.Matches(
+        /* Three call sites name a database, and all three read it through the helper: the two fault arms, and
+           the planted-byte sentence that the general arm records for a log-tail read (#4046, #4051). */
+        Assert.Equal(3, Regex.Matches(
             worker, @"CollectorFaultDatabase\.For\(ex, runtime\.ConnectedDatabase\)").Count);
 
         /* And neither passes the runtime's field straight into a fault message. These are the two

@@ -23,7 +23,7 @@ namespace Darling.Tests;
 ///
 /// <para><b>The hole this closes.</b>
 /// <see cref="ViewerFleetTimerGuardTests.NoStoreRead_IsFiredByBothFleetTimers"/> cuts the tick at its first
-/// <c>return;</c> and intersects only the region ABOVE it with <c>OnOverviewTimerTick</c>. Move the fan-out
+/// tab <c>return;</c> and intersects only the region ABOVE it with <c>OnOverviewTimerTick</c>. Move the fan-out
 /// below that return and the region empties, the intersection empties with it, and the assertion is
 /// satisfied BECAUSE the regression happened. Measured by mutation: relocating the three unconditional
 /// calls below the early-return leaves all four of that class's facts GREEN. Its staleness guard —
@@ -48,8 +48,9 @@ namespace Darling.Tests;
 /// reports the mutation as applied whether it applied or not, and reports this pin as red-capable when it
 /// is not. The comparison itself is the only control, which is why every message here carries the offsets.
 /// Measured on the shipped source as of this pin, and DESCRIPTIVE — nothing below asserts an absolute
-/// value, only an ordering: with the body taken from its opening brace, the first <c>return;</c> is at
-/// 2455, the four fan-out calls at 1041, 1082, 1322 and 1755, and the visible-tab refresh at 2886.
+/// value, only an ordering: with the body taken from its opening brace, the tab early-return is at
+/// 2455 (as of #2923, before the store-unavailable guard of #4648 was written above the fan-out; that
+/// guard's own <c>return;</c> is skipped, see <see cref="TabEarlyReturnIndex"/>), the four fan-out calls at 1041, 1082, 1322 and 1755, and the visible-tab refresh at 2886.
 /// (#2923 cites 2454 for the return, which is the same place counted from just inside the brace, and 2881
 /// for <c>_ = RefreshServerStatusAsync();</c>, which that call has at no convention — it lands on the
 /// awaited visible-tab refresh at the bottom of the method. The fan-out is 1,414 characters ABOVE the
@@ -72,6 +73,26 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerFleetTimerFanOutPositionTests
 {
+    /// <summary>
+    /// #4227: the FinOps aggregate tab must sit in <see cref="RefreshTick"/>'s tab early-return, the same way
+    /// Recommendations and Overview already do — every FinOps sub-tab loads on activation and its own Refresh
+    /// button, so polling the whole tab every <c>NocRefreshIntervalSeconds</c> re-ran its costliest reads
+    /// (the top-consumer grids' raw query_stats scan, the object-growth bounds scan) for figures that move
+    /// hourly at the fastest. A source pin rather than a behavioural test for the same reason
+    /// <see cref="ViewerFleetTimerGuardTests"/>'s class remarks give: no seam to instantiate
+    /// <c>MainWindow</c>/<c>DispatcherTimer</c> against. Proven red against the pre-#4227 source once, by
+    /// reverting the exemption locally and confirming this fails.
+    /// </summary>
+    [Fact]
+    public void FinOpsTab_IsInTheRefreshTicksTabEarlyReturn()
+    {
+        var body = StrippedTickBody(RefreshTick);
+        var earlyReturn = EarlyReturnOffset(body);
+        var guard = body[..earlyReturn];
+
+        Assert.Contains("FinOpsTab", guard, StringComparison.Ordinal);
+    }
+
     /// <summary>The tick whose fan-out position is the subject; the Overview tick has no early-return to
     /// split on and is <see cref="ViewerFleetTimerGuardTests"/>'s side of the pair.</summary>
     private const string RefreshTick = "OnRefreshTimerTick";
@@ -95,12 +116,68 @@ public sealed class ViewerFleetTimerFanOutPositionTests
         @"_\s*=\s*(\w+)\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /// <summary>The same expression <see cref="ViewerFleetTimerGuardTests"/> splits on, deliberately: the
-    /// two pins have to agree on where the unconditional region ends, or this one is green about a boundary
-    /// the other one is not using.</summary>
+    /// <summary>A bare bail-out, the boundary once the leading store-unavailable guard is skipped.</summary>
     private static readonly Regex s_earlyReturn = new(
         @"\breturn\s*;",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>The tick's leading store-unavailable guard (#4648): once the store is unavailable the
+    /// viewer makes no store read at all, so this <c>return;</c> is above the fan-out on purpose and is NOT
+    /// the tab early-return. Anchored to the start of the stripped body and whitespace-tolerant.</summary>
+    private static readonly Regex s_storeUnavailableGuard = new(
+        @"\A\s*\{\s*if\s*\(\s*_storeUnavailable\s*\)\s*\{\s*return\s*;\s*\}",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Offset of the tab early-return in a stripped tick body: the first <c>return;</c> after a leading
+    /// <c>if (_storeUnavailable) { return; }</c> guard, or simply the first <c>return;</c> when the body
+    /// does not start with that guard. Shared with <see cref="ViewerFleetTimerGuardTests"/> so the two pins
+    /// agree on where the unconditional region ends. Returns -1 when there is none.
+    /// </summary>
+    internal static int TabEarlyReturnIndex(string body)
+    {
+        var guard = s_storeUnavailableGuard.Match(body);
+        var from = guard.Success ? guard.Index + guard.Length : 0;
+        var match = s_earlyReturn.Match(body, from);
+
+        return match.Success ? match.Index : -1;
+    }
+
+    /// <summary>
+    /// #4648: the tick's FIRST statement is the store-unavailable early return, with no fan-out call and
+    /// no store read written above it, so a later edit cannot move reads in front of it.
+    /// </summary>
+    [Fact]
+    public void TheStoreUnavailableGuard_IsTheTicksFirstStatement_WithNoReadAboveIt()
+    {
+        var body = StrippedTickBody(RefreshTick);
+
+        AssertGuardFirst(body);
+    }
+
+    /// <summary>The control: the same check REPORTS a guard written below a fan-out call.</summary>
+    [Fact]
+    public void TheGuardPositionCheck_RejectsAGuardBelowAFanOutCall()
+    {
+        var below = CSharpSourceWalker.StripCommentsAndStrings(
+            "{ _ = RefreshServerStatusAsync(); if (_storeUnavailable) { return; } return; }");
+
+        Assert.ThrowsAny<Exception>(() => AssertGuardFirst(below));
+    }
+
+    private static void AssertGuardFirst(string body)
+    {
+        var guard = s_storeUnavailableGuard.Match(body);
+
+        Assert.True(
+            guard.Success,
+            $"{RefreshTick}'s first statement is no longer `if (_storeUnavailable) {{ return; }}`, so store "
+            + "reads can fire while the store is unavailable");
+
+        var above = body[..guard.Index];
+
+        Assert.DoesNotMatch(@"\w\s*\(", above);
+    }
 
     [Fact]
     public void TheUnconditionalFanOut_IsFiredAboveTheTabEarlyReturn()
@@ -128,7 +205,7 @@ public sealed class ViewerFleetTimerFanOutPositionTests
 
         Assert.True(
             offenders.Count == 0,
-            $"{RefreshTick}'s first return; is at body offset {split} and these fan-out calls are no longer "
+            $"{RefreshTick}'s tab early-return is at body offset {split} and these fan-out calls are no longer "
             + "above it, so they stop firing entirely while the Overview or a per-server tab is up — the "
             + $"regression #2907 named and #2923 found unguarded: {string.Join("; ", offenders)}");
     }
@@ -155,7 +232,7 @@ public sealed class ViewerFleetTimerFanOutPositionTests
         Assert.True(
             offsets.All(o => o > split),
             $"{VisibleRefresh} is called at offset(s) {string.Join(",", offsets)} in {RefreshTick}, at or "
-            + $"above its first return; ({split}) — so it runs on the tabs that return exists to skip and "
+            + $"above its tab early-return ({split}) — so it runs on the tabs that return exists to skip and "
             + "the Overview grid is refreshed twice a cycle by two timers at one interval");
     }
 
@@ -256,21 +333,22 @@ public sealed class ViewerFleetTimerFanOutPositionTests
             .ToList();
 
     /// <summary>
-    /// Offset of the tick's first bail-out <c>return;</c> — the boundary between what runs regardless of
+    /// Offset of the tick's tab early-return (the first <c>return;</c> after the leading store-unavailable
+    /// guard, if any) — the boundary between what runs regardless of
     /// the visible tab and what does not. Fails rather than returning a sentinel: with no return there is
     /// no position left to pin, and a check that silently degrades to "no boundary, nothing below it" is
     /// the pass-for-the-wrong-reason this pin exists to remove.
     /// </summary>
     private static int EarlyReturnOffset(string body)
     {
-        var match = s_earlyReturn.Match(body);
+        var index = TabEarlyReturnIndex(body);
 
         Assert.True(
-            match.Success,
+            index >= 0,
             $"{RefreshTick} has no bail-out return;, so there is no boundary for the fan-out to sit above — "
             + "and ViewerFleetTimerGuardTests' region split is stale in the same breath");
 
-        return match.Index;
+        return index;
     }
 
     // ── Source access ─────────────────────────────────────────────────────────────────────

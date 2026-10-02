@@ -899,6 +899,7 @@ public sealed class RepeatDeliveryBudgetTests
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Seed(dedupKey);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
 
         private Task<DateTime?> Seed(string? dedupKey) =>
             Task.FromResult<DateTime?>(dedupKey is not null && _seeded.Contains(dedupKey) ? _sentUtc : null);
@@ -940,6 +941,7 @@ public sealed class RepeatDeliveryBudgetTests
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Max(serverId, metricName, _ => true);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
 
         private Task<DateTime?> Max(string serverId, string metricName, Func<string, bool> typeFilter)
         {

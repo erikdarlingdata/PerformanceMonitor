@@ -47,7 +47,9 @@ public sealed class AlertMasterSwitchSurfaceTests
     /* ---------------- the delivery-call census ---------------- */
 
     /// <summary>
-    /// A call that can put an alert on a channel: the shared deliverer seam (<c>DeliverAsync</c>), the
+    /// A call that can put an alert on a channel: the shared deliverer seam (<c>DeliverAsync</c>, and its
+    /// #3580 reporting twin <c>DeliverAndReportAsync</c> — the same send, answering what the channels did,
+    /// which the self-alert funnel now calls so the two daily documents can stamp delivered-today), the
     /// analysis notify seam (<c>NotifyAsync</c> / <c>SendFindingAlertAsync</c>), Lite's direct send seam
     /// (<c>TrySendAlertEmailAsync</c>), the shared send core (<c>TrySendAsync</c>), and the deliberate
     /// channel-probe statics (<c>SendTest*</c>). Dot-qualified on purpose: a DECLARATION has no receiver,
@@ -55,7 +57,7 @@ public sealed class AlertMasterSwitchSurfaceTests
     /// comment-and-string-stripped source, so prose mentioning a seam is not a site.
     /// </summary>
     private static readonly Regex s_deliveryCall = new(
-        @"\??\.\s*(?:DeliverAsync|NotifyAsync|TrySendAlertEmailAsync|TrySendAsync|SendFindingAlertAsync|SendTestPagerDutyAsync|SendTestTeamsAsync|SendTestSlackAsync|SendTestGenericAsync)\s*\(",
+        @"\??\.\s*(?:DeliverAsync|DeliverAndReportAsync|NotifyAsync|TrySendAlertEmailAsync|TrySendAsync|SendFindingAlertAsync|SendFindingSummaryAsync|SendTestPagerDutyAsync|SendTestTeamsAsync|SendTestSlackAsync|SendTestGenericAsync)\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>How a censused site pays for its place on a delivery path.</summary>
@@ -142,10 +144,19 @@ public sealed class AlertMasterSwitchSurfaceTests
             "the shared record-and-send seam; every caller of DeliverAsync is a censused site"),
         new("Darling/PerformanceMonitor.Darling.Service/DarlingFindingAlertSender.cs", "SendFindingAlertAsync", 1, GateMode.Funnel,
             "the analysis finding sender; reached only through AnalysisNotificationService, whose callers are censused"),
+        /* #3916: the over-the-cap summary — the same sender, the same sole caller (the service's flush). */
+        new("Darling/PerformanceMonitor.Darling.Service/DarlingFindingAlertSender.cs", "SendFindingSummaryAsync", 1, GateMode.Funnel,
+            "the analysis page summary; reached only through AnalysisNotificationService's flush, whose pages NotifyAsync's censused callers queued"),
         new("PerformanceMonitor.Notifications/AnalysisNotificationService.cs", "NotifyAsync", 1, GateMode.Funnel,
             "shared by both SKUs; the master consult lives at its two censused call sites, where each SKU's live settings are"),
+        /* #3916: the page road's hold-back flush — one individual send and one summary send, delivering only
+           what NotifyAsync queued, so its gate is NotifyAsync's (the page was notify-worthy when it queued). */
+        new("PerformanceMonitor.Notifications/AnalysisNotificationService.cs", "FlushPendingAsync", 2, GateMode.Funnel,
+            "delivers only pages NotifyAsync queued; NotifyAsync's callers are censused"),
         new("Lite/Services/EmailAlertService.cs", "TrySendAlertEmailAsync", 1, GateMode.Funnel,
             "Lite's record-and-send seam; every caller is a censused site"),
+        new("Lite/Services/EmailAlertService.cs", "SendFindingSummaryAsync", 1, GateMode.Funnel,
+            "#3916: Lite's analysis page summary; reached only through AnalysisNotificationService's flush"),
         new("Lite/Services/LiteAlertDeliverer.cs", "SendAlert", 1, GateMode.Funnel,
             "the shared engine's Lite deliverer, below the pinned EvaluateServerAsync master gate"),
 
@@ -282,8 +293,10 @@ public sealed class AlertMasterSwitchSurfaceTests
 
         for (var i = 0; i < lines.Length; i++)
         {
-            /* A firing call, not the funnel's own declaration: FireAsync is called bare (same class). */
-            if (!Regex.IsMatch(lines[i], @"(?<![\w.])FireAsync\s*\(") || Regex.IsMatch(lines[i], @"\bTask\s+FireAsync\s*\("))
+            /* A firing call, not the funnel's own declaration: FireAsync is called bare (same class). The
+               declaration's return type is generic since #3580 (Task<AlertDelivery?> — the funnel reports
+               what the channels did), so the exclusion allows a type-argument list on the Task. */
+            if (!Regex.IsMatch(lines[i], @"(?<![\w.])FireAsync\s*\(") || Regex.IsMatch(lines[i], @"\bTask(?:<[^>]*>)?\s+FireAsync\s*\("))
             {
                 continue;
             }
@@ -351,7 +364,7 @@ public sealed class AlertMasterSwitchSurfaceTests
             "#3464 pin: the master-off return is NotEvaluated, so hosts leave badge state untouched");
 
         /* The funnel is private, so the entry gate covers every path to the deliver site. */
-        Assert.Contains("private async Task FireAsync(", stripped, StringComparison.Ordinal);
+        Assert.Contains("private async Task<AlertDelivery?> FireAsync(", stripped, StringComparison.Ordinal);
     }
 
     /// <summary>The PostgreSQL predictors' gate (#3464): before the pass is counted, before anything is

@@ -78,6 +78,16 @@ public class ServerConnection : INotifyPropertyChanged
 
     public string? Description { get; set; }
     public DateTime CreatedDate { get; set; } = DateTime.Now;
+
+    /// <summary>
+    /// <see cref="CreatedDate"/> in UTC: when this server was added, which is the first moment Lite could have
+    /// collected from it (#3967). It is what tells a server whose whole history has aged out of the archive
+    /// (Offline) from one that has never collected. The stored value is the adding machine's local clock, so
+    /// it is converted here once rather than at each reader. Not persisted.
+    /// </summary>
+    [JsonIgnore]
+    public DateTime RegisteredAtUtc => CreatedDate.ToUniversalTime();
+
     public DateTime LastConnected { get; set; } = DateTime.Now;
     public bool IsFavorite { get; set; }
     public bool IsEnabled { get; set; } = true;

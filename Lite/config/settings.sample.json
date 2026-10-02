@@ -73,6 +73,19 @@
   "alert_long_running_query_exclude_backups": true,
   "alert_long_running_query_exclude_misc_waits": true,
   "alert_long_running_query_exclude_cdc": true,
+  // The opt-out knob for permanent background requests (#3653): sessions whose program_name STARTS
+  // WITH a prefix below, or whose login_name IS a login below (both case-insensitive, no wildcards),
+  // are NOT evaluated by this alert at all - unlike a mute rule, which silences a fire already decided.
+  // Applied ahead of the row cap, so an excluded session never consumes one of the max_results slots;
+  // the fired card counts how many sessions each list removed.
+  // The values below are the SEEDED DEFAULTS, measured over 7 days on one large production store:
+  // SQL Agent job steps (~460 sessions/week, medians 35-62 min; the program name embeds the job id, hence
+  // a prefix) and the two NT AUTHORITY service logins (the permanent multi-day CDC-shaped background).
+  // The application's admin login is deliberately NOT a default: it runs the job wave but also real ad-hoc
+  // long-runners, and the job-step prefix already covers its share. Named humans are never excluded.
+  // A key that is ABSENT reads as these defaults; a key that is PRESENT and [] excludes nothing on that arm.
+  "alert_long_running_query_excluded_program_name_prefixes": ["SQLAgent - TSQL JobStep"],
+  "alert_long_running_query_excluded_logins": ["NT AUTHORITY\\SYSTEM", "NT AUTHORITY\\NETWORK SERVICE"],
 
   // ---- Database exclusions ------------------------------------------------------------
   // Applies to every alert type. Names only; anything blank is dropped on read.
@@ -145,6 +158,10 @@
   "auto_refresh_enabled": true,
   "auto_refresh_interval_seconds": 60, // 30 | 60 | 300
 
+  // How far a plan operator's actual row count may diverge from its estimate before the plan viewer
+  // colors the edge feeding it. Floored at 2.0 when the viewer renders.
+  "accuracy_ratio_divergence_limit": 10,
+
   // ---- Overview and sidebar state -----------------------------------------------------------------
   // Written by the app as you use it, not settings you would normally hand-edit.
   "overview_sort_mode": "Cpu",         // "Cpu" | "Name"; unrecognised -> "Cpu"
@@ -210,6 +227,12 @@
   "analysis_interval_minutes": 30,        // clamped 5-360
   "analysis_notify_severity": 1.5,        // minimum severity to notify on; clamped 0.0-2.0
   "analysis_notify_cooldown_minutes": 360, // clamped 30-10080
+  // #3712: where a notify-worthy but UNCORROBORATED finding goes -- a lone fact, no second fact in its
+  // chain and no matched co-fire check. "digest" (default) records it (Alerts tab status Digest, with the
+  // reason) and marks it Not paged in Recommendations but delivers it to no channel and no toast; "page"
+  // restores delivery of every finding at or above analysis_notify_severity. A corroborated finding is
+  // delivered under either. Settings -> Alerts -> "Only notify on corroborated findings".
+  "analysis_uncorroborated_route": "digest",
   // NO UI. The per-server budget for one analysis pass. Raise it on a server whose analysis
   // keeps timing out; the pass is bounded so one slow server cannot stall the rest.
   "analysis_timeout_seconds": 120,        // clamped 30-600
@@ -218,5 +241,19 @@
   // Read by Mcp\McpSettings, not by the alert-settings loader. Enabling it from the Settings
   // window is the supported route: that path also opens the firewall and restarts the host.
   "mcp_enabled": false,
-  "mcp_port": 5151
+  "mcp_port": 5151,
+
+  // ---- Plan analysis (#4535) ------------------------------------------------------------------------------
+  // NO UI. Per-rule overrides for the plan analyzer (the analyze_query_plan / analyze_procedure_plan /
+  // analyze_query_store_plan / analyze_plan_xml MCP tools, and the plan viewer window). Shown here at its
+  // default (no rule disabled, no severity overridden). "rules.disabled" takes a list of rule numbers and
+  // drops those rules' findings; "rules.severity_overrides" maps a rule number to a replacement severity
+  // string. Example: hide rule 20 (Local Variables) and downgrade rule 5 to "Low":
+  //   "analyzer": {
+  //     "rules": {
+  //       "disabled": [20],
+  //       "severity_overrides": { "5": "Low" }
+  //     }
+  //   }
+  "analyzer": {}
 }

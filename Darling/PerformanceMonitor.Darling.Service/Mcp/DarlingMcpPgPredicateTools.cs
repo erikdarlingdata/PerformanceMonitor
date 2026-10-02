@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -40,15 +41,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgPredicateTools
 {
-    [McpServerTool(Name = "get_pg_predicate_stats"), Description("Gets PostgreSQL predicate selectivity from the pg_qualstats extension: which columns queries actually filter on, with which operator, how many rows each predicate evaluated and how many it filtered out. This is the evidence behind an index recommendation - a predicate that evaluates many rows and filters nearly all of them away is a column doing work an index could do instead. filtered_pct is that ratio. worst_estimate_error_ratio compares what the planner expected against what it got, so a large value marks a predicate the planner is misjudging, which is a statistics or correlated-column problem rather than an indexing one. IMPORTANT: these are SAMPLED counts - pg_qualstats records only a fraction of executions, given per row as sample_rate (commonly 0.01), and the counts are NOT scaled up here. queryid joins get_pg_top_queries.")]
+    [McpServerTool(Name = "get_pg_predicate_stats"), Description("Gets PostgreSQL predicate selectivity from pg_qualstats: which columns are filtered, with which operator, rows evaluated and rows filtered out. filtered_pct is 100*rows_filtered/rows_evaluated (a percent), NULL when nothing was evaluated, never a false 0%. worst_estimate_error_ratio large means the PLANNER is misjudging this predicate (a stats/correlation problem), not that it needs an index. SAMPLED: counts are raw at sample_rate (often 0.01) and are NEVER scaled up here. queryid is a STRING and joins get_pg_top_queries. <<GUIDE>> Gets PostgreSQL predicate selectivity from the pg_qualstats extension: which columns queries actually filter on, with which operator, how many rows each predicate evaluated and how many it filtered out. This is the evidence behind an index recommendation - a predicate that evaluates many rows and filters nearly all of them away is a column doing work an index could do instead. filtered_pct is that ratio. worst_estimate_error_ratio compares what the planner expected against what it got, so a large value marks a predicate the planner is misjudging, which is a statistics or correlated-column problem rather than an indexing one. IMPORTANT: these are SAMPLED counts - pg_qualstats records only a fraction of executions, given per row as sample_rate (commonly 0.01), and the counts are NOT scaled up here. queryid joins get_pg_top_queries.")]
     public static async Task<string> GetPgPredicateStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -59,14 +61,14 @@ public sealed class DarlingMcpPgPredicateTools
         try
         {
             var rows = await DarlingPgPredicateStatsReader.GetPgPredicateStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit, cancellationToken);
 
             if (rows.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_predicate_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_predicate_stats", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_predicate_stats")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_predicate_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No predicate statistics for {resolved.ServerName} in the last {hours_back} "
@@ -115,9 +117,9 @@ public sealed class DarlingMcpPgPredicateTools
                 predicates,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL predicate stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_predicate_stats", ex);
         }
     }
 }

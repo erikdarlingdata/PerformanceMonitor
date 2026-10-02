@@ -55,18 +55,28 @@ public sealed class PgDeadlockLogTimezoneTests
     /// <summary>
     /// The <c>pg_read_file</c> route's own half: the query has to RETURN the prefix zone, or the parser has
     /// nothing to check and the refusal is unreachable on the transport that has a database connection.
-    /// The zone was matched and discarded here before #2993.
+    /// The zone was matched and discarded here before #2993. Since #4005 the query returns each candidate
+    /// report's text whole, prefix included, and the log reader the RDS route shares reads the zone out of it.
     /// </summary>
     [Fact]
     public void The_Collector_Query_Returns_The_Prefix_Zone()
     {
         var source = ReadRepoFile(Path.Combine("PerformanceMonitor.Collectors", "PgDeadlocksCollector.cs"));
 
-        Assert.Contains("AS log_zone_text", source, System.StringComparison.Ordinal);
+        Assert.Contains("AS report_text", source, System.StringComparison.Ordinal);
+
+        /* #4046: the candidate reaches the parser with the target's own log_timezone, read in the same statement,
+           which decides whether a line in another zone refuses the read or is skipped as not the server's. */
+        Assert.Contains("PgServerLogTail.LogTimezoneSql + @\" AS log_timezone", source, System.StringComparison.Ordinal);
+        Assert.Contains(
+            "PgDeadlockLogParser.FromReport(\n                firstColumn, PgServerLogTail.LogTimezoneIsUtc(reader, 1), out var foreignZoneLines)",
+            source.Replace("\r\n", "\n", System.StringComparison.Ordinal),
+            System.StringComparison.Ordinal);
 
         /* [^ \n]+ rather than \w+: a numeric-offset zone matched no block at all under \w+, so the
-           server reported no deadlocks instead of reporting a zone this cannot store. */
-        Assert.Contains("([^ \\n]+) \\[(\\d+)\\]", source, System.StringComparison.Ordinal);
-        Assert.DoesNotContain("\\w+ \\[(\\d+)\\]", source, System.StringComparison.Ordinal);
+           server reported no deadlocks instead of reporting a zone this cannot store. Since #4041 the space
+           family's zone is followed by a gap for fields before the pid rather than by the bracket itself. */
+        Assert.Contains("[^ \\n]+ (?:(?!:  )[^[\\n])*\\[\\d+\\]", source, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("\\w+ \\[", source, System.StringComparison.Ordinal);
     }
 }

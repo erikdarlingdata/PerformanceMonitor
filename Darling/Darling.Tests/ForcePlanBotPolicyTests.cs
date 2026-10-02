@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
 using PerformanceMonitor.Analysis;
 using Xunit;
 
@@ -198,6 +201,303 @@ public sealed class ForcePlanBotPolicyTests
         Assert.Empty(decision.Reasons);
     }
 
+    /* ---------------- the bot's whole blocker list (#3654) ---------------- */
+
+    private static readonly DateTime Observed = new(2026, 9, 18, 12, 0, 0, DateTimeKind.Utc);
+
+    private static ForcePlanTargetState Clean(string? flgp = "OFF", DateTime? enablementAt = null) => new(
+        PlanIsForced: null, PlanForcingType: null, ForceFailureCount: null, LastForceFailureReason: null,
+        PlanObservedAtUtc: null,
+        OtherForcedPlanId: null, OtherForcedPlanForcingType: null, OtherForcedPlanObservedAtUtc: null,
+        ApcState: null, ApcStateReason: null, ApcRegressedPlanId: null, ApcLastGoodPlanId: null,
+        ApcLastGoodPlanForcingType: null, ApcLastGoodPlanIsForced: null, ApcLastGoodPlanForceFailureReason: null,
+        ApcExecuteActionInitiatedBy: null, ApcObservedAtUtc: null,
+        ForceLastGoodPlanActualState: flgp, EnablementObservedAtUtc: enablementAt ?? (flgp is null ? null : Observed));
+
+    [Fact]
+    public void Blockers_IsTheWholeSharedGate_PlusNothing_WhenTheStateIsCleanAndObserved()
+    {
+        /* The happy path: state read, FLGP OFF, nothing forced, no recommendation. The bot's list is
+           exactly the two-argument gate's (empty here) — no bot-only blocker fires on a clean read. */
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), Clean(), stateUnavailableReason: null);
+
+        Assert.Empty(blockers);
+        Assert.Empty(ForcePlanBotPolicy.Names(blockers));
+        Assert.Null(ForcePlanBotPolicy.Evidence(blockers));
+    }
+
+    [Fact]
+    public void Blockers_CarriesTheSharedGatesVerdict_Verbatim()
+    {
+        /* Same function, same names, same evidence strings as structured_remediation — the bot never
+           recomputes the gate (#2146). APC AUTO-forced on the target plan, plus the target's own PSP flag. */
+        var state = Clean() with
+        {
+            PlanIsForced = true, PlanForcingType = "AUTO", ForceFailureCount = 0, PlanObservedAtUtc = Observed,
+            ApcState = "Verifying", ApcLastGoodPlanId = 7, ApcObservedAtUtc = Observed,
+        };
+        var target = Target(psp: true);
+
+        var shared = FactRemediation.ForcePlanBlockers(target, state);
+        var bot = ForcePlanBotPolicy.Blockers(target, state, stateUnavailableReason: null);
+
+        Assert.Equal(shared, bot);
+        Assert.Equal(new[] { "parameter_sensitivity_cofired", "apc_owns_it" }, ForcePlanBotPolicy.Names(bot));
+    }
+
+    [Fact]
+    public void Blockers_FlgpOn_AddsTheStandDown_AfterTheSharedGate()
+    {
+        var state = Clean(flgp: "ON") with
+        {
+            PlanIsForced = true, PlanForcingType = "AUTO", PlanObservedAtUtc = Observed,
+        };
+
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null);
+
+        Assert.Equal(new[] { "apc_owns_it", ForcePlanBotPolicy.ReasonApcEnabledForDatabase }, ForcePlanBotPolicy.Names(blockers));
+        var standDown = blockers[1];
+        Assert.Contains("force_last_good_plan_actual_state = ON for orders at 2026-09-18T12:00:00Z", standDown.Evidence, StringComparison.Ordinal);
+        Assert.Contains("second forcer", standDown.Evidence, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("ON")]
+    [InlineData("on")]
+    [InlineData("On")]
+    public void Blockers_FlgpOn_IsCaseInsensitive_OnTheStoredSpelling(string spelling)
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), Clean(flgp: spelling), stateUnavailableReason: null);
+
+        Assert.Equal(new[] { ForcePlanBotPolicy.ReasonApcEnabledForDatabase }, ForcePlanBotPolicy.Names(blockers));
+    }
+
+    [Theory]
+    [InlineData("OFF")]
+    [InlineData("off")]
+    public void Blockers_FlgpOff_FiresNothing(string spelling)
+    {
+        Assert.Empty(ForcePlanBotPolicy.Blockers(Target(), Clean(flgp: spelling), stateUnavailableReason: null));
+    }
+
+    /* ---------------- #4736: the engine names the proposed plan as the worse one ---------------- */
+
+    /// <summary>The newest correction row for the query: <paramref name="apcState"/>, naming
+    /// <paramref name="regressed"/> as the worse plan and <paramref name="lastGood"/> as the better one, on a
+    /// database where the automatic setting is off (so the recommendation is only on offer).</summary>
+    private static ForcePlanTargetState Recommendation(string apcState, long? regressed, long? lastGood) => Clean(flgp: "OFF") with
+    {
+        ApcState = apcState,
+        ApcStateReason = "AutomaticTuningOptionNotEnabled",
+        ApcRegressedPlanId = regressed,
+        ApcLastGoodPlanId = lastGood,
+        ApcObservedAtUtc = Observed,
+    };
+
+    [Fact]
+    public void Blockers_AnActiveRecommendationThatNamesTheTargetAsRegressed_BlocksTheBot_QuotingBothPlanIdsAndTheSnapshot()
+    {
+        /* The target is plan 7. The engine's own open recommendation says 7 is the WORSE plan and 9 the
+           better one: the bot must not force the plan the engine wants replaced. */
+        var state = Recommendation("Active", regressed: 7, lastGood: 9);
+
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null);
+
+        var only = Assert.Single(blockers);
+        Assert.Equal("apc_names_this_plan_as_regressed", only.Name);
+        Assert.Contains("regressed_plan_id = 7", only.Evidence, StringComparison.Ordinal);
+        Assert.Contains("last_good_plan_id = 9", only.Evidence, StringComparison.Ordinal);
+        Assert.Contains("2026-09-18T12:00:00Z", only.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Blockers_TheAdvisoryGateStaysOpen_ForTheSameCase_SoAHumanDecidesOnThePageNotTheBot()
+    {
+        /* The shared gate, which structured_remediation's eligible/blockers come from, does not block an
+           Active recommendation: the operator gets the guidance and decides on purpose. Only the bot,
+           which has no one to hand the decision to, stands down. */
+        var state = Recommendation("Active", regressed: 7, lastGood: 9);
+
+        Assert.Empty(FactRemediation.ForcePlanBlockers(Target(), state));
+    }
+
+    [Theory]
+    [InlineData("Reverted")]
+    [InlineData("Expired")]
+    public void Blockers_ARevertedOrExpiredRecommendation_DoesNotBlock_EvenWhenItNamesTheTargetAsRegressed(string apcState)
+    {
+        /* The engine withdrew the recommendation, or reverted it for no significant gain: there is no
+           open claim that the target is the worse plan. */
+        var state = Recommendation(apcState, regressed: 7, lastGood: 9);
+
+        Assert.Empty(ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null));
+    }
+
+    [Fact]
+    public void Blockers_AnActiveRecommendationThatNamesAnotherPlanAsRegressed_DoesNotBlock()
+    {
+        var state = Recommendation("Active", regressed: 8, lastGood: 9);
+
+        Assert.Empty(ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null));
+    }
+
+    [Fact]
+    public void Evaluate_AnActiveRecommendationThatNamesTheTargetAsRegressed_IsBlocked_EvenWithEveryGateOpen()
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(
+            Target(), Recommendation("Active", regressed: 7, lastGood: 9), stateUnavailableReason: null);
+
+        var decision = ForcePlanBotPolicy.Evaluate(
+            Target(), ForcePlanBotPolicy.Names(blockers), serverOptedIn: true, Enabled(dryRun: false),
+            ForcePlanBotHistory.Empty, Now);
+
+        Assert.Equal(ForcePlanBotDecisionKind.Blocked, decision.Kind);
+        Assert.Equal(new[] { "apc_names_this_plan_as_regressed" }, decision.Reasons);
+    }
+
+    private static StructuredForcePlanTarget Project(ForcePlanTarget target, ForcePlanTargetState state) =>
+        Assert.Single(FactRemediation.BuildStructuredRemediation(
+            new RemediationAction("PLAN_REGRESSION", "force", new[] { target }),
+            new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer) { [ForcePlanTargetKey.Of(target)] = state })!.ForcePlanTargets);
+
+    [Fact]
+    public void TheGuidance_SaysTheEngineNamesTheProposedPlanAsTheWorseOne_WhenAnActiveRecommendationDoes()
+    {
+        var projected = Project(Target(), Recommendation("Active", regressed: 7, lastGood: 9));
+
+        Assert.NotNull(projected.Guidance);
+        Assert.Contains("names plan 7", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("the plan proposed here", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("worse", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("2026-09-18T12:00:00Z", projected.Guidance, StringComparison.Ordinal);
+        /* The advisory verdict is still the operator's: nothing blocks the page. */
+        Assert.True(projected.Eligible);
+    }
+
+    [Fact]
+    public void TheGuidance_SaysTheSameThing_WhenTheRecommendationNamesNoBetterPlan()
+    {
+        var projected = Project(Target(), Recommendation("Active", regressed: 7, lastGood: null));
+
+        Assert.NotNull(projected.Guidance);
+        Assert.Contains("names plan 7", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("worse", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Reverted")]
+    [InlineData("Expired")]
+    public void TheGuidance_DoesNotAccuseTheProposedPlan_WhenTheEngineWithdrewTheRecommendation(string apcState)
+    {
+        var projected = Project(Target(), Recommendation(apcState, regressed: 7, lastGood: 9));
+
+        Assert.Null(projected.Guidance);
+    }
+
+    [Fact]
+    public void Blockers_NullState_IsUnavailable_QuotingTheReadersReason()
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), state: null, stateUnavailableReason: "the read failed (NpgsqlException: timeout)");
+
+        var only = Assert.Single(blockers);
+        Assert.Equal(ForcePlanBotPolicy.ReasonStateUnavailable, only.Name);
+        Assert.StartsWith("the read failed (NpgsqlException: timeout) — an unattended force cannot proceed", only.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Blockers_NullState_WithNoReason_IsUnavailable_NamingTheMissingKey()
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), state: null, stateUnavailableReason: null);
+
+        var only = Assert.Single(blockers);
+        Assert.Equal(ForcePlanBotPolicy.ReasonStateUnavailable, only.Name);
+        Assert.Contains("returned no row for plan 7 of query 42 in orders", only.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Blockers_NullState_StillCarriesTheTargetHalf_First()
+    {
+        /* Unknown state does not erase what the target itself says: PSP is named, then the
+           unavailability. */
+        var blockers = ForcePlanBotPolicy.Blockers(Target(psp: true), state: null, stateUnavailableReason: "boom");
+
+        Assert.Equal(new[] { "parameter_sensitivity_cofired", ForcePlanBotPolicy.ReasonStateUnavailable }, ForcePlanBotPolicy.Names(blockers));
+    }
+
+    [Fact]
+    public void Blockers_EmptyState_IsUnavailable_BecauseTheEnablementHalfIsTheCollectorsEveryDatabaseRow()
+    {
+        var empty = Clean(flgp: null);
+        Assert.True(empty.IsEmpty);
+
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), empty, stateUnavailableReason: null);
+
+        var only = Assert.Single(blockers);
+        Assert.Equal(ForcePlanBotPolicy.ReasonStateUnavailable, only.Name);
+        Assert.Contains("observed nothing for this target inside the last 24 hours", only.Evidence, StringComparison.Ordinal);
+        Assert.Contains("no plan_correction capture for orders at all", only.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Blockers_APlanNotObservedButADatabaseThatIs_IsNotUnavailable()
+    {
+        /* The ordinary shape for a best plan that is not executing: no query_store_stats row for it, no
+           recommendation — but the enablement row is there (OFF), so the store CAN see the database and
+           the bot proceeds. Null on a half means not observed, not unavailable. */
+        var state = Clean(flgp: "OFF");
+        Assert.False(state.IsEmpty);
+
+        Assert.Empty(ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null));
+    }
+
+    [Fact]
+    public void Evidence_IsOneLinePerBlocker_NameColonEvidence()
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(Target(psp: true), Clean(flgp: "ON"), stateUnavailableReason: null);
+
+        var detail = ForcePlanBotPolicy.Evidence(blockers);
+        Assert.NotNull(detail);
+        var lines = detail!.Split('\n');
+        Assert.Equal(2, lines.Length);
+        Assert.StartsWith("parameter_sensitivity_cofired: ", lines[0], StringComparison.Ordinal);
+        Assert.StartsWith("apc_enabled_for_database: ", lines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheBotsOwnReasons_AreNotInTheSharedVocabulary()
+    {
+        /* They belong to the actor, not the advice: an agent reading structured_remediation must never
+           see state_unavailable or apc_enabled_for_database as a blocker, because for a reader neither
+           IS one. Pinned as strings because both are consumer API. */
+        Assert.Equal("state_unavailable", ForcePlanBotPolicy.ReasonStateUnavailable);
+        Assert.Equal("apc_enabled_for_database", ForcePlanBotPolicy.ReasonApcEnabledForDatabase);
+
+        var shared = typeof(ForcePlanBlockerNames).GetFields()
+            .Select(f => (string)f.GetValue(null)!)
+            .ToArray();
+        Assert.DoesNotContain(ForcePlanBotPolicy.ReasonStateUnavailable, shared);
+        Assert.DoesNotContain(ForcePlanBotPolicy.ReasonApcEnabledForDatabase, shared);
+
+        /* #4736: the same holds for the regressed-plan blocker, which only the bot carries. */
+        Assert.Equal("apc_names_this_plan_as_regressed", ForcePlanBotPolicy.ReasonApcNamesPlanAsRegressed);
+        Assert.DoesNotContain(ForcePlanBotPolicy.ReasonApcNamesPlanAsRegressed, shared);
+    }
+
+    [Fact]
+    public void Evaluate_WithTheBotsBlockers_IsBlocked_EvenWithEveryGateOpen()
+    {
+        /* End to end through the decision table: the state names apc_enabled_for_database, and no
+           combination of gates turns that into WouldForce or Force. */
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), Clean(flgp: "ON"), stateUnavailableReason: null);
+
+        var decision = ForcePlanBotPolicy.Evaluate(
+            Target(), ForcePlanBotPolicy.Names(blockers), serverOptedIn: true, Enabled(dryRun: false),
+            ForcePlanBotHistory.Empty, Now);
+
+        Assert.Equal(ForcePlanBotDecisionKind.Blocked, decision.Kind);
+        Assert.Equal(new[] { ForcePlanBotPolicy.ReasonApcEnabledForDatabase }, decision.Reasons);
+    }
+
     /* ---------------- settings hygiene ---------------- */
 
     [Fact]
@@ -231,5 +531,195 @@ public sealed class ForcePlanBotPolicyTests
         /* Normalize clamps knobs, never flips gates — an operator's explicit arm survives. */
         Assert.True(reckless.Enabled);
         Assert.False(reckless.DryRun);
+    }
+    /* ---------------- #3953: the best plan's age ---------------- */
+
+    /// <summary>
+    /// The interval table makes the 14-day window real, so a best plan can be two weeks old. The unattended bot does
+    /// not act on one older than <see cref="ForcePlanBotPolicy.MaxBestPlanAgeDays"/>: it is Blocked with the reason
+    /// named, even with every gate open. A plan inside the age runs the ordinary decision, and a target with no age
+    /// (a finding from before the column, when raw's retention bounded it) is not gated.
+    /// </summary>
+    [Fact]
+    public void AStaleBestPlan_IsBlocked_AFreshOneIsNot_AndAnUnknownAgeIsNotGated()
+    {
+        var stale = Target() with { BestPlanLastSeenUtc = Now.AddDays(-(ForcePlanBotPolicy.MaxBestPlanAgeDays + 1)) };
+        var fresh = Target() with { BestPlanLastSeenUtc = Now.AddDays(-(ForcePlanBotPolicy.MaxBestPlanAgeDays - 1)) };
+
+        var staleDecision = Evaluate(stale, Enabled(dryRun: false), serverOptedIn: true);
+        Assert.Equal(ForcePlanBotDecisionKind.Blocked, staleDecision.Kind);
+        Assert.Equal(new[] { ForcePlanBotPolicy.ReasonBestPlanStale }, staleDecision.Reasons);
+
+        Assert.Equal(ForcePlanBotDecisionKind.Force, Evaluate(fresh, Enabled(dryRun: false), serverOptedIn: true).Kind);
+        Assert.Equal(ForcePlanBotDecisionKind.Force, Evaluate(Target(), Enabled(dryRun: false), serverOptedIn: true).Kind);
+        Assert.Equal("best_plan_stale", ForcePlanBotPolicy.ReasonBestPlanStale);
+        Assert.Equal(4, ForcePlanBotPolicy.MaxBestPlanAgeDays);
+    }
+
+    /// <summary>The drill-down's <c>best_plan_last_seen</c> reaches the target through the shared extractor.</summary>
+    [Fact]
+    public void TheExtractor_CarriesTheBestPlansLastSeen_FromTheDrillDown()
+    {
+        var lastSeen = new DateTime(2026, 8, 25, 13, 45, 0, DateTimeKind.Unspecified);
+        var finding = new AnalysisFinding
+        {
+            FindingId = 1,
+            AnalysisTime = Now,
+            ServerId = 42,
+            ServerName = "SQL01",
+            DatabaseName = "orders",
+            TimeRangeStart = Now.AddHours(-4),
+            TimeRangeEnd = Now,
+            Severity = 1.6,
+            Confidence = 1.0,
+            Category = "queries",
+            StoryPath = "PLAN_REGRESSION",
+            StoryPathHash = "hash_PLAN_REGRESSION",
+            StoryText = "story",
+            RootFactKey = "PLAN_REGRESSION",
+            DrillDown = new Dictionary<string, object>
+            {
+                ["regressed_queries"] = new[]
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["database"] = "orders",
+                        ["query_id"] = 42L,
+                        ["best_plan_id"] = 7L,
+                        ["regression_factor"] = 10.0,
+                        ["best_plan_last_seen"] = lastSeen,
+                    },
+                },
+            },
+        };
+
+        var target = Assert.Single(FactRemediation.ExtractPlanRegressionTargets(finding));
+        Assert.Equal(lastSeen, target.BestPlanLastSeenUtc);
+    }
+    /// <summary>
+    /// #3953: the advice states how old the faster plan is when the fact carries <c>best_plan_age_days</c>, and says
+    /// what it always said when it does not (a fact from before the key existed, or Lite's older payloads).
+    /// </summary>
+    [Fact]
+    public void ThePlanRegressionAdvice_StatesTheBestPlansAge_WhenTheFactCarriesIt()
+    {
+        static IReadOnlyDictionary<string, Fact> Facts(double? ageDays)
+        {
+            var metadata = new Dictionary<string, double>
+            {
+                ["worst_regression_factor"] = 6,
+                ["offender_count"] = 2,
+                ["latest_cpu_per_exec_us"] = 60000,
+                ["best_cpu_per_exec_us"] = 10000,
+            };
+            if (ageDays is double age)
+            {
+                metadata["best_plan_age_days"] = age;
+            }
+
+            return new Dictionary<string, Fact>
+            {
+                ["PLAN_REGRESSION"] = new Fact { Source = "queries", Key = "PLAN_REGRESSION", Value = 6, Metadata = metadata },
+            };
+        }
+
+        Assert.Contains("the faster plan on record (it last ran 9 days ago), so",
+            FactAdvice.Compose("PLAN_REGRESSION", Facts(9.6))!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the faster plan on record (it last ran within the past day), so",
+            FactAdvice.Compose("PLAN_REGRESSION", Facts(0.4))!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the faster plan on record, so",
+            FactAdvice.Compose("PLAN_REGRESSION", Facts(null))!.Investigation, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #4736: every target shows its own best plan's age ---------------- */
+
+    private static AnalysisFinding TwoTargetFinding() => new()
+    {
+        FindingId = 1,
+        AnalysisTime = Now,
+        ServerId = 42,
+        ServerName = "SQL01",
+        DatabaseName = "orders",
+        TimeRangeStart = Now.AddHours(-4),
+        TimeRangeEnd = Now,
+        Severity = 1.6,
+        Confidence = 1.0,
+        Category = "queries",
+        StoryPath = "PLAN_REGRESSION",
+        StoryPathHash = "hash_PLAN_REGRESSION",
+        StoryText = "story",
+        RootFactKey = "PLAN_REGRESSION",
+        DrillDown = new Dictionary<string, object>
+        {
+            ["regressed_queries"] = new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["database"] = "orders", ["query_id"] = 42L, ["best_plan_id"] = 7L, ["regression_factor"] = 10.0,
+                    ["best_plan_last_seen"] = new DateTime(2026, 8, 22, 9, 0, 0, DateTimeKind.Unspecified),
+                },
+                new Dictionary<string, object?>
+                {
+                    ["database"] = "orders", ["query_id"] = 43L, ["best_plan_id"] = 8L, ["regression_factor"] = 5.0,
+                    ["best_plan_last_seen"] = new DateTime(2026, 8, 31, 7, 0, 0, DateTimeKind.Unspecified),
+                },
+                new Dictionary<string, object?>
+                {
+                    ["database"] = "orders", ["query_id"] = 44L, ["best_plan_id"] = 9L, ["regression_factor"] = 3.0,
+                },
+            },
+        },
+    };
+
+    [Fact]
+    public void TheScript_ShowsEachTargetsBestPlanAge_InThatTargetsOwnComment()
+    {
+        var script = FactRemediation.GenerateForFinding(TwoTargetFinding());
+
+        Assert.NotNull(script);
+        var first = script!.IndexOf("-- query_id = 42, forcing plan_id = 7", StringComparison.Ordinal);
+        var second = script.IndexOf("-- query_id = 43, forcing plan_id = 8", StringComparison.Ordinal);
+        var third = script.IndexOf("-- query_id = 44, forcing plan_id = 9", StringComparison.Ordinal);
+        Assert.InRange(first, 0, second - 1);
+        Assert.InRange(second, first + 1, third - 1);
+
+        var nineDays = script.IndexOf("best plan last ran 9 days ago (2026-08-22T09:00:00Z)", StringComparison.Ordinal);
+        var withinDay = script.IndexOf("best plan last ran within the past day (2026-08-31T07:00:00Z)", StringComparison.Ordinal);
+        Assert.InRange(nineDays, first, second - 1);
+        Assert.InRange(withinDay, second, third - 1);
+
+        /* A target whose drill-down row has no best_plan_last_seen says nothing about age. */
+        Assert.DoesNotContain("last ran", script[third..], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheStructuredEvidence_CarriesEachTargetsBestPlanAge()
+    {
+        var structured = FactRemediation.BuildStructuredRemediation(FactRemediation.BuildAction(TwoTargetFinding()));
+
+        Assert.NotNull(structured);
+        var targets = structured!.ForcePlanTargets;
+        Assert.Equal(3, targets.Count);
+
+        using var first = JsonDocument.Parse(JsonSerializer.Serialize(targets[0].Evidence));
+        /* Rounded to a tenth of a day on the wire: 9 days 3 hours is 9.125. */
+        Assert.Equal(9.1, first.RootElement.GetProperty("best_plan_age_days").GetDouble(), 6);
+        Assert.Equal("2026-08-22T09:00:00Z", first.RootElement.GetProperty("best_plan_last_seen_utc").GetString());
+
+        using var second = JsonDocument.Parse(JsonSerializer.Serialize(targets[1].Evidence));
+        Assert.Equal(0.2, second.RootElement.GetProperty("best_plan_age_days").GetDouble(), 6);
+        Assert.Equal("2026-08-31T07:00:00Z", second.RootElement.GetProperty("best_plan_last_seen_utc").GetString());
+
+        using var third = JsonDocument.Parse(JsonSerializer.Serialize(targets[2].Evidence));
+        Assert.True(!third.RootElement.TryGetProperty("best_plan_age_days", out var noAge) || noAge.ValueKind == JsonValueKind.Null);
+        Assert.True(!third.RootElement.TryGetProperty("best_plan_last_seen_utc", out var noSeen) || noSeen.ValueKind == JsonValueKind.Null);
+    }
+
+    [Fact]
+    public void TheAge_IsNotABlocker_AnOldBestPlanStaysEligibleOnTheAdvisorySurface()
+    {
+        var structured = FactRemediation.BuildStructuredRemediation(FactRemediation.BuildAction(TwoTargetFinding()));
+
+        Assert.All(structured!.ForcePlanTargets, t => Assert.Empty(t.Blockers));
     }
 }

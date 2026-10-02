@@ -86,7 +86,20 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         public long? QueryPlanXmlBytes { get; set; }
 
         public long PlanGenerationNum { get; set; }
+
+        /// <summary>
+        /// <c>sys.dm_exec_query_stats.statement_start_offset</c> / <c>statement_end_offset</c>: the statement's
+        /// position inside its batch text, in BYTES of the <c>nvarchar</c> text, so a character slice divides
+        /// by two (the <c>SUBSTRING(st.text, (start / 2) + 1, …)</c> in the SELECT above). <c>-1</c> as the end
+        /// offset means "to the end of the batch"; <c>(0, -1)</c> is the whole batch. Half of the delta key
+        /// (<c>sql_handle:start:end:plan_handle</c>) — a multi-statement batch shares one sql_handle and one
+        /// plan_handle across its statements, and only the offsets tell them apart. Stored since Darling
+        /// V128 / Lite v61 (#3540) exactly as read, <c>-1</c> included, so the restart seed can rebuild the
+        /// key from the store.
+        /// </summary>
         public int StatementStartOffset { get; set; }
+
+        /// <summary>See <see cref="StatementStartOffset"/>.</summary>
         public int StatementEndOffset { get; set; }
 
         /// <summary>The statement's host object (schema.name) from <c>sys.dm_exec_sql_text.objectid</c>;
@@ -383,6 +396,17 @@ OUTER APPLY
            expression returns bigint, and a plan XML document is measured in megabytes on the tail this
            exists to describe. */
         new CollectorColumn("query_plan_xml_bytes", CollectorColumnType.BigInt),
+        /* #3540 (Darling V128 / Lite v61), appended after it for the same reason: the two statement
+           offsets the delta key is made of. Until these were stored no row in query_stats could
+           reproduce the key WritePayload builds, so the restart seed could restore this family's pass
+           window but not one baseline, and every plan older than the restart gap re-baselined on every
+           deploy. Integer, the DMV's own type. BYTE offsets into the batch's nvarchar text (Unicode, so a
+           character position is offset / 2), and statement_end_offset = -1 means "to the end of the
+           batch" — stored verbatim, -1 included, because the key string carries the raw values and the
+           seed has to spell the same string. NULL on every pre-V128 row: the offsets were never
+           recorded, and a fabricated 0/-1 would build a key nothing will ever present. */
+        new CollectorColumn("statement_start_offset", CollectorColumnType.Integer),
+        new CollectorColumn("statement_end_offset", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -461,7 +485,11 @@ OUTER APPLY
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
         /* Delta key = the dm_exec_query_stats row identity (sql_handle + offsets + plan_handle).
-           Keying on plan_handle alone cross-contaminated multi-statement plans — parity contract. */
+           Keying on plan_handle alone cross-contaminated multi-statement plans — parity contract.
+           The two hosts' restart seeds (DeltaCalculator / DarlingDeltaCalculator, QueryStatsSeedSql)
+           rebuild THIS string from the stored handles and offsets with the same interpolation — a null
+           handle formats as empty here and there, and the raw offsets (-1 included) are spelled by the
+           same int formatting — so the seeded key is the one this line presents. */
         var deltaKey = $"{row.SqlHandle}:{row.StatementStartOffset}:{row.StatementEndOffset}:{row.PlanHandle}";
 
         /* #2235: plan_handle is in the key above, and it changes on every recompile — so a churning plan
@@ -477,16 +505,102 @@ OUTER APPLY
            ALL EIGHT delta'd counters take the same rule. Crediting only some would make one row's metrics
            disagree about how much work it did, which is worse than under-reporting all of them. */
         var age = row.CompileAgeSeconds;
-        var deltaExecCount = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        /* #4428: a per-family CalculateDeltaWithSeriesAge call only ever sees its OWN counter, so a row
+           whose statistics restart under this same key can be read as a reset in one family (the one that
+           happened to shrink) and a giant real increment in another (a sibling that had already re-grown
+           past its own pre-restart value) — the same row telling two different stories about whether it
+           restarted. In the field: executions 1 -> 16 against a CPU counter that fell from 57,695,259 to
+           703,943 read as "executions +15" instead of "16 executions since the restart". DecideRow peeks
+           every family's cached value under deltaKey WITHOUT updating anything, so the decision is made
+           once, ROW-COHERENTLY, before any of the eight per-family calls below mutate a baseline: if any
+           family would reset, every counter's fate is the same — the #2235 series-age test's call on
+           whether the restart falls inside the gap since we last looked, exactly as a single reset already
+           decides for itself. A row with no reset is unaffected: DecideRow reports AnyReset = false and
+           every per-family call below runs its ordinary path. */
+        var rowReset = context.Deltas.DecideRow(
+            context.ServerId,
+            new (string Family, long Current)[]
+            {
+                ("query_stats_exec", row.ExecutionCount),
+                ("query_stats_worker", row.TotalWorkerTime),
+                ("query_stats_elapsed", row.TotalElapsedTime),
+                ("query_stats_reads", row.TotalLogicalReads),
+                ("query_stats_writes", row.TotalLogicalWrites),
+                ("query_stats_phys_reads", row.TotalPhysicalReads),
+                ("query_stats_rows", row.TotalRows),
+                ("query_stats_spills", row.TotalSpills),
+            },
+            deltaKey,
+            age,
+            context.CollectionTime,
+            CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        var deltaExecCount = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, age, out var execIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         /* Capture the collection interval alongside the CPU delta so the display can derive
            worker_time_per_second (peak CPU-ms per wall-clock second) over the window. */
-        var deltaWorkerTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, age, out var sampleIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaElapsedTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWorkerTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, age, out var workerIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaElapsedTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, age, out var elapsedIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaLogicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_reads", deltaKey, row.TotalLogicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaLogicalWrites = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_writes", deltaKey, row.TotalLogicalWrites, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaPhysicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_phys_reads", deltaKey, row.TotalPhysicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaRows = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_rows", deltaKey, row.TotalRows, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaSpills = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_spills", deltaKey, row.TotalSpills, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        /* #4428: apply the row-coherent decision AFTER every per-family call above has run — each call
+           already updated its own baseline to the current value/time (the store-forward the Add/Update
+           branches always perform), so the row is ready for an ordinary delta on the NEXT pass regardless
+           of which branch this row takes now. When the row restarted, override every counter together:
+           credited-in-gap makes each counter's delta its own CURRENT value over the real interval (the
+           restart's whole accrual, symmetric with #2235's single-family rescue); otherwise every counter
+           becomes unknowable, (0, 0), rather than the mixed reset-plus-inflated-increment the per-family
+           calls above would otherwise have written. */
+        if (rowReset.AnyReset)
+        {
+            if (rowReset.CreditedInGap)
+            {
+                deltaExecCount = row.ExecutionCount;
+                deltaWorkerTime = row.TotalWorkerTime;
+                deltaElapsedTime = row.TotalElapsedTime;
+                deltaLogicalReads = row.TotalLogicalReads;
+                deltaLogicalWrites = row.TotalLogicalWrites;
+                deltaPhysicalReads = row.TotalPhysicalReads;
+                deltaRows = row.TotalRows;
+                deltaSpills = row.TotalSpills;
+                execIntervalSeconds = rowReset.IntervalSeconds;
+                workerIntervalSeconds = rowReset.IntervalSeconds;
+                elapsedIntervalSeconds = rowReset.IntervalSeconds;
+            }
+            else
+            {
+                deltaExecCount = 0;
+                deltaWorkerTime = 0;
+                deltaElapsedTime = 0;
+                deltaLogicalReads = 0;
+                deltaLogicalWrites = 0;
+                deltaPhysicalReads = 0;
+                deltaRows = 0;
+                deltaSpills = 0;
+                execIntervalSeconds = 0;
+                workerIntervalSeconds = 0;
+                elapsedIntervalSeconds = 0;
+            }
+        }
+
+        /* #4394: the worker (CPU) counter's own interval can land at 0 — a first sighting, a plan
+           reset, or a gap past the policy — while the exec-count or elapsed-time counters (same row,
+           same collection pass) return a real, knowable delta. Writing CPU as a false 0 over interval 0
+           in that case made the row look like it did no work, and the interval-honest filter
+           (sample_interval_seconds IS DISTINCT FROM 0) then discarded its real executions and duration
+           along with it. #2234 established interval 0 as the pairing for "no delta knowable"; that now
+           holds per counter rather than per row — CPU can be unknowable (NULL) while exec/elapsed are
+           real. A worker delta of 0 over a REAL interval (a query that ran but burned no CPU) is left
+           untouched: that 0 is measured, not assumed. */
+        var (resolvedWorkerDelta, sampleIntervalSeconds) = ResolveWorkerDelta(
+            deltaWorkerTime,
+            workerIntervalSeconds,
+            execIntervalSeconds,
+            elapsedIntervalSeconds);
 
         writer
             .Value(row.DatabaseName)
@@ -530,7 +644,7 @@ OUTER APPLY
             .Value(row.SqlHandle)
             .Value(row.PlanHandle)
             .Value(deltaExecCount)
-            .Value(deltaWorkerTime)
+            .Value(resolvedWorkerDelta)
             .Value(deltaElapsedTime)
             .Value(deltaLogicalReads)
             .Value(deltaLogicalWrites)
@@ -540,7 +654,43 @@ OUTER APPLY
             .Value(row.PlanGenerationNum)
             .Value(sampleIntervalSeconds)      /* sample_interval_seconds INTEGER */
             .Value(row.HostObjectName)         /* #2012 stage 2: NULL for ad-hoc text */
-            .Value(row.QueryPlanXmlBytes);     /* #3392: measured size, never gated by the cap */
+            .Value(row.QueryPlanXmlBytes)      /* #3392: measured size, never gated by the cap */
+            .Value(row.StatementStartOffset)   /* #3540: the delta key's offsets, raw, -1 included */
+            .Value(row.StatementEndOffset);
+    }
+
+    /// <summary>
+    /// #4394: resolves the worker (CPU) delta to write. The worker counter's own delta call can return
+    /// interval 0 (a first sighting, a plan reset, or a gap past the policy) in the SAME collection pass
+    /// where the exec-count or elapsed-time counters return a real, knowable delta. In that case CPU is
+    /// unknowable rather than zero, so this returns a NULL worker delta and takes the row's
+    /// sample_interval_seconds from whichever of exec/elapsed has a real interval (exec first, then
+    /// elapsed). Every other case passes the worker call's own delta and interval through unchanged —
+    /// in particular a worker delta of 0 over a REAL interval (a query that ran but burned no measurable
+    /// CPU) is a measured 0, not an unknowable one, and keeps its own interval.
+    /// </summary>
+    internal static (long? WorkerDelta, int IntervalSeconds) ResolveWorkerDelta(
+        long workerDelta,
+        int workerIntervalSeconds,
+        int execIntervalSeconds,
+        int elapsedIntervalSeconds)
+    {
+        if (workerIntervalSeconds != 0)
+        {
+            return (workerDelta, workerIntervalSeconds);
+        }
+
+        if (execIntervalSeconds > 0)
+        {
+            return (null, execIntervalSeconds);
+        }
+
+        if (elapsedIntervalSeconds > 0)
+        {
+            return (null, elapsedIntervalSeconds);
+        }
+
+        return (workerDelta, workerIntervalSeconds);
     }
 
     /// <summary>

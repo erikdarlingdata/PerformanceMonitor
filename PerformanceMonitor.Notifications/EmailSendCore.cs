@@ -7,11 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Mail;
 using System.Net.Mime;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
@@ -69,7 +71,7 @@ public sealed class EmailSendCore
     /// <summary>
     /// Attempts email delivery (if SMTP is configured and outside the per-metric cooldown)
     /// and the webhook fan-out, and reports what happened so the caller can record its
-    /// app-specific alert-history rows. Never throws.
+    /// app-specific alert-history rows. Throws only the caller's own cancellation.
     /// </summary>
     /// <param name="attemptChannels">
     /// When false (Lite's muted case) neither email nor webhook is attempted; the caller
@@ -96,6 +98,13 @@ public sealed class EmailSendCore
     /// <see cref="AlertNotificationMode.PerEvent"/> and <c>null</c> do not — see
     /// <see cref="RepeatDeliveryBudget.Evaluate"/> for why an unstated mode declines rather than defaults.
     /// </param>
+    /// <param name="cancellationToken">
+    /// #4752: handed to the webhook fan-out, so a service that is stopping can end a post in flight. The SMTP
+    /// send does not take it. A cancel from this token passes through here as the
+    /// <see cref="OperationCanceledException"/> it is, not as a channel's recorded failure: a stop request is
+    /// not a failed delivery, and the deliverer's shutdown path writes no history row for it. It is the only
+    /// exception this method throws. Optional so every caller that has no token to give compiles unchanged.
+    /// </param>
     public async Task<EmailFanoutResult> TrySendAsync(
         string metricName,
         string serverName,
@@ -106,19 +115,29 @@ public sealed class EmailSendCore
         bool attemptChannels,
         string? detailText = null,
         string? displayName = null,
-        AlertNotificationMode? deliveryMode = null)
+        AlertNotificationMode? deliveryMode = null,
+        CancellationToken cancellationToken = default)
     {
         var emailOutcome = AlertChannelOutcome.NotAttempted;
         string? sendError = null;
 
+        /* #3598: the email channel's routing decision, resolved AFTER this path's own cooldown and budget say
+           the alert sends (design point 2) and null otherwise. Recorded on the result so the deliverer can put
+           it on the history row when the webhook fan-out had nothing to say (an SMTP-only store). */
+        NotificationRouteDecision? emailRoute = null;
+
         /* The SMTP gate, hoisted so the same expression both decides whether email is attempted and
            answers "is any channel configured at all". A restatement of it somewhere else would be free to
-           drift; a reader of the result needs the answer from the code that consults the settings. */
+           drift; a reader of the result needs the answer from the code that consults the settings.
+           #4751: somebody has to be named to receive it — the default recipient list, or an enabled route's
+           recipients. A route's recipients alone are enough: the host, from address and credentials still come
+           from the parent, and which firing they cover is decided per firing below. */
         var smtpConfigured =
             _settings.SmtpEnabled &&
             !string.IsNullOrWhiteSpace(_settings.SmtpServer) &&
             !string.IsNullOrWhiteSpace(_settings.SmtpFromAddress) &&
-            !string.IsNullOrWhiteSpace(_settings.SmtpRecipients);
+            (!string.IsNullOrWhiteSpace(_settings.SmtpRecipients) ||
+             NotificationRouter.AnyRouteConfiguresEmail(_settings.NotificationRoutes));
 
         var anyChannelConfigured = smtpConfigured || _webhookAlertService.AnyWebhookConfigured;
 
@@ -146,7 +165,8 @@ public sealed class EmailSendCore
                 ? _repeatBudget.Evaluate(
                     metricName, serverName, decision, window,
                     aggregateRepeats: deliveryMode == AlertNotificationMode.Summary,
-                    incidents: context?.Incidents)
+                    incidents: context?.Incidents,
+                    serverKey: serverId)
                 : null;
 
             if (budget is not null && budget.ShouldSend)
@@ -161,52 +181,89 @@ public sealed class EmailSendCore
 
                 var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
                 var subject = $"[SQL Monitor Alert] {titleName} on {serverName}";
+
+                /* #4220: the same triage-page link the webhook channels carry (WebhookAlertService's own
+                   #2710 comment explains the key) — email was the one channel without it. The dedup key
+                   reuses DerivePagerDutyDedupKey so the link correlates with the SAME incident PagerDuty
+                   names for this firing, keyed off the RENDERED context like the webhook fan-out reads. Null
+                   (base URL unset, or the dashboard disabled) renders neither body's link, same as today. */
+                var triageUrl = TriageLink.Build(
+                    _settings.TriageBaseUrl, serverName, metricName, DateTime.UtcNow,
+                    WebhookAlertService.DerivePagerDutyDedupKey(
+                        string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, render.Context));
+
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
                     metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding,
-                    render.Context, render.Prose, displayName);
+                    render.Context, render.Prose, displayName, triageUrl);
 
-                try
+                /* #3598: WHO receives this firing — an exact-metric route's recipients, else its family route's,
+                   else the parent's list. Resolved here, after the cooldown and the budget, so a throttled alert
+                   never consults a route; with zero routes the list IS _settings.SmtpRecipients and the send is the
+                   pre-routes one. A route can only REDIRECT email: host, from and credentials live on the parent,
+                   and a recipient list without them is not a configuration. #4751: `smtpConfigured` above only
+                   asks that SOME enabled route names recipients, so the fall-through to the parent's list can now
+                   be blank — a firing no route covers, with no default list, has nobody to send to. */
+                emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings);
+                var recipients = emailRoute.Email.Destination ?? _settings.SmtpRecipients;
+
+                if (string.IsNullOrWhiteSpace(recipients))
                 {
-                    await SendEmailAsync(_settings, subject, htmlBody, plainTextBody, render.Context);
-                    emailOutcome = AlertChannelOutcome.Delivered;
-                    _cooldown.Stamp(decision);
-
-                    /* #3430: clear only the roster entries this email named, so anything folded while the
-                       SMTP send was in flight is named by the next one. */
-                    _repeatBudget.Commit(budget);
-                    if (budget.RosterEntryCount > 0)
-                    {
-                        _logger.LogInformation(
-                            $"Alert email for {metricName} on {serverName} carried {budget.RosterEntryCount} already-reported incident(s) from other servers");
-                    }
-
-                    if (_consecutiveFailures > 0)
-                    {
-                        _logger.LogInformation($"Alert email delivery recovered after {_consecutiveFailures} failure(s)");
-                    }
-                    _consecutiveFailures = 0;
-                    _lastFailureError = null;
-
-                    _logger.LogInformation($"Alert email sent for {metricName} on {serverName}");
-                }
-                catch (Exception ex)
-                {
-                    /* The send threw, so this email named nothing and must not have spent the metric's
-                       window — the same rule the cooldown applies by stamping only on success. */
+                    /* #4751: nobody to send to, which is a coverage gap and not a send failure. Nothing was
+                       attempted, so this firing gives back the window the budget just claimed for it (the rule
+                       the catch below applies), stamps no cooldown (the next firing must still be owed an email
+                       once a route or the default list covers it), counts no failure, and keeps the outcome at
+                       NotAttempted. SendEmailAsync throws on an empty list; calling it would turn this gap into a
+                       failed row and a consecutive-failure count. `emailRoute` stays set: it is the firing's
+                       routing record for the alert log. */
                     _repeatBudget.Release(budget);
-
-                    emailOutcome = AlertChannelOutcome.Failed;
-                    sendError = ex.Message;
-                    _consecutiveFailures++;
-                    _lastFailureError = ex.Message;
-
-                    if (_consecutiveFailures <= 3)
+                    _logger.LogDebug(
+                        $"Alert email for {metricName} on {serverName} skipped: no notification route covers it and no default recipients are set");
+                }
+                else
+                {
+                    try
                     {
-                        _logger.LogError($"ALERT EMAIL FAILED ({_consecutiveFailures}x): {ex.GetType().Name}: {ex.Message}");
+                        await SendEmailAsync(_settings, subject, htmlBody, plainTextBody, render.Context, recipients);
+                        emailOutcome = AlertChannelOutcome.Delivered;
+                        _cooldown.Stamp(decision);
+
+                        /* #3430: clear only the roster entries this email named, so anything folded while the
+                           SMTP send was in flight is named by the next one. */
+                        _repeatBudget.Commit(budget);
+                        if (budget.RosterEntryCount > 0)
+                        {
+                            _logger.LogInformation(
+                                $"Alert email for {metricName} on {serverName} carried {budget.RosterEntryCount} already-reported incident(s) from other servers");
+                        }
+
+                        if (_consecutiveFailures > 0)
+                        {
+                            _logger.LogInformation($"Alert email delivery recovered after {_consecutiveFailures} failure(s)");
+                        }
+                        _consecutiveFailures = 0;
+                        _lastFailureError = null;
+
+                        _logger.LogInformation($"Alert email sent for {metricName} on {serverName}");
                     }
-                    else if (_consecutiveFailures % 50 == 0)
+                    catch (Exception ex)
                     {
-                        _logger.LogError($"ALERT EMAIL STILL FAILING: {_consecutiveFailures} consecutive failures. Last error: {ex.Message}");
+                        /* The send threw, so this email named nothing and must not have spent the metric's
+                           window — the same rule the cooldown applies by stamping only on success. */
+                        _repeatBudget.Release(budget);
+
+                        emailOutcome = AlertChannelOutcome.Failed;
+                        sendError = ex.Message;
+                        _consecutiveFailures++;
+                        _lastFailureError = ex.Message;
+
+                        if (_consecutiveFailures <= 3)
+                        {
+                            _logger.LogError($"ALERT EMAIL FAILED ({_consecutiveFailures}x): {ex.GetType().Name}: {ex.Message}");
+                        }
+                        else if (_consecutiveFailures % 50 == 0)
+                        {
+                            _logger.LogError($"ALERT EMAIL STILL FAILING: {_consecutiveFailures} consecutive failures. Last error: {ex.Message}");
+                        }
                     }
                 }
             }
@@ -239,11 +296,29 @@ public sealed class EmailSendCore
         {
             webhook = await _webhookAlertService.TrySendWebhookAlertsAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId, context, detailText, displayName,
-                deliveryMode);
+                deliveryMode, cancellationToken);
+        }
+
+        /* #3598: the two paths resolve the same pure function over the same inputs, so whichever one ran is
+           the firing's routing record; the webhook's is preferred only because it names four channels to
+           email's one. Null when neither reached resolution. */
+        /* #4750: what each channel's send did, for the route record. The webhook fan-out named its own
+           channels; email adds its one only when an SMTP send was actually attempted, because a cooldown, a
+           fold or a muted alert attempted nothing and the record reads a channel with no entry as "not
+           attempted". Null when no channel was attempted. */
+        var channelOutcomes = webhook.ChannelOutcomes;
+        if (emailOutcome is AlertChannelOutcome.Delivered or AlertChannelOutcome.Failed)
+        {
+            var merged = channelOutcomes is null
+                ? new Dictionary<string, AlertChannelOutcome>()
+                : new Dictionary<string, AlertChannelOutcome>(channelOutcomes);
+            merged[NotificationRouter.EmailChannel] = emailOutcome;
+            channelOutcomes = merged;
         }
 
         return new EmailFanoutResult(
-            emailOutcome, sendError, webhook.Outcome, webhook.SendError, anyChannelConfigured);
+            emailOutcome, sendError, webhook.Outcome, webhook.SendError, anyChannelConfigured,
+            webhook.Route ?? emailRoute, channelOutcomes);
     }
 
     /// <summary>Gets email delivery health summary (consecutive failures + last error).</summary>
@@ -282,7 +357,9 @@ public sealed class EmailSendCore
     /// Shared SMTP send helper with multipart/alternative (HTML + plain text) and an optional
     /// XML attachment (deadlock graph / blocked process report).
     /// </summary>
-    private static async Task SendEmailAsync(IAlertSettings settings, string subject, string htmlBody, string plainTextBody, AlertContext? context = null)
+    /// <param name="recipients">#3598: the routed recipient list; null (the test-email path) means the
+    /// parent's <see cref="IAlertSettings.SmtpRecipients"/>.</param>
+    private static async Task SendEmailAsync(IAlertSettings settings, string subject, string htmlBody, string plainTextBody, AlertContext? context = null, string? recipients = null)
     {
         using var smtpClient = new SmtpClient(settings.SmtpServer, settings.SmtpPort)
         {
@@ -317,7 +394,7 @@ public sealed class EmailSendCore
             message.Attachments.Add(new Attachment(stream, context.AttachmentFileName, "application/xml"));
         }
 
-        foreach (var recipient in settings.SmtpRecipients.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        foreach (var recipient in (recipients ?? settings.SmtpRecipients).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             message.To.Add(recipient);
         }
@@ -352,12 +429,29 @@ public sealed class EmailSendCore
 /// both of which read <see cref="AlertChannelOutcome.NotAttempted"/> for a muted alert on a fully
 /// configured store.
 /// </param>
+/// <param name="Route">
+/// #3598: where this firing's channels resolved to — the webhook fan-out's decision when it reached
+/// resolution, else the email path's, else null (throttled, folded, muted, or nothing configured). The
+/// deliverer records it on the history row's context. Trailing and defaulted so every existing
+/// construction and pin compiles unchanged.
+/// </param>
+/// <param name="ChannelOutcomes">
+/// #4750: what each channel's send did, keyed by the <see cref="NotificationRouter"/> channel names — the
+/// webhook fan-out's entries plus <c>Email</c> when an SMTP send was attempted. A channel with no entry was
+/// not attempted on this firing. The deliverer hands it to <see cref="NotificationRouteDecision.ToDto"/> so the
+/// history row's route record says which channel delivered and which failed. Outcomes only, never error text:
+/// a webhook failure message can name the endpoint's URL, which is a secret, and <paramref name="SendError"/> and
+/// <paramref name="WebhookSendError"/> stay where a reason is written. Trailing and defaulted like
+/// <paramref name="Route"/>.
+/// </param>
 public readonly record struct EmailFanoutResult(
     AlertChannelOutcome EmailOutcome,
     string? SendError,
     AlertChannelOutcome WebhookOutcome,
     string? WebhookSendError,
-    bool AnyChannelConfigured)
+    bool AnyChannelConfigured,
+    NotificationRouteDecision? Route = null,
+    IReadOnlyDictionary<string, AlertChannelOutcome>? ChannelOutcomes = null)
 {
     /// <summary>Whether an SMTP send was attempted — configured, outside its cooldown, and not folded.</summary>
     public bool EmailAttempted =>

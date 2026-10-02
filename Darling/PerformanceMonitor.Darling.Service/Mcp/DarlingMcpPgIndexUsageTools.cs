@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -199,7 +200,13 @@ public sealed class DarlingMcpPgIndexUsageTools
 
     [McpServerTool(Name = "get_pg_index_usage")]
     [Description(
-        "PostgreSQL per-index usage: how often each index was scanned, what it costs, and - the part a raw "
+        "Per-index usage and droppability advice, beyond raw pg_stat_user_indexes. scans_in_window, not "
+        + "lifetime total_scans_since_stats_reset, is the disuse figure; needs 2+ samples (no index-creation "
+        + "timestamp exists). Droppability is GATED on primary key/unique/exclusion/replica-identity/partial/"
+        + "expression/invalid facts: unscanned_without_a_structural_blocker is a candidate, never a "
+        + "conclusion. WRITERS ONLY - a replica's scan counts are its own, not the writer's. Floors at 64 kB "
+        + "(plus any INVALID index), so counts run lower than get_pg_index_bloat's floor-free census. "
+        + "<<GUIDE>> PostgreSQL per-index usage: how often each index was scanned, what it costs, and - the part a raw "
         + "pg_stat_user_indexes query cannot give you - whether it is actually safe to drop. Reports BOTH the "
         + "server's lifetime scan count since its statistics were last reset AND the scans observed across "
         + "the stored window, which is the more useful figure: an index with millions of lifetime scans and "
@@ -214,15 +221,18 @@ public sealed class DarlingMcpPgIndexUsageTools
         + "indexes than get_pg_index_bloat, which is the complete btree census with no size floor - 1,517 "
         + "against 2,500 on one measured target, a difference that is entirely that floor. Neither is "
         + "missing objects, and for indexes too large for get_pg_index_bloat to measure this is the only "
-        + "collector carrying their size over time.")]
+        + "collector carrying their size over time. This is what bounds the page - read truncated to know "
+        + "whether the server held more indexes than were returned; it is observed by fetching one row past "
+        + "this cap, never inferred from a full page.")]
     public static async Task<string> GetPgIndexUsage(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (seven days). Widen this to the longest interval any scheduled job runs on before calling an index unused.")] int hours_back = 168,
-        [Description("Maximum indexes to return, biggest unscanned first. Default 25.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum indexes to return, biggest unscanned first. Default 25. See the tool's reading guide.")] int limit = 25,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -234,12 +244,17 @@ public sealed class DarlingMcpPgIndexUsageTools
         {
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
-            var rows = await DarlingPgIndexUsageReader.GetPgIndexUsageAsync(
-                postgres, resolved.ServerId, start, end, limit);
+            /* #3653 (one vocabulary): the page cut is OBSERVED off a limit + 1 fetch through McpHelpers.BoundPage
+               (the #3594 dialect), replacing `limit_reached = indexes.Count >= limit` — which read a server with
+               exactly `limit` reportable indexes as a cut page. Bound BEFORE the aggregates below, so every count
+               is a count of the page. */
+            var fetched = await DarlingPgIndexUsageReader.GetPgIndexUsageAsync(
+                postgres, resolved.ServerId, start, end, limit + 1, cancellationToken);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, cancellationToken);
             }
 
             var unscanned = rows.Where(r => r.ScansInWindow == 0 && r.IsValid && !r.IsPrimaryKey
@@ -315,7 +330,8 @@ public sealed class DarlingMcpPgIndexUsageTools
                 server = resolved.ServerName,
                 hours_back,
                 status = "index_usage",
-                index_count = indexes.Count,
+                /* The page's count under the page's name (#3594). */
+                indexes_returned = indexes.Count,
                 /* Deliberately NOT called "droppable". These are the indexes with no scans in the window
                    and no structural blocker - which is a shortlist to investigate, not a work queue. The
                    field name has to survive being read by something that will act on it. */
@@ -326,7 +342,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                 statistics_were_reset_in_window = resetSeen,
                 /* Same discipline as get_pg_database_stats: every total above covers the rows the LIMIT let
                    through, and the caller has to be able to tell when the cut bit. */
-                limit_reached = indexes.Count >= limit,
+                truncated,
                 note = "An index with no scans is a CANDIDATE, never a conclusion. Three things this data "
                      + "cannot see, in the order they bite: an index backing a constraint enforces it "
                      + "without ever registering a scan; a query that runs less often than "
@@ -345,14 +361,14 @@ public sealed class DarlingMcpPgIndexUsageTools
                          + "failed CREATE INDEX CONCURRENTLY leftovers, maintained by writes and used by "
                          + "nobody."
                          : string.Empty)
-                     + (indexes.Count >= limit
-                         ? $" The row limit of {limit} was REACHED, so the totals cover only the indexes "
-                         + "returned. Raise limit for the full picture."
+                     + (truncated
+                         ? $" TRUNCATED: the server held more indexes than the {limit} returned, so the totals "
+                         + "cover only the indexes returned. Raise limit for the full picture."
                          : string.Empty),
                 indexes,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_index_usage", ex);
         }
@@ -368,16 +384,17 @@ public sealed class DarlingMcpPgIndexUsageTools
     /// windowed scan count is a difference and needs two.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end)
+        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
+        CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_index_usage_stats");
+            postgres, serverId, serverName, "pg_index_usage_stats", cancellationToken);
         if (gated != null)
         {
             return gated;
         }
 
-        var probe = await DarlingPgIndexUsageReader.ProbePgIndexUsageAsync(postgres, serverId, start, end);
+        var probe = await DarlingPgIndexUsageReader.ProbePgIndexUsageAsync(postgres, serverId, start, end, cancellationToken);
 
         var hints = new
         {

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
@@ -56,6 +57,73 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
             "Should have prescriptive hardware or compute recommendations");
     }
 
+    /* ── Right-sizing advice needs a measurement, and a server whose hardware is its own ── */
+
+    [Fact]
+    public async Task NoCpuSamples_CpuAndVmRightSizingAdviseNothing()
+    {
+        // Size and memory rows, no CPU rows in the window: the CPU P95 reads 0 only because nothing was measured.
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 3, withCpuSamples: false));
+        PrintRecommendations("NO CPU SAMPLES", recs);
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Category == "Hardware");
+        // Only the CPU-dependent rules stand down: memory is its own measurement and still advises.
+        Assert.Contains(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AzureSqlDatabase_MemoryAndVmRightSizingAdviseNothing_BecauseItsMemoryComesWithItsServiceObjective()
+    {
+        // The database uses 40,960 MB of its own 167,117 MB memory limit, a share that advises on any other edition. Its
+        // service objective names 32 vCores, which is the CPU it is given. Its memory cannot be resized on its own,
+        // so the memory and VM rules have nothing to recommend.
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 5, withCpuSamples: true, vcoreCount: 32));
+        PrintRecommendations("AZURE SQL DATABASE MEMORY AND VM RULES", recs);
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Category == "Hardware");
+        // The CPU rule is not one of the two that stand down on a database: it reads the vCores the objective names, and it
+        // calls them vCores, as the utilization card does, in the finding and in the detail.
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.StartsWith("CPU over-provisioned (32 vCores, P95 = ", cpu.Finding, StringComparison.Ordinal);
+        Assert.Contains("across 32 vCores. Consider reducing to ~", cpu.Detail, StringComparison.Ordinal);
+        Assert.EndsWith(" vCores.", cpu.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain(" cores", cpu.Finding + cpu.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AzureSqlDatabaseWithNoVcores_CpuRightSizingAdvisesNothing_BecauseTheStoredSchedulerCountIsNotTheCpuItIsGiven()
+    {
+        // A DTU-model objective names no vCores. The stored cpu_count (32 here) is the schedulers the database can see, not the
+        // CPU it is given, so the CPU rule has no count to work from.
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 5, withCpuSamples: true));
+        PrintRecommendations("AZURE SQL DATABASE, NO VCORES", recs);
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Finding.Contains("32 cores", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Category == "Hardware");
+    }
+
+    [Theory]
+    [InlineData(3)]   // SQL Server Enterprise
+    [InlineData(8)]   // Azure SQL Managed Instance: its memory is its own
+    public async Task WithCpuSamplesOffAzureSqlDatabase_CpuMemoryAndVmRightSizingStillAdvise(int engineEdition)
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition, withCpuSamples: true));
+        PrintRecommendations($"RIGHT-SIZING UNCHANGED (edition {engineEdition})", recs);
+
+        // Off an Azure SQL Database the count is a CPU count and the word is the one it always was.
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.StartsWith("CPU over-provisioned (32 cores, P95 = ", cpu.Finding, StringComparison.Ordinal);
+        Assert.Contains("across 32 cores. Consider reducing to ~", cpu.Detail, StringComparison.Ordinal);
+        Assert.EndsWith(" cores.", cpu.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("vCores", cpu.Finding + cpu.Detail, StringComparison.Ordinal);
+        Assert.Contains(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+        Assert.Contains(recs, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.Contains(recs, r => r.Category == "Hardware" && r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
+    }
+
     /* ── Idle Databases ── */
 
     [Fact]
@@ -89,6 +157,31 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         Assert.Null(dormant.EstMonthlySavings);
     }
 
+    [Fact]
+    public async Task IdleDatabases_FourHoursOfHistory_AdviseNothing_BecauseSevenDaysWereNotObserved()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithFourHoursOfHistoryAsync());
+
+        Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task IdleDatabases_SixAndAHalfDaysOfHistory_AdviseNothing()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithSixAndAHalfDaysOfHistoryAsync());
+
+        Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task IdleDatabases_SevenDaysOfHistory_StillAdvise()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesAsync());
+
+        var idle = Assert.Single(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("No query activity in 7 days", idle.Detail, StringComparison.Ordinal);
+    }
+
     /* ── High Impact Query Skew ── */
 
     [Fact]
@@ -109,6 +202,30 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
 
         Assert.True(results.Count > 0);
         Assert.True(results[0].ImpactScore >= 80, $"Dominant query should score >= 80, got {results[0].ImpactScore}");
+    }
+
+    /// <summary>
+    /// Pure-function proof for <see cref="HoursBackCoveringTestPeriod"/>: the read window it computes must
+    /// cover the seeded rows (TestPeriodEnd - 30m) at the worst minute of day, 03:59 UTC — one minute before
+    /// TestDataSeeder's UTC-midnight anchor rolls TestPeriodEnd forward to today, which is when a fixed
+    /// hoursBack: 24 window (measured from "now") is furthest from the seed. Mirrors
+    /// TestDataSeeder.AnchorPeriodEndToUtcMidnight's logic directly since that helper is private.
+    /// </summary>
+    [Fact]
+    public void HighImpactWindowCoversSeedAtWorstHour()
+    {
+        var worstNowUtc = DateTime.UtcNow.Date.AddHours(3).AddMinutes(59); // 03:59 UTC today
+        var midnight = worstNowUtc.Date;
+        if (worstNowUtc.Hour < 4) midnight = midnight.AddDays(-1);
+        var periodEnd = midnight.AddHours(4);
+        var periodStart = periodEnd.AddHours(-4);
+        var seedTime = periodEnd.AddMinutes(-30);
+
+        var hoursBack = (int)Math.Ceiling((worstNowUtc - periodStart).TotalHours) + 1;
+        var cutoff = worstNowUtc.AddHours(-hoursBack);
+
+        Assert.True(cutoff <= seedTime,
+            $"Read window (cutoff {cutoff:O}) must cover the seeded row ({seedTime:O}) at 03:59 UTC, hoursBack={hoursBack}");
     }
 
     /* ── HighImpactScorer Pure Function Tests ── */
@@ -215,7 +332,134 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var recs = await RunRecommendationsAsync(s => s.SeedLowIoLatencyAsync());
         PrintRecommendations("LOW IO LATENCY", recs);
 
-        Assert.Contains(recs, r => r.Category == "Storage");
+        var storage = Assert.Single(recs, r => r.Category == "Storage");
+        // The seed's samples span 225 minutes: the text names that, not "7 days".
+        Assert.Contains("under 3ms across 16 samples over 3 hours", storage.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("the last", storage.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("7 days", storage.Detail, StringComparison.Ordinal);
+    }
+
+    /* ── Right-sizing advice: no "X to X", and the window the data covers ── */
+
+    /// <summary>Seeds a 32-core host with the given RAM, <paramref name="cpuSamples"/> CPU samples
+    /// <paramref name="spacingMinutes"/> apart, and 16 memory samples.</summary>
+    private static Func<TestDataSeeder, Task> RightSizingSeed(long physMb, int cpuSamples, int spacingMinutes) => async s =>
+    {
+        await s.ClearTestDataAsync();
+        await s.SeedFinOpsCpuUtilizationAsync(8, 2, cpuSamples, spacingMinutes);
+        await s.SeedMemoryStatsAsync(totalPhysicalMb: physMb, bufferPoolMb: 512, targetMb: physMb);
+        await s.SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: physMb);
+    };
+
+    [Fact]
+    public async Task VmRightSizing_MemoryTargetThatRoundsToTheCurrentGb_GivesNoAdvice()
+    {
+        // 5000 MB is "4GB" as displayed; the 4096 MB floor is "4GB" too. "reduce from 4GB to 4GB" is not advice.
+        var recs = await RunRecommendationsAsync(RightSizingSeed(5000, 9, 15));
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory: reduce from", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Finding.Contains("4GB to 4GB", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task VmRightSizing_TwoHoursOfSamples_StatesTwoHours_NotSevenDays()
+    {
+        var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 9, 15));
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.StartsWith("From 9 samples over 2 hours, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        var memory = Assert.Single(recs, r => r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
+        Assert.DoesNotContain("7 days", memory.Detail, StringComparison.Ordinal);
+        // 16 memory samples 15 minutes apart span 225 minutes: three whole hours, never rounded up to four.
+        Assert.Contains("P95 SQL Server memory from 16 samples over 3 hours", memory.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MemoryOverProvisioned_TargetThatPrintsAsTheCurrentGb_GivesNoAdvice()
+    {
+        // 8704 MB is "8GB" as displayed and the 8192 MB floor is "8GB" too: "of 8GB RAM ... reducing to ~8GB" is not advice.
+        var recs = await RunRecommendationsAsync(RightSizingSeed(8704, 9, 15));
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MemoryOverProvisioned_AtTwoHundredFiftySixGb_NamesTheWindowAndTheTarget()
+    {
+        var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 9, 15));
+
+        var memory = Assert.Single(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+        Assert.Contains("P95 SQL Server memory from 16 samples over 3 hours", memory.Detail, StringComparison.Ordinal);
+        Assert.Contains("Consider reducing to ~8GB", memory.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VmRightSizing_AWeekOfSamples_StatesTheWholeDaysObserved_NeverMore()
+    {
+        // 17 samples fall inside the 7-day read: 160 hours = 6 days 16 hours, which reads as 6 whole days (never rounded up to 7).
+        var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 20, 10 * 60));
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.StartsWith("From 17 samples over 6 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VmRightSizing_TwoClustersFourDaysApart_NamesTheCountAndSpan_NeverTheLast()
+    {
+        // Five samples now and five 4 days earlier: the 4 days between them were never observed, so the text
+        // says "10 samples over 4 days" and does not claim "the last 4 days".
+        var recs = await RunRecommendationsAsync(async s =>
+        {
+            await RightSizingSeed(262_144, 5, 15)(s);
+            await s.SeedFinOpsCpuUtilizationAsync(8, 2, 5, 15, daysBack: 4);
+        });
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.StartsWith("From 10 samples over 4 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("the last", cpu.Detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Azure SQL Database (System)", "GP_SYSTEM_4", 32, true)]
+    [InlineData("Azure SQL Database (General Purpose)", "GP_S_Gen5_1", 32, false)]
+    [InlineData("Azure SQL Database (Hyperscale)", "HS_S_Gen5_2", 32, false)]
+    public async Task AzureSqlDatabase_MasterOfALogicalServer_GetsNoRightSizingAdvice_AndANotApplicableVerdict(string edition, string serviceObjective, int vcoreCount, bool isMaster)
+    {
+        // The same idle seed: a user database keeps its CPU advice, master has nothing to resize. Master is seeded with 32 vCores
+        // too (its real count is 4): the CPU rule needs more than 4, so only the stand-down can keep the advice away.
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
+            engineEdition: 5, withCpuSamples: true, vcoreCount: vcoreCount, serviceObjective: serviceObjective, edition: edition));
+        PrintRecommendations($"AZURE SQL DATABASE ({edition})", recs);
+
+        if (isMaster)
+        {
+            Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+            Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+            Assert.DoesNotContain(recs, r => r.Category == "Hardware");
+        }
+        else
+        {
+            Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        }
+
+        var util = await new LocalDataService(_duckDb).GetUtilizationEfficiencyAsync(TestDataSeeder.TestServerId);
+        Assert.NotNull(util);
+        if (isMaster)
+            Assert.Equal(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
+        else
+            Assert.NotEqual(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
+    }
+
+    [Fact]
+    public async Task SqlServer_WithAServiceObjectiveNamedSystem_IsUnchanged()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
+            engineEdition: 3, withCpuSamples: true, serviceObjective: "System", edition: "Enterprise Edition (System)"));
+
+        Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        var util = await new LocalDataService(_duckDb).GetUtilizationEfficiencyAsync(TestDataSeeder.TestServerId);
+        Assert.NotNull(util);
+        Assert.NotEqual(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
     }
 
     /* ── Helpers ── */
@@ -231,14 +475,30 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     private async Task<List<HighImpactQueryRow>> RunHighImpactAsync(
-        Func<TestDataSeeder, Task> seedAction, int hoursBack = 24)
+        Func<TestDataSeeder, Task> seedAction, int? hoursBack = null)
     {
         using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var dataService = new LocalDataService(_duckDb);
-        return await dataService.GetHighImpactQueriesAsync(TestDataSeeder.TestServerId, hoursBack);
+
+        // GetHighImpactQueriesAsync reads collection_time >= DateTime.UtcNow.AddHours(-hoursBack), but the
+        // seed rows are stamped relative to TestDataSeeder.TestPeriodEnd, which is anchored to the most
+        // recent UTC-midnight-plus-4h boundary (#4385) rather than to "now". A fixed hoursBack: 24 window
+        // read from "now" can land up to ~28h after that anchor, so shortly before 04:00 UTC each day the
+        // seeded rows (TestPeriodEnd - 30m) fall outside a naive 24h lookback. Compute hoursBack from
+        // "now" back to TestPeriodStart instead, so the read window always covers the seed at any hour.
+        var effectiveHoursBack = hoursBack ?? HoursBackCoveringTestPeriod();
+        return await dataService.GetHighImpactQueriesAsync(TestDataSeeder.TestServerId, effectiveHoursBack);
     }
+
+    /// <summary>
+    /// Smallest whole hour count such that DateTime.UtcNow.AddHours(-hoursBack) is at or before
+    /// TestDataSeeder.TestPeriodStart, at any time of day the suite runs. See <see cref="HighImpactWindowCoversSeedAtWorstHour"/>
+    /// for the boundary-case proof (03:59 UTC, the worst minute before the anchor rolls forward a day).
+    /// </summary>
+    private static int HoursBackCoveringTestPeriod()
+        => (int)Math.Ceiling((DateTime.UtcNow - TestDataSeeder.TestPeriodStart).TotalHours) + 1;
 
     private static void PrintRecommendations(string scenario, List<RecommendationRow> recs)
     {

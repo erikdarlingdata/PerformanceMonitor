@@ -69,4 +69,12 @@
   <ItemGroup>
     <Resource Include="EDD.ico" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- #3577: the three theme dictionaries a SECOND time, as plain text, under Themes/{Name}Theme.xaml -
+         the same line Lite's project carries, for the same reason. The compiled BAML stays the load path
+         for a theme with no color overrides; a theme WITH overrides is regenerated from this text by the
+         shared ThemeManager (see ThemeXamlRewriter's header for why it must be the text). -->
+    <EmbeddedResource Include="Themes\*.xaml" LogicalName="Themes/%(Filename).xaml" />
+  </ItemGroup>
 </Project>

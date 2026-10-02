@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Globalization;
 using System.Linq;
 
@@ -64,6 +65,16 @@ public static class CollectorRuntimePrecondition
     /// <summary>
     /// The <c>collection_log</c> status meaning the Extended Events session a collector reads is absent or
     /// stopped on the monitored server, so the tolerant reader came back with nothing to say.
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This status word (through
+    /// <see cref="NamedSkipStatusSqlList"/>, last_non_skip_time) is baked, at materialization time, into
+    /// <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves
+    /// the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week of
+    /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
+    /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string CaptureSessionMissingStatus = "SESSION_MISSING";
 
@@ -74,6 +85,16 @@ public static class CollectorRuntimePrecondition
     /// stored explanation instead of expanding the status word itself. Since #3240 a missing extension a
     /// collector DECLARES no longer lands here — that case has its own status
     /// (<see cref="ExtensionMissingStatus"/>), because its remedy is never a grant.
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This status word (through
+    /// <see cref="NamedSkipStatusSqlList"/>, and as the literal permission_denied_count counts) is baked, at materialization
+    /// time, into <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>),
+    /// which serves the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week
+    /// of already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE
+    /// ... IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string DegradedStatus = "PERMISSIONS";
 
@@ -86,8 +107,80 @@ public static class CollectorRuntimePrecondition
     /// says so) — and an optional extension left uninstalled is a legitimate resting state, not a broken
     /// grant. The stored message names the extension; this status is what lets the health surfaces band it
     /// apart.
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This status word (through
+    /// <see cref="NamedSkipStatusSqlList"/>, and as the literal extension_missing_count counts) is baked, at materialization
+    /// time, into <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>),
+    /// which serves the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week
+    /// of already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE
+    /// ... IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string ExtensionMissingStatus = "EXTENSION_MISSING";
+
+    /// <summary>
+    /// The NAMED SKIP vocabulary: every <c>collection_log</c> status meaning the run was neither a result
+    /// nor a fault, but a deliberate stand-down because a runtime precondition on the monitored server was
+    /// unsatisfied. The three constants above, gathered — this class is where each of them is declared and
+    /// explained, so it is also where the question "is this status a skip" is answered.
+    ///
+    /// <para><b>Gathered rather than listed, so a fourth cannot be added without a decision here.</b> Each
+    /// entry is the CONSTANT, not the word, so renaming a status word moves the set and
+    /// <see cref="NamedSkipStatusSqlList"/> with it. A reader that hand-lists the words instead goes stale
+    /// in the direction that makes it pass: the next precondition status to be split out gets read as an
+    /// ordinary outcome until somebody remembers the second copy.</para>
+    ///
+    /// <para><c>ERROR</c>, <c>YIELDED</c> and <c>ABANDONED</c> are deliberately out. An ERROR is a
+    /// monitoring fault and is already loud; a YIELDED is the lock-timeout guard firing on a contended
+    /// target, which is transient by construction and nobody sets or clears; an ABANDONED is the
+    /// wall-clock budget giving up, which has its own count and its own WARNING band. None of the three is
+    /// a state an operator can satisfy on the monitored server, which is what a precondition is.</para>
+    /// </summary>
+    public static readonly IReadOnlySet<string> NamedSkipStatuses =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            ExtensionMissingStatus,
+            DegradedStatus,
+            CaptureSessionMissingStatus,
+        };
+
+    /// <summary>
+    /// <see cref="NamedSkipStatuses"/> as a quoted, comma-separated SQL <c>IN</c> list, for the health
+    /// reads that have to ask the store the same question (#3819).
+    ///
+    /// <para><b>A <c>const</c>, built by concatenating the three constants</b>, because the reads that
+    /// consume it are themselves <c>const</c> interpolated strings — the same shape
+    /// <c>EnumeratedCollectorDriver.AbandonedRunPredicateSql</c> is consumed in. So the SQL cannot carry a
+    /// status word this class does not declare, and a rename reaches the store without anybody editing
+    /// SQL. Ordered as declared rather than sorted: the order is not read by anything, and pinning it to a
+    /// sort would make the list's text depend on a collation nothing else here depends on.</para>
+    ///
+    /// <para>A pin holds this string and <see cref="NamedSkipStatuses"/> to the same membership, so a
+    /// fourth status added to one and not the other fails a build rather than leaving a read asking about
+    /// three of four.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This list (last_non_skip_time) — and adding a fourth
+    /// status to <see cref="NamedSkipStatuses"/>, which moves it — is baked, at materialization time, into
+    /// <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves
+    /// the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week of
+    /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
+    /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
+    /// </summary>
+    public const string NamedSkipStatusSqlList =
+        "'" + ExtensionMissingStatus + "', '" + DegradedStatus + "', '" + CaptureSessionMissingStatus + "'";
+
+    /// <summary>
+    /// True when <paramref name="status"/> is one of <see cref="NamedSkipStatuses"/>. A null or unknown
+    /// status answers FALSE: absence of a status is not a claim that a run stood down, and a status this
+    /// build has never heard of is not one this build may classify as benign.
+    /// </summary>
+    public static bool IsNamedSkip(string? status) =>
+        status is not null && NamedSkipStatuses.Contains(status);
 
     /// <summary>
     /// How long a collector has to have gone dark — no run of any kind, measured against the server's OWN
@@ -102,6 +195,23 @@ public static class CollectorRuntimePrecondition
     /// cannot drift silently.</para>
     /// </summary>
     public const double GoneDarkHours = 24.0;
+
+    /// <summary>
+    /// Minutes of slack on top of a collector's default cadence before any surface may say it never ran. A collector is
+    /// not due until the server's first collection plus its cadence plus this slack (see <see cref="IsInsideFirstRunGrace"/>);
+    /// before that, no run only means the first run has not come round yet.
+    /// </summary>
+    public const int FirstRunSlackMinutes = 10;
+
+    /// <summary>
+    /// What could stop the running_jobs collector, as <c>get_running_jobs</c> words it on both SKUs. One copy, so
+    /// the Lite and Darling tools cannot drift apart. Each cause is named as possible, because the gated-off arm
+    /// cannot see which one applies.
+    /// </summary>
+    public const string RunningJobsPossibleCauses =
+        "Possible cause: this is an AWS RDS instance, where the Agent job tables are not reachable to a " +
+        "monitoring login and no grant changes that. A login without msdb access does not stop this " +
+        "collector: it runs and reports a permission error instead, and a grant takes effect on its next run.";
 
     /// <summary>
     /// The closing sentence every precondition message ends on. One copy, for the same reason
@@ -208,10 +318,12 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
-    /// The precondition explanation for a read whose collector <b>is not being invoked</b> — no run of any
-    /// kind for longer than <see cref="GoneDarkHours"/> — on a server that is demonstrably collecting other
-    /// things, or null when that is not the case, in which case the caller falls through to its own miss
-    /// vocabulary.
+    /// The explanation for a read whose collector <b>is not being invoked</b> on a server that is demonstrably
+    /// collecting other things, or null when that is not the case, in which case the caller falls through to its
+    /// own miss vocabulary. There are three answers, one for each case <see cref="ClassifyGatedOff"/> finds: a
+    /// collector with no run of any kind for longer than <see cref="GoneDarkHours"/> (gone dark), a collector with
+    /// no run at all once it was due (never ran), and a collector with no run yet inside its first-run grace (not
+    /// due yet).
     ///
     /// <para><b>Why this arm has to exist, and why <see cref="CollectionOutcomeMessage"/> cannot cover it.</b>
     /// That method reports what the collector's last run RECORDED. A collector whose <c>AppliesTo</c> gate is
@@ -239,6 +351,12 @@ public static class CollectorRuntimePrecondition
     /// that belongs in <c>unavailable</c>. Both halves are still required — a server that has collected
     /// nothing at all answers null here.</para>
     ///
+    /// <para><b>The first-run grace.</b> A collector with no run at all is not called switched off before it was
+    /// due, by the one rule every surface uses (<see cref="IsInsideFirstRunGrace"/>). Inside the grace the answer is
+    /// the <see cref="NotYetRunMessage"/> sentence: it names both collections and the default cadence, and no cause.
+    /// <see cref="GatedOffStatusWord"/> gives it <see cref="NotYetDueStatusWord"/>, because nothing is in the way of a
+    /// collector that is not due yet. A caller that passes no first collection gets no grace.</para>
+    ///
     /// <para><b>What it must not claim.</b> It cannot say WHICH gate is off, because the facts that decide
     /// are not persisted — <c>HAS_DBACCESS('msdb')</c> and the RDS flag live on the cached connection, not on
     /// the registry. So it names the candidates rather than picking one, and carries the connect-scoped
@@ -251,16 +369,164 @@ public static class CollectorRuntimePrecondition
     /// <param name="collectorLastRunUtc">This collector's most recent run of ANY status against this server,
     /// or null when it has none at all.</param>
     /// <param name="serverLastCollectedUtc">The server's most recent run by ANY collector, or null if none.</param>
+    /// <param name="serverFirstCollectedUtc">The server's oldest run by ANY collector in the same store, or null
+    /// when it has none. Null makes no first-run grace claim, so the never-ran arm speaks as before. It has no default,
+    /// so a caller cannot drop the grace by leaving it out.</param>
     public static string? GatedOffMessage(
         string serverName,
         string collectorName,
         string gateCandidates,
         DateTime? collectorLastRunUtc,
-        DateTime? serverLastCollectedUtc)
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc)
     {
-        if (serverLastCollectedUtc is null)
+        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc))
+        {
+            case GatedOffCase.GoneDark:
+                /* Both instants, because this is a claim about NOW assembled from two stored measurements and the
+                   reader is the only one who can judge the pair. Saying "never run" here would also be false, and
+                   falsifiable by the run log the same reader can query. */
+                return $"The {collectorName} collector is no longer being invoked against {serverName}: its last " +
+                       $"run of any kind{DescribeObserved(collectorLastRunUtc)} predates the server's own newest " +
+                       $"collection{DescribeObserved(serverLastCollectedUtc)} by more than " +
+                       $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours. That combination " +
+                       $"usually means the collector is switched off for this server rather than that it has " +
+                       $"nothing to report. If it is switched off, this read cannot tell you the state it " +
+                       $"describes, only that it is no longer permitted to look. {gateCandidates} " +
+                       ConnectScopedEpilogue;
+
+            case GatedOffCase.NotYetDue:
+                return NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc);
+
+            case GatedOffCase.NeverRan:
+                return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
+                       $"is collecting normally{DescribeObserved(serverLastCollectedUtc)}. That combination usually " +
+                       $"means the collector is switched off for this server rather than that it has nothing to " +
+                       $"report. If it is switched off, this read cannot tell you the state it describes, only " +
+                       $"that it was never permitted to look. {gateCandidates} " +
+                       ConnectScopedEpilogue;
+
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// The status word for the sentence <see cref="GatedOffMessage"/> gives inside a collector's first-run grace. Nothing is
+    /// in the way of a collector that is not due yet: this server could have the data and does not have it right now.
+    /// </summary>
+    public const string NotYetDueStatusWord = "unavailable";
+
+    /// <summary>
+    /// The status word for what <see cref="GatedOffMessage"/> says from the same facts: <see cref="NotYetDueStatusWord"/>
+    /// for the "not run yet" sentence of a collector inside its first-run grace, and <see cref="StatusWord"/> for both notes
+    /// that say it is switched off.
+    /// </summary>
+    public static string GatedOffStatusWord(
+        string collectorName,
+        DateTime? collectorLastRunUtc,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc) =>
+        ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc)
+            == GatedOffCase.NotYetDue
+            ? NotYetDueStatusWord
+            : StatusWord;
+
+    /// <summary>
+    /// The first-run grace, decided here once for every surface in Lite and the Darling viewer and for both MCP tools. A
+    /// collector with no run yet is not overdue until it has been due: the server's first collection plus the collector's
+    /// default cadence plus <see cref="FirstRunSlackMinutes"/>. A collector that runs when monitoring of the server starts has
+    /// a default cadence of 0, so its grace is the slack alone; its daily recapture
+    /// (<see cref="CollectorScheduleDefaults.OnLoadRecaptureMinutes"/>) is not when its first run is due. Measured against the
+    /// server's LAST collection, as the gone-dark arm is, so both instants come from the same store and a server that stopped
+    /// collecting early stays inside the grace. False when either instant is null, for a collector with no default schedule,
+    /// and for one that is off by default, so a caller that read nothing makes no grace claim.
+    /// </summary>
+    public static bool IsInsideFirstRunGrace(string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+    {
+        return serverLastCollectedUtc is { } lastCollected
+               && serverFirstCollectedUtc is { } firstCollected
+               && CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
+               && schedule.DefaultEnabled
+               && schedule.FrequencyMinutes >= 0
+               && lastCollected < firstCollected.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes);
+    }
+
+    /// <summary>
+    /// The sentence for a collector with no run yet that is inside its first-run grace (<see cref="IsInsideFirstRunGrace"/>),
+    /// or null outside it. Every surface that would otherwise say the collector never ran shows this one sentence instead, in
+    /// both apps and both MCP tools, so a new server reads the same everywhere. It names both collections, so a server that
+    /// stopped collecting inside the grace reads as stopped. It names the collector's default cadence as the default, because
+    /// a user may have changed the schedule. The times are UTC, marked with a "Z".
+    /// </summary>
+    public static string? NotYetRunMessage(
+        string serverName, string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+    {
+        if (!IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc))
         {
             return null;
+        }
+
+        var everyMinutes = CollectorScheduleDefaults.All[collectorName].FrequencyMinutes;
+        var cadence = everyMinutes == 0
+            ? "when monitoring of the server starts, then " +
+              CadenceText(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(everyMinutes))
+            : CadenceText(everyMinutes);
+
+        return $"The {collectorName} collector has not run against {serverName} yet. The server started collecting at " +
+               $"{UtcText(serverFirstCollectedUtc)} and last collected at {UtcText(serverLastCollectedUtc)}, and by default " +
+               $"this collector runs {cadence}.";
+    }
+
+    /// <summary>
+    /// How <see cref="NotYetRunMessage"/> words a cadence in minutes, the one formatter every ending uses: "every minute",
+    /// "every N minutes" below an hour, "every hour" or "every H hours" for whole hours, and "every N minutes" otherwise.
+    /// </summary>
+    internal static string CadenceText(int everyMinutes)
+    {
+        if (everyMinutes == 1)
+        {
+            return "every minute";
+        }
+
+        if (everyMinutes >= 60 && everyMinutes % 60 == 0)
+        {
+            var hours = everyMinutes / 60;
+            return hours == 1 ? "every hour" : $"every {hours.ToString(CultureInfo.InvariantCulture)} hours";
+        }
+
+        return $"every {everyMinutes.ToString(CultureInfo.InvariantCulture)} minutes";
+    }
+
+    /// <summary>Which answer <see cref="GatedOffMessage"/> gives from the stored facts.</summary>
+    private enum GatedOffCase
+    {
+        /// <summary>No answer: the server has collected nothing, or the collector ran recently.</summary>
+        None,
+
+        /// <summary>The collector ran, then fell more than <see cref="GoneDarkHours"/> behind the server.</summary>
+        GoneDark,
+
+        /// <summary>The collector has no run yet, and it is inside its first-run grace.</summary>
+        NotYetDue,
+
+        /// <summary>The collector has no run at all, and it was due.</summary>
+        NeverRan,
+    }
+
+    /// <summary>
+    /// The one classification behind both <see cref="GatedOffMessage"/> and <see cref="GatedOffStatusWord"/>, so a
+    /// sentence and its status word cannot disagree.
+    /// </summary>
+    private static GatedOffCase ClassifyGatedOff(
+        string collectorName,
+        DateTime? collectorLastRunUtc,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc)
+    {
+        if (serverLastCollectedUtc is not { } lastCollected)
+        {
+            return GatedOffCase.None;
         }
 
         if (collectorLastRunUtc is { } lastRun)
@@ -269,31 +535,28 @@ public static class CollectorRuntimePrecondition
                server, so anything inside the cutoff is an ordinary gap and this arm must stand aside. Only a
                collector the dispatcher has stopped reaching for can fall this far behind a server that is
                still collecting. */
-            if ((serverLastCollectedUtc.Value - lastRun).TotalHours <= GoneDarkHours)
-            {
-                return null;
-            }
-
-            /* Both instants, because this is a claim about NOW assembled from two stored measurements and the
-               reader is the only one who can judge the pair. Saying "never run" here would also be false, and
-               falsifiable by the run log the same reader can query. */
-            return $"The {collectorName} collector is no longer being invoked against {serverName}: its last " +
-                   $"run of any kind{DescribeObserved(lastRun)} predates the server's own newest " +
-                   $"collection{DescribeObserved(serverLastCollectedUtc)} by more than " +
-                   $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours. That combination " +
-                   $"means the collector's gate is switched off for this server rather than that it has " +
-                   $"nothing to report, so this read cannot tell you the state it describes — it can only " +
-                   $"tell you it is no longer permitted to look. {gateCandidates} " +
-                   ConnectScopedEpilogue;
+            return (lastCollected - lastRun).TotalHours <= GoneDarkHours
+                ? GatedOffCase.None
+                : GatedOffCase.GoneDark;
         }
 
-        return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
-               $"is collecting normally{DescribeObserved(serverLastCollectedUtc)}. That combination means the " +
-               $"collector's gate is switched off for this server rather than that it has nothing to report, " +
-               $"so this read cannot tell you the state it describes — it can only tell you it was never " +
-               $"permitted to look. {gateCandidates} " +
-               ConnectScopedEpilogue;
+        return IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+            ? GatedOffCase.NotYetDue
+            : GatedOffCase.NeverRan;
     }
+
+    /// <summary>
+    /// The row a collector last-run read returns, in its column order: the collector's last run, the server's last
+    /// collection and the server's first collection. Each is null where the store has no such row, and UTC otherwise.
+    /// Lite's read, the Darling service's read and the Darling viewer's copy of it all map their row here, so one test can
+    /// drive the mapping with a <see cref="DataTableReader"/> and no store.
+    /// </summary>
+    public static (DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)
+        CollectorLastRunFrom(IDataRecord row) =>
+        (UtcOrNull(row, 0), UtcOrNull(row, 1), UtcOrNull(row, 2));
+
+    private static DateTime? UtcOrNull(IDataRecord row, int ordinal) =>
+        row.IsDBNull(ordinal) ? null : DateTime.SpecifyKind(row.GetDateTime(ordinal), DateTimeKind.Utc);
 
     /// <summary>
     /// One database's Query Store configuration as the hourly <c>query_store_health</c> collector recorded
@@ -421,6 +684,13 @@ public static class CollectorRuntimePrecondition
         observedUtc is { } when
             ? $" (as of {DateTime.SpecifyKind(when, DateTimeKind.Utc).ToString("u", CultureInfo.InvariantCulture)})"
             : string.Empty;
+
+    private static string UtcText(DateTime? instant)
+    {
+        return instant is { } when
+            ? DateTime.SpecifyKind(when, DateTimeKind.Utc).ToString("u", CultureInfo.InvariantCulture)
+            : string.Empty;
+    }
 
     /// <summary>The stored explanation, quoted. Empty when the runner recorded none.</summary>
     private static string DescribeServerAnswer(string? errorMessage) =>

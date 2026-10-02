@@ -39,7 +39,18 @@ public static class DarlingPgWaitSamplingReader
     /// statement — a background process — kept so attributed and unattributed waits stay distinguishable.</param>
     /// <param name="SampleCount">Samples observed IN THE WINDOW, already differenced.</param>
     /// <param name="EstimatedWaitMs"><c>SampleCount × profile_period_ms</c>. An estimate from a sampling
-    /// profiler, not a measured duration.</param>
+    /// profiler, not a measured duration.
+    /// <para><b>It is wait time OBSERVED, not wait time per interval</b> — and since V133 (#3691) the row says
+    /// how much of the interval was observed. On the extension arm the module samples in-engine for the whole
+    /// interval, so this figure over the window's length is an honest rate. On the service-sampled arm the
+    /// collector watches <c>SamplerSnapshotsPerCycle</c> one-second snapshots (30 s) of each 300 s cycle, so
+    /// the same figure over the window's length understates the rate by the duty cycle, roughly 10×. A rate
+    /// read must divide by <c>pg_wait_sampling.sampled_ms</c> — the milliseconds each collection actually
+    /// observed, one value per <c>collection_time</c>, summed over the collections between the window's two
+    /// endpoints — and treat a NULL <c>sampled_ms</c> (the extension arm, or any pre-V133 row) as "the whole
+    /// interval was observed", which is exactly the arithmetic below. This reader does NOT yet make that
+    /// correction: it reports the estimate as observed and leaves the rate to the consumer, which is the
+    /// follow-on lane's change, not this rung's.</para></param>
     /// <param name="CounterReset">True when the profile was reset inside the window, so the figure covers
     /// only the time since the reset rather than the whole window.</param>
     public sealed record PgWaitSamplingRow(
@@ -52,12 +63,30 @@ public static class DarlingPgWaitSamplingReader
         bool CounterReset,
         DateTime CaptureTime);
 
+    /// <summary>
+    /// One page of sampled waits plus the denominator their shares are taken over (#3541 A7).
+    /// <para><c>WindowTotalSamples</c> is the differenced sample count of EVERY (event type, event, query) series
+    /// in the window, not of the rows on the page. Off the same statement as the rows, as a window aggregate
+    /// over the joined result before <c>LIMIT</c>, so it cannot drift from them. On the page rather than on
+    /// <see cref="PgWaitSamplingRow"/>: a fact about the window, not a series, and a per-row copy would invite
+    /// a reader to sum it.</para>
+    /// </summary>
+    public sealed record PgWaitSamplingPage(List<PgWaitSamplingRow> Rows, long WindowTotalSamples);
+
     /* Newest and oldest per key in one pass each, then differenced. Two DISTINCT ON scans rather than a
        window function because the key is compound and the hypertable is ordered by time - the same idiom
        every other reader here uses.
 
        The key does NOT include database_name: the profile is cluster-wide and the table carries no such
-       column, deliberately (#2599 is about not inventing that attribution). */
+       column, deliberately (#2599 is about not inventing that attribution).
+
+       #3541 A7: window_total_samples is the WHOLE window's differenced sample count, on every row. A window
+       aggregate over the joined result - PostgreSQL evaluates it before ORDER BY / LIMIT - so it sums every
+       series the window holds rather than the rows the cap admits. The tool used to divide each row by the
+       sum of the rows it had fetched, so a three-row page summed to 100% of the samples by construction.
+       The CASE is repeated inside the SUM rather than referenced by alias because a window function cannot
+       name a select-list alias of the same level; the two expressions are pinned identical by test. Appended
+       LAST so the ordinal ORDER BY 4 still names sample_count. */
     public const string PgWaitSamplingSql = """
         WITH newest AS (
             SELECT DISTINCT ON (event_type, event, query_id)
@@ -88,7 +117,11 @@ public static class DarlingPgWaitSamplingReader
             n.profile_period_ms,
             n.backend_count,
             (n.sample_count < o.sample_count) AS counter_reset,
-            n.collection_time
+            n.collection_time,
+            SUM(CASE WHEN n.sample_count < o.sample_count
+                     THEN n.sample_count
+                     ELSE n.sample_count - coalesce(o.sample_count, 0)
+                END) OVER () AS window_total_samples
         FROM newest AS n
         LEFT JOIN oldest AS o
           ON  o.event_type IS NOT DISTINCT FROM n.event_type
@@ -98,13 +131,67 @@ public static class DarlingPgWaitSamplingReader
         LIMIT $4
         """;
 
+    /// <summary>
+    /// Which instrument is feeding this server's <c>pg_wait_sampling</c> rows (#3604), read from the
+    /// collector's own state: <c>PgWaitSamplingCollector</c> records a <c>PgWaitInstrument</c> token under
+    /// <c>collector_state (server_id, 'pg_wait_sampling', 'instrument')</c> on every cycle, whichever arm ran.
+    /// Off the store rather than re-derived here because the decision was made once at connect and the
+    /// collector is the only thing that knows which arm its last cycle took; a read guessing from
+    /// <c>profile_period_ms</c> would be right until an operator set the extension's period to a second.
+    /// <para>Null when no cycle has recorded one — a store written before #3604, or a server whose collector
+    /// has not completed a cycle since. The tool says so rather than picking a default.</para>
+    /// </summary>
+    public const string InstrumentSql = """
+        SELECT state_value, updated_at
+        FROM collector_state
+        WHERE server_id = $1
+        AND   collector_name = 'pg_wait_sampling'
+        AND   state_key = 'instrument'
+        """;
+
+    /// <summary>The recorded instrument and when the collector last recorded it (UTC), or null.</summary>
+    public sealed record WaitInstrumentState(string Instrument, DateTime RecordedAtUtc);
+
+    /// <summary>Runs <see cref="InstrumentSql"/>. An unrecognised token is returned as-is; the tool decides
+    /// whether to echo it.</summary>
+    public static async Task<WaitInstrumentState?> GetWaitInstrumentAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        await using var command = postgres.CreateCommand(InstrumentSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+        {
+            return null;
+        }
+
+        return new WaitInstrumentState(
+            reader.GetString(0),
+            reader.IsDBNull(1) ? default : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+    }
+
+    /// <summary>The rows alone — the WPF Viewer's grid, which has no column for the window total.</summary>
     public static async Task<List<PgWaitSamplingRow>> GetPgWaitSamplingAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken = default) =>
+        (await GetPgWaitSamplingPageAsync(postgres, serverId, startUtc, endUtc, limit, cancellationToken)).Rows;
+
+    /// <summary>
+    /// The paged read: <paramref name="limit"/> rows, most-sampled first, and the whole window's sample count
+    /// beside them. The MCP tool asks for <c>limit + 1</c> so it can OBSERVE truncation rather than infer it.
+    /// </summary>
+    public static async Task<PgWaitSamplingPage> GetPgWaitSamplingPageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var rows = new List<PgWaitSamplingRow>();
+        long windowTotalSamples = 0;
         await using var command = postgres.CreateCommand(PgWaitSamplingSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
@@ -120,6 +207,8 @@ public static class DarlingPgWaitSamplingReader
         {
             var samples = reader.IsDBNull(3) ? 0 : reader.GetInt64(3);
             var periodMs = reader.IsDBNull(4) ? 10 : reader.GetInt32(4);
+            /* SUM over bigint widens to numeric in PostgreSQL; identical on every row, last write wins. */
+            windowTotalSamples = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8));
 
             rows.Add(new PgWaitSamplingRow(
                 EventType: reader.IsDBNull(0) ? null : reader.GetString(0),
@@ -134,6 +223,6 @@ public static class DarlingPgWaitSamplingReader
                     : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)));
         }
 
-        return rows;
+        return new PgWaitSamplingPage(rows, windowTotalSamples);
     }
 }

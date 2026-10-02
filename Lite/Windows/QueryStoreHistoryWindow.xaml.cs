@@ -34,6 +34,8 @@ public partial class QueryStoreHistoryWindow : Window
     private readonly int _hoursBack;
     private readonly string? _connectionString;
     private readonly string _queryText;
+    /// <summary>The zone the tab shows times in: the tick labels and the hover read it each time they draw, and the summary reads it when the history loads.</summary>
+    private readonly Func<TimeZoneInfo> _displayZone;
     private readonly PlanNavigationController _planActions;
     private List<QueryStoreHistoryRow> _historyData = new();
     private ChartHoverHelper? _chartHover;
@@ -42,7 +44,7 @@ public partial class QueryStoreHistoryWindow : Window
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
-    public QueryStoreHistoryWindow(LocalDataService dataService, int serverId, string databaseName, long queryId, long planId, string queryText, int hoursBack, string? connectionString = null)
+    public QueryStoreHistoryWindow(LocalDataService dataService, int serverId, string databaseName, long queryId, long planId, string queryText, int hoursBack, string? connectionString, Func<TimeZoneInfo> displayZone)
     {
         InitializeComponent();
         _dataService = dataService;
@@ -52,11 +54,13 @@ public partial class QueryStoreHistoryWindow : Window
         _planId = planId;
         _hoursBack = hoursBack;
         _connectionString = connectionString;
+        _displayZone = displayZone;
         _queryText = queryText;
 
         _planActions = new PlanNavigationController(
             this,
-            (xml, label, qt) => PlanViewerWindow.ShowPlanAsync(this, xml, label, qt),
+            async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
+                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
             (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite"),
@@ -79,15 +83,24 @@ public partial class QueryStoreHistoryWindow : Window
         try
         {
             _historyData = await _dataService.GetQueryStoreHistoryAsync(_serverId, _databaseName, _queryId, _hoursBack);
+            /* #4766: the grid words each row's times in this window's own zone, as the chart and the summary below do,
+               not in whichever server's tab is selected when the row is drawn (this window stays open after another
+               tab is selected). Set before the rows reach the grid. */
+            foreach (var row in _historyData)
+            {
+                row.Zone = _displayZone;
+            }
+
             _filterManager!.UpdateData(_historyData);
 
             if (_historyData.Count > 0)
             {
                 var totalExec = _historyData.Sum(r => r.ExecutionCount);
                 var planCount = _historyData.Select(r => r.PlanId).Distinct().Count();
-                var first = _historyData.First().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
-                var last = _historyData.Last().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
-                SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
+                var zone = _displayZone();
+                var first = ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, "MM/dd HH:mm");
+                var last = ServerTimeHelper.FormatInstant(_historyData.Last().CollectionTime, zone, "MM/dd HH:mm");
+                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
                                    $"Total Executions: {totalExec:N0} | " +
                                    (planCount > 1 ? $"{planCount} different plans" : "Single plan");
             }
@@ -126,7 +139,7 @@ public partial class QueryStoreHistoryWindow : Window
 
         var unit = tag.Contains("Ms") ? "ms" : "";
         if (_chartHover == null)
-            _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            _chartHover = new ChartHoverHelper(HistoryChart, unit, displayZone: _displayZone);
         else
             _chartHover.Unit = unit;
         _chartHover.Clear();
@@ -139,7 +152,7 @@ public partial class QueryStoreHistoryWindow : Window
         foreach (var planGroup in planGroups)
         {
             var ordered = planGroup.OrderBy(r => r.CollectionTime).ToList();
-            var xs = ordered.Select(r => r.CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes).ToOADate()).ToArray();
+            var xs = ordered.Select(r => r.CollectionTime.ToOADate()).ToArray();
             var ys = ordered.Select(r => GetMetricValue(r, tag)).ToArray();
 
             var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
@@ -151,9 +164,9 @@ public partial class QueryStoreHistoryWindow : Window
             colorIndex++;
         }
 
-        /* #1831: the DateChange variant routes labels through the shared formatter, which converts
-           for the display mode — plain DateTimeTicksBottom() rendered raw server time. */
-        HistoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        /* #4766: X is the collection time as stored, the naive-UTC instant. The display mode reaches only the
+           text: the tick labels here, the hover, and the summary's first and last times. */
+        HistoryChart.Plot.Axes.DateTimeTicksBottomUtc(_displayZone);
         if (planGroups.Count > 1)
         {
             _legendPanel = HistoryChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);

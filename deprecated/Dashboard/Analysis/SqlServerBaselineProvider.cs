@@ -190,7 +190,8 @@ public class SqlServerBaselineProvider
         }
     }
 
-    private static string? GetBaselineQuery(string metricName)
+    // Internal for Dashboard.Tests (InternalsVisibleTo): the #3527 per-second pins read the arm SQL.
+    internal static string? GetBaselineQuery(string metricName)
     {
         // All queries return: hour_of_day, day_of_week, mean_val, stddev_val, sample_count
         // Day-of-week normalization: (DATEPART(weekday, x) + @@DATEFIRST - 1) % 7 gives Sunday=0
@@ -217,21 +218,28 @@ GROUP BY DATEPART(HOUR, collection_time),
             // Cumulative counter — restart exclusion via CTE with LAG.
             // server_start_time is inline in collect.perfmon_stats.
             // Exclude samples within 5 min of a detected restart.
+            // #3527: v is the per-second rate — the per-interval delta divided by the row's measured
+            // sample_interval_seconds — so the baseline population is in the same requests/sec unit as
+            // the detector's window statistic. Interval <= 0 rows (unknowable delta) are skipped, never
+            // read as 0. The restart signature stays on the RAW delta: its > 1000 bar predates the
+            // division and marks a counter reset regardless of cadence.
             SqlServerMetricNames.BatchRequests => @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 ;WITH filtered AS (
     SELECT collection_time, cntr_value_delta,
+           cntr_value_delta * 1.0 / NULLIF(sample_interval_seconds, 0) AS v,
            LAG(cntr_value_delta) OVER (ORDER BY collection_time) AS prev_value
     FROM collect.perfmon_stats
     WHERE collection_time >= @windowStart AND collection_time < @windowEnd
     AND   counter_name = 'Batch Requests/sec'
     AND   cntr_value_delta >= 0
+    AND   sample_interval_seconds > 0
 )
 SELECT DATEPART(HOUR, collection_time) AS hour_of_day,
        (DATEPART(WEEKDAY, collection_time) + @@DATEFIRST - 1) % 7 AS day_of_week,
-       AVG(cntr_value_delta) AS mean_val,
-       STDEV(cntr_value_delta) AS stddev_val,
+       AVG(v) AS mean_val,
+       STDEV(v) AS stddev_val,
        COUNT(*) AS sample_count,
        COUNT(DISTINCT CAST(collection_time AS DATE)) AS distinct_days
 FROM filtered

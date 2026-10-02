@@ -281,20 +281,13 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON DATABASE STATE = START;", conne
     /// Collects deadlocks via the shared <see cref="DeadlocksCollector"/> definition (the
     /// server- vs database-scoped ring-buffer reads, the deadlock_time watermark, and the
     /// victim-inputbuf extraction live there — the cross-SKU parity contract). The XE session
-    /// lifecycle stays here; a missing/inaccessible session is tolerated as zero rows, exactly
-    /// as before.
+    /// lifecycle stays here; a missing/inaccessible session is NOT tolerated as zero rows (#4731): the
+    /// read raises <see cref="XeSessionEnsureException"/> like the ensure does (see
+    /// <see cref="ReadXeSessionAsync"/>), so the run records PERMISSIONS or ERROR with the XE session
+    /// flagged unavailable, and never a SUCCESS over a source it could not read.
     /// </summary>
-    private async Task<int> CollectDeadlocksAsync(ServerConnection server, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await RunCollectorDefinitionAsync(DeadlocksCollector.Instance, server, cancellationToken);
-        }
-        catch (SqlException ex) when (ex.Number == 297 || ex.Number == 15151 || ex.Message.Contains("XE session"))
-        {
-            /* XE session not found or not accessible */
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Deadlock XE session not available: {ex.Message}");
-            return 0;
-        }
-    }
+    private Task<int> CollectDeadlocksAsync(ServerConnection server, CancellationToken cancellationToken)
+        => ReadXeSessionAsync(
+            "deadlock",
+            () => RunCollectorDefinitionAsync(DeadlocksCollector.Instance, server, cancellationToken));
 }

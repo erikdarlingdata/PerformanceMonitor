@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -56,7 +57,8 @@ public sealed class DarlingFleetReaderSqlTests
         var sql = DarlingFleetReader.FleetServersSql;
         Assert.Contains("EXISTS", sql, StringComparison.Ordinal);
         Assert.Contains("FROM config_mute_rules m", sql, StringComparison.Ordinal);
-        Assert.Contains("lower(m.server_name) = lower(COALESCE(s.display_name, s.server_name))", sql, StringComparison.Ordinal);
+        /* A rule keyed on the store id matches by id; only a legacy (NULL id) rule falls back to the name. */
+        Assert.Contains("(m.server_id = s.server_id OR (m.server_id IS NULL AND lower(m.server_name) = lower(COALESCE(s.display_name, s.server_name))))", sql, StringComparison.Ordinal);
         Assert.Contains("m.enabled", sql, StringComparison.Ordinal);
         Assert.Contains("m.expires_at_utc IS NULL OR m.expires_at_utc >", sql, StringComparison.Ordinal);
         Assert.Contains("m.metric_name IS NULL", sql, StringComparison.Ordinal);
@@ -83,15 +85,57 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Equal(expectAzureMi, isAzureMi);
     }
 
-    [Fact]
-    public void LatestSnapshotReads_AreDistinctOnPerServer()
+    /// <summary>
+    /// #3895: each newest-row read is ONE probe per registry server — a <c>LATERAL</c> with its own
+    /// <c>LIMIT 1</c>, ordered on the partition column so ordered ChunkAppend stops in the newest chunk — and
+    /// never the <c>DISTINCT ON (server_id)</c> it replaced, which read, decompressed and sorted every
+    /// retained row of the table to keep one per server. Driven from the enabled registry (the servers the
+    /// cards are built for) minus the targets the registry says are PostgreSQL, which never write these
+    /// tables.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(DarlingFleetReader.FleetCpuSql), "FROM v_cpu_utilization_stats", "ORDER BY collection_time DESC, sample_time DESC")]
+    [InlineData(nameof(DarlingFleetReader.FleetMemorySql), "FROM v_memory_stats", "ORDER BY collection_time DESC")]
+    [InlineData(nameof(DarlingFleetReader.FleetThreadsSql), "FROM v_cpu_scheduler_stats", "ORDER BY collection_time DESC, collection_id DESC")]
+    [InlineData(nameof(DarlingFleetReader.FleetMemoryPressureSql), "FROM v_memory_grant_stats", "ORDER BY collection_time DESC")]
+    public void LatestSnapshotReads_AreOnePerServerProbeFromTheRegistry(string constName, string source, string ordering)
     {
-        Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
-        /* collection_time leads, matching FleetMemorySql; sample_time is the within-batch tiebreak. For the
-           frame, not the cost - LatestCpuReadShapeSqlTests and the constant's own doc carry both halves. */
-        Assert.Contains("ORDER BY server_id, collection_time DESC, sample_time DESC", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
-        Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetMemorySql, StringComparison.Ordinal);
-        Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetThreadsSql, StringComparison.Ordinal);
+        var sql = (string)typeof(DarlingFleetReader).GetField(constName, BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+
+        Assert.Contains("FROM servers AS s", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains(source, sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
+        /* collection_time leads for the frame AND the cost; on the CPU read sample_time is the within-batch
+           tiebreak — LatestCpuReadShapeSqlTests carries the frame half. The LIMIT belongs to the probe. */
+        Assert.Matches(Regex.Escape(ordering) + @"\s+LIMIT 1\s+\) AS latest", sql);
+        Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
+        Assert.Contains(DarlingFleetReader.SqlServerCollectedTargetSql, sql, StringComparison.Ordinal);
+
+        /* The replaced shape, in any spelling that sorts the whole relation to keep one row per server. */
+        Assert.DoesNotContain("DISTINCT ON", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3895: the driver skips exactly the servers the registry POSITIVELY says are PostgreSQL, spelled from
+    /// the vocabulary's own constants and normalised the way <see cref="MonitoredEngineKind.IsPostgres"/>
+    /// normalises. The live arm (<c>FleetReadsAreBoundedLivePostgresTests</c>) evaluates the predicate for
+    /// every token and holds its answer to the C# one row by row.
+    /// </summary>
+    [Fact]
+    public void SqlServerTargetFilter_ExcludesOnlyAPositivePostgresClaim()
+    {
+        var predicate = DarlingFleetReader.SqlServerCollectedTargetSql;
+
+        Assert.StartsWith("(s.engine_kind IS NULL OR ", predicate, StringComparison.Ordinal);
+        Assert.Contains("lower(btrim(s.engine_kind)) NOT IN ('" + MonitoredEngineKind.Postgres + "', '" + MonitoredEngineKind.AuroraPostgres + "')", predicate, StringComparison.Ordinal);
+
+        /* Every PostgreSQL token the vocabulary has is named, and no SQL Server one. */
+        foreach (var kind in MonitoredEngineKind.All)
+        {
+            Assert.Equal(MonitoredEngineKind.IsPostgres(kind), predicate.Contains("'" + kind + "'", StringComparison.Ordinal));
+        }
     }
 
     [Fact]
@@ -105,6 +149,10 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
         Assert.Contains("event_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("event_time <= $2", sql, StringComparison.Ordinal);
+        /* #3895: both scans carry the partition-column floor, and neither an upper bound on it: a late
+           collection is still an event in the window. */
+        Assert.Equal(2, Regex.Matches(sql, @"collection_time >= \$3").Count);
+        Assert.DoesNotContain("collection_time <", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -115,15 +163,26 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
         Assert.Contains("deadlock_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("deadlock_time <= $2", sql, StringComparison.Ordinal);
+        /* #3895: FleetBlockingSql's floor, for its reason. */
+        Assert.Contains("collection_time >= $3", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time <", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3895: the newest grant-snapshot instant per server is found by the per-server probe, and the pools are
+    /// summed AT that instant by equality — never a <c>MAX(collection_time)</c> over every retained row joined
+    /// back to the table, which is what this was.
+    /// </summary>
     [Fact]
     public void FleetMemoryPressureSql_SumsAtNewestSnapshotPerServer()
     {
         var sql = DarlingFleetReader.FleetMemoryPressureSql;
-        Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY m.server_id", sql, StringComparison.Ordinal);
+        Assert.Equal(2, Regex.Matches(sql, "FROM v_memory_grant_stats").Count);
+        Assert.Contains("AND   m.collection_time = latest.collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(m.waiter_count)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(m.granted_memory_mb)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -136,7 +195,7 @@ public sealed class DarlingFleetReaderSqlTests
     }
 
     /// <summary>
-    /// Regression pin for a fleet false-Offline (found live on prod-pos-use1-monitor-01, 2026-08-30): this
+    /// Regression pin for a fleet false-Offline (found live on the use1 monitoring host, 2026-08-30): this
     /// query used to be a bare `GROUP BY server_id` with no bound at all — a full scan of the server's ENTIRE
     /// collection_log history on every fleet-overview call, exactly the pattern already fixed elsewhere the same
     /// day (pg_statement_stats #2691, pg_wait_stats #2695). It must stay windowed like every other fleet read
@@ -147,8 +206,18 @@ public sealed class DarlingFleetReaderSqlTests
     {
         var sql = DarlingFleetReader.FleetLastCollectionSql;
         Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
+        /* #3895: bounded is not enough — as a GROUP BY the 48 hours still aggregated every collector run of
+           every server in them (490,940 rows on DARLING01) for one timestamp each. One probe per enabled
+           registry server, the window kept. #3935 made the join LEFT: a long-dark server is reported with an
+           empty window rather than dropped, so the card can tell it from one never collected
+           (FleetCardTellsDarkFromNeverCollectedTests). */
+        Assert.Contains("FROM servers AS s", sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Matches(@"ORDER BY collection_time DESC\s+LIMIT 1", sql);
+        Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
+        Assert.Contains("s.server_id <> 0", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -193,6 +262,7 @@ public sealed class DarlingFleetReaderSqlTests
     [InlineData(nameof(DarlingFleetReader.FleetThreadsSql))]
     [InlineData(nameof(DarlingFleetReader.FleetBlockingSql))]
     [InlineData(nameof(DarlingFleetReader.FleetDeadlockSql))]
+    [InlineData(nameof(DarlingFleetReader.FleetPgDeadlockSql))]
     [InlineData(nameof(DarlingFleetReader.FleetLastCollectionSql))]
     [InlineData(nameof(DarlingFleetReader.FleetCollectionHealthSql))]
     public void EveryFleetSql_IsPgDialect_NoTSql(string constName)
@@ -230,14 +300,20 @@ public sealed class DarlingFleetDtoJsonTests
             CpuSeverity = HealthSeverity.Critical,
             MemorySeverity = HealthSeverity.Healthy,
             BlockingCount = 4,
+            BlockingRatePerHour = 4.0,
             BlockingSeverity = HealthSeverity.Warning,
             DeadlockCount = 1,
             DeadlockLastSeen = new DateTime(2026, 7, 18, 3, 15, 0, DateTimeKind.Unspecified),
             DeadlockSeverity = HealthSeverity.Critical,
             ThreadsSeverity = HealthSeverity.Unknown,
             FailedCollectorCount = 0,
+            CollectorCount = 40,
             CollectorSeverity = HealthSeverity.Healthy,
             OverallMetricSeverity = HealthSeverity.Critical,
+            /* #3528: deliberately measured < total, so the value pins below cannot pass off a card that
+               serialized one count under both keys. */
+            MeasuredMetricCount = 1,
+            MetricCount = 6,
         };
 
         var json = JsonSerializer.Serialize(card, DarlingFleetReader.JsonOptions);
@@ -247,14 +323,22 @@ public sealed class DarlingFleetDtoJsonTests
             "\"server_id\"", "\"display_name\"", "\"server_name\"", "\"engine_edition\"",
             "\"is_azure_sql_db\"", "\"is_azure_mi\"", "\"is_silenced\"", "\"tags\"", "\"band\"", "\"status\"",
             "\"is_online\"", "\"last_collection\"", "\"cpu_percent\"", "\"total_cpu_percent\"",
-            "\"cpu_severity\"", "\"memory_severity\"", "\"blocking_count\"", "\"blocking_severity\"",
+            "\"cpu_severity\"", "\"memory_severity\"", "\"blocking_count\"", "\"blocking_rate_per_hour\"",
+            "\"blocking_severity\"",
             "\"deadlock_count\"", "\"deadlock_last_seen\"", "\"deadlock_rate_per_hour\"",
             "\"deadlock_severity\"", "\"threads_severity\"",
-            "\"failed_collector_count\"", "\"collector_severity\"", "\"overall_metric_severity\"",
+            "\"failed_collector_count\"", "\"collector_count\"", "\"collector_severity\"", "\"overall_metric_severity\"",
+            "\"measured_metric_count\"", "\"metric_count\"",
         })
         {
             Assert.Contains(field, json, StringComparison.Ordinal);
         }
+
+        /* #3528: the coverage counts ride every card so a consumer can qualify the band label
+           ("Healthy — 1 of 6 measured") — values pinned, not just keys, so the two cannot be swapped or
+           collapsed into one. */
+        JsonAssert.Contains("\"measured_metric_count\": 1", json);
+        JsonAssert.Contains("\"metric_count\": 6", json);
 
         /* Bands / severities serialize as strings, not ordinals — the frontend maps a name to a color. */
         JsonAssert.Contains("\"band\": \"Critical\"", json);
@@ -401,19 +485,36 @@ public sealed class DarlingFleetDeadlockCoverageTests
         => Assert.Equal(expected, FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: false, band));
 
     /// <summary>
-    /// The issue's own case: a PostgreSQL target is never covered, and its collector's band cannot change
-    /// that. <c>pg_deadlocks</c> can be perfectly HEALTHY on all fifty targets and this total still counts
-    /// none of it — the rows are in a different table. That is why PostgreSQL is asked before any band.
+    /// #3539 reversed #3017's PostgreSQL arm: a PostgreSQL target IS covered when its deadlock-source
+    /// collector (<c>pg_database_stats</c>) read, on exactly the terms a SQL Server's <c>deadlocks</c>
+    /// collector is — degraded still counts, silent and denied do not — and the covered arm is
+    /// <c>PostgresTarget</c> rather than <c>Read</c> only because the instrument differs (a counter
+    /// difference, not a graph). The pre-#3539 answer, <c>PostgresTarget</c> on the engine alone, would now
+    /// call a server whose collector never ran "counted".
     /// </summary>
     [Theory]
-    [InlineData(CollectorHealthClassifier.Healthy)]
-    [InlineData(CollectorHealthClassifier.NoPermissions)]
-    [InlineData(CollectorHealthClassifier.Stopped)]
-    [InlineData(null)]
-    public void APostgresTarget_IsNeverCovered_WhateverItsCollectorSays(string? band)
-        => Assert.Equal(
-            FleetDeadlockSource.PostgresTarget,
-            FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: true, band));
+    [InlineData(CollectorHealthClassifier.Healthy, FleetDeadlockSource.PostgresTarget)]
+    [InlineData(CollectorHealthClassifier.Warning, FleetDeadlockSource.PostgresTarget)]
+    [InlineData(CollectorHealthClassifier.Stale, FleetDeadlockSource.PostgresTarget)]
+    [InlineData(CollectorHealthClassifier.Failing, FleetDeadlockSource.PostgresTarget)]
+    [InlineData(CollectorHealthClassifier.NoPermissions, FleetDeadlockSource.CollectorDenied)]
+    [InlineData(CollectorHealthClassifier.Stopped, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(CollectorHealthClassifier.NeverRun, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(null, FleetDeadlockSource.CollectorSilent)]
+    public void APostgresTarget_IsCoveredOnItsOwnCollectorsTerms(string? band, FleetDeadlockSource expected)
+        => Assert.Equal(expected, FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: true, band));
+
+    /// <summary>The one predicate both roll-ups reduce <c>servers_read</c> with: the two covered arms and
+    /// nothing else. Enumerated over the whole enum so a value added later lands uncovered by default.</summary>
+    [Fact]
+    public void ExactlyTheTwoCoveredArmsCount()
+    {
+        Assert.True(FleetDeadlockCoverage.IsCovered(FleetDeadlockSource.Read));
+        Assert.True(FleetDeadlockCoverage.IsCovered(FleetDeadlockSource.PostgresTarget));
+        Assert.False(FleetDeadlockCoverage.IsCovered(FleetDeadlockSource.CollectorSilent));
+        Assert.False(FleetDeadlockCoverage.IsCovered(FleetDeadlockSource.CollectorDenied));
+        Assert.Equal(2, Enum.GetValues<FleetDeadlockSource>().Count(FleetDeadlockCoverage.IsCovered));
+    }
 
     /// <summary>
     /// A card that sets nothing reads as UNCOVERED, and that is the load-bearing default. <c>DeadlockSource</c>
@@ -450,57 +551,97 @@ public sealed class DarlingFleetDeadlockCoverageTests
             {
                 Card(1, band: CollectorHealthClassifier.Healthy),
                 Card(2, band: CollectorHealthClassifier.Failing),
-                Card(3, isPostgres: true),
-                Card(4, isPostgres: true),
+                Card(3, isPostgres: true, band: CollectorHealthClassifier.Healthy),
+                Card(4, isPostgres: true, band: CollectorHealthClassifier.Stale),
                 Card(5, band: CollectorHealthClassifier.Stopped),
                 Card(6, band: CollectorHealthClassifier.NoPermissions),
                 Card(7, band: null),
+                /* #3539: a PostgreSQL target whose pg_database_stats collector left no band is SILENT, not
+                   a PostgreSQL bucket entry - the engine no longer answers on its own. */
+                Card(8, isPostgres: true, band: null),
             },
             Now, Now.AddHours(-1), Now);
 
         var coverage = rollup.DeadlockCoverage;
 
-        Assert.Equal(2, coverage.ServersRead);
-        Assert.Equal(7, coverage.ServersTotal);
+        /* Four read: two SQL Servers through their deadlocks collector, two PostgreSQL targets through
+           pg_database_stats (#3539). */
+        Assert.Equal(4, coverage.ServersRead);
+        Assert.Equal(8, coverage.ServersTotal);
+        /* The PostgreSQL sub-count names the instrument for two of the four read. */
         Assert.Equal(2, coverage.PostgresServers);
-        Assert.Equal(2, coverage.ServersCollectorSilent);   // STOPPED + the null band
+        Assert.Equal(3, coverage.ServersCollectorSilent);   // STOPPED + the null band + the bandless PostgreSQL target
         Assert.Equal(1, coverage.ServersCollectorDenied);
 
         /* Every server is accounted for exactly once — an unattributed server would mean coverage that
-           reports a gap it cannot explain, which is the same shape as a total that reports no denominator. */
+           reports a gap it cannot explain, which is the same shape as a total that reports no denominator.
+           Three terms, not four: postgres_servers is a SUBSET of servers_read since #3539, and a consumer
+           still summing it in would over-count the fleet by every PostgreSQL target. */
         Assert.Equal(
             coverage.ServersTotal,
-            coverage.ServersRead + coverage.PostgresServers
-                + coverage.ServersCollectorSilent + coverage.ServersCollectorDenied);
+            coverage.ServersRead + coverage.ServersCollectorSilent + coverage.ServersCollectorDenied);
+        Assert.True(coverage.PostgresServers <= coverage.ServersRead);
 
         /* And it agrees with the field the fleet already reported. */
         Assert.Equal(rollup.TotalServers, coverage.ServersTotal);
     }
 
     /// <summary>
-    /// The measured case, end to end: a PostgreSQL-only fleet reports <c>total_deadlocks: 0</c> with zero
-    /// coverage beside it, and the note sends the reader to the tool that can actually answer.
+    /// The measured case, end to end (#3539 reversed its direction): a PostgreSQL-only fleet whose
+    /// <c>pg_database_stats</c> collectors are running reports FULL coverage, its deadlocks summed into
+    /// <c>total_deadlocks</c>, and the note names the instrument and the tool that has the graphs — the
+    /// pre-#3539 sentence, "cannot count at all", is gone.
     /// </summary>
     [Fact]
-    public void APostgresOnlyFleet_ReportsZeroCoverage_AndNamesTheToolThatCanAnswer()
+    public void APostgresOnlyFleet_IsCovered_AndTheNoteNamesTheInstrument()
     {
         var rollup = DarlingFleetReader.BuildRollup(
-            new[] { Card(1, isPostgres: true), Card(2, isPostgres: true), Card(3, isPostgres: true) },
+            new[]
+            {
+                Card(1, isPostgres: true, band: CollectorHealthClassifier.Healthy, deadlockCount: 2),
+                Card(2, isPostgres: true, band: CollectorHealthClassifier.Healthy),
+                Card(3, isPostgres: true, band: CollectorHealthClassifier.Failing, deadlockCount: 1),
+            },
             Now, Now.AddHours(-1), Now);
 
-        Assert.Equal(0, rollup.TotalDeadlocks);
-        Assert.Equal(0, rollup.DeadlockCoverage.ServersRead);
+        Assert.Equal(3, rollup.TotalDeadlocks);
+        Assert.Equal(3, rollup.DeadlockCoverage.ServersRead);
         Assert.Equal(3, rollup.DeadlockCoverage.PostgresServers);
 
         var note = rollup.DeadlockCoverage.Note;
 
-        Assert.Contains("read a deadlock source for 0 of 3", note, StringComparison.Ordinal);
+        Assert.Contains("read a deadlock source for 3 of 3", note, StringComparison.Ordinal);
+        Assert.Contains("3 of those are PostgreSQL targets counted from the server's own pg_stat_database.deadlocks counter", note, StringComparison.Ordinal);
         Assert.Contains("get_pg_deadlocks", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("cannot count", note, StringComparison.Ordinal);
 
         /* The two causes that do not apply are absent, so a reader is not handed three actions when one is
            called for. */
         Assert.DoesNotContain("get_collection_health", note, StringComparison.Ordinal);
         Assert.DoesNotContain("needs a grant", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The cross-server PostgreSQL deadlock read is a per-series counter DIFFERENCE, clamped, summed —
+    /// pinned on the SQL's text because the alternative, <c>SUM(deadlocks)</c>, is a plausible-looking
+    /// one-liner that returns a lifetime counter multiplied by the sample count (measured: eight million
+    /// "deadlocks" on a store with none in the window). The live test runs it; this stops a rewrite from
+    /// quietly reintroducing the sum.
+    /// </summary>
+    [Fact]
+    public void ThePostgresDeadlockRead_DifferencesTheCounterPerDatabaseSeries_AndNeverSumsTheColumn()
+    {
+        var sql = DarlingFleetReader.FleetPgDeadlockSql;
+
+        Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(GREATEST(raw_delta, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time) FILTER (WHERE raw_delta > 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
+        /* Windowed on the partitioning column, both bounds, like the SQL Server twin. */
+        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -548,7 +689,7 @@ public sealed class DarlingFleetDeadlockCoverageTests
     {
         var json = JsonSerializer.Serialize(
             DarlingFleetReader.BuildRollup(
-                new[] { Card(1, isPostgres: true), Card(2, band: CollectorHealthClassifier.Healthy) },
+                new[] { Card(1, isPostgres: true, band: CollectorHealthClassifier.Healthy), Card(2, band: CollectorHealthClassifier.Healthy) },
                 Now, Now.AddHours(-1), Now),
             DarlingFleetReader.JsonOptions);
 
@@ -564,12 +705,17 @@ public sealed class DarlingFleetDeadlockCoverageTests
 
         JsonAssert.Contains("\"deadlock_source\": \"PostgresTarget\"", json);
         JsonAssert.Contains("\"deadlock_source\": \"Read\"", json);
-        JsonAssert.Contains("\"servers_read\": 1", json);
+        /* Both covered (#3539): servers_read counts the PostgreSQL target, and postgres_servers names it
+           as the counter-read one of the two. */
+        JsonAssert.Contains("\"servers_read\": 2", json);
+        JsonAssert.Contains("\"postgres_servers\": 1", json);
     }
 
     private static readonly DateTime Now = new(2026, 9, 5, 12, 0, 0, DateTimeKind.Unspecified);
 
-    private static FleetServerCard Card(int id, bool isPostgres = false, string? band = null) =>
+    /// <param name="band">The ENGINE'S deadlock-source collector band — <c>deadlocks</c> on a SQL Server,
+    /// <c>pg_database_stats</c> on a PostgreSQL target (#3539); the card carries one field for it.</param>
+    private static FleetServerCard Card(int id, bool isPostgres = false, string? band = null, int deadlockCount = 0) =>
         new()
         {
             ServerId = id,
@@ -577,6 +723,7 @@ public sealed class DarlingFleetDeadlockCoverageTests
             ServerName = "target-" + id.ToString(CultureInfo.InvariantCulture),
             IsPostgres = isPostgres,
             DeadlockCollectorBand = band,
+            DeadlockCount = deadlockCount,
         };
 }
 
@@ -597,7 +744,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
     private const string NoHistoryName = "fleet-reader-e2e-no-history";
 
     /// <summary>
-    /// Regression test for a fleet false-Offline found live on prod-pos-use1-monitor-01 (2026-08-30): a server
+    /// Regression test for a fleet false-Offline found live on the use1 monitoring host (2026-08-30): a server
     /// with NO row in <c>collection_log</c> at all — the "never collected" bootstrap state — must band Warning
     /// with <c>IsOnline = null</c> and <c>AwaitingFirstCollection = true</c>
     /// (<see cref="ServerCollectionStatusRules.FlagsFor"/>), never <c>FleetHealthBand.Offline</c> with
@@ -674,9 +821,15 @@ public sealed class DarlingFleetReaderLivePostgresTests
             await InsertServerAsync(connection, XeServerId, XeName, 5, ct);
             await InsertServerAsync(connection, DmvServerId, DmvName, 3, ct);
 
-            /* XE server: 2 XE reports + 1 DMV snapshot -> fallback prefers XE (count 2). */
-            await InsertBlockedProcessAsync(connection, XeServerId, XeName, at, ct);
-            await InsertBlockedProcessAsync(connection, XeServerId, XeName, at.AddMinutes(1), ct);
+            /* XE server: 5 XE reports + 1 DMV snapshot -> fallback prefers XE (count 5). Five inside the
+               one-hour card window is 5/hr, the blocking band's Warning tier exactly (#3539 A3) — two
+               would be the measured quiet mode and Healthy by count, and this server has to sit in the
+               WARNING band for the cross-band ordering assertion below. */
+            for (var i = 0; i < 5; i++)
+            {
+                await InsertBlockedProcessAsync(connection, XeServerId, XeName, at.AddSeconds(i), ct);
+            }
+
             await InsertDmvBlockingAsync(connection, XeServerId, XeName, at, ct);
 
             /* DMV-only server: 3 DMV snapshots (fallback), and enough deadlocks to clear the rate tier. */
@@ -701,8 +854,12 @@ public sealed class DarlingFleetReaderLivePostgresTests
             var xe = result.Cards.Single(c => c.ServerId == XeServerId);
             var dmv = result.Cards.Single(c => c.ServerId == DmvServerId);
 
-            /* XE preferred: 2 events, no deadlock -> Warning band. */
-            Assert.Equal(2, xe.BlockingCount);
+            /* XE preferred: 5 events (5.0/hr over the card's hour, the Warning tier), no deadlock ->
+               Warning band, and the rate rides the card beside the count (#3539 A3). */
+            Assert.Equal(5, xe.BlockingCount);
+            Assert.Equal(5.0, xe.BlockingRatePerHour);
+            Assert.Equal(TimeSpan.FromHours(1), xe.BlockingWindow);
+            Assert.Equal(HealthSeverity.Warning, xe.BlockingSeverity);
             Assert.Equal(0, xe.DeadlockCount);
             Assert.Equal(FleetHealthBand.Warning, xe.Band);
             Assert.True(xe.IsOnline);
@@ -712,9 +869,11 @@ public sealed class DarlingFleetReaderLivePostgresTests
             Assert.True(xe.IsAzureSqlDb);
             Assert.False(xe.IsAzureManagedInstance);
 
-            /* DMV fallback: 3 events -> Warning on the blocking axis, 25 deadlocks/hr -> Critical on the
-               deadlock axis, and worst-wins makes the card Critical. */
+            /* DMV fallback: 3 snapshots (3/hr, Healthy by count — the fallback's unit is coarser and the
+               rows carry no wait), 25 deadlocks/hr -> Critical on the deadlock axis, and worst-wins makes
+               the card Critical. */
             Assert.Equal(3, dmv.BlockingCount);
+            Assert.Equal(HealthSeverity.Healthy, dmv.BlockingSeverity);
             Assert.Equal(25, dmv.DeadlockCount);
             Assert.Equal(FleetHealthBand.Critical, dmv.Band);
 

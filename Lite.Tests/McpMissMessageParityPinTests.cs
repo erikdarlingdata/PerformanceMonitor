@@ -61,6 +61,26 @@ public sealed class McpMissMessageParityPinTests
         Assert.True(empty > gate, $"{relativePath} no longer keeps the empty miss as the last resort");
     }
 
+    /// <summary>
+    /// The gated-off arm's possible cause for running_jobs. It used to be a literal at each tool's call site,
+    /// and the two copies are exactly what drifts. Both tools now pass the one shared constant, so the text a
+    /// caller reads is identical on both SKUs; this pins that each call still passes it.
+    /// </summary>
+    [Theory]
+    [InlineData("Lite/Mcp/McpJobTools.cs")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs")]
+    public void BothSkus_PassTheSharedRunningJobsCause(string relativePath)
+    {
+        var source = File.ReadAllText(Path.Combine(ParitySource.RepoRoot(), relativePath));
+
+        var call = source.IndexOf("GatedOffStatusAsync(", StringComparison.Ordinal);
+        var cause = call < 0 ? -1 : source.IndexOf("CollectorRuntimePrecondition.RunningJobsPossibleCauses", call, StringComparison.Ordinal);
+
+        Assert.True(call > 0, $"{relativePath} no longer calls GatedOffStatusAsync");
+        Assert.True(cause > call && !source[call..cause].Contains(';', StringComparison.Ordinal),
+            $"{relativePath} does not pass CollectorRuntimePrecondition.RunningJobsPossibleCauses to its GatedOffStatusAsync call");
+    }
+
     private const string LiteMcpDir = "Lite/Mcp";
     private const string DarlingMcpDir = "Darling/PerformanceMonitor.Darling.Service/Mcp";
 
@@ -90,6 +110,37 @@ public sealed class McpMissMessageParityPinTests
         "in EITHER window, so there is nothing to compare — this is NOT a report that nothing changed.",
         "The BASELINE window produced no facts at all, so every fact below counts as a new issue only because there was nothing to compare it against.",
         "The COMPARISON window produced no facts at all, so every fact below counts as a resolved issue only because there is nothing in the recent window to compare against.",
+
+        /* The analysis family's coverage caveats (#3538 A2). The NUMBERS in them come from
+           WindowCoverage.Describe(), shared by construction; what lives twice is the sentence each tool
+           body wraps around them, and that is what would drift — one SKU telling a caller its rates are
+           per observed time while the other said nothing. analyze_server (findings and the scoped
+           all-clear), get_analysis_facts (the partial caveat and the unobserved miss), compare_analysis
+           (either side partly collected, and the closing warning). */
+        "Rates and fractions below are per observed time, so they are not deflated by the gap — but the unobserved stretch could have held anything, and nothing here speaks for it. Check get_collection_health for why collection stopped.",
+        "of this window the collector observed — a PARTIAL reading, not a full all-clear. ",
+        ". The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.",
+        "Every fraction-of-period and per-hour value below is per OBSERVED time (period_duration_ms × coverage_fraction, or observed_hours), not per nominal window; the COLLECTION_GAP fact carries the hole.",
+        ", so no windowed fact (wait fractions, blocking or deadlock rates) exists to show.",
+        "point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those.",
+        "The BASELINE window was only partly collected: ",
+        "The COMPARISON window was only partly collected: ",
+        ". Its rates are per observed time, and its windowed facts are absent where nothing was observed.",
+        "A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.",
+
+        /* The analysis family's collection caveats (#3691). The SENTENCE comes from CollectionCaveats.Describe(),
+           shared by construction; what lives twice is the label each tool body puts in front of it and the
+           description sentence that promises the field — analyze_server (three envelopes) and
+           get_analysis_facts (three envelopes), both SKUs. */
+        " COLLECTION CAVEAT: ",
+        "the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the status prose says so; the field is absent on a clean pass, and an empty result over unread families is not an all-clear. The empty envelope also states fact_count (facts the scorer saw) and facts_scored (those graded above zero), so scored-but-nothing-fired is told apart from no-fact-emitted.",
+        "the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the caveat says so; the field is absent on a clean read, and a fact set missing those families is not evidence that they were quiet.",
+
+        /* compare_analysis's verdict reading (#3538 A3). The band RULES live once, in the shared
+           ComparisonBanding, and cannot drift; what lives twice is the sentence each tool body puts on the
+           payload about what a verdict is, and the description that promises it. */
+        "Each row is banded by how far its VALUE moved on this server's own scale (band_source says which rule; band_rules states them), not by the severity formula's slope. One window against one window cannot show that a change caused anything: a same-hour-yesterday comparison at N=1 vs N=1 is a difference, not an experiment. Count families, not rows, to count causes.",
+        "What \\\"worse\\\" does NOT mean: this is one window against one window — same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat.",
 
         /* get_query_heatmap (#2484) — the three empty branches, one of which (a collected but IDLE
            window) no other read has. */
@@ -137,11 +188,77 @@ public sealed class McpMissMessageParityPinTests
         "A few preconditions are the exception and SAY SO IN THEIR OWN MESSAGE: the fact that gates them is read once when the service connects to that server and cached for the connection's life",
         "telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates",
 
-        /* The gated-off arm's GATE CANDIDATES (#2559). The message body itself comes from the shared
-           CollectorRuntimePrecondition and is byte-identical by construction, so it does not belong here —
-           but this sentence is supplied by each tool body at its own call site, lives twice, and is exactly
-           what drifts. A tree missing it is a tree whose get_running_jobs never grew the arm at all. */
-        "tables are not reachable to a monitoring login at all and no grant changes that.",
+        /* The confidence DEFINITION (#3538 A6). The confidence_basis STRING itself is built by the shared
+           StoryConfidence.DescribeBasis and is byte-identical by construction, so it does not belong here;
+           what lives twice is the tool-description sentence teaching a caller what the number is — and
+           that is exactly the text that would drift into one SKU saying "evidence score" while the other
+           still implied a probability. analyze_server, get_analysis_findings (the legacy-row warning) and
+           get_analysis_facts (the baseline_confidence disambiguation), plus the instructions rows. */
+        "confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain",
+        "Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them.",
+        "Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape and they must not be read as corroborated.",
+        "For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server.",
+
+        /* #3691: the facts read runs the anomaly detector on both SKUs, and the sentence teaching a caller
+           that ANOMALY_* facts are on this read — with which metadata and at what cost — lives twice in the
+           get_analysis_facts description. A SKU whose description dropped it would send its callers back to
+           analyze_server for gate metadata the facts read now carries. */
+        "The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's.",
+        "Each finding's `confidence` is an EVIDENCE score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on",
+        "(an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`)",
+
+        /* #3541 A9 / A13. The purged-day refusal (get_daily_summary), the filtered-miss sentences
+           (get_top_queries_by_cpu under parallel_only / min_dop; get_active_queries under database_name /
+           blocking_only) and the negative-span refusal all live twice; each is a sentence whose whole job is
+           to say WHICH kind of nothing came back, and a SKU that reworded one alone would send its callers to
+           a different next step. The negative-span refusal is built by McpHelpers.ValidateUncappedWindow and
+           is shared by construction; what lives twice is the call, pinned by McpPageContractTests. */
+        "): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
+        ". The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+        ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
+
+        /* #3541 A12 — the health-parser family's four-rung empty ladder, now one EmptyAsync per SKU that all
+           nine reads climb. The rung sentences sit between interpolation holes (server, hours, event type,
+           stamp), so what is compared is the literal text a caller receives. The dead rung keeps the
+           "system_health session is started" sentence EngineCapabilityMissTests pins on both SKUs. */
+        ". Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
+        "), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
+        " — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
+        "No system_health events of ANY type have EVER been captured for ",
+        ", so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
+
+        /* #3541 A12 — get_query_store_regressions' per-percent reason (a 0 baseline has no ratio), the
+           trend trio's unrated-point note, get_pvs_stats' three share reasons, and get_table_index_sizes'
+           history note. Each is emitted by a helper or envelope builder that lives once per SKU. */
+        " is null: no_baseline — ",
+        " is 0, so the ratio has no denominator; this is NOT 0% change. Compare ",
+        " collection(s) had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways — the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0 — such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates (",
+        "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown — not zero.",
+        "database_data_size_mb was not captured for this database, so there is no denominator — the share is unknown, not zero.",
+        "database_data_size_mb is 0, so the share has no denominator — the share is unknown, not zero.",
+        " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_* — it spans exactly growth_window_days.",
+        "the store holds a single day of snapshots for this server, so no growth is knowable yet — every growth figure is null, not 0",
+
+        /* #3653 Q11 — errors one shape. The instructions paragraph that teaches a caller the FIFTH status
+           word: every tool's caught exception is McpHelpers.FormatError's {status:"error", message, hints}
+           envelope on both SKUs (a WIRE CHANGE for the 214 tools that answered with a bare sentence until
+           then). The envelope itself is built once in Common and is identical by construction; what lives
+           twice is the sentence teaching an agent to branch on `status` rather than on prose, and a SKU that
+           reworded it alone would teach one client to read a failure as text again. The example envelope is
+           pinned byte-for-byte because it is the one place the shape is spelled out for a reader. */
+        "Every tool FAILURE — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{\"status\":\"error\",\"message\":\"Error during <tool_name>: <what went wrong>\",\"hints\":{\"operation\":\"<tool_name>\"}}`.",
+        "It is the fifth `status` word and the only one that is not an answer about the data: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema.",
+
+        /* #3739 — refusals one shape. The sentences that teach a caller the SIXTH status word: a refusal (a
+           parameter the tool cannot honor, a server name that resolves to nothing, a required parameter not
+           sent) is McpHelpers.Refusal's {status:"invalid", message, hints.parameter} envelope on both SKUs —
+           a WIRE CHANGE for the ~400 validation bails that answered with the validator's bare sentence until
+           then. Until #3739 each SKU carried its own trailing sentence here (Lite: "not this envelope";
+           Darling: "a handful of the PostgreSQL reads wrap that sentence in the same `error` envelope") because
+           the two said different true things; now they say the same true thing and the whole paragraph is
+           shared. The example envelope is pinned byte-for-byte for the reason the failure's is. */
+        "A REFUSAL — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{\"status\":\"invalid\",\"message\":\"<what was refused, and what is accepted>\",\"hints\":{\"parameter\":\"<parameter_name>\"}}`.",
+        "The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. Six `status` words, then: four kinds of nothing, one failure (`error`: retry or report), one refusal (`invalid`: correct the call).",
     };
 
     [Theory]

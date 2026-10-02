@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -37,15 +38,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpDefaultTraceTools
 {
-    [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. event_time is UTC here, the same frame as this tool's own as_of, so it lines up directly against get_collection_log's collection_time and list_servers' last_collection (the Default Trace stores its StartTime in the monitored server's local clock; this read de-skews it). NOTE: configuration-change events are intentionally excluded here to avoid double-counting — use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
+    [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events from the built-in Default Trace: file auto-grow/shrink stalls over 1 second, ErrorLog writes at severity 16+ (a null severity also counts), schema DDL, security audits, and Server Memory Change, each tagged with category, over an event_time window ending at as_of, newest first. Config-change events are excluded: use get_server_config_changes / get_database_config_changes / get_trace_flag_changes instead. Empty: nothing significant in the window, or nothing collected in it; not_collected means this engine has no default trace (Azure SQL Database). <<GUIDE>> Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. event_time is UTC here, the same frame as this tool's own as_of, so it lines up directly against get_collection_log's collection_time and list_servers' last_collection (the Default Trace stores its StartTime in the monitored server's local clock; this read de-skews it). NOTE: configuration-change events are intentionally excluded here to avoid double-counting — use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
     public static async Task<string> GetDefaultTraceEvents(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of events to return. Default 100.")] int limit = 100,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
@@ -55,7 +57,7 @@ public sealed class DarlingMcpDefaultTraceTools
         {
             var now = windowEnd;
             var all = await DarlingDefaultTraceReader.ReadEventsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
             /* The significant-set gate (shared with the viewer's System Events surface): every curated
                category is significant as collected, except ErrorLog which must clear the severity floor. */
@@ -64,7 +66,7 @@ public sealed class DarlingMcpDefaultTraceTools
                 .ToList();
 
             if (significant.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events", cancellationToken)
                     ?? McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
 
             var events = significant.Take(limit).Select(r =>
@@ -104,7 +106,7 @@ public sealed class DarlingMcpDefaultTraceTools
                 events
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_default_trace_events", ex);
         }

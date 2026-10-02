@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
@@ -17,6 +18,23 @@ public sealed class McpAlertTools
     /// <summary>All non-idle CPU. Darling's <c>ViewerDataService.CpuModeTotal</c>.</summary>
     internal const string CpuModeTotal = "total";
 
+    /// <summary>The wire-side deprecation note for <c>poison_wait.threshold_ms</c> (#3653) — Darling's
+    /// <c>DarlingMcpAlertTools.PoisonWaitThresholdMsNote</c>, byte for byte; <c>McpAlertSettingsKeyTests</c>
+    /// reads that declaration to hold the two equal, the way it holds the cpu.mode vocabulary.</summary>
+    internal const string PoisonWaitThresholdMsNote =
+        "retired by #3593 — the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
+
+    /// <summary>The <c>analysis.uncorroborated_route_note</c> text (#3712). Darling's twin states the precedence
+    /// between the knob's TWO homes there (the settings-row column since V137, over darling.json) and publishes
+    /// which one decided under a provenance key beside the route; Lite has ONE home, its settings file, so this
+    /// note says where it is edited and there is no source key to publish (<c>McpAlertSettingsKeyTests</c> holds
+    /// that omission as a decision).</summary>
+    internal const string UncorroboratedRouteNote =
+        "#3712: 'digest' (default) keeps a lone uncorroborated finding off email, the webhooks and the tray — it is still "
+        + "recorded (Alerts tab status Digest) and shown in Recommendations with a not-paged marker; 'page' restores delivery of "
+        + "every finding at or above notify_severity. A corroborated finding is delivered under either value. Edited in "
+        + "Settings → Alerts ('Only notify on corroborated findings') or as analysis_uncorroborated_route in the settings file.";
+
     /// <summary>
     /// Lite's <see cref="CpuAlertMode"/> in Darling's wire vocabulary (#1911). Deliberately NOT
     /// <c>App.AlertCpuMode.ToString()</c>: that emits the C# enum names <c>Total</c>/<c>SqlOnly</c>, which no
@@ -27,12 +45,15 @@ public sealed class McpAlertTools
     internal static string CpuModeFor(CpuAlertMode mode) =>
         mode == CpuAlertMode.SqlOnly ? CpuModeSql : CpuModeTotal;
 
-    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log. Shows what alerts fired, when, and whether email was sent successfully. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>>Gets recent alert history from the alert log, NEWEST FIRST. Shows what alerts fired, when, and whether email was sent successfully. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Alerts History tab. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. On this edition an alert that was dismissed AFTER aging into the parquet archive is removed by the archive view itself and can be neither returned nor counted here. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate kept it off email, the webhooks and the tray — it is persisted, shown in Recommendations with a not-paged marker, and routing_reason on the row says which components decided; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, on 'digest' rows, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. routing is the corroboration gate's decision for an 'Analysis: …' finding, one step upstream of delivery: 'page' when it earned a channel (two or more facts in its chain, a matched co-fire check, or one of the two by-construction stories), 'digest' when it was a lone uncorroborated fact; routing_reason names the components. Both are null on engine alerts and on analysis rows written before the gate existed. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable.")]
     public static async Task<string> GetAlertHistory(
         LocalDataService dataService,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum rows to return, newest first. Default 50. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        /* Appended after as_of: MCP invokes by name, and a trailing optional is the one position no existing
+           positional C# caller can be re-bound by. Same convention as Darling's twin. */
+        [Description("Include alerts an operator has dismissed in the Alerts History tab. Default false, which is the tab's own read.")] bool include_dismissed = false)
     {
         try
         {
@@ -42,32 +63,96 @@ public sealed class McpAlertTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetAlertHistoryAsync(hours_back, limit, asOfUtc: windowEnd);
+            /* #3541 A3: over-fetch by one so truncation is OBSERVED rather than inferred from count == limit.
+               The cap was already the caller's here; what was missing was any way to tell a window of
+               exactly `limit` alerts from a busier one, and any statement that the dismissed rows had been
+               removed. Same shape as Darling's twin. */
+            var rows = await dataService.GetAlertHistoryAsync(hours_back, limit + 1, asOfUtc: windowEnd, includeDismissed: include_dismissed);
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
 
-            if (rows.Count == 0)
+            /* The hidden filter, measured: how many rows in this window it removed. Zero is a real answer
+               (nothing was hidden). Not probed when the filter is off, because then it removed nothing by
+               construction. */
+            var dismissedExcludedCount = include_dismissed
+                ? 0L
+                : await dataService.CountDismissedAlertsAsync(hours_back, serverId: null, asOfUtc: windowEnd);
+
+            if (page.Count == 0)
             {
-                return McpHelpers.Status("empty", "No alerts found in the specified time range.");
+                /* An empty default page over a window that DOES hold dismissed rows is not "no alerts": it is
+                   "every alert here was acknowledged", and the one-sentence quiet-window answer would send
+                   the caller off widening a window whose contents they were never shown. */
+                return dismissedExcludedCount > 0
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No undismissed alerts found in the specified time range, but {dismissedExcludedCount} dismissed alert(s) were excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
+                    : McpHelpers.Status("empty", "No alerts found in the specified time range.");
             }
 
-            var alerts = rows.Select(r => new
+            var alerts = page.Select(r =>
             {
-                alert_time = r.AlertTime.ToString("o"),
-                server_id = r.ServerId,
-                server_name = r.ServerName,
-                metric_name = r.MetricName,
-                current_value = r.CurrentValue,
-                threshold_value = r.ThresholdValue,
-                alert_sent = r.AlertSent,
-                notification_type = r.NotificationType,
-                send_error = r.SendError,
-                muted = r.Muted,
-                detail_text = r.DetailText
+                var (severity, severitySource) = AlertHistoryRowSeverity.Describe(r.MetricName, r.ContextJson);
+                var routing = AlertContextSerializer.TryReadRouting(r.ContextJson);
+                return new
+                {
+                    alert_time = r.AlertTime.ToString("o"),
+                    server_id = r.ServerId,
+                    server_name = r.ServerName,
+                    metric_name = r.MetricName,
+                    current_value = r.CurrentValue,
+                    threshold_value = r.ThresholdValue,
+                    alert_sent = r.AlertSent,
+                    notification_type = r.NotificationType,
+                    send_error = r.SendError,
+                    muted = r.Muted,
+                    /* Per row, so a page that mixes the two populations labels each one. Always false on the
+                       default read, which is a true statement about every row on it. */
+                    dismissed = r.Dismissed,
+                    /* #3539 A8e: the tier the alert FIRED at where the row persisted one ("fired"), else what
+                       the metric NAME implies ("metric_name") — the Darling tool's twin fields, from the same
+                       shared decision the Alerts History tab colours its rows by. */
+                    severity,
+                    severity_source = severitySource,
+                    /* #3598: the Darling twin's routing provenance, read through the shared serializer for
+                       parity of shape. This edition has no routes table, so a row's route names the parent
+                       settings' channels (family and source "Default"). #4750: each destination also says what
+                       the send to it did ("delivered", "failed" or "not attempted"; null on a row written
+                       before that was recorded), so a channel that failed beside one that delivered shows
+                       here. The outcome word only: the failure's reason stays in send_error. A row whose
+                       fan-out reached no channel (a cooldown, a fold, a mute, nothing configured) answers
+                       null. */
+                    route = AlertContextSerializer.TryReadRoute(r.ContextJson) is { } route
+                        ? new
+                        {
+                            family = route.Family,
+                            route_id = route.RouteId,
+                            destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source, outcome = d.Outcome }),
+                        }
+                        : null,
+                    /* #3712: the corroboration gate's decision for an analysis finding — 'page' or 'digest' —
+                       and the sentence naming the components it read, read off the row the way severity_source
+                       is. Null on every engine alert and on analysis rows written before the gate existed. */
+                    routing = routing?.Route,
+                    routing_reason = routing?.Reason,
+                    detail_text = r.DetailText,
+                };
             }).ToList();
 
             return JsonSerializer.Serialize(new
             {
                 hours_back,
-                total_alerts = alerts.Count,
+                /* #3541 A3: `total_alerts` is gone — it was the page count under a name that promised the
+                   window. What is published is what was measured: the page, whether the window held more,
+                   the span the page covers (newest-first, so the oldest stamp IS the reach), and the filter
+                   that shaped the population together with how much it removed. */
+                alerts_returned = page.Count,
+                truncated,
+                oldest_returned_alert_time = page.Min(r => r.AlertTime).ToString("o"),
+                newest_returned_alert_time = page.Max(r => r.AlertTime).ToString("o"),
+                order = "alert_time_desc",
+                dismissed_excluded = !include_dismissed,
+                dismissed_excluded_count = dismissedExcludedCount,
                 alerts
             }, McpHelpers.JsonOptions);
         }
@@ -77,9 +162,7 @@ public sealed class McpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the SMTP email configuration. The two cooldowns govern different stages: top-level cooldown_minutes gates whether an alert FIRES, delivery.cooldown_minutes bounds the resulting email/Teams/Slack/PagerDuty/webhook send both per alert FINGERPRINT and, for a re-notification, per METRIC across every monitored server (the servers it holds back are named on the send that does go out, under an 'Other Servers Affected' section; a first notice is never held back, and delivery.mode PerEvent opts out of the per-metric bound). The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
-    public static Task<string> GetAlertSettings()
-    {
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the SMTP email configuration. The two cooldowns govern different stages: top-level cooldown_minutes gates whether an alert FIRES, delivery.cooldown_minutes bounds the resulting email/Teams/Slack/PagerDuty/webhook send both per alert FINGERPRINT and, for a re-notification, per METRIC across every monitored server (the servers it holds back are named on the send that does go out, under an 'Other Servers Affected' section; a first notice is never held back, and delivery.mode PerEvent opts out of the per-metric bound). The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window. poison_wait.threshold_ms is RETIRED: the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, so this value is stored and reported for compatibility but consulted by nothing — poison_wait.threshold_ms_note says so beside it, and poison_wait.enabled is the live switch. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off email, the webhooks and the tray while it is still recorded (Alerts tab status Digest) and shown in Recommendations with a not-paged marker; 'page' restores delivery of every finding at or above notify_severity; a corroborated finding is delivered under either. analysis.uncorroborated_route_note says where it is edited. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — the opposite of a mute rule, which silences a fire already decided. The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it in the Settings window and that arm excludes nothing. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]    public static Task<string> GetAlertSettings()    {
         try
         {
             var settings = new
@@ -138,7 +221,15 @@ public sealed class McpAlertTools
                 poison_wait = new
                 {
                     enabled = App.AlertPoisonWaitEnabled,
-                    threshold_ms = App.AlertPoisonWaitThresholdMs
+                    /* #3653 (from #3541): the key stays — a published field a client may already read — but
+                       since #3593 the shared AlertEngine grades ACCUMULATED wait over a ten-minute window and
+                       reads no per-wait bar (IAlertEngineSettings.PoisonWaitThresholdMs records why the member
+                       survives). The note sits beside the value so an agent reading the payload learns it
+                       there rather than only in a description read once. Same text as Darling's
+                       DarlingMcpAlertTools.PoisonWaitThresholdMsNote, held equal by McpAlertSettingsKeyTests
+                       reading that declaration — Lite cannot reference the service assembly. */
+                    threshold_ms = App.AlertPoisonWaitThresholdMs,
+                    threshold_ms_note = PoisonWaitThresholdMsNote
                 },
                 long_running_query = new
                 {
@@ -149,7 +240,13 @@ public sealed class McpAlertTools
                     exclude_wait_for = App.AlertLongRunningQueryExcludeWaitFor,
                     exclude_backups = App.AlertLongRunningQueryExcludeBackups,
                     exclude_misc_waits = App.AlertLongRunningQueryExcludeMiscWaits,
-                    exclude_cdc = App.AlertLongRunningQueryExcludeCdc
+                    exclude_cdc = App.AlertLongRunningQueryExcludeCdc,
+                    /* #3653 (A5, Q5): the opt-out knob, Darling's spelling (McpAlertSettingsKeyTests derives the
+                       shape from Darling's source) — sessions whose program_name starts with a prefix / whose
+                       login_name equals an entry are NOT EVALUATED by the alert; see the tool description. Lite's
+                       two settings.json arrays, seeded with the production read's defaults. */
+                    excluded_program_name_prefixes = App.AlertLongRunningQueryExcludedProgramNamePrefixes,
+                    excluded_logins = App.AlertLongRunningQueryExcludedLogins
                 },
                 tempdb_space = new
                 {
@@ -188,6 +285,9 @@ public sealed class McpAlertTools
                 file_growth = new
                 {
                     enabled = App.AlertFileGrowthEnabled,
+                    /* #3539 A8c: MB per HOUR averaged over lookback_minutes, like Darling's; the key keeps its
+                       spelling (McpAlertSettingsKeyTests derives the shape from Darling's source) and the unit is
+                       stated in the tool description above. */
                     rise_mb = App.AlertFileGrowthRiseMb,
                     volume_percent = App.AlertFileGrowthVolumePercent,
                     lookback_minutes = App.AlertFileGrowthLookbackMinutes
@@ -249,7 +349,14 @@ public sealed class McpAlertTools
                        is why the master switch above had to be renamed off notifications_enabled. */
                     notifications_enabled = App.AnalysisNotificationsEnabled,
                     notify_severity = App.AnalysisNotifySeverity,
-                    notify_cooldown_minutes = App.AnalysisNotifyCooldownMinutes
+                    notify_cooldown_minutes = App.AnalysisNotifyCooldownMinutes,
+                    /* #3712: where a notify-worthy but UNCORROBORATED finding goes — Darling's key, Lite's own live
+                       value (Settings → Alerts, or analysis_uncorroborated_route in the settings file). The note
+                       key rides for shape parity with Darling; here it names the surface that edits it. Darling's
+                       provenance key (which of its two homes decided the route) is deliberately NOT mirrored:
+                       Lite has one home, so the key could only ever read a constant. */
+                    uncorroborated_route = FindingRouting.RouteText(App.AnalysisUncorroboratedRoute),
+                    uncorroborated_route_note = UncorroboratedRouteNote
                 },
                 /* Lite-only, and left last so the shared groups above stay in Darling's order: Lite delivers
                    its own email, where Darling manages delivery credentials outside the settings row and
@@ -272,6 +379,42 @@ public sealed class McpAlertTools
         catch (Exception ex)
         {
             return Task.FromResult(McpHelpers.FormatError("get_alert_settings", ex));
+        }
+    }
+
+    [McpServerTool(Name = "get_notification_routes"), Description(
+        "Gets the alert family taxonomy, and where each family's posts go. Zero routes is the ordinary state: every alert goes to every parent channel configured in Settings. Darling: sparse routes layered over that parent set; an EMPTY channel on a route INHERITS the parent's rather than silencing it; resolution is exact metric, then family, then parent. Lite: routes_supported is false, so no routes exist to edit. Routing decides WHERE a post lands, never WHETHER it is sent.<<GUIDE>>Gets the alert FAMILY taxonomy — which metric names belong to self-monitor, reports, agent-jobs " +
+        "and performance — and reports that this edition has NO notification routes: every alert goes to every " +
+        "channel configured in Settings. The Darling edition's twin of this tool also lists the sparse routes " +
+        "layered over its central store's channel set; routes_supported is false here, so an agent asked to route " +
+        "a family on this instance should say so rather than look for a route to edit. The taxonomy is the shared " +
+        "one, so an alert seen in get_alert_history classifies identically on both editions.")]
+    public static Task<string> GetNotificationRoutes()
+    {
+        try
+        {
+            return Task.FromResult(JsonSerializer.Serialize(new
+            {
+                families = AlertFamily.All.Select(family => new
+                {
+                    family,
+                    metrics = AlertFamily.MetricFamilies
+                        .Where(kv => kv.Value == family && !AlertFamily.RecoveryPairs.ContainsKey(kv.Key))
+                        .Select(kv => kv.Key)
+                        .OrderBy(m => m, StringComparer.Ordinal),
+                    metric_prefixes = AlertFamily.PrefixFamilies.Where(p => p.Family == family).Select(p => p.Prefix + "*"),
+                }),
+                recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value }),
+                unclassified_metrics_route_as = AlertFamily.Performance,
+                routes_supported = false,
+                route_count = 0,
+                routes = Array.Empty<object>(),
+                note = "This edition delivers every alert to every configured channel; per-family routes are a Darling (central store) feature.",
+            }, McpHelpers.JsonOptions));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(McpHelpers.FormatError("get_notification_routes", ex));
         }
     }
 

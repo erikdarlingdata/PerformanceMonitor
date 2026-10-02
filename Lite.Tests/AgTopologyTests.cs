@@ -240,8 +240,14 @@ public sealed class AgTopologyTests
     [Fact]
     public void Summary_DistinguishesGroupsFromViews()
     {
+        /* the primary's view lists every replica; a secondary's lists only itself (#4475) */
         var cards = AgTopology.BuildCards(
-            new[] { Replica(1, "SQL01", "AG1", "SQL01", "PRIMARY"), Replica(2, "SQL02", "AG1", "SQL02", "SECONDARY") },
+            new[]
+            {
+                Replica(1, "SQL01", "AG1", "SQL01", "PRIMARY"),
+                Replica(1, "SQL01", "AG1", "SQL02", "SECONDARY"),
+                Replica(2, "SQL02", "AG1", "SQL02", "SECONDARY"),
+            },
             Array.Empty<AgTopologyDatabaseRow>());
 
         Assert.Equal("1 group · 2 reporting servers · 2 views", AvailabilityGroupsTab.BuildSummary(cards));

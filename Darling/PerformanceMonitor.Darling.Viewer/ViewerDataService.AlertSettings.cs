@@ -16,6 +16,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -74,7 +75,14 @@ public sealed partial class ViewerDataService
         /* #3444: V122's PostgreSQL Deadlocks/Blocking count thresholds, APPENDED for the same reason. */
         "pg_deadlock_count_threshold, pg_blocking_count_threshold, " +
         /* #3466: V124's fleet-sweep cadence knobs, APPENDED for the same reason. */
-        "fleet_sweep_enabled, fleet_sweep_interval_minutes";
+        "fleet_sweep_enabled, fleet_sweep_interval_minutes, " +
+        /* #3528: V126's store-disk-warn GB floor, APPENDED for the same reason. */
+        "self_disk_free_warn_gb, " +
+        /* #3653 (A5, Q5): the Long-Running Query opt-out lists (text[], the excluded_databases shape), APPENDED. */
+        "long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins, " +
+        /* #3712 (V137): the uncorroborated-finding route knob's STORE half — nullable text under a CHECK, the one
+           tri-state on the row (NULL = the file governs), APPENDED for the same reason. */
+        "analysis_uncorroborated_route";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -91,7 +99,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66,
+        $63, $64, $65, $66, $67, $68, $69, $70,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -160,6 +168,10 @@ ON CONFLICT (id) DO UPDATE SET
     pg_blocking_count_threshold = EXCLUDED.pg_blocking_count_threshold,
     fleet_sweep_enabled = EXCLUDED.fleet_sweep_enabled,
     fleet_sweep_interval_minutes = EXCLUDED.fleet_sweep_interval_minutes,
+    self_disk_free_warn_gb = EXCLUDED.self_disk_free_warn_gb,
+    long_running_query_excluded_program_name_prefixes = EXCLUDED.long_running_query_excluded_program_name_prefixes,
+    long_running_query_excluded_logins = EXCLUDED.long_running_query_excluded_logins,
+    analysis_uncorroborated_route = EXCLUDED.analysis_uncorroborated_route,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -257,6 +269,21 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.PgBlockingCountThreshold });      // $64 (#3444, V122)
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.FleetSweepEnabled });            // $65 (#3466, V124)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FleetSweepIntervalMinutes });     // $66 (#3466, V124)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.SelfDiskFreeWarnGb });            // $67 (#3528, V126)
+        /* #3653 (A5, Q5): normalised on the way in (trim, blanks dropped, case-insensitive dedupe) so the store
+           holds the list the engine applies and get_alert_settings reports back. An emptied box is an explicit
+           empty array — the operator clearing a seeded default — and is stored as such, never re-seeded. */
+        AddTextArray(command, LongRunningQueryExclusions.Normalize(r.LongRunningQueryExcludedProgramNamePrefixes));   // $68
+        AddTextArray(command, LongRunningQueryExclusions.Normalize(r.LongRunningQueryExcludedLogins));         // $69
+        /* #3712 (V137): the route knob's store half, the one NULLABLE text on this row. Normalised to the
+           canonical lower-case wire spelling the V137 CHECK admits (FindingRouting.RouteText), so the store
+           never holds a 'Page' no reader wrote; a value that parses to neither route is written as NULL --
+           "the file governs" -- rather than refused, because the Settings window's combo can only produce the
+           three states and a hand-built row carrying garbage should land on the honest third state, not on a
+           23514 the operator cannot see past. NULL is bound as a typed text NULL so the upsert's positional
+           parameter keeps its type on the INSERT arm. */
+        var route = FindingRouting.TryParseRoute(r.AnalysisUncorroboratedRoute);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = route is { } parsed ? FindingRouting.RouteText(parsed) : DBNull.Value }); // $70 (#3712, V137)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -338,6 +365,15 @@ ON CONFLICT (id) DO UPDATE SET
         /* #3466 fleet-sweep cadence knobs appended (V124) at ordinals 64-65. */
         FleetSweepEnabled = reader.GetBoolean(64),
         FleetSweepIntervalMinutes = reader.GetInt32(65),
+        /* #3528 store-disk-warn GB floor appended (V126) at ordinal 66. */
+        SelfDiskFreeWarnGb = reader.GetInt32(66),
+        /* #3653 (A5, Q5) Long-Running Query opt-out lists appended at ordinals 67-68 (V135; text[] NOT NULL, DEFAULT
+           the production read's seeds, so a pre-rung row reads as the defaults Lite ships with). */
+        LongRunningQueryExcludedProgramNamePrefixes = reader.IsDBNull(67) ? new List<string>() : reader.GetFieldValue<string[]>(67).ToList(),
+        LongRunningQueryExcludedLogins = reader.IsDBNull(68) ? new List<string>() : reader.GetFieldValue<string[]>(68).ToList(),
+        /* #3712 (V137) the route knob's store half appended at ordinal 69 (nullable text; NULL is the expected
+           reading on every store nobody has written a route into, and it means "darling.json governs"). */
+        AnalysisUncorroboratedRoute = reader.IsDBNull(69) ? null : reader.GetString(69),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -391,6 +427,15 @@ public sealed class AlertSettingsRow
 
     /* #2107 (V55): the previously-hardcoded thresholds; defaults are the constants they replaced. */
     public int SelfDiskFreeWarnPercent { get; set; } = 10;
+
+    /// <summary>#3528 (V126): the Store Disk Pressure warning's GB floor — the percent above additionally
+    /// requires free space below this many GB before the alert fires (an AND qualifier, the PVS floor's
+    /// composition); 0 removes the floor. The default mirrors the V126 DDL default and the shipped constant
+    /// (<c>DarlingSelfAlertEvaluator.DiskFreeWarnFloorGb</c>) as a literal, like its percent sibling above:
+    /// the constant lives on the SERVICE assembly the viewer does not reference, and
+    /// <c>SelfDiskWarnGbFloorRungTests</c> pins the two equal so a moved shipped default cannot leave this
+    /// row seeding a floor no surface reports.</summary>
+    public int SelfDiskFreeWarnGb { get; set; } = 50;
     public int CollectionStaleMinutes { get; set; } = 30;
     public int CollectionFailureThreshold { get; set; } = 10;
     public int DiskCriticalFreePercent { get; set; } = 3;
@@ -431,7 +476,8 @@ public sealed class AlertSettingsRow
     public int FleetSweepIntervalMinutes { get; set; } = FleetSweepCadence.DefaultIntervalMinutes;
 
     /* #2391: defaults mirror the V79 column defaults, so a viewer prefilling against a store that has
-       not seeded the row shows what the store would have given it. Ships OFF, per #2349. */
+       not seeded the row shows what the store would have given it. Ships OFF, per #2349. The rise column
+       is MB per HOUR averaged over the lookback (#3539 A8c) -- the Settings row's label says so. */
     public bool FileGrowthEnabled { get; set; }
     public int FileGrowthRiseMb { get; set; } = 10240;
     public int FileGrowthVolumePercent { get; set; } = 60;
@@ -474,6 +520,31 @@ public sealed class AlertSettingsRow
     public int FailedJobLookbackMinutes { get; set; } = 60;
     public int CooldownMinutes { get; set; } = 5;
     public List<string> ExcludedDatabases { get; set; } = new();
+
+    /// <summary>#3653 (A5, Q5): the Long-Running Query opt-out knob's <c>program_name</c> PREFIXES — sessions whose
+    /// program name starts with one are NOT EVALUATED by the alert (case-insensitive, no wildcard grammar; the rule
+    /// is <c>LongRunningQueryExclusions</c> in the Alerting library, applied in the read ahead of its row cap).
+    /// Seeded with <c>SQLAgent - TSQL JobStep</c> from the production read; empty = evaluate every program. Stored as
+    /// <c>long_running_query_excluded_program_name_prefixes</c> (<c>text[]</c>, V135), edited as comma-separated text
+    /// on the Settings window like <see cref="ExcludedDatabases"/>.</summary>
+    public List<string> LongRunningQueryExcludedProgramNamePrefixes { get; set; } = LongRunningQueryExclusions.DefaultProgramNamePrefixes.ToList();
+
+    /// <summary>#3653 (A5, Q5): the knob's EXACT <c>login_name</c> arm (case-insensitive, whole name); a session is
+    /// excluded when EITHER arm matches and counted once, under the prefix. Seeded with <c>NT AUTHORITY\SYSTEM</c> and
+    /// <c>NT AUTHORITY\NETWORK SERVICE</c>; the application's admin login is deliberately not a default. Stored as
+    /// <c>long_running_query_excluded_logins</c> (V135).</summary>
+    public List<string> LongRunningQueryExcludedLogins { get; set; } = LongRunningQueryExclusions.DefaultLogins.ToList();
+
+    /// <summary>#3712 (V137): the uncorroborated-finding route knob's STORE half —
+    /// <c>config_alert_settings.analysis_uncorroborated_route</c>, nullable <c>text</c> under a CHECK admitting
+    /// <c>digest</c> / <c>page</c>. A TRI-STATE, which is why this is the one nullable member on the row: null is
+    /// "not set in the store; darling.json's <c>analysis.uncorroboratedRoute</c> governs" (what every store reads
+    /// after the V137 upgrade and what <see cref="Defaults"/> holds), and a non-null route WINS over the file in
+    /// the running service from its next reload beacon. The Settings window edits it as a three-way combo under
+    /// Automated Analysis (Digest / Page / Use the service's darling.json value); the bind normalises to the
+    /// lower-case wire spelling. The routing decision itself — what counts as corroborated — is unchanged; this
+    /// is only WHERE an operator sets the lone-fact arm.</summary>
+    public string? AnalysisUncorroboratedRoute { get; set; }
     public bool AnalysisEnabled { get; set; } = true;
     public int AnalysisIntervalMinutes { get; set; } = 30;
 
@@ -527,6 +598,7 @@ public sealed class AlertSettingsRow
             && AgDisconnectRefireMinutes == other.AgDisconnectRefireMinutes
             && DatabaseStateEnabled == other.DatabaseStateEnabled
             && SelfDiskFreeWarnPercent == other.SelfDiskFreeWarnPercent
+            && SelfDiskFreeWarnGb == other.SelfDiskFreeWarnGb
             && CollectionStaleMinutes == other.CollectionStaleMinutes
             && CollectionFailureThreshold == other.CollectionFailureThreshold
             && DiskCriticalFreePercent == other.DiskCriticalFreePercent
@@ -589,6 +661,11 @@ public sealed class AlertSettingsRow
             && PgDeadlockCountThreshold == other.PgDeadlockCountThreshold
             && PgBlockingCountThreshold == other.PgBlockingCountThreshold
             && FleetSweepEnabled == other.FleetSweepEnabled
-            && FleetSweepIntervalMinutes == other.FleetSweepIntervalMinutes;
+            && FleetSweepIntervalMinutes == other.FleetSweepIntervalMinutes
+            && (LongRunningQueryExcludedProgramNamePrefixes ?? new List<string>()).SequenceEqual(other.LongRunningQueryExcludedProgramNamePrefixes ?? new List<string>())
+            && (LongRunningQueryExcludedLogins ?? new List<string>()).SequenceEqual(other.LongRunningQueryExcludedLogins ?? new List<string>())
+            /* #3712 (V137): the route knob's tri-state -- null and a route differ, two spellings of one route
+               do not (the store holds the lower-case form; a row built from the combo does too). */
+            && string.Equals(AnalysisUncorroboratedRoute, other.AnalysisUncorroboratedRoute, StringComparison.OrdinalIgnoreCase);
     }
 }

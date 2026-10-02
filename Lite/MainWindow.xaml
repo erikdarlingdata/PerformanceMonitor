@@ -563,6 +563,8 @@
                     <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed">
                         <TabItem.Header>
                             <StackPanel Orientation="Horizontal">
+                                <!-- #4678: shadow the app-level TextBlock style so the label inherits the TabItem Foreground (AccentForegroundBrush when selected). -->
+                                <StackPanel.Resources><Style TargetType="TextBlock"/></StackPanel.Resources>
                                 <TextBlock Text="Plan Viewer" VerticalAlignment="Center" FontWeight="SemiBold"/>
                                 <Button Style="{DynamicResource TabCloseButton}"
                                         Click="MainWindowPlanViewerClose_Click"
@@ -590,13 +592,16 @@
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
                     <TextBlock Grid.Column="0" x:Name="StatusText" Text="Ready" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="1" x:Name="CollectorHealthText" Text="" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="2" x:Name="DatabaseSizeText" Text="Database: --" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="3" x:Name="CollectionStatusText" Text="Collection: Stopped" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="4" x:Name="ServerCountText" Text="Servers: 0" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                    <!-- Lite's own database after a fatal error: why collection stopped, or when it was reopened. -->
+                    <TextBlock Grid.Column="1" x:Name="LocalDatabaseStatusText" Text="" Visibility="Collapsed" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="2" x:Name="CollectorHealthText" Text="" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="4" x:Name="CollectionStatusText" Text="Collection: Stopped" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="5" x:Name="ServerCountText" Text="Servers: 0" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                 </Grid>
             </Border>
         </Grid>

@@ -119,14 +119,20 @@ public sealed class TimescaleSupportTests
            grid itself is pinned literally, and wait_stats' own minute too, by the #3035 tests below —
            so a moved grid is loud there rather than silently agreed with here. */
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("wait_stats", out var waitStatsPhase));
+        /* #4510: wait_stats is one of the heavy tables staggered by HeavyCompressAfterOffsetHours, so its
+           compress_after literal carries that table's own extra hours rather than the plain day every
+           other pin in this file still expects. CompressAfterFor is the single source both the statement
+           and this assertion read, so they cannot disagree. */
         Assert.Equal(
-            "SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
+            $"SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '{TimescaleSupport.CompressAfterFor("wait_stats")}', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
             + "initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '"
             + waitStatsPhase.ToString(CultureInfo.InvariantCulture) + " minutes')",
             TimescaleSupport.AddCompressionPolicySql(byName["wait_stats"]));
 
-        /* 1 day matches the 1-day chunk interval so chunks become compressible quickly, keeping the
-           managed store compact (#1458). */
+        /* 1 day, fixed on every table since #4211 (decision 1: A no longer tracks a narrowed raw table's
+           chunk_time_interval — RawChunkIntervalPlanner only ever moves I). Originally chosen to match the
+           1-day chunk interval so chunks become compressible quickly, keeping the managed store compact
+           (#1458). */
         Assert.Equal(1, TimescaleSupport.CompressAfterDays);
 
         /* #1778: schedule_interval is passed EXPLICITLY on every table. Omitting it does not mean "some
@@ -156,6 +162,22 @@ public sealed class TimescaleSupportTests
             TimescaleSupport.AddCompressionPolicySql(TimescaleSupport.CollectionLogTable));
     }
 
+    /* ---------------- raw compress_after floor (#4211) ---------------- */
+
+    [Fact]
+    public void CompressAfterDays_IsAtLeastTheHourlyRefreshStartOffset()
+    {
+        /* #4211 ruling decision 1: a raw table's compress_after (A) stays fixed regardless of how far
+           RawChunkIntervalPlanner narrows that table's own chunk_time_interval (I). The reason is this
+           invariant — A below HourlyRefreshStartOffset would let a chunk compress before the hourly
+           continuous-aggregate refresh has finished reading it uncompressed, removing the gap the product's
+           lock safety relies on. Pinned as a span comparison, not a re-parse of the "1 day" strings, so it
+           breaks loudly if either side ever moves without the other. */
+        Assert.True(
+            TimeSpan.FromDays(TimescaleSupport.CompressAfterDays) >= TimescaleSupport.HourlyRefreshStartSpan,
+            $"CompressAfterDays ({TimescaleSupport.CompressAfterDays} days) must stay at least HourlyRefreshStartOffset ({TimescaleSupport.HourlyRefreshStartSpan}).");
+    }
+
     /* ---------------- compression-job self-heal (#1581) — pure predicate ---------------- */
 
     private static readonly DateTime s_now = new(2026, 7, 19, 12, 0, 0, DateTimeKind.Utc);
@@ -164,8 +186,12 @@ public sealed class TimescaleSupportTests
     public void IsCompressionJobStuck_NextStartNegativeInfinity_IsStuck()
     {
         /* The dominant failure mode: next_start = -infinity on a job that is NOT running — the scheduler
-           abandoned it and never re-fires it. */
-        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+           abandoned it and never re-fires it. ONE read says so here, and one read is what the predicate
+           judges; since #3575 the reader (ReadStuckPolicyJobsAsync) asks twice five seconds apart before
+           it believes this arm, because the view assembles "not running" and "-infinity" from independent
+           sources and reads this exact shape for a few milliseconds at either edge of every healthy run.
+           The predicate itself stays single-shot — CompressionStuckConfirmReadTests pins the second read. */
+        Assert.True(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: null,
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out var reason));
         Assert.Contains("-infinity", reason, StringComparison.Ordinal);
@@ -178,13 +204,19 @@ public sealed class TimescaleSupportTests
            -infinity WITH job_status = 'Running' — the engine only computes the real next start when the
            run finishes. An unconditioned -infinity arm flagged every healthy job caught mid-run (the
            field's transient stuck→self-healed alert noise, and the CI flake where the live test caught
-           its own re-arm-triggered run). Mid-run belongs to the elapsed-bound arm: */
-        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+           its own re-arm-triggered run). Mid-run belongs to the elapsed-bound arm.
+
+           This guard was necessary and was not sufficient (#3575): 'Running' is pg_stat_activity, read
+           live, and -infinity is the bgw_job_stat row, read under the statement's snapshot, so the guard
+           is blind for the milliseconds between the scheduler committing -infinity and the worker
+           reporting itself active, and again between the worker leaving and its mark_end becoming
+           visible. That is the reader's problem to close (it re-reads), not this predicate's: */
+        Assert.False(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: true, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddMinutes(-3),
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out _));
 
         /* ...which still catches a genuinely HUNG run that carries the mid-run marker. */
-        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+        Assert.True(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: true, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddHours(-30),
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out var reason));
         Assert.Contains("Running", reason, StringComparison.Ordinal);
@@ -194,7 +226,7 @@ public sealed class TimescaleSupportTests
     public void IsCompressionJobStuck_HealthyScheduled_IsNotStuck()
     {
         /* A normally scheduled job (finite next_start, not running) is healthy. */
-        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+        Assert.False(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: false, jobStatus: "Scheduled", lastRunStartedAtUtc: s_now.AddMinutes(-5),
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out var reason));
         Assert.Equal("", reason);
@@ -205,14 +237,14 @@ public sealed class TimescaleSupportTests
     {
         /* Running since well past max(2x interval, floor). At the #1778 tick the FLOOR dominates (2x 1h = 2h,
            floor 6h), so it takes more than six hours to call a run hung — 8h elapsed does. */
-        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+        Assert.True(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: false, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddHours(-8),
             scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, out var reason));
         Assert.Contains("Running", reason, StringComparison.Ordinal);
 
         /* And the run the field actually measured (1h33m) is NOT hung at that same tick — the regression #1778
            would otherwise have introduced by shortening the interval without raising the floor. */
-        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+        Assert.False(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: false, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddMinutes(-93),
             scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, out _));
     }
@@ -221,7 +253,7 @@ public sealed class TimescaleSupportTests
     public void IsCompressionJobStuck_RunningWithinBound_IsNotStuck()
     {
         /* Running for 10 minutes with a 12h interval (bound = 24h) — legitimately in progress, not stuck. */
-        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+        Assert.False(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: false, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddMinutes(-10),
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out _));
     }
@@ -230,7 +262,7 @@ public sealed class TimescaleSupportTests
     public void IsCompressionJobStuck_RunningButNoStartTime_IsNotStuck()
     {
         /* Running with an unknown last_run_started_at cannot be judged as hung — do not false-flag. */
-        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+        Assert.False(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: false, jobStatus: "Running", lastRunStartedAtUtc: null,
             scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, out _));
     }
@@ -240,10 +272,10 @@ public sealed class TimescaleSupportTests
     {
         /* #1760: TimescaleDB's never-ran sentinel is -infinity, which Npgsql maps to DateTime.MinValue. Read
            literally that is a run "started" in year 1 — an elapsed of ~739,000 days that clears every bound —
-           so a healthy job got flagged as stuck for the whole of its FIRST run. StuckCompressionJobsSql NULLIFs
+           so a healthy job got flagged as stuck for the whole of its FIRST run. StuckPolicyJobsSql NULLIFs
            the sentinel; this is the second line of defence, so a future caller reading the column un-guarded
            cannot resurrect the false positive. */
-        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+        Assert.False(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: false, jobStatus: "Running", lastRunStartedAtUtc: DateTime.MinValue,
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out _));
     }
@@ -254,7 +286,132 @@ public sealed class TimescaleSupportTests
         /* The guard lives in the ONE query the detector and the live test both run. Containment, not shape:
            the point is that last_run_started_at is never read raw. */
         Assert.Contains("NULLIF(js.last_run_started_at, '-infinity'::timestamptz)",
-            TimescaleSupport.StuckCompressionJobsSql, StringComparison.Ordinal);
+            TimescaleSupport.StuckPolicyJobsSql, StringComparison.Ordinal);
+    }
+
+    /* ---------------- the -infinity arm's sentence, by TimescaleDB version (#3591) ---------------- */
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("2.14.2")]
+    [InlineData("2.26.0")]
+    [InlineData("2.26.3")]
+    public void NegInfinityArm_BelowTheFix_OrUnknown_SaysTheSchedulerWillNeverRunIt(string? extversion)
+    {
+        /* Below 2.26.4 a persisted -infinity is returned to the scheduler as the due time and the job is never
+           due again — #1581's sentence, byte for byte, because it is true there. An unknown version (null: the
+           read failed, or the pre-#3591 callers) gets the same text on purpose: it is the sentence that costs
+           nothing when wrong on a new store and everything when wrong on an old one. */
+        var version = TimescaleSupport.ParseTimescaleVersion(extversion);
+        Assert.False(TimescaleSupport.SchedulerRecoversNegativeInfinity(version));
+
+        var arm = TimescaleSupport.ClassifyPolicyJob(
+            nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: s_now.AddHours(-1),
+            scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, timescaleVersion: version, out var reason);
+
+        Assert.Equal(StuckPolicyJobArm.NextStartNegativeInfinity, arm);
+        Assert.Equal("next_start is -infinity — the scheduler will never run it again", reason);
+        Assert.Equal(TimescaleSupport.NextStartNegativeInfinityPermanentReason, reason);
+    }
+
+    [Theory]
+    [InlineData("2.26.4")]
+    [InlineData("2.27.0")]
+    [InlineData("2.28.1")]
+    [InlineData("2.29.0-dev")]
+    public void NegInfinityArm_FromTheFix_SaysCrashBackoff_AndStillFires(string extversion)
+    {
+        /* Upstream #9360 shipped in 2.26.4 (the CHANGELOG lists it there, not under 2.27.0), so from 2.26.4 the
+           only persistent -infinity is a crashed run in the scheduler's crash backoff. Same arm — the verdict
+           does not move — different sentence, naming the fix so the reader knows where the claim comes from. */
+        var version = TimescaleSupport.ParseTimescaleVersion(extversion);
+        Assert.NotNull(version);
+        Assert.True(TimescaleSupport.SchedulerRecoversNegativeInfinity(version));
+
+        var arm = TimescaleSupport.ClassifyPolicyJob(
+            nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: s_now.AddHours(-1),
+            scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, timescaleVersion: version, out var reason);
+
+        Assert.Equal(StuckPolicyJobArm.NextStartNegativeInfinity, arm);
+        Assert.Equal(TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, reason);
+        Assert.Contains("crash backoff", reason, StringComparison.Ordinal);
+        Assert.Contains("#9360", reason, StringComparison.Ordinal);
+        Assert.Contains("2.26.4", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("never", reason, StringComparison.Ordinal);
+
+        /* And the boolean projection with the version agrees with the classifier. */
+        Assert.True(TimescaleSupport.IsPolicyJobStuck(
+            nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: s_now.AddHours(-1),
+            scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, timescaleVersion: version, out var boolReason));
+        Assert.Equal(reason, boolReason);
+    }
+
+    [Fact]
+    public void NegInfinityArm_TheVersionChangesTheSentenceOnly_NeverTheVerdict()
+    {
+        /* Every row shape the predicate knows, on both sides of the fix: the arm is identical, and only the
+           -infinity arm's text differs. The stuck-Running arm did not change upstream and reads the version
+           for nothing. */
+        var old = new Version(2, 26, 3);
+        var fixedVersion = new Version(2, 28, 1);
+        foreach (var (negInf, status, started) in new (bool, string, DateTime?)[]
+        {
+            (true, "Scheduled", null),                   /* the dead-job / crash-backoff arm */
+            (true, "Running", s_now.AddMinutes(-3)),     /* mid-run marker */
+            (true, "Running", s_now.AddHours(-30)),      /* hung run carrying the marker */
+            (false, "Scheduled", s_now.AddMinutes(-5)),  /* healthy */
+            (false, "Running", s_now.AddHours(-8)),      /* hung run */
+            (false, "Running", DateTime.MinValue),       /* #1760 sentinel */
+        })
+        {
+            var armOld = TimescaleSupport.ClassifyPolicyJob(negInf, status, started, TimeSpan.FromHours(1), s_now, old, out var reasonOld);
+            var armNew = TimescaleSupport.ClassifyPolicyJob(negInf, status, started, TimeSpan.FromHours(1), s_now, fixedVersion, out var reasonNew);
+            var armNone = TimescaleSupport.ClassifyPolicyJob(negInf, status, started, TimeSpan.FromHours(1), s_now, out var reasonNone);
+
+            Assert.Equal(armOld, armNew);
+            Assert.Equal(armOld, armNone);
+            Assert.Equal(reasonOld, reasonNone);  /* version-less IS the old text */
+            if (armOld == StuckPolicyJobArm.NextStartNegativeInfinity)
+            {
+                Assert.NotEqual(reasonOld, reasonNew);
+            }
+            else
+            {
+                Assert.Equal(reasonOld, reasonNew);
+            }
+        }
+    }
+
+    [Fact]
+    public void TimescaleNextStartSanitizedFrom_Is_2_26_4()
+    {
+        /* Pinned to the release the upstream CHANGELOG lists #9360 under. The issue and the first brief said
+           2.27.0; a check keyed there would have told every 2.26.4–2.26.x store the old lie. */
+        Assert.Equal(new Version(2, 26, 4), TimescaleSupport.TimescaleNextStartSanitizedFrom);
+    }
+
+    [Theory]
+    [InlineData("2.28.1", "2.28.1")]
+    [InlineData(" 2.26.4 ", "2.26.4")]
+    [InlineData("2.29.0-dev", "2.29.0")]
+    [InlineData("2.28", "2.28")]
+    public void ParseTimescaleVersion_TakesTheNumericPrefix(string raw, string expected)
+    {
+        Assert.Equal(Version.Parse(expected), TimescaleSupport.ParseTimescaleVersion(raw));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("2")]
+    [InlineData("dev")]
+    [InlineData("v2.28.1")]
+    public void ParseTimescaleVersion_AnythingElse_IsNull_WhichReadsAsOld(string? raw)
+    {
+        var parsed = TimescaleSupport.ParseTimescaleVersion(raw);
+        Assert.Null(parsed);
+        Assert.False(TimescaleSupport.SchedulerRecoversNegativeInfinity(parsed));
     }
 
     [Fact]
@@ -287,9 +444,14 @@ public sealed class TimescaleSupportTests
            read returns an empty list and logs at Debug, NEVER throwing into the sweep loop. An unopened
            connection exercises that catch deterministically without a live store. */
         using var connection = new NpgsqlConnection("Host=localhost;Port=1;Database=darling-does-not-exist");
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await TimescaleSupport.ReadStuckPolicyJobsAsync(
             connection, DateTime.UtcNow, logger: null, TestContext.Current.CancellationToken);
-        Assert.Empty(result);
+
+        /* #3816: an unreadable pass is StorePolicyJobHealth.Empty — no stuck jobs AND no census. Both halves
+           are asserted, because the census is what the summary line reports: a pass that read nothing must
+           not be able to log "0 jobs read, nothing wrong" as if it had looked. */
+        Assert.Empty(result.Stuck);
+        Assert.Empty(result.Jobs);
     }
 
     [Fact]
@@ -591,7 +753,7 @@ WHERE hypertable_name = 'wait_stats'
         foreach (var (name, sql) in new[]
         {
             ("CompressionActivitySql", TimescaleSupport.CompressionActivitySql),
-            ("StuckCompressionJobsSql", TimescaleSupport.StuckCompressionJobsSql),
+            ("StuckPolicyJobsSql", TimescaleSupport.StuckPolicyJobsSql),
         })
         {
             var reads = CountOccurrences(sql, "js.last_run_started_at");
@@ -1109,9 +1271,15 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
         /* Two REAL views, because the converge is scoped by membership of HourlyRefreshPhaseOrder and a
-           throwaway name would be skipped — which is a property worth having, and is asserted at the end. */
-        const string Hourly = TimescaleSupport.QueryStatsHourlyView;
-        const string Daily = TimescaleSupport.QueryStatsDailyView;
+           throwaway name would be skipped — which is a property worth having, and is asserted at the end.
+           #3653 LC: query_stats_hourly/query_stats_daily are two of the frozen six now — LEFT
+           HourlyRefreshPhaseOrder entirely, and EnsureContinuousAggregatesAsync actively strips any refresh
+           policy off a frozen view every start, so this test's whole "converge a drifted policy" premise can
+           no longer run against them at all (AddHourlyRefreshPolicySql(Hourly) throws before ever reaching
+           Postgres). query_stats_interval_hourly/query_stats_interval_daily are still on the grid and still
+           refreshing the same way the legacy pair used to, so they stand in as the example. */
+        const string Hourly = TimescaleSupport.QueryStatsIntervalHourlyView;
+        const string Daily = TimescaleSupport.QueryStatsIntervalDailyView;
 
         /* This test MUTATES the shared fixture's shape (creating the hourly/daily CAGGs changes compose's tier
            routing), so it restores it: snapshot what already exists and drop only what it creates. */
@@ -1461,6 +1629,15 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
         Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        /* #3949: collection_log is OUTSIDE CollectorCatalog (see EnsureCollectionLogHypertableAsync's own
+           test above), and the off-grid collection_health_hourly aggregate this test's RetentionPolicyCount
+           counts on is built FROM it. The shipped order (DarlingWorker's s_storeObjectConvergence) always
+           runs this before EnsureContinuousAggregatesAsync; this test must too, or "all 21 applied" depends
+           on some OTHER live-postgres class having already converted collection_log first — a run-order
+           flake caught live: collection_health_hourly's CREATE failed 0A000 invalid continuous aggregate
+           view when this test ran before anything else on the shared store had done the conversion. */
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct),
+            "EnsureCollectionLogHypertableAsync is expected to convert (or no-op on) collection_log once the extension is enabled");
 
         /* This test MUTATES the shared fixture's shape, so it restores it. Creating the hourly CAGGs changes
            compose's tier routing (RunComposedPanel_OldWindow_AgainstPlainPostgres_RunsCleanOnRaw asserts a
@@ -1483,8 +1660,9 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
             var retentionLog = new CapturingTestLogger();
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, retentionLog, ct);
 
-            /* THE assertion: every policy applied. A 42883 would be caught per-policy and counted as 0. */
-            var applied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct);
+            /* THE assertion: every policy applied. A 42883 would be caught per-policy and counted as 0. InPlace is
+               the count this method returned as a bare int before #3812 replaced it with the whole tally. */
+            var applied = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct)).InPlace;
             Assert.True(applied == RetentionPolicyCount,
                 $"expected all {RetentionPolicyCount} retention policies to apply, got {applied} — a swallowed error means the policy SQL is invalid on this TimescaleDB; {retentionLog.Joined}");
 
@@ -1493,7 +1671,7 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
                Information summary even on success, so reusing retentionLog would bury this pass's own evidence
                under the first pass's already-explained noise (review finding on #2887). */
             var reapplyLog = new CapturingTestLogger();
-            var reapplied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, reapplyLog, ct);
+            var reapplied = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, reapplyLog, ct)).InPlace;
             Assert.True(reapplied == RetentionPolicyCount,
                 $"the idempotent second pass should count all {RetentionPolicyCount} policies, got {reapplied}; {reapplyLog.Joined}");
 
@@ -1590,6 +1768,12 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
         Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        /* #3949: same ordering requirement as the EndToEnd retention test above - collection_log must be a
+           hypertable before EnsureContinuousAggregatesAsync builds the off-grid collection_health_hourly
+           aggregate RetentionPolicyCount counts on, or this test's "all 21 applied" depends on run order
+           across the whole live-postgres collection instead of on its own setup. */
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct),
+            "EnsureCollectionLogHypertableAsync is expected to convert (or no-op on) collection_log once the extension is enabled");
 
         var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
 
@@ -1624,7 +1808,7 @@ VALUES (1, $1, 9137, 'converge-1937', 'TestDb', decode(md5('converge'), 'hex'), 
                pass actually fails under the earlier passes' expected noise (review finding on #2887). */
             var createLog = new CapturingTestLogger();
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct);
-            var created17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, createLog, ct);
+            var created17 = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, createLog, ct)).InPlace;
             Assert.True(created17 == RetentionPolicyCount,
                 $"the creation pass should apply all {RetentionPolicyCount} retention policies, got {created17}; {createLog.Joined}");
 
@@ -1663,7 +1847,7 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             /* THE measured claim: the sweep converges both onto the constant, preserving everything else.
                Fresh logger — see the fixture-level #2818 comment above. */
             var convergeLog = new CapturingTestLogger();
-            var converged = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, convergeLog, ct);
+            var converged = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, convergeLog, ct)).InPlace;
             Assert.True(converged == RetentionPolicyCount,
                 $"the convergence pass should count all {RetentionPolicyCount} policies, got {converged}; {convergeLog.Joined}");
 
@@ -1693,7 +1877,7 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing.
                Fresh logger — see the fixture-level #2818 comment above. */
             var settledLog = new CapturingTestLogger();
-            var settled17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, settledLog, ct);
+            var settled17 = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, settledLog, ct)).InPlace;
             Assert.True(settled17 == RetentionPolicyCount,
                 $"the idempotent third sweep should count all {RetentionPolicyCount} policies, got {settled17}; {settledLog.Joined}");
 
@@ -1945,7 +2129,13 @@ AND   j.hypertable_name = '" + relation + "'", connection) { CommandTimeout = Po
         TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
         TimescaleSupport.QueryStoreStatsIntervalDailyView,
     }
+    /* The three interval-honest hourly successors (#3653, Q12) carry the hourly tier's 90-day policy like the
+       legacies they supersede, and are DERIVED from the supersession registry so a fourth pair cannot leave an
+       armed policy behind on the shared fixture. 20 relations since Q12 (17 before). */
+    .Concat(TimescaleSupport.SupersededHourlyRollups.Select(s => s.Successor))
     .Concat(TimescaleSupport.BaselineAggregates.Select(a => a.View))
+    /* #3893: the off-grid fleet collection-health rollup carries its own 8-day leaf policy. 21 relations. */
+    .Concat(TimescaleSupport.OffGridAggregates.Select(a => a.View))
     .ToArray();
 
     /// <summary>The policy set EnsureRetentionPoliciesAsync attaches, derived so the two cannot drift.</summary>
@@ -1986,7 +2176,7 @@ LIMIT 1", connection))
 
         /* (1) The detection query is valid SQL against the REAL timescaledb_information job_stats/jobs views
            (including the `next_start = '-infinity'::timestamptz` comparison), and a healthy compression job is
-           NOT flagged — no false alarm. This is the full ReadStuckCompressionJobsAsync path against the live
+           NOT flagged — no false alarm. This is the full ReadStuckPolicyJobsAsync path against the live
            schema.
 
            A just-added compression policy job can momentarily read next_start = '-infinity' in job_stats
@@ -2013,13 +2203,13 @@ LIMIT 1", connection))
         var healthy = await WaitUntilDetectorReportsHealthyAsync(connection, jobId, ct);
 
         /* The SQL really is valid against the live catalog, and this job really is in its result set.
-           ReadStuckCompressionJobsAsync is failure-isolated (a broken query is swallowed and returns an EMPTY
+           ReadStuckPolicyJobsAsync is failure-isolated (a broken query is swallowed and returns an EMPTY
            list), so DoesNotContain ALONE would pass just as happily against SQL that never compiled — the one
            thing this leg claims to prove. Run the production const directly, where a syntax or column error
            throws, and require the job to be present: only then does "not flagged" mean the detector looked at
            this job and judged it healthy.
 
-           This one keeps its OWN read, which is safe where the health assertion is not: StuckCompressionJobsSql
+           This one keeps its OWN read, which is safe where the health assertion is not: StuckPolicyJobsSql
            filters on proc_name alone, so it returns every compression job whatever state it is in, and "this job
            is in the result set" cannot race. Flagging is the C# predicate applied on top of those rows, and that
            is the only part that moves. */
@@ -2044,19 +2234,25 @@ LIMIT 1", connection))
            REJECTS `alter_job(..., next_start => '-infinity')` with `22023: cannot set next start to -infinity`
            (the dead-scheduler -infinity arises from TimescaleDB's own background scheduler on a failed run, not
            from a user call, so it cannot be injected through the public API). The -infinity / Running-past-bound
-           DETECTION logic is covered by the pure IsCompressionJobStuck unit tests. */
+           DETECTION logic is covered by the pure IsPolicyJobStuck unit tests. */
         Assert.True(await TimescaleSupport.TryRearmJobAsync(connection, jobId, null, ct));
 
         /* (3) After a real re-arm (next_start => now()) the job settles healthy. SETTLES, not "reads healthy
            on one snapshot": next_start => now() makes the job immediately due, the scheduler picks it up, and
            from pickup to completion job_stats reads next_start = -infinity with status Running — the mid-run
            marker (measured live; the detector now defers that state to its elapsed-bound arm). A single
-           un-settled read raced the very run the re-arm triggered, which was this test's own flake. */
+           un-settled read raced the very run the re-arm triggered, which was this test's own flake.
+
+           Since #3575 the detector also re-reads five seconds later before it reports the -infinity arm, so
+           the run-instant EDGES (-infinity while the worker is not yet, or no longer, visible as Running —
+           the shape that paged a production store) clear inside one call rather than surfacing as a flagged
+           poll here. The wait stays: it is the assertion's contract, and a poll that lands on the edge now
+           costs five seconds of confirm rather than a flagged iteration. */
         await WaitUntilDetectorReportsHealthyAsync(connection, jobId, ct);
     }
 
     /// <summary>
-    /// Wait until <see cref="TimescaleSupport.ReadStuckCompressionJobsAsync"/> — the DETECTION QUERY ITSELF,
+    /// Wait until <see cref="TimescaleSupport.ReadStuckPolicyJobsAsync"/> — the DETECTION QUERY ITSELF,
     /// the thing under test — stops flagging this job. #1760: the predecessor polled
     /// <c>next_start &lt;&gt; '-infinity'</c> directly, which is only ONE of the two arms the detector
     /// evaluates, so "settled" and "the assertion will pass" were different statements and the gap between
@@ -2076,13 +2272,13 @@ LIMIT 1", connection))
     /// caller that re-queries is therefore asserting on an observation this method never validated — which is
     /// exactly how the race came back after being closed once.</para>
     /// </summary>
-    private static async Task<IReadOnlyList<StuckCompressionJob>> WaitUntilDetectorReportsHealthyAsync(
+    private static async Task<IReadOnlyList<StuckPolicyJob>> WaitUntilDetectorReportsHealthyAsync(
         NpgsqlConnection connection, long jobId, System.Threading.CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
         while (true)
         {
-            var flagged = await TimescaleSupport.ReadStuckCompressionJobsAsync(connection, DateTime.UtcNow, null, ct);
+            var flagged = (await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, DateTime.UtcNow, null, ct)).Stuck;
             var mine = flagged.FirstOrDefault(s => s.JobId == jobId);
             if (mine is null)
             {
@@ -2097,14 +2293,14 @@ LIMIT 1", connection))
 
     /// <summary>
     /// Every job_id the production detection query OBSERVES — not just the ones it flags — by running
-    /// <see cref="TimescaleSupport.StuckCompressionJobsSql"/> itself. Sharing the const is the whole point: a
+    /// <see cref="TimescaleSupport.StuckPolicyJobsSql"/> itself. Sharing the const is the whole point: a
     /// paraphrase here could compile happily while the real query did not.
     /// </summary>
     private static async Task<List<long>> ReadObservedJobIdsAsync(
         NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         var ids = new List<long>();
-        using var command = new NpgsqlCommand(TimescaleSupport.StuckCompressionJobsSql, connection);
+        using var command = new NpgsqlCommand(TimescaleSupport.StuckPolicyJobsSql, connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -2206,7 +2402,7 @@ LIMIT 1", connection))
 
             /* ...and the production query neutralises it, so the stuck-Running arm cannot fire on a job that
                has never run. Without the NULLIF this reads DateTime.MinValue. */
-            using (var guarded = new NpgsqlCommand(TimescaleSupport.StuckCompressionJobsSql, connection))
+            using (var guarded = new NpgsqlCommand(TimescaleSupport.StuckPolicyJobsSql, connection))
             {
                 await using var reader = await guarded.ExecuteReaderAsync(ct);
                 var sawJob = false;
@@ -2228,7 +2424,7 @@ LIMIT 1", connection))
 
             /* The pure predicate agrees end to end: never-ran + Running is NOT stuck. */
             Assert.False(
-                TimescaleSupport.IsCompressionJobStuck(false, "Running", null, TimeSpan.FromHours(12), DateTime.UtcNow, out _));
+                TimescaleSupport.IsPolicyJobStuck(false, "Running", null, TimeSpan.FromHours(12), DateTime.UtcNow, out _));
 
             bodySucceeded = true;
         }
@@ -2313,7 +2509,20 @@ LIMIT 1", connection))
             / TimescaleSupport.CompressionPhaseMaxPerMinute,
             TimescaleSupport.CompressionPhaseBandMinutes);
 
+        /* RE-DERIVED at #3653 (Q12) to fifteen light members when the three interval-honest hourly successors
+           were APPENDED beside the legacy trio, and RE-DERIVED AGAIN at #3653 (LC) back to twelve: the freeze
+           moved the legacy trio off this grid entirely (into FrozenRollupAggregates) while the successors took
+           its three positions in HourlyAggregates rather than joining behind it, so the count returns to
+           thirteen hourly policies, twelve of them light. The light band spans (12 - 1) * 1 = 11 minutes (was
+           14 at Q12, 11 before it), the heaviest refresh starts at 11 + the 4-minute guard = :15 (was :18, :15
+           before Q12), and its window is the remainder 60 - 15 - 24 = 21 minutes (was 18, 21 before Q12). The
+           literals move WITH the identities beside them; nothing here was renumbered by hand. */
+        Assert.Equal(12, TimescaleSupport.LightHourlyRefreshCount);
+        Assert.Equal(11, TimescaleSupport.LightBandSpanMinutes);
         Assert.Equal(15, TimescaleSupport.HeaviestRefreshStartMinute);
+        Assert.Equal(
+            TimescaleSupport.LightBandSpanMinutes + TimescaleSupport.CompressionPhaseGuardMinutes,
+            TimescaleSupport.HeaviestRefreshStartMinute);
         Assert.Equal(21, TimescaleSupport.HeaviestRefreshWindowMinutes);
         Assert.Equal(
             TimescaleSupport.MinutesInHourlyCadence
@@ -2356,6 +2565,10 @@ LIMIT 1", connection))
             .Distinct()
             .OrderBy(m => m)
             .ToArray();
+        /* Twelve light minutes :00-:11 and the heaviest at :15 (fifteen light minutes :00-:14 and :18 during
+           #3653's Q12, before the freeze moved the legacy trio off this grid). The compression band does NOT
+           move: it is the hour's remainder after the heaviest window, and the window grew back by exactly
+           what the light band shrank, so :36-:59 stays where #3174 left it. */
         Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15 }, refreshMinutes);
         Assert.Equal(TimescaleSupport.HourlyRefreshPhaseOrder.Count, refreshMinutes.Length);
 
@@ -2405,6 +2618,9 @@ LIMIT 1", connection))
             .Select(m => m % TimescaleSupport.MinutesInHourlyCadence)
             .ToArray();
 
+        /* Twelve light starts at :00-:11, each excluding its own minute and the three after it: :00-:14, fifteen
+           minutes (was :00-:17, eighteen, during Q12). The heaviest window is the 21 minutes :15-:35 (was 18,
+           :18-:35, during Q12). */
         Assert.Equal(15, excludedByGuard.Length);
         Assert.Equal(21, excludedByHeaviestWindow.Length);
         Assert.Contains(heaviestMinute + 1, excludedByHeaviestWindow);
@@ -2476,7 +2692,15 @@ LIMIT 1", connection))
             $"the recorded ceiling is {ceiling}s against a {TimescaleSupport.RefreshSlotWarningSeconds}s watch "
             + "line, so the figure the grid is sized against classifies as a warning and the watch reports the "
             + "grid's own sizing rather than anything new");
+
+        /* #3653's LC freeze restores the 21-minute window: the line is 1,260 * 5 / 6 = 1,050 s, and the
+           ceiling sits 154 s under it — 17% of itself (where Q12's briefly-narrowed 18-minute window had left
+           only 4 s, 0%). The ordering the pin holds still holds, by the ceiling essay's own arithmetic; the
+           GAP is stated in seconds beside the percentage because a percentage that truncates to 0 can read as
+           "none" when it is not. A fourth light member, or a ceiling re-derived one run higher, turns this
+           red — which is the ruling the grid asks for at that point rather than a hand-tuned band. */
         Assert.Equal(17, (TimescaleSupport.RefreshSlotWarningSeconds - ceiling) * 100 / ceiling);
+        Assert.Equal(154, TimescaleSupport.RefreshSlotWarningSeconds - ceiling);
     }
 
     /* ─────────────────── #3044: the watch on the LIVE figure, not the constant ─────────────────── */
@@ -2496,6 +2720,12 @@ LIMIT 1", connection))
     [Fact]
     public void TheRefreshSlotWatchLines_AreDerivedFromTheWindow_NotWrittenDown()
     {
+        /* #3653's LC freeze moved the legacy trio off this grid (into FrozenRollupAggregates) while their
+           successors took its three positions in HourlyAggregates, so the heaviest window is back to 21
+           minutes (see CompressionPhaseGrid_ClearsEveryRefreshSlotsGuardBand_AndTheHeaviestRefreshsSlotWhole
+           for the derivation) — the slot is 21 * 60 = 1,260 s (was 18 * 60 = 1,080 during Q12, when the
+           successors were briefly appended behind the legacy trio instead) and the five-sixths line is
+           1,260 * 5 / 6 = 1,050 s (was 900). The identities beside the literals are what moved them. */
         Assert.Equal(1260, TimescaleSupport.RefreshPhaseSlotSeconds);
         Assert.Equal(TimescaleSupport.HeaviestRefreshWindowMinutes * 60, TimescaleSupport.RefreshPhaseSlotSeconds);
 
@@ -2518,6 +2748,7 @@ LIMIT 1", connection))
         Assert.True(
             TimescaleSupport.RefreshSlotWarningSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
             "the watch line is at or past the slot it is meant to give warning of");
+        /* The remaining sixth: 1,260 / 6 = 210 s of lead (was 1,080 / 6 = 180 during Q12). */
         Assert.Equal(210, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
     }
 
@@ -2619,12 +2850,26 @@ LIMIT 1", connection))
     /// any quoted population a threshold would fire on moves as that population grows while the threshold
     /// and the decision behind it stand still. Which constants a line is a function of moves only when the
     /// derivations move, and then the decision genuinely does have to be re-taken — as it just was.</para>
+    ///
+    /// <para><b>RE-TAKEN AGAIN at #3653 (Q12), because the inversion this test pinned had reversed.</b> The
+    /// three interval-honest hourly successors were APPENDED behind the legacy trio, re-deriving the window
+    /// to 18 minutes, so the alternative became 1,080 - 240 = 840 s — 56 s BELOW the 896 s recorded ceiling.
+    /// The ordering argument #3174 lost was briefly available again alongside the coupling one.</para>
+    ///
+    /// <para><b>AND RE-TAKEN A THIRD TIME at #3653 (LC), because the freeze reverses Q12's append.</b> The
+    /// legacy trio left this grid entirely (into <see cref="TimescaleSupport.FrozenRollupAggregates"/>) and
+    /// the successors took its three positions in <see cref="TimescaleSupport.HourlyAggregates"/> rather than
+    /// staying appended behind it, so the window is back to #3174's 21 minutes and the alternative is back to
+    /// 1,020 s — ABOVE the 896 s ceiling, exactly as it was between #3174 and Q12. The ordering argument is
+    /// gone again and COUPLING is once more the only reason left; #3174's coupling paragraph above needed no
+    /// change to say so, which is what makes it the durable half and the ordering paragraphs the transient
+    /// ones.</para>
     /// </summary>
     [Fact]
-    public void TheRejectedWatchLineAlternative_NoLongerSitsBelowTheRecordedCeiling_SoTheRejectionIsCoupling()
+    public void TheRejectedWatchLineAlternative_NoLongerSitsBelowTheRecordedCeiling_SoTheRejectionIsCouplingAgain()
     {
         /* Derived as the prose derives it, then held to the literal too — a re-derivation-only assertion
-           agrees with any derivation, including one frozen at 480. */
+           agrees with any derivation, including one frozen at 480 or at Q12's 840. */
         var alternative =
             TimescaleSupport.RefreshPhaseSlotSeconds - (TimescaleSupport.CompressionPhaseGuardMinutes * 60);
         Assert.Equal(1020, alternative);
@@ -2633,20 +2878,24 @@ LIMIT 1", connection))
             "the alternative is no longer the LOWER of the two lines, so the paragraph rejecting it as the "
             + "lower one is about something else now");
 
-        /* THE INVERSION, pinned: the alternative now clears the recorded ceiling, so the ordering the
-           rejection used to rest on no longer discriminates between the two lines. If this ever goes back to
-           false, the ordering argument is available again and the coupling one becomes the weaker of two
-           rather than the only one. */
+        /* THE INVERSION, pinned as it stands at LC's restored window: the alternative clears the recorded
+           ceiling, so the ordering the rejection rested on at Q12 no longer discriminates between the two
+           lines. If this ever goes back to false (a narrower window, or a ceiling re-derived upward), the
+           ordering argument is available again alongside the coupling one — re-read #3107 and #3174 rather
+           than editing this assertion. */
         var ceiling = TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
         Assert.True(
             ceiling < alternative,
             $"the {alternative} s alternative sits at or below the {ceiling} s recorded ceiling again, so the "
-            + "ordering rejects it on its own and the coupling argument in the doc comment is no longer the "
-            + "load-bearing one — re-read #3107 rather than editing this assertion");
+            + "ordering no longer discriminates and the coupling argument is the load-bearing one alone — "
+            + "re-read #3107 and #3174 rather than editing this assertion");
+        Assert.Equal(124, alternative - ceiling);
 
-        /* Both lines clear the ceiling, and the gap between them is one guard band less one sixth of the
-           window. Stated as the two verdicts the classifier actually produces, since a line is a
-           compile-time value and the classifier cannot be re-run against the alternative. */
+        /* The chosen line still clears the ceiling; the alternative would too. Stated as the verdicts the
+           classifier produces where it can be (the ceiling against the shipped line) and as the inequality
+           where it cannot (a line is a compile-time value and the classifier cannot be re-run against the
+           alternative). The gap between the two lines is one guard band less one sixth of the window:
+           240 - 210 = 30 s (was 240 - 180 = 60 during Q12). */
         Assert.Equal(
             TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
             TimescaleSupport.ClassifyRefreshSlotHeadroom(ceiling));
@@ -2684,7 +2933,8 @@ LIMIT 1", connection))
 
         /* And the lead time each line leaves, as the two figures rather than as the inequality between them
            — which is the same inequality asserted above and would add nothing on its own. The lower line
-           leaves the larger margin, so lead time argues FOR it and cannot be part of its rejection. */
+           leaves the larger margin, so lead time argues FOR it and cannot be part of its rejection; at LC's
+           restored window the guard band (240 s) is unchanged and the sixth is 210 s (was 180 during Q12). */
         Assert.Equal(240, TimescaleSupport.RefreshPhaseSlotSeconds - alternative);
         Assert.Equal(210, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
     }
@@ -2710,14 +2960,18 @@ LIMIT 1", connection))
             TimescaleSupport.HeaviestHourlyRefreshView,
             TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
 
-        /* The recorded ceiling: 71.1% of the window and 364 s clear, inside the routine band. That band
-           assertion went RED on #3166's census against a 15-minute slot and #3174 answered it with geometry
-           rather than with a renumbered band — see the classifier test for the ordering it restored. */
+        /* The recorded ceiling against LC's restored 1,260 s window: 896 / 1,260 = 71.1% of it and
+           1,260 - 896 = 364 s clear (was 83.0% and 184 s of Q12's 1,080 s window), inside the routine band by
+           154 s. That band assertion went RED on #3166's census against a 15-minute slot and #3174 answered
+           it with geometry rather than with a renumbered band — see the classifier test for the ordering it
+           restored; the freeze re-derived the geometry back to that same shape, and the band held. */
         Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.InsideSlot, atTheCeiling.Headroom);
         Assert.Equal(364, atTheCeiling.ClearOfSlotSeconds);
         Assert.Equal(71.1, atTheCeiling.PercentOfSlot, 1);
 
-        /* The watch line, which is where APPROACHING starts: 83.3% of the window, 210 s clear. */
+        /* The watch line, which is where APPROACHING starts: 83.3% of the window, 1,260 / 6 = 210 s clear
+           (was 180 s of Q12's 1,080 s window; the percentage is the same five-sixths fraction at any window
+           width). */
         var atTheWatchLine = new HeaviestRefreshSlotReading(
             TimescaleSupport.HeaviestHourlyRefreshView, TimescaleSupport.RefreshSlotWarningSeconds);
         Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot, atTheWatchLine.Headroom);
@@ -2909,6 +3163,8 @@ LIMIT 1", connection))
             + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window — at or past the wall, so the cadence alert "
             + "would arrive after #3035's precondition is already false. The knob cannot move without a rung "
             + "(V57), so the repair is the grid");
+        /* #3653's LC freeze restores the 1,260 s window, leaving the knob 360 s inside the wall (was 180
+           inside Q12's 1,080 s window, before the freeze moved the legacy trio off this grid). */
         Assert.Equal(360, TimescaleSupport.RefreshPhaseSlotSeconds - (hourlyCadenceSeconds * ShippedWarnPercent / 100));
 
         /* And where the knob's own clamp lets an operator move it to — well past the wall, with the
@@ -2918,23 +3174,28 @@ LIMIT 1", connection))
             "the knob's clamp can no longer be raised past the window, so the argument for a separate "
             + "grid-derived line has changed");
 
-        /* THE ORDERING BETWEEN THE TWO SIGNALS INVERTED at #3174, and it is asserted in its new direction
-           rather than left to be discovered. #3044's watch used to fire at 750 s, BEFORE #2136's 900 s
-           default; the window the hour can spare puts it at 1,050 s, AFTER it. That is forced, not chosen:
-           the watch line has to clear the 896 s ceiling and the knob is frozen at 900 s by V57, and
-           896 < window * 50 < 900 has no integer solution — so no geometry restores the old order while the
-           ceiling stands where it does. The cost is real and belongs on the record: an operator now sees the
-           cadence alert first, and #2136's documented remedy ("extend the job's schedule_interval") is wrong
-           for this job, because the hourly schedule interval is also its end_offset. #3044's line still
-           carries the correct remedy, and it now arrives second. */
+        /* THE ORDERING BETWEEN THE TWO SIGNALS INVERTED at #3174, COLLAPSED TO A COINCIDENCE at #3653 (Q12),
+           and REOPENED at #3653 (LC) — each asserted in its direction rather than left to be discovered.
+           #3044's watch used to fire at 750 s, BEFORE #2136's 900 s default; #3174's 21-minute window put it
+           at 1,050 s, AFTER it, which was forced: the watch line has to clear the 896 s ceiling and the knob
+           is frozen at 900 s by V57, and 896 < window * 50 < 900 has no integer solution. Q12 re-derived the
+           window to 18 minutes when the three successors were appended behind the legacy trio, and
+           18 * 50 = 900 EXACTLY — the one integer window whose five-sixths line lands ON the knob. LC's
+           freeze moved the legacy trio off the grid and put the successors in its three positions instead,
+           re-deriving the window back to 21 minutes and the watch line back to 1,050 s — AFTER the knob
+           again, by the same 150 s #3174 originally measured. The gap is pinned as an inequality rather than
+           an equality now that the coincidence is gone; a window of 18 minutes exactly would restore it, and
+           the assertion below says so by failing on that width. */
         Assert.True(
-            TimescaleSupport.RefreshSlotWarningSeconds > hourlyCadenceSeconds * ShippedWarnPercent / 100,
-            "#3044's watch line fires at or before #2136's default cadence warning again, so the ordering "
-            + "this comment records has reverted — re-read it rather than editing the assertion");
+            hourlyCadenceSeconds * ShippedWarnPercent / 100 < TimescaleSupport.RefreshSlotWarningSeconds,
+            $"the knob's {hourlyCadenceSeconds * ShippedWarnPercent / 100} s line no longer fires strictly "
+            + $"before the {TimescaleSupport.RefreshSlotWarningSeconds} s watch line, so the two signals have "
+            + "collapsed to a coincidence again — re-read #3174 and Q12 rather than editing this assertion");
+        Assert.Equal(150, TimescaleSupport.RefreshSlotWarningSeconds - (hourlyCadenceSeconds * ShippedWarnPercent / 100));
         Assert.True(
-            hourlyCadenceSeconds * ShippedWarnPercent / 100 < TimescaleSupport.RefreshSlotWarningSeconds
+            hourlyCadenceSeconds * ShippedWarnPercent / 100 <= TimescaleSupport.RefreshSlotWarningSeconds
             && TimescaleSupport.RefreshSlotWarningSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
-            "the three lines are no longer ordered knob, watch, wall");
+            "the three lines are no longer ordered knob <= watch < wall");
 
         /* And the evidence that #2136 does not know this job's size, as a number rather than as prose:
            the recorded ceiling is 24.9% of the same cadence, while the clamp in DarlingAlertSettings is
@@ -3194,18 +3455,20 @@ LIMIT 1", connection))
            be filtered out before the caller ever saw it. */
         Assert.DoesNotContain("IS DISTINCT FROM", read, StringComparison.Ordinal);
 
-        /* THE ORDINAL CONTRACT. The reader positions its columns by index, and hypertable_schema was
-           APPENDED rather than inserted precisely so no existing index moved — an ordinal shift in a column
-           list is a defect only a live store can see, and it would silently read a phase out of a boolean.
-           So the schema is asserted to be the LAST of exactly seven selected columns, which is the property
-           the C# index depends on. */
+        /* THE ORDINAL CONTRACT. The reader positions its columns by index, and hypertable_schema and
+           #4510's compress_after_seconds were APPENDED rather than inserted precisely so no existing index
+           moved — an ordinal shift in a column list is a defect only a live store can see, and it would
+           silently read a phase out of a boolean. So hypertable_schema is asserted second-to-last and
+           compress_after_seconds last, of exactly eight selected columns, which is the property the C#
+           index depends on. */
         var selected = SelectedColumns(read);
 
-        /* Control on the split itself: a CASE expression carries no top-level comma, so seven parts is the
+        /* Control on the split itself: a CASE expression carries no top-level comma, so eight parts is the
            column count and not an artifact of splitting inside one. */
-        Assert.Equal(7, selected.Length);
+        Assert.Equal(8, selected.Length);
         Assert.StartsWith("j.job_id", selected[0], StringComparison.Ordinal);
         Assert.Equal("j.hypertable_schema", selected[6]);
+        Assert.Contains("compress_after", selected[7], StringComparison.Ordinal);
 
         /* And the phase is gated on it: CompressionPhaseOrder holds BARE names, so a foreign hypertable
            called like one of ours must not inherit its minute. The cadence converge stays unscoped on
@@ -3313,25 +3576,45 @@ LIMIT 1", connection))
     /// the full assignment, and the heaviest view's own minute.</para>
     ///
     /// <para><b>The table is the whole map, not a sample, and #3185 moved the light band's half of it.</b>
-    /// The heaviest refresh is answered by identity; the three unbounded-cardinality light views take every
-    /// fourth position from the first, and the nine deployment-bounded ones fill the positions those leave
-    /// in registry order. So this table is also the readable statement of what "thirteen distinct minutes"
+    /// The heaviest refresh is answered by identity; the unbounded-cardinality light views take every
+    /// fourth position from the first, and the deployment-bounded ones fill the positions those leave
+    /// in registry order. So this table is also the readable statement of what "sixteen distinct minutes"
     /// resolves to on today's list — the one place a reader can see the grid without re-deriving it, and
     /// the one place the interleaving is visible as minutes rather than as a rule.</para>
+    ///
+    /// <para><b>RE-DERIVED at #3653 (Q12) by appending three successors, and RE-DERIVED AGAIN at #3653 (LC) by
+    /// freezing their legacies off the grid — the derivation is in the table.</b> The freeze moved the legacy
+    /// trio (<c>query_stats_hourly</c>, <c>procedure_stats_hourly</c>, <c>query_stats_db_hourly</c>) out of
+    /// <see cref="TimescaleSupport.HourlyAggregates"/> into <see cref="TimescaleSupport.FrozenRollupAggregates"/>
+    /// — the daily tier no longer needs them on the grid to stay hierarchical (LB's successor dailies cover the
+    /// window above the freeze floor) — while the successors took the three positions the legacy trio held,
+    /// rather than staying appended behind it. Thirteen hourly policies again, twelve of them light, so the band
+    /// holds positions 0-11. <c>query_store_stats_hourly</c> and <c>query_store_stats_corrected_hourly</c> are
+    /// the first two unbounded members (positions 0 and 4); <c>query_stats_interval_hourly</c> groups by
+    /// statement like the legacy it replaces, so it is the THIRD unbounded member and takes position 2 * 4 = 8.
+    /// The other two successors are deployment-bounded like their legacies and are dealt in registry order with
+    /// the rest of that class, over the positions the unbounded set leaves (1, 2, 3, 5, 6, 7, 9, 10, 11):
+    /// <c>procedure_stats_interval_hourly</c> takes 1, <c>query_stats_db_interval_hourly</c> takes 2, and the
+    /// seven baseline members fill 3, 5, 6, 7, 9, 10, 11 in order — nine sub-3 s policies re-phased ONCE by the
+    /// converge on the first start that carries this build, which is what the converge exists for. The heaviest
+    /// moves back 18→15 with the band it follows.</para>
     /// </summary>
     [Fact]
     public void TheRefreshGridIsUnchanged_AndTheCompressionGridsOneInputFromItIsPinned()
     {
         var expected = new (string View, int Minute)[]
         {
-            (TimescaleSupport.QueryStatsHourlyView, 0),
-            (TimescaleSupport.ProcedureStatsHourlyView, 1),
-            (TimescaleSupport.QueryStoreStatsHourlyView, 4),
-            (TimescaleSupport.QueryStatsDbHourlyView, 2),
+            /* #3653 (LC): the Query Store family leads (unchanged since before Q12), then the three
+               successors in the three positions their legacies held — not appended behind the family, which
+               is what keeps the grid at thirteen policies instead of sixteen. */
+            (TimescaleSupport.QueryStoreStatsHourlyView, 0),
             (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 15),
-            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 8),
-            (TimescaleSupport.PerfmonBaselineView, 3),
-            (TimescaleSupport.WaitStatsBaselineView, 5),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 4),
+            (TimescaleSupport.QueryStatsIntervalHourlyView, 8),
+            (TimescaleSupport.ProcedureStatsIntervalHourlyView, 1),
+            (TimescaleSupport.QueryStatsDbIntervalHourlyView, 2),
+            (TimescaleSupport.PerfmonIntervalBaselineView, 3),
+            (TimescaleSupport.WaitStatsIntervalBaselineView, 5),
             (TimescaleSupport.SessionStatsBaselineView, 6),
             (TimescaleSupport.QueryStatsBaselineView, 7),
             (TimescaleSupport.BlockedProcessBaselineView, 9),
@@ -3366,8 +3649,10 @@ LIMIT 1", connection))
         Assert.Throws<ArgumentOutOfRangeException>(
             () => TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStatsDailyView));
 
-        /* And the refresh STATEMENTS are untouched: still the refresh phase, still no compression in them. */
-        var refreshSql = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.ProcedureStatsHourlyView);
+        /* And the refresh STATEMENTS are untouched: still the refresh phase, still no compression in them.
+           ProcedureStatsHourlyView is frozen off this grid since LC (FrozenRollupAggregates); its successor
+           holds the position it used to and is what a live policy is built for now. */
+        var refreshSql = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.ProcedureStatsIntervalHourlyView);
         Assert.Contains("INTERVAL '1 minutes'", refreshSql, StringComparison.Ordinal);
         Assert.Contains("add_continuous_aggregate_policy", refreshSql, StringComparison.Ordinal);
         Assert.DoesNotContain("compression", refreshSql, StringComparison.Ordinal);
@@ -3397,9 +3682,14 @@ LIMIT 1", connection))
 
         Assert.Equal(TimescaleSupport.HypertableCount, statements.Length);
 
-        foreach (var sql in statements)
+        for (var i = 0; i < statements.Length; i++)
         {
-            Assert.Contains($"compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days'", sql, StringComparison.Ordinal);
+            var sql = statements[i];
+
+            /* #4510: the heaviest tables now render compress_after with an extra per-table offset
+               (CompressAfterFor), so this checks the compress_after literal matches THAT table's own
+               value rather than assuming every table shares the plain day literal. */
+            Assert.Contains($"compress_after => INTERVAL '{TimescaleSupport.CompressAfterFor(TimescaleSupport.CompressionPhaseOrder[i])}'", sql, StringComparison.Ordinal);
             Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", sql, StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
             Assert.Contains("initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' " + Anchor, sql, StringComparison.Ordinal);
@@ -3835,4 +4125,174 @@ AND   (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')", c
             !reader.IsDBNull(3) && reader.GetBoolean(3));
     }
 
+    /// <summary>
+    /// #3816, against a real TimescaleDB catalog: the widened read sees every policy family this product
+    /// creates, names an aggregate's policy after the aggregate, reports a HELD policy as held rather than
+    /// dead, and EXCLUDES both the extension's own jobs and the families this product does not create.
+    ///
+    /// <para><b>Why the exclusions are the half that needs a live store.</b> Their proof is the catalog's
+    /// content, not our statement's text: <c>policy_telemetry</c> exists on every install, names no
+    /// hypertable, and on an air-gapped store sits at a PERSISTENT <c>next_start = -infinity</c> with
+    /// <c>consecutive_crashes = 1</c> — the confirmed dead-job shape (measured on a virgin PG18 +
+    /// TimescaleDB 2.28.1 container with no network). Reading it would page about TimescaleDB's phone-home
+    /// on every such store, forever. So this test first proves those job ids EXIST in
+    /// <c>timescaledb_information.jobs</c> and then proves the widened read does not return them — a pin that
+    /// only asserted absence would pass just as well against a catalog that had none of them.</para>
+    ///
+    /// <para>The held-versus-dead arm is the same fixture the pure pins use
+    /// (<c>PolicyJobFamilyTests</c>), driven through the production read: a retention policy paused the way
+    /// #1680/#1877's coverage gate pauses one must arrive as <c>Held</c> in the census and must NOT be in the
+    /// stuck list, because the next thing that happens to a stuck row is <c>alter_job</c>.</para>
+    /// </summary>
+    [Fact]
+    public async Task StuckPolicyJobsSql_ReadsEveryFamily_HoldsAreNotDead_ExtensionJobsExcluded_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the policy-family census.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        /* Migrate for the search_path reason the #1760 pin above states, not for the schema. */
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string table = "policy_family_probe_3816";
+        const string view = table + "_hourly";
+        var bodySucceeded = false;
+
+        try
+        {
+            await ExecuteAsync(connection, $"DROP MATERIALIZED VIEW IF EXISTS collect.{view} CASCADE", ct);
+            await ExecuteAsync(connection, $"DROP TABLE IF EXISTS collect.{table} CASCADE", ct);
+            await ExecuteAsync(connection,
+                $"CREATE TABLE collect.{table} (collection_time timestamptz NOT NULL, server_id integer NOT NULL, v bigint NOT NULL)", ct);
+            await ExecuteAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{table}", "collection_time"), ct);
+            await ExecuteAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{table}"), ct);
+
+            /* Family 1: compression, parked for the #1888 reason the helper states. */
+            await AddCompressionPolicyParkedAsync(connection, table, ct);
+
+            /* Family 2: retention, created and PAUSED in one transaction — byte for byte how
+               EnsureRetentionPoliciesAsync creates one (#1705), which is to say: HELD. */
+            long heldRetentionJobId;
+            await using (var tx = await connection.BeginTransactionAsync(ct))
+            {
+                using (var create = new NpgsqlCommand(TimescaleSupport.AddRetentionPolicySql(table, "4 days"), connection, tx))
+                {
+                    heldRetentionJobId = Convert.ToInt64(
+                        await create.ExecuteScalarAsync(ct) ?? -1L, System.Globalization.CultureInfo.InvariantCulture);
+                }
+
+                Assert.True(heldRetentionJobId > 0, "the retention policy is expected to be created, not skipped");
+                using (var pause = new NpgsqlCommand(TimescaleSupport.PauseJobSql, connection, tx))
+                {
+                    pause.Parameters.AddWithValue((int)heldRetentionJobId);
+                    await pause.ExecuteNonQueryAsync(ct);
+                }
+
+                await tx.CommitAsync(ct);
+            }
+
+            /* Family 3: a continuous aggregate and its refresh policy — the family this issue is mostly
+               about, and the one whose catalog identity is reported from the VIEW rather than the
+               materialization. */
+            await ExecuteAsync(connection, $@"
+CREATE MATERIALIZED VIEW collect.{view} WITH (timescaledb.continuous) AS
+SELECT time_bucket(INTERVAL '1 hour', collection_time) AS bucket, server_id, sum(v) AS v
+FROM collect.{table}
+GROUP BY 1, 2
+WITH NO DATA", ct);
+            /* The generic builder, not AddHourlyRefreshPolicySql: that one demands the view be a registered
+               member of the hourly phase grid (#3012), and a probe table is deliberately not one. The
+               statement shape — and therefore the catalog row this test reads — is the same one every
+               product refresh policy is created by. */
+            await ExecuteAsync(
+                connection,
+                TimescaleSupport.AddContinuousAggregatePolicySql(view, "3 days", "1 hour", "1 hour", phaseMinutes: null),
+                ct);
+
+            /* And a family this product does NOT create, so its exclusion is measured rather than assumed. */
+            await ExecuteAsync(connection, $"CREATE INDEX {table}_srv ON collect.{table} (server_id, collection_time DESC)", ct);
+            await ExecuteAsync(connection, $"SELECT add_reorder_policy('collect.{table}', '{table}_srv')", ct);
+
+            /* The extension's own jobs, read FIRST so the exclusion assertion cannot pass vacuously. */
+            var extensionJobIds = await JobIdsByProcAsync(
+                connection, new[] { "policy_telemetry", "policy_job_stat_history_retention" }, ct);
+            Assert.NotEmpty(extensionJobIds);
+
+            var reorderJobIds = await JobIdsByProcAsync(connection, new[] { "policy_reorder" }, ct);
+            Assert.NotEmpty(reorderJobIds);
+
+            var reading = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, DateTime.UtcNow, null, ct);
+            var mine = reading.Jobs
+                .Where(j => string.Equals(j.RelationName, table, StringComparison.Ordinal)
+                    || string.Equals(j.RelationName, view, StringComparison.Ordinal))
+                .ToList();
+
+            /* Every family this product creates is read, and the aggregate's policies are named after the
+               AGGREGATE (j.hypertable_name) rather than _materialized_hypertable_N (js.hypertable_name). */
+            Assert.Contains(mine, j => j.Family == TimescaleSupport.StorePolicyJobFamily.Compression
+                && string.Equals(j.RelationName, table, StringComparison.Ordinal));
+            Assert.Contains(mine, j => j.Family == TimescaleSupport.StorePolicyJobFamily.Refresh
+                && string.Equals(j.RelationName, view, StringComparison.Ordinal));
+            Assert.Contains(mine, j => j.Family == TimescaleSupport.StorePolicyJobFamily.Retention
+                && j.JobId == heldRetentionJobId);
+            Assert.DoesNotContain(mine, j => j.RelationName is not null
+                && j.RelationName.StartsWith("_materialized_hypertable", StringComparison.Ordinal));
+
+            /* THE HOLD: read as held, and absent from the stuck list, which is the list the re-arm acts on. */
+            var held = Assert.Single(mine, j => j.JobId == heldRetentionJobId);
+            Assert.True(held.Held, "a retention policy paused the way the coverage gate pauses one must read as HELD");
+            Assert.DoesNotContain(reading.Stuck, s => s.JobId == heldRetentionJobId);
+
+            /* THE EXCLUSIONS: the extension's own jobs and the family we do not create are enumerated by the
+               catalog and returned by neither arm of the statement. */
+            foreach (var excluded in extensionJobIds.Concat(reorderJobIds))
+            {
+                Assert.DoesNotContain(reading.Jobs, j => j.JobId == excluded);
+            }
+
+            /* No row reaches the evaluator without a band, which is the other half of the scope agreement:
+               a family with no sentence is skipped with a warning rather than paged under another's name. */
+            Assert.DoesNotContain(reading.Jobs, j => j.Family == TimescaleSupport.StorePolicyJobFamily.Other);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            /* #1902: teardown on a connection of its own, through LiveStoreCleanup — cleaning up on the
+               body's own connection leaves a throw-from-finally that replaces the body's exception, and the
+               conversion ratchet fails any live test that tries. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await ExecuteAsync(cleanup, $"DROP MATERIALIZED VIEW IF EXISTS collect.{view} CASCADE", cleanupCt);
+                await ExecuteAsync(cleanup, $"DROP TABLE IF EXISTS collect.{table} CASCADE", cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>Every job id the catalog holds for the named procs — read straight from
+    /// <c>timescaledb_information.jobs</c> so an exclusion pin can prove the rows it expects to be excluded
+    /// actually exist.</summary>
+    private static async Task<List<long>> JobIdsByProcAsync(
+        NpgsqlConnection connection, IReadOnlyList<string> procNames, System.Threading.CancellationToken ct)
+    {
+        var ids = new List<long>();
+        using var command = new NpgsqlCommand(
+            "SELECT job_id FROM timescaledb_information.jobs WHERE proc_name = ANY($1)", connection);
+        command.Parameters.AddWithValue(procNames.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            ids.Add(Convert.ToInt64(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        return ids;
+    }
 }

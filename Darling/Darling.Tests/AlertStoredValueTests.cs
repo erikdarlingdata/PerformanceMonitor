@@ -76,6 +76,7 @@ public sealed class AlertStoredValueTests
         public int BlockingCountThreshold { get; set; } = 1;
         public int BlockingWaitSecondsThreshold { get; set; }
         public int DeadlockCountThreshold { get; set; } = 1;
+        public DeadlockRateThresholds DeadlockRateThresholds => DeadlockRateThresholds.Default;
         public int PoisonWaitThresholdMs { get; set; } = 500;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30;
         public int LongRunningQueryMaxResults { get; set; } = 5;
@@ -84,6 +85,9 @@ public sealed class AlertStoredValueTests
         public bool LongRunningQueryExcludeBackups { get; set; } = true;
         public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
         public bool LongRunningQueryExcludeCdc { get; set; } = true;
+        /* #3653 (A5, Q5): the opt-out knob, empty in the fakes — every session evaluated; the hosts seed it, the engine does not. */
+        public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes { get; set; } = Array.Empty<string>();
+        public IReadOnlyList<string> LongRunningQueryExcludedLogins { get; set; } = Array.Empty<string>();
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
@@ -91,6 +95,7 @@ public sealed class AlertStoredValueTests
         public int DiskCriticalFreePercent { get; set; } = 3;
         public int DiskCriticalFreeGb { get; set; } = 2;
         public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int SelfDiskFreeWarnGb { get; set; } = 50;
         public int CollectionStaleMinutes { get; set; } = 30;
         public int CollectionFailureThreshold { get; set; } = 10;
         public int PvsThresholdPercent { get; set; } = 40;
@@ -117,6 +122,15 @@ public sealed class AlertStoredValueTests
             Outcomes.Add(outcome);
             return Task.CompletedTask;
         }
+
+        /* #3580: DeliverAndReportAsync is REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store
+           Parity), so every fake answers it by hand. This one reports nothing: null is "unreported", which the
+           two daily documents treat as delivered, exactly as every fire before #3580 was. */
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            await DeliverAsync(outcome, cancellationToken);
+            return null;
+        }
     }
 
     private sealed class NullHistory : IAlertHistoryStore
@@ -137,6 +151,7 @@ public sealed class AlertStoredValueTests
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
     }
 
     private sealed class Rig
@@ -295,14 +310,17 @@ public sealed class AlertStoredValueTests
         var rig = new Rig();
 
         /* 8 hours into a run, against the 6-hour floor StuckRunningBound applies to a 30-minute schedule. */
-        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+        Assert.True(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: false, jobStatus: "Running",
             lastRunStartedAtUtc: rig.Now.AddMinutes(-480), scheduleInterval: TimeSpan.FromMinutes(30),
             nowUtc: rig.Now, out var reason));
         Assert.StartsWith("stuck in the Running state for 480 minutes", reason, StringComparison.Ordinal);
 
-        await rig.Build().ApplyCompressionJobsStuckAsync(
-            new[] { new StuckCompressionJob(9001L, "wait_stats", reason) }, _ => Task.FromResult(true), Ct);
+        await rig.Build().ApplyPolicyJobsStuckAsync(
+            new StorePolicyJobHealth(
+                new[] { new StuckPolicyJob(9001L, "wait_stats", reason) },
+                Array.Empty<PolicyJobRunReading>()),
+            _ => Task.FromResult(true), Ct);
 
         /* Stored 480 before #1881. The sibling branch below has no duration at all. */
         Assert.Equal(480.0, AlertValueParser.ParseOrDefault(reason));
@@ -314,12 +332,15 @@ public sealed class AlertStoredValueTests
     {
         var rig = new Rig();
 
-        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+        Assert.True(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: null,
             scheduleInterval: TimeSpan.FromMinutes(30), nowUtc: rig.Now, out var reason));
 
-        await rig.Build().ApplyCompressionJobsStuckAsync(
-            new[] { new StuckCompressionJob(9001L, "wait_stats", reason) }, _ => Task.FromResult(true), Ct);
+        await rig.Build().ApplyPolicyJobsStuckAsync(
+            new StorePolicyJobHealth(
+                new[] { new StuckPolicyJob(9001L, "wait_stats", reason) },
+                Array.Empty<PolicyJobRunReading>()),
+            _ => Task.FromResult(true), Ct);
 
         /* This branch always stored 0 — its reason carries no digit — but the metric was NOT classified
            state-only, so the grid rendered "0.00" for it. Both halves had to move. */
@@ -498,6 +519,11 @@ public sealed class AlertStoredValueTests
             "Collection Stopped", "Capture Down", "Agent Not Running", "Server Unreachable",
             "AG Failover", "AG Replica Disconnected", "AG Sync Fell Behind", "AG Database Suspended",
             "Compression Job Stuck", DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+            /* #3816: the two new per-family stuck names store the same sentinel for the same reason — the
+               reason text is elapsed minutes on the hung arm and a scheduler state with no duration on the
+               -infinity arm. "Store Job Failing" is absent on purpose: its value is how many MORE failures
+               were recorded since the previous sample, which is a real measurement. */
+            "Refresh Job Stuck", "Retention Job Stuck",
         };
 
         var notClassified = selfAlertMetrics.Where(m => !AlertMetricClassifier.IsStateOnly(m)).ToList();

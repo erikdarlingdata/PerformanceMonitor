@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -24,21 +25,64 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// Newest collection time per server across all collectors, in one pass — the sidebar dots and the
-    /// status bar's collection field derive freshness from this (the same <c>MAX(collection_time)</c> the
+    /// Newest collection time per server across all collectors, in one statement — the sidebar dots and the
+    /// status bar's collection field derive freshness from this (the same newest <c>collection_time</c> the
     /// Overview cards use per server, so a dot and its card agree). Timestamps are the store's naive UTC.
     /// Excludes <c>server_id = 0</c>, the fleet-level retention run-record sentinel
     /// (<c>DarlingObservability.FleetServerId</c>) — it is not a real server, so it must not appear as a
     /// phantom key a future key-iterating consumer could render as "server 0".
+    ///
+    /// <para><b>One probe per registered server, not an aggregate over the log</b> (#3895). This was a
+    /// <c>GROUP BY server_id</c> over every retained row of <c>collection_log</c> — the store's biggest
+    /// table, re-read on every refresh tick for a handful of timestamps: 93.8 ms of planning and 129.5 ms on
+    /// DARLING01, and linear in servers x retained days on a field store. Now each registry row gets its own
+    /// <c>LIMIT 1</c>, an index-only descent in the newest chunk for a server that is collecting (2.5 ms and
+    /// 6.4 ms there). Every registry row, enabled or not, because Manage Servers shows a disabled server's
+    /// last collection too; unbounded, because that "last collected" may be weeks old and is still the
+    /// answer. The two callers look up registry ids only, so the rows they read are identical.</para>
     /// </summary>
     public const string ServerFreshnessSql = @"
-SELECT server_id, MAX(collection_time)
-FROM v_collection_log
-WHERE server_id <> 0
-GROUP BY server_id";
+SELECT
+    s.server_id,
+    latest.collection_time
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT collection_time
+    FROM v_collection_log
+    WHERE server_id = s.server_id
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS latest
+WHERE s.server_id <> 0";
 
-    /// <summary>The store's on-disk size in bytes (status-bar Database field). No parameters.</summary>
+    /// <summary>The store's on-disk size in bytes (status-bar Database field). No parameters.
+    ///
+    /// <para><c>pg_database_size</c> walks every file in the database directory, so its cost scales with the
+    /// store rather than with the one number it returns (#4477 measured 468 ms mean / 1.96 s worst-case on a
+    /// production store, called on every status-bar refresh — 9 calls in one 4.5-minute session). See
+    /// <see cref="StoreSizeCacheLifetime"/> for why the fix here is a cache rather than a cheaper query.</para>
+    /// </summary>
     public const string StoreSizeSql = "SELECT pg_database_size(current_database())";
+
+    /// <summary>How long <see cref="GetStoreSizeBytesAsync"/> serves its cached reading before it re-runs
+    /// <see cref="StoreSizeSql"/> (#4477). Five minutes, not the refresh timer's own 10-600 s
+    /// <c>NocRefreshIntervalSeconds</c>: the status-bar field is a coarse operator signal ("about how big is
+    /// the store"), never a threshold or a stored numeric value, and a store's on-disk size does not move
+    /// enough within five minutes for the field to read stale to a human glancing at it — the same order of
+    /// staleness <see cref="StoreSelfMetrics.LatestStoreSizeSql"/> already accepts for the service's own
+    /// disk-pressure check (mean ~59 min between sweeps there). Five minutes keeps this field visibly fresher
+    /// than that self-metrics row while cutting the read from every refresh tick to at most one per window.</summary>
+    public static readonly TimeSpan StoreSizeCacheLifetime = TimeSpan.FromMinutes(5);
+
+    /// <summary>#4477: single-flighted and TTL-memoized the same way as
+    /// <see cref="GetFleetCollectionHealthByServerAsync"/> — two refreshes racing a cold cache share ONE
+    /// <see cref="StoreSizeSql"/> round trip instead of each running its own. A null reading (a transient
+    /// read failure) is never cached, so the very next call retries rather than serving null for the rest
+    /// of the window — the same rule the previous single-caller cache followed.</summary>
+    private readonly SingleFlightTtlCache<long?> _storeSizeCache = new(StoreSizeCacheLifetime);
+
+
 
     /// <summary>
     /// Reads MAX(collection_time) for every server in a single query, keyed by server_id. A server with no
@@ -62,12 +106,21 @@ GROUP BY server_id";
         return result;
     }
 
-    /// <summary>The store database's size in bytes, or null when it can't be read.</summary>
-    public async Task<long?> GetStoreSizeBytesAsync(CancellationToken cancellationToken = default)
+    /// <summary>The store database's size in bytes, or null when it can't be read. Cached for
+    /// <see cref="StoreSizeCacheLifetime"/> (#4477): a call inside the window returns the cached reading with
+    /// no store round trip at all, rather than re-running <see cref="StoreSizeSql"/>'s whole-file-directory
+    /// walk on every status-bar refresh.</summary>
+    public Task<long?> GetStoreSizeBytesAsync(CancellationToken cancellationToken = default)
+        => _storeSizeCache.GetOrStartAsync(FetchStoreSizeBytesAsync, shouldCache: static bytes => bytes is not null, cancellationToken);
+
+    /// <summary>The actual read behind <see cref="GetStoreSizeBytesAsync"/>'s single-flight gate. Runs with
+    /// <see cref="CancellationToken.None"/> (via <see cref="SingleFlightTtlCache{T}"/>): shared work, not any
+    /// one caller's.</summary>
+    private async Task<long?> FetchStoreSizeBytesAsync()
     {
         await using var command = _dataSource.CreateCommand(StoreSizeSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        return result is null || result == DBNull.Value ? null : Convert.ToInt64(result);
+        var result = await command.ExecuteScalarAsync(CancellationToken.None);
+        return result is null || result == DBNull.Value ? (long?)null : Convert.ToInt64(result);
     }
 }

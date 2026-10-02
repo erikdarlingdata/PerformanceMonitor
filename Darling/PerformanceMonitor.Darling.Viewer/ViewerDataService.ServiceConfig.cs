@@ -128,6 +128,17 @@ WHERE id = 1";
     public const string ConfigReloadSignalSql =
         "UPDATE config_service SET updated_at = (now() AT TIME ZONE 'UTC') WHERE id = 1";
 
+    /// <summary>
+    /// How long, at most, the running service takes to NOTICE a beacon bump: it polls <c>config_version</c> at
+    /// the top of every sweep tick, and the tick is <c>DarlingWorker.s_sweepInterval</c> (15 s). The viewer
+    /// does not reference the Service project, so the figure is restated here for the status line a mute
+    /// write shows (#3570: "the service picks it up within N s") and pinned against the service's source by
+    /// <c>Darling.Tests.ViewerTraySnoozeTests</c>, so the sentence cannot quietly outlive the cadence it
+    /// describes. What it bounds is the service's OWN channels (email/webhook); the tray toast the viewer
+    /// raises honors the rule on the viewer's next poll without waiting on this.
+    /// </summary>
+    public const int ServiceReloadTickSeconds = 15;
+
     /// <summary>Bumps the reload beacon (see <see cref="ConfigReloadSignalSql"/>) so the service re-reads the
     /// store on its next sweep — used after a write to a config table without its own bump trigger.</summary>
     public async Task SignalConfigReloadAsync(CancellationToken cancellationToken = default)

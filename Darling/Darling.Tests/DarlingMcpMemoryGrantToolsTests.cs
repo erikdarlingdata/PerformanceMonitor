@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
@@ -77,6 +78,46 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
         Assert.All(p, x => Assert.True(x.Optional, $"{toolName}.{x.Name} must be optional"));
     }
 
+    /// <summary>
+    /// #3653 A15/A16: <c>get_resource_semaphore</c> returned the same rows in a DIFFERENT order on the two SKUs —
+    /// Darling's latest-snapshot and window reads ordered <c>resource_semaphore_id, pool_id</c>, Lite's ordered
+    /// <c>pool_id, resource_semaphore_id</c>. Both take the newest snapshot in the window through the same
+    /// <c>MAX(collection_time)</c> probe (that part never drifted); the drift was the ORDER BY alone. The parity
+    /// pin reads Lite's SQL from source (this project does not reference the desktop app — the arrangement
+    /// <see cref="McpPageContractTests"/> uses) and holds both reads on both SKUs to ONE clause, pool first.
+    /// </summary>
+    [Fact]
+    public void TheSameToolName_OrdersTheSemaphoreRowsTheSameWay_OnBothSkus()
+    {
+        const string latestOrder = "ORDER BY pool_id, resource_semaphore_id";
+        const string windowOrder = "ORDER BY a.pool_id, a.resource_semaphore_id";
+
+        /* The drifted spelling, as a FINAL clause only: the peak subquery's DISTINCT ON legitimately leads with
+           `resource_semaphore_id, pool_id, waiter_count DESC, ...` on both SKUs (DISTINCT ON must sort by its own
+           keys first) and is not the row order the payload carries, so the lookahead excludes a trailing comma. */
+        var drifted = new System.Text.RegularExpressions.Regex(@"ORDER BY (?:a\.)?resource_semaphore_id, (?:a\.)?pool_id(?!,)");
+        /* The discriminator against literals written for it, so a matcher that quietly stopped matching cannot
+           report a clean bill of health. */
+        Assert.Matches(drifted, "ORDER BY resource_semaphore_id, pool_id\n");
+        Assert.Matches(drifted, "ORDER BY a.resource_semaphore_id, a.pool_id\"");
+        Assert.DoesNotMatch(drifted, "ORDER BY resource_semaphore_id, pool_id, waiter_count DESC");
+
+        var darlingLatest = DarlingMemoryGrantReader.ResourceSemaphoreLatestSql;
+        var darlingWindow = DarlingMemoryGrantReader.ResourceSemaphoreWindowSql;
+        Assert.Contains(latestOrder, darlingLatest, StringComparison.Ordinal);
+        Assert.Contains(windowOrder, darlingWindow, StringComparison.Ordinal);
+        Assert.DoesNotMatch(drifted, darlingLatest);
+        Assert.DoesNotMatch(drifted, darlingWindow);
+
+        var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.MemoryGrants.cs");
+        /* Positive control first: the two Lite reads this pin speaks for are where it thinks they are. */
+        Assert.Contains("GetResourceSemaphoreSnapshotAsync(", lite, StringComparison.Ordinal);
+        Assert.Contains("GetResourceSemaphoreWindowAsync(", lite, StringComparison.Ordinal);
+        Assert.Contains(latestOrder, lite, StringComparison.Ordinal);
+        Assert.Contains(windowOrder, lite, StringComparison.Ordinal);
+        Assert.DoesNotMatch(drifted, lite);
+    }
+
     [Fact]
     public void ResourceSemaphoreLatestSql_LatestSnapshot_CarriesCeilingColumns()
     {
@@ -88,6 +129,31 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
         Assert.Contains("resource_semaphore_id", sql, StringComparison.Ordinal);
         Assert.Contains("timeout_error_count_delta", sql, StringComparison.Ordinal);
         Assert.Contains("forced_grant_count_delta", sql, StringComparison.Ordinal);
+        /* #3540 (V128): the Dashboard's sample_interval_seconds is back — the collector stores it now — and
+           it rides LAST so every ordinal the reader indexes is unchanged. */
+        var interval = sql.IndexOf("sample_interval_seconds", StringComparison.Ordinal);
+        Assert.True(interval > sql.IndexOf("forced_grant_count_delta,", StringComparison.Ordinal), "the interval must be selected after the last pre-V128 column");
+        /* LastIndexOf: the CTE's MAX(collection_time) probe reads the view first; the select list sits ahead
+           of the SECOND FROM. */
+        Assert.True(interval < sql.LastIndexOf("FROM v_memory_grant_stats", StringComparison.Ordinal), "the interval must be in the SELECT list");
+        Assert.Equal(1, sql.Split("sample_interval_seconds").Length - 1);
+    }
+
+    /// <summary>
+    /// #3540 (V128): the resource-semaphore row carries the stored interval and reports it the way the file-I/O
+    /// row does — <c>IsUnknowable</c> is true ONLY for a stored 0 (the calculator's marker), never for a
+    /// pre-V128 NULL, which is "never recorded" rather than "unknowable". The tool then hands the caller a
+    /// null interval for both, with <c>interval_known</c> saying so.
+    /// </summary>
+    [Fact]
+    public void ResourceSemaphoreRow_IsUnknowable_OnlyForAStoredZeroInterval()
+    {
+        static DarlingMemoryGrantReader.ResourceSemaphoreRow Row(int? interval) => new(
+            DateTime.UnixEpoch, 0, 2, 100, 200, 90, 80, 10, 8, 3, 1, 5, 2, 0, 0, interval);
+
+        Assert.True(Row(0).IsUnknowable);
+        Assert.False(Row(120).IsUnknowable);
+        Assert.False(Row(null).IsUnknowable);
     }
 
     [Fact]
@@ -203,17 +269,42 @@ public sealed class DarlingMcpMemoryGrantToolsLivePostgresTests
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             var t = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
 
-            foreach (var (semaphore, pool) in new[] { ((short)0, 1), ((short)0, 2) })
+            /* #3540 (V128): three semaphores at one collection — pool 1 a restart marker (stored interval 0),
+               pool 2 measured (120 s), pool 3 a pre-V128 row (NULL). The tool reports the interval only for
+               the measured one and says interval_known for exactly that one. */
+            foreach (var (semaphore, pool, interval) in new[] { ((short)0, 1, (object)0), ((short)0, 2, 120), ((short)0, 3, DBNull.Value) })
             {
                 await DarlingMcpTestData.ExecAsync(connection, ct,
-                    @"INSERT INTO memory_grant_stats (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id, target_memory_mb, max_target_memory_mb, total_memory_mb, available_memory_mb, granted_memory_mb, used_memory_mb, grantee_count, waiter_count, timeout_error_count, forced_grant_count, timeout_error_count_delta, forced_grant_count_delta)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
-                    CollectionIdGenerator.Next(), t, ServerId, ServerName, semaphore, pool, 8000m, 12000m, 8000m, 6000m, 2000m, 1500m, 3, 1, 4L, 2L, 1L, 0L);
+                    @"INSERT INTO memory_grant_stats (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id, target_memory_mb, max_target_memory_mb, total_memory_mb, available_memory_mb, granted_memory_mb, used_memory_mb, grantee_count, waiter_count, timeout_error_count, forced_grant_count, timeout_error_count_delta, forced_grant_count_delta, sample_interval_seconds)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, semaphore, pool, 8000m, 12000m, 8000m, 6000m, 2000m, 1500m, 3, 1, 4L, 2L, 1L, 0L, interval);
             }
 
             var semaphoreJson = await DarlingMcpMemoryGrantTools.GetResourceSemaphore(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(semaphoreJson, ServerName, "grants");
             Assert.Contains("max_target_memory_mb", semaphoreJson, StringComparison.Ordinal);
+
+            using (var doc = JsonDocument.Parse(semaphoreJson))
+            {
+                var byPool = doc.RootElement.GetProperty("grants").EnumerateArray()
+                    .ToDictionary(g => g.GetProperty("pool_id").GetInt32());
+                Assert.Equal(3, byPool.Count);
+
+                Assert.Equal(JsonValueKind.Null, byPool[1].GetProperty("sample_interval_seconds").ValueKind);
+                Assert.False(byPool[1].GetProperty("interval_known").GetBoolean());
+
+                Assert.Equal(120, byPool[2].GetProperty("sample_interval_seconds").GetInt32());
+                Assert.True(byPool[2].GetProperty("interval_known").GetBoolean());
+
+                Assert.Equal(JsonValueKind.Null, byPool[3].GetProperty("sample_interval_seconds").ValueKind);
+                Assert.False(byPool[3].GetProperty("interval_known").GetBoolean());
+
+                /* #3653 item 17: interval_seconds is sample_interval_seconds under the name get_latch_stats and
+                   get_spinlock_stats use, including null for the same restart-marker and pre-column rows. */
+                Assert.Equal(JsonValueKind.Null, byPool[1].GetProperty("interval_seconds").ValueKind);
+                Assert.Equal(byPool[2].GetProperty("sample_interval_seconds").GetInt32(), byPool[2].GetProperty("interval_seconds").GetInt32());
+                Assert.Equal(JsonValueKind.Null, byPool[3].GetProperty("interval_seconds").ValueKind);
+            }
 
             var grantsJson = await DarlingMcpMemoryGrantTools.GetMemoryGrants(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(grantsJson, ServerName, "grants");

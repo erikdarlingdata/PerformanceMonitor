@@ -71,7 +71,7 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
             .Select(x => (x.Name!, x.HasDefaultValue))
             .ToArray();
 
-        Assert.Equal(new[] { "server_name", "hours_back", "database_name", "limit", "as_of" }, p.Select(x => x.Item1).ToArray());
+        Assert.Equal(new[] { "server_name", "hours_back", "database_name", "limit", "full_text", "as_of" }, p.Select(x => x.Item1).ToArray());
         Assert.All(p, x => Assert.True(x.Item2, $"{x.Item1} must be optional"));
     }
 
@@ -102,11 +102,29 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
     public void RegressionsSql_SplitsBaselineFromRecent_OnTheSameBoundary()
     {
         var sql = DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql;
+        /* #4217/#4310: the baseline has a FIXED lower bound too, not "everything before the window" — this
+           is the assertion that fails against the pre-#4217 shape (the grid's twin,
+           ViewerQueryStoreRegressionsTests.RegressionsSql_SplitsBaselineBeforeWindow_RecentInWindow_OverTheBaseTable,
+           already carries it for the viewer's copy; this reader's own copy was uncovered). */
+        Assert.Contains("collection_time >= $6", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
         Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4310: the grid keeps its own copy of <c>BaselineLookbackDays</c> (it cannot reference this project)
+    /// and pins it equal to 7 in <c>ViewerQueryStoreRegressionsTests.BaselineLookbackDays_IsSevenDays_SameAsTheMcpReaderAndLite</c>.
+    /// This reader's OWN constant had no such pin — nothing stopped the two copies drifting apart, since
+    /// #4217's fixed-baseline lower bound above depends on this constant's value at the call site rather
+    /// than in the SQL text.
+    /// </summary>
+    [Fact]
+    public void BaselineLookbackDays_IsSevenDays_SameAsTheViewerAndLite()
+    {
+        Assert.Equal(7, DarlingQueryStoreRegressionReader.BaselineLookbackDays);
     }
 
     /// <summary>
@@ -144,6 +162,11 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
         var sql = DarlingQueryStoreRegressionReader.RegressionCoverageSql;
         Assert.Equal(2, CountOf(sql, "FROM query_store_stats"));
         Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal);
+        /* #4310: the coverage probe's own baseline arm must use the SAME fixed lower bound as the read it
+           probes for — an unbounded coverage probe over a bounded read would answer "has_baseline" for
+           history the read itself can no longer see, and report the no-baseline branch (#4195/#4217) as
+           false whenever it is in fact true. */
+        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
         Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
@@ -292,8 +315,12 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Contains("no baseline", noBaselineText, StringComparison.Ordinal);
             Assert.Contains("NOT a clean bill of health", noBaselineText, StringComparison.Ordinal);
 
-            /* Widening would make the window bigger and the baseline SHORTER — the wrong direction. */
-            Assert.Contains("Shorten hours_back", noBaselineText, StringComparison.Ordinal);
+            /* #4195: the baseline is now a FIXED lookback (BaselineLookbackDays), not "everything before
+               hours_back" — so neither widening nor shortening hours_back changes how far back the baseline
+               reaches, and the old "Shorten hours_back" advice (correct for the unbounded baseline, where a
+               shorter recent window left more history in the baseline arm) no longer applies and was removed. */
+            Assert.Contains("baseline lookback", noBaselineText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Shorten hours_back", noBaselineText, StringComparison.Ordinal);
             Assert.DoesNotContain("Widen", noBaselineText, StringComparison.Ordinal);
             Assert.NotEqual(neverText, noBaselineText);
 

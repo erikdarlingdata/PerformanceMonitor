@@ -61,6 +61,28 @@ public sealed class ServerRuntime
     /// booleans on <see cref="Target"/>.
     /// </summary>
     public int EngineEdition { get; init; }
+
+    /// <summary>
+    /// What the PostgreSQL detection query saw in <c>pg_extension</c> for <c>pg_stat_statements</c>, in the
+    /// database this connection landed in (#3830) - the ROW, not a verdict drawn from it. Default
+    /// <see cref="PgExtensionRowObservation.NotObserved"/> on every SQL Server target and on any runtime a
+    /// test builds by hand, which every consumer must read as "no answer" rather than "no row".
+    ///
+    /// <para><b>What it is for.</b> The companion-object fault sentence (#3818) has the exception and not
+    /// the catalog, so it had one remedy - <c>ALTER EXTENSION pg_stat_statements UPDATE</c> - for three
+    /// different states. #3830 is the record of the cost: the 23 clusters that motivated #3818 have NO
+    /// <c>pg_extension</c> row at all, the collector reads Aurora's <c>aurora_stat_statements()</c> which
+    /// needs none, and they were being told to update an extension that was never created. This is the
+    /// value that lets <c>DarlingWorker.PostgresFaultOutcome</c> RECEIVE the state instead of guessing it.</para>
+    ///
+    /// <para><b>Connect-scoped, deliberately, and bounded to a sentence.</b> It moves when the connection is
+    /// re-established, so an operator who runs <c>CREATE EXTENSION</c> mid-life is described by the value
+    /// read at connect until then. Nothing DISPATCHES on it - it changes no gate and skips no collector, so
+    /// the stale direction costs a sentence naming a remedy already applied, on a fault that stops being
+    /// raised at the same moment. A gate on this would be the #2559 defect ("run the GRANT, nothing happens
+    /// until restart"), which is why it is not one.</para>
+    /// </summary>
+    public PgExtensionRowObservation PgStatStatementsExtension { get; init; }
 }
 
 /// <summary>
@@ -255,7 +277,15 @@ SELECT
     pg_is_in_recovery() AS is_in_recovery,
     current_setting('server_version_num')::int AS server_version_num,
     -- #2228: which database this connection actually landed in. Appended; see the comment above.
-    current_database() AS connected_database";
+    current_database() AS connected_database,
+    -- #3830: the pg_stat_statements catalog version in THIS database, or NULL when pg_extension has no
+    -- row for it. A column on the read that was already being made rather than a probe of its own: one
+    -- scalar on one statement, and pg_extension is world-readable, so it adds no round trip and no grant.
+    -- Named as a literal because a const cannot interpolate. PostgresFaultOutcomeTests compares it against
+    -- the collector's own RequiredPgExtensions declaration, so the two cannot drift apart unnoticed.
+    (SELECT e.extversion
+     FROM pg_catalog.pg_extension AS e
+     WHERE e.extname = 'pg_stat_statements') AS pg_stat_statements_extversion";
 
     /// <summary>
     /// The Aurora probe (#2340), a SEPARATE statement because it decides by CALLING the marker function
@@ -304,6 +334,40 @@ SELECT
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogDebug(ex, "aurora_version() probe did not succeed; treating the target as stock PostgreSQL");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the <c>pg_wait_sampling</c> extension is created in the database this connection landed in
+    /// (#3604) — the connect-time fact that picks <c>PgWaitSamplingCollector</c>'s arm on a stock target:
+    /// the extension's own 10 ms profile when present, the service-side <c>pg_stat_activity</c> sampler when
+    /// not. <c>pg_extension</c> is per database, and the collector reads <c>pg_wait_sampling_profile</c> from
+    /// exactly this database, so this is the fact that decides whether that read can succeed rather than a
+    /// proxy for it (<c>pg_available_extensions</c> would say "installable", which is a different question).
+    /// </summary>
+    public const string PostgresWaitSamplingProbeQueryText =
+        @"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_wait_sampling')";
+
+    /// <summary>
+    /// Runs <see cref="PostgresWaitSamplingProbeQueryText"/>. Fails CLOSED to false on any error other than
+    /// cancellation, and for the same reason <see cref="ProbeAuroraAsync"/> does: this probe decides which
+    /// arm an optional collector takes, and a target that answered every other connect question must still be
+    /// monitored. False routes the target to the sampler arm, which reads only <c>pg_stat_activity</c> — the
+    /// floor — so the failure direction produces a coarser wait history rather than none.
+    /// </summary>
+    private static async Task<bool> ProbeWaitSamplingExtensionAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken, ILogger? logger = null)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(PostgresWaitSamplingProbeQueryText, connection) { CommandTimeout = 15 };
+            var present = await command.ExecuteScalarAsync(cancellationToken);
+            return present is bool b && b;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(ex, "pg_wait_sampling extension probe did not succeed; treating the extension as absent (#3604)");
             return false;
         }
     }
@@ -392,6 +456,7 @@ SELECT
         bool isInRecovery = false;
         string versionText = "";
         string? connectedDatabase = null;
+        var statementsExtension = PgExtensionRowObservation.NotObserved;
         if (await reader.ReadAsync(cancellationToken))
         {
             versionText = reader.IsDBNull(0) ? "" : reader.GetString(0);
@@ -399,6 +464,12 @@ SELECT
             isInRecovery = !reader.IsDBNull(2) && reader.GetBoolean(2);
             versionNum = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
             connectedDatabase = reader.IsDBNull(4) ? null : reader.GetString(4);   /* #2228 */
+
+            /* #3830: the row, observed. A NULL scalar is "pg_extension has no row for it", which is a
+               different answer from "nothing read it" - so the observation is built on the row being
+               present in the result, never inferred from the value being null. */
+            statementsExtension = PgExtensionRowObservation.From(
+                reader.IsDBNull(5) ? null : reader.GetString(5), connectedDatabase);
         }
 
         /* The reader must be closed before another command runs on this connection. */
@@ -406,9 +477,18 @@ SELECT
 
         var isAurora = await ProbeAuroraAsync(connection, cancellationToken, logger);
 
+        /* #3604: the wait-tier decision's second fact. Probed AFTER Aurora-ness and independently of it —
+           an Aurora cluster cannot load the module, so the answer there is false by construction, but the
+           gate reads the two facts separately and the sweep varies them separately. */
+        var hasWaitSampling = await ProbeWaitSamplingExtensionAsync(connection, cancellationToken, logger);
+
         logger?.LogInformation(
-            "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora} — {VersionText}",
+            "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora}, pg_wait_sampling: {WaitSampling}, pg_stat_statements: {StatementsExtension} — {VersionText}",
             config.DisplayName, majorVersion, versionNum, isInRecovery ? "reader (in recovery)" : "writer", isAurora,
+            hasWaitSampling ? "present (extension_sampled tier)" : isAurora ? "n/a (engine_cumulative tier)" : "absent (service_sampled tier)",
+            statementsExtension.ExtensionVersion is { } extversion
+                ? "extension " + extversion
+                : "no pg_extension row in this database",
             versionText);
 
         /* A Postgres target reached through the SQL Server path would have failed on the detection
@@ -434,10 +514,16 @@ SELECT
                 IsAwsRds = RdsEndpoint.TryParse(
                     new NpgsqlConnectionStringBuilder(connectionString).Host) is not null,
                 IsInRecovery = isInRecovery,
+                /* #3604: which stock-PostgreSQL wait instrument this target gets, decided here once. */
+                HasPgWaitSamplingExtension = hasWaitSampling,
             },
             StorageName = storageName,
             ServerId = config.ServerId,
             ConnectedDatabase = connectedDatabase,
+            /* #3830: on the runtime rather than on Target, because nothing dispatches on it - it feeds one
+               fault sentence - and CollectorTargetInfo is the type whose facts the engine-capability sweep
+               has to vary or fix. */
+            PgStatStatementsExtension = statementsExtension,
         };
     }
 
@@ -478,7 +564,8 @@ SELECT
                 PostgresMajorVersion: runtime.Target.PostgresMajorVersion,
                 PostgresVersionNum: runtime.Target.PostgresVersionNum,
                 IsAurora: runtime.Target.IsAurora,
-                IsInRecovery: runtime.Target.IsInRecovery);
+                IsInRecovery: runtime.Target.IsInRecovery,
+                HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension);
         }
         catch (OperationCanceledException)
         {
@@ -588,7 +675,10 @@ public sealed record ConnectionProbeResult(
     /* #2280: the database the connection ACTUALLY reached, so a registration-time collision check can compare
        what the SERVER says against what other registrations claim, rather than comparing two claims. Trailing
        and defaulted, so every existing construction of this record still compiles unchanged. */
-    string? ConnectedDatabase = null)
+    string? ConnectedDatabase = null,
+    /* #3604: the wait-tier fact, so --test-connection's "which collectors would run" count is computed
+       against the same shape the gate reads. Trailing and defaulted for the #2280 reason. */
+    bool HasPgWaitSamplingExtension = false)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually
@@ -607,5 +697,6 @@ public sealed record ConnectionProbeResult(
         PostgresVersionNum = PostgresVersionNum,
         IsAurora = IsAurora,
         IsInRecovery = IsInRecovery,
+        HasPgWaitSamplingExtension = HasPgWaitSamplingExtension,
     };
 }

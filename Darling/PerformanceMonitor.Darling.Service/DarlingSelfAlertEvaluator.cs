@@ -17,8 +17,10 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -94,14 +96,21 @@ internal sealed class DarlingSelfAlertEvaluator
        cycle. 10 spans a couple of minutes of total failure across the frequently-scheduled collectors. */
     internal const int ConsecutiveFailureThreshold = 10;
 
-    /* Store Disk Pressure fires when the store volume drops below this percent free — a percentage (not an
-       absolute floor) so it scales from a small managed box to a large fleet disk; 10% is the universal DBA
-       "act now" threshold for a database volume, and mirrors the shared engine's target-server low-disk
-       percent (LowDiskThresholdPercent). Percent-only by design (defaults over speculative config — a GB
-       floor is a trivial follow-up if an operator ever wants one). The condition no-ops when free space is
-       undeterminable (a remote BYO store), so it never false-alarms; the managed store's own volume is the
-       case it exists to protect. */
+    /* Store Disk Pressure fires when the store volume drops below this percent free — a percentage so it
+       scales from a small managed box to a large fleet disk; 10% is the universal DBA "act now" threshold
+       for a database volume, and mirrors the shared engine's target-server low-disk percent
+       (LowDiskThresholdPercent). The condition no-ops when free space is undeterminable (a remote BYO
+       store), so it never false-alarms; the managed store's own volume is the case it exists to protect. */
     internal const double DiskFreeWarnPercent = 10.0;
+
+    /* #3528: the percent's GB floor — pressure additionally requires free space BELOW this many GB, an AND
+       qualifier so a big volume at a low percent (400 GB free on a 4 TB store) never pages CRITICAL. This
+       was "percent-only by design (a GB floor is a trivial follow-up if an operator ever wants one)"; #3528
+       is that want. The composition is PvsFloorGb's (percent triggers, the floor keeps it honest, 0 removes
+       the floor), deliberately NOT the target-volume pair's OR — there the GB dimension ADDS fires, which
+       would make this alert noisier, the opposite of the complaint. 50 puts the crossover at a 500 GB
+       volume: below that the percent governs exactly as before; above it, 50 GB free is the line. */
+    internal const double DiskFreeWarnFloorGb = 50.0;
 
     private readonly IAlertEngineSettings _settings;
     private readonly IAlertDeliverer _deliverer;
@@ -149,6 +158,22 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, DateTime> _lastCaptureDownAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeAgentDown = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastAgentDownAlert = new();
+
+    /// <summary>The failed-send streaks behind <see cref="AfterSelfFire"/> (#4795): per (alert metric, key), how
+    /// many sends in a row reached no channel. In memory only, like the stamps it back-dates; a restart starts
+    /// every streak over, which only ever makes the first retry earlier.</summary>
+    private readonly FailedSendBackoff _selfFailedSends = new();
+
+    /// <summary>When a "Server Unreachable" that no channel delivered is due again, per server (#4795). The
+    /// connection edge has nothing else that brings it back with re-fire off. Cleared when the server is seen
+    /// online.</summary>
+    private readonly FailedSendRetryTracker _connectionRetries = new();
+
+    /// <summary>The same for the availability group alerts (#4795), keyed by metric and AG grain: a disconnect
+    /// that reached no channel is due again with re-fire off or on; a failover and a data-movement-suspended
+    /// edge, whose "already reported" markers are put back, are due again after the same delay. Held in a tracker
+    /// rather than back-dated into the re-fire stamp because the stamp means nothing with re-fire off.</summary>
+    private readonly FailedSendRetryTracker _agRetries = new();
 
     /// <summary>Servers on which SQL Agent has been OBSERVED RUNNING at least once — the capability gate for
     /// "Agent Not Running". Memoized only once true, so the store probe behind it stops after the first
@@ -328,11 +353,28 @@ internal sealed class DarlingSelfAlertEvaluator
     /// and cannot be taken from a phone at 3am. A longer interval alone would have produced the same
     /// unactionable card less often.</para>
     ///
-    /// <para><b>In-memory, like every sibling's interval, and a restart costs one extra digest.</b> That is
-    /// the failure class <see cref="StaleMuteRefire"/> and #3430's <c>RepeatDeliveryBudget</c> both already
-    /// accept, and it is what keeps this change free of a migration rung. An extra copy of a report is the
-    /// cheapest possible failure; nothing is lost either way, because the digest is recomputed from the
-    /// store every time rather than accumulated in process.</para>
+    /// <para><b>Gated on DELIVERED-TODAY in the store, not fired-today in memory (#3580).</b> This shipped
+    /// as "in-memory, like every sibling's interval, and a restart costs one extra digest" — the failure
+    /// class <see cref="StaleMuteRefire"/> and #3430's <c>RepeatDeliveryBudget</c> both accept, on the
+    /// argument that an extra copy of a report is the cheapest possible failure. The v3.8.0 install night
+    /// priced it: three stores restarted once each, and the channel carried SIX re-announcements among ~23
+    /// overnight posts — a quarter of the channel was this document and the rollup, twice — because a fresh
+    /// process has an empty <see cref="_lastCostDigest"/> and the gate was answering "has THIS PROCESS sent
+    /// one today" when the reader's question is "has one been DELIVERED today". The same night showed the
+    /// case the fix must keep: a pair whose delivery had FAILED (a transport fault, not a suppression) was
+    /// correctly re-attempted after the restart and landed; the restart was the recovery.</para>
+    ///
+    /// <para>So the gate now reads a delivery stamp from <see cref="ISelfAlertDeliveryStampStore"/> (the
+    /// store's existing key/value state table, no rung) and skips while <c>now - stamp</c> is inside this
+    /// interval, restart or not; and the stamp is written only when the deliverer reports a disposition
+    /// other than <see cref="AlertDelivery.ChannelFailed"/>. A failed delivery writes nothing, so the next
+    /// tick — restart or not — retries; the in-memory dictionary remains as a same-process fast path (23 of
+    /// 24 ticks still cost one lookup and no store read) but is no longer the authority. A store fault on
+    /// the stamp falls back to that fast path and warns — fail-open toward delivering, the direction every
+    /// store-fault posture in this evaluator already takes, because the alternative (skip on an unreadable
+    /// stamp) would let a store hiccup silence a daily document, and the memory gate still bounds the
+    /// fallback at one copy per process. The nothing-is-lost half of the original argument still holds:
+    /// the digest is recomputed from the store every time rather than accumulated in process.</para>
     /// </summary>
     internal static readonly TimeSpan CollectorCostDigestInterval = TimeSpan.FromDays(1);
 
@@ -345,9 +387,11 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>How many collectors the digest's heaviest-first census spells out.</summary>
     private const int MaxListedCostHeaviest = 10;
 
-    /// <summary>When the digest was last sent — the <see cref="_lastStaleMuteAlert"/> idiom, one fixed key.
-    /// A digest has no active flag and no resolution edge: it is a report of a measurement, not a condition
-    /// that can be entered and left, so there is nothing to clear.</summary>
+    /// <summary>When the digest was last known DELIVERED — the <see cref="_lastStaleMuteAlert"/> idiom, one
+    /// fixed key, but since #3580 a CACHE of the store's stamp rather than the authority: filled from the
+    /// stamp on the first tick that has to ask, and from the fire itself on a delivery the deliverer did
+    /// not report failed. A digest has no active flag and no resolution edge: it is a report of a
+    /// measurement, not a condition that can be entered and left, so there is nothing to clear.</summary>
     private readonly ConcurrentDictionary<string, DateTime> _lastCostDigest = new();
 
     /// <summary>
@@ -371,10 +415,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the trailing day and only the trailing day, so what a post claims to cover and how often one can
     /// arrive are the same number and cannot drift apart.
     ///
-    /// <para><b>In-memory, like <see cref="CollectorCostDigestInterval"/>, and a restart costs one extra
-    /// rollup.</b> The same accepted failure class: an extra copy of a report is the cheapest possible
-    /// failure, and the rollup is recomputed from the sweep store every time rather than accumulated in
-    /// process, so nothing is lost in either direction.</para>
+    /// <para><b>Gated on delivered-today in the store, like <see cref="CollectorCostDigestInterval"/> and
+    /// for the same night's reason (#3580).</b> This shipped in-memory with "a restart costs one extra
+    /// rollup" accepted as the cheapest failure; the install night's census — three restarts, six
+    /// re-announcements, this document being three of them — is what that acceptance cost, and the digest's
+    /// remarks carry the arc. The one-post-per-day CEILING above is a ruling, and a gate that a restart
+    /// resets is a ceiling the deployment procedure breaches on every install. The rollup takes the same
+    /// stamp store, the same failed-writes-nothing rule and the same fail-open fallback, under its own key.
+    /// Still recomputed from the sweep store every time rather than accumulated in process, so nothing is
+    /// lost in either direction.</para>
     /// </summary>
     internal static readonly TimeSpan FleetSweepRollupInterval = TimeSpan.FromDays(1);
 
@@ -391,10 +440,53 @@ internal sealed class DarlingSelfAlertEvaluator
     /// stay readable on the fleet-wide day it exists for.</summary>
     private const int MaxListedRollupLedgerServers = 10;
 
-    /// <summary>When the rollup was last sent — the <see cref="_lastCostDigest"/> idiom, one fixed key. A
-    /// rollup is a report of a period, not a condition: no active flag, no resolution edge, nothing to
-    /// clear.</summary>
+    /// <summary>When the rollup was last known DELIVERED — the <see cref="_lastCostDigest"/> idiom, one
+    /// fixed key, and since #3580 the same cache-of-the-stamp role rather than the authority. A rollup is a
+    /// report of a period, not a condition: no active flag, no resolution edge, nothing to clear.</summary>
     private readonly ConcurrentDictionary<string, DateTime> _lastSweepRollup = new();
+
+    /// <summary>
+    /// The metric name the ANALYSIS SINGLES DIGEST fires under (#3712) — the third daily document, beside the
+    /// collector-cost digest and the fleet-sweep rollup. A WEBHOOK AUTOMATION KEY like its siblings (the
+    /// alert-history grids, the severity map's declared INFO arm, the family census and any downstream
+    /// consumer key on it), so it is a const and must stay stable across releases.
+    /// </summary>
+    internal const string AnalysisSinglesDigestMetric = "Analysis Singles Digest";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the
+    /// <see cref="DiskKey"/> shape).</summary>
+    private const string AnalysisSinglesDigestKey = "singlesdigest";
+
+    /// <summary>
+    /// How often the singles digest is sent. Daily, and the interval is also its COVERED SPAN, the rollup's
+    /// exact reasoning: what the post claims to cover and how often one can arrive are one number. It exists
+    /// because of what #3712 measured — forty-plus uncorroborated anomaly pages in seven hours on a large
+    /// production fleet, interleaved with the handful that needed a human — and the action a lone-fact
+    /// anomaly invites is "look at the day's singles as a distribution and decide which to promote", which is
+    /// a document to read, not a card to act on at 3am. The findings themselves are live on the web and MCP
+    /// surfaces the instant they fire; this is the once-a-day channel copy, and its ceiling.
+    ///
+    /// <para>Gated on delivered-today in the store like both siblings (#3580): the same stamp store, the same
+    /// failed-writes-nothing rule, the same fail-open fallback, under its own key. Recomputed from the
+    /// ledger every time rather than accumulated in process, so a restart loses nothing in either
+    /// direction.</para>
+    /// </summary>
+    internal static readonly TimeSpan AnalysisSinglesDigestInterval = TimeSpan.FromDays(1);
+
+    /// <summary>How many top movers the singles digest spells out, on <see cref="MaxListedCostMovers"/>'
+    /// reasoning — one bounded message that states the population it selected from.</summary>
+    private const int MaxListedSinglesMovers = 10;
+
+    /// <summary>How many servers a family block names before eliding, and how many singles a server line
+    /// names — the ledger block's <see cref="MaxListedRollupLedgerServers"/> reasoning: readable on the
+    /// fleet-wide day it exists for.</summary>
+    private const int MaxListedSinglesServersPerFamily = 10;
+    private const int MaxListedSinglesPerServer = 3;
+
+    /// <summary>When the singles digest was last known DELIVERED — the <see cref="_lastCostDigest"/> idiom:
+    /// one fixed key, a cache of the store's stamp rather than the authority (#3580). A digest is a report of
+    /// a period, not a condition: no active flag, no resolution edge, nothing to clear.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastSinglesDigest = new();
 
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
@@ -621,9 +713,15 @@ internal sealed class DarlingSelfAlertEvaluator
        when the job stops being stuck. Keyed by the CompressionKeyPrefix + job_id so the alert serverKey never
        collides with a real server_id (an int hash) — the deliverer's #1236 int.TryParse override no-ops on it,
        exactly like the non-numeric DiskKey. */
-    private enum CompressionJobHealth { ReArmed, Escalated }
-    private readonly ConcurrentDictionary<string, CompressionJobHealth> _compressionJobState = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, DateTime> _lastCompressionJobAlert = new(StringComparer.Ordinal);
+    /* AwaitingSchedulerRetry (#3591): a -infinity row on a TimescaleDB whose scheduler recovers it by itself
+       (StuckPolicyJob.SchedulerRetries) — seen once, not re-armed, not paged; a second consecutive
+       sighting escalates. The other two states are #1581's. */
+    /* #3816: the state is now keyed by job_id across EVERY policy family, not only compression, and each
+       entry remembers which family it fired under — see PolicyJobEpisode for why the recovery edge needs
+       that. One dictionary rather than one per family because a job_id is unique within a store. */
+    private enum PolicyJobHealth { ReArmed, Escalated, AwaitingSchedulerRetry }
+    private readonly ConcurrentDictionary<string, PolicyJobEpisode> _policyJobState = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastPolicyJobAlert = new(StringComparer.Ordinal);
 
     /// <summary>The alert metric name every compression-job self-alert fires under (first-detection + escalation
     /// re-fires share it, so the deliverer's per-metric cooldown and the recovery resolution correlate cleanly;
@@ -632,6 +730,85 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>Prefixes the fleet-level compression-job alert serverKey so it never parses as a server_id.</summary>
     private const string CompressionKeyPrefix = "compressjob:";
+
+    /// <summary>
+    /// #3816: the metric name a dead or hung CONTINUOUS-AGGREGATE REFRESH policy fires under.
+    ///
+    /// <para><b>A new name beside <see cref="CompressionJobMetric"/> rather than a widening of it.</b> A
+    /// metric name is a PERSISTED IDENTITY: it is the string in every <c>config_alert_log</c> row, the string
+    /// a mute rule matches, the key a notification route resolves, and the key the triage page's read map is
+    /// built on. Renaming "Compression Job Stuck" to something family-neutral would orphan every existing
+    /// history row and silently break every mute rule written against it on a deployed store, so the
+    /// compression family keeps its exact string and its exact key prefix. And a REFRESH job's page must not
+    /// arrive under a name that says compression: an operator who mutes one condition would have muted the
+    /// other, and the two have different urgency, different remedies and different blast radius.</para>
+    ///
+    /// <para><b>One tier per name is the second reason to split.</b> This one is always Critical and
+    /// <see cref="RetentionJobStuckMetric"/> is always Warning, so each name's arm in
+    /// <c>AlertSeverity.ForMetric</c> is a faithful replay colour for every row it will ever style — the
+    /// #3635 defect (a history row wearing the colour its NAME implies rather than the tier it fired at) is
+    /// unreachable here by construction, where one mixed-tier name would have walked into it.</para>
+    /// </summary>
+    internal const string RefreshJobStuckMetric = "Refresh Job Stuck";
+
+    /// <summary>#3816: the resolution title when a refresh job runs on schedule again. Carries a recognized
+    /// resolution suffix ("Recovered") so <c>AlertMetricClassifier.IsResolution</c> styles it green, exactly
+    /// like "Compression Job Recovered".</summary>
+    internal const string RefreshJobRecoveredMetric = "Refresh Job Recovered";
+
+    /// <summary>Prefixes the refresh-job alert serverKey so it never parses as a server_id — and so a job id
+    /// that was a refresh policy on one deployment and a compression policy on another cannot inherit the
+    /// other family's open alert row.</summary>
+    private const string RefreshKeyPrefix = "refreshjob:";
+
+    /// <summary>#3816: the metric name a dead or hung RETENTION policy fires under. See
+    /// <see cref="RefreshJobStuckMetric"/> for why this is an addition rather than a widening, and the
+    /// evaluator's family table for why this one is the Warning of the three.</summary>
+    internal const string RetentionJobStuckMetric = "Retention Job Stuck";
+
+    /// <summary>#3816: the resolution title when a retention job runs on schedule again.</summary>
+    internal const string RetentionJobRecoveredMetric = "Retention Job Recovered";
+
+    /// <summary>Prefixes the retention-job alert serverKey. Deliberately NOT
+    /// <c>RetentionHoldKeyPrefix</c> ("retentionhold:"): a dead retention job and a HELD one are different
+    /// conditions with different remedies — the hold is the coverage gate working and clears with a backfill,
+    /// this is the scheduler having abandoned an ARMED policy — and sharing a key would let one resolve the
+    /// other's alert row.</summary>
+    private const string RetentionKeyPrefix = "retentionjob:";
+
+    /* #3816: the total_failures arm's baselines. The DELTA is what this arm judges, and nothing in the
+       product persisted a per-pass copy of these counters where the evaluator could reach it, so the
+       previous pass's value is held in memory here — one long per policy job, on an hourly cadence. The
+       first pass after a service start therefore establishes a BASELINE and cannot fire: a non-measurement
+       neither fires nor resolves (the checkpointer arm's NoPrevious discipline). The alternative — reading
+       the previous collect.store_metrics sample back out — is a second store read per hour to re-learn a
+       number this process had in its hand an hour ago, and it would still be a non-measurement on the first
+       pass after a restart. */
+    private readonly ConcurrentDictionary<string, long> _policyJobFailureBaseline = new(StringComparer.Ordinal);
+
+    /// <summary>Jobs whose last Policy Job Failing alert reached no channel (#4795): the retry is pending until
+    /// the back-dated cooldown stamp opens, and the failure baseline is left alone until then.</summary>
+    private readonly ConcurrentDictionary<string, bool> _policyJobRetryPending = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastPolicyJobFailureAlert = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #3816: the metric name the <c>total_failures</c> arm fires under — a policy job that FAILED since the
+    /// previous hourly sample and whose last run reports <c>Failed</c>.
+    ///
+    /// <para><b>A third name, because it is a third condition and not a tier of the other two.</b> A job that
+    /// fails and retries is alive: the scheduler is running it, <c>next_start</c> is finite, and the stuck
+    /// arms are correctly silent. It is also invisible everywhere else — #2136's cadence read filters to
+    /// <c>last_run_status = 'Success'</c> (the check gets quieter as the job gets sicker, as the issue puts
+    /// it), #2813 judges a PAUSED policy, and <c>total_failures</c> has ridden the V56 telemetry since then
+    /// with nothing alerting on it. Fired at INFORMATION (no severity override, the declared INFO arm in
+    /// <c>AlertSeverity.ForMetric</c> — the #3443/#3783 idiom), because the useful response is to read the
+    /// PostgreSQL log, not to wake anybody: a failing job that then stops being run at all arrives as one of
+    /// the two Critical/Warning names above.</para>
+    /// </summary>
+    internal const string PolicyJobFailingMetric = "Store Job Failing";
+
+    /// <summary>Prefixes the failure-arm alert serverKey.</summary>
+    private const string PolicyJobFailingKeyPrefix = "jobfailing:";
 
     /* Store Job Over Cadence edge state (#2136). FLEET-level like disk pressure, MULTI-keyed by job_id like
        the compression machine, but a STANDING condition (the AG Sync Fell Behind idiom): active flag +
@@ -656,6 +833,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>The #2813 alert metric name — Warning and Critical share it (severity carries the tier), so
     /// the deliverer's per-metric cooldown and the resolution correlate cleanly.</summary>
     internal const string RetentionHoldMetric = "Retention Held";
+
+    /// <summary>The resolution title <see cref="RetentionHoldMetric"/> clears with. A constant (rather than
+    /// the inline literal it was) because the triage endpoint's <c>ResolutionAliases</c> folds this title onto
+    /// its firing metric (#3833), and a string that exists in two files with no shared symbol is how the four
+    /// store families after #2768 drifted out of that fold in the first place.</summary>
+    internal const string RetentionHoldClearedMetric = "Retention Hold Cleared";
 
     /// <summary>Prefixes the fleet-level retention-hold alert serverKey so it never parses as a server_id.</summary>
     private const string RetentionHoldKeyPrefix = "retentionhold:";
@@ -690,6 +873,164 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>#3297: the Retention Held CRITICAL tier, read live like its warning sibling.</summary>
     private readonly Func<double> _retentionHoldCriticalRatio;
 
+    /* Raw Purge Over Horizon edge state (#4299). FLEET-level, MULTI-keyed by raw job_id, STANDING
+       like Retention Held: active flag + cooldown re-fire while a raw relation stays over-horizon with a
+       last-recorded outcome that is not "ran", one "Raw Purge Over Horizon Cleared" resolution when a later
+       record says "ran" and the ratio is back under. A SEPARATE metric from Retention Held so its standing
+       state does not collide with the generic hold's — a raw relation reads BOTH conditions' readings from
+       the same RetentionHoldReading.OverHorizonRatio, but this one fires on the RECORDED REASON the trigger
+       did not run, not on the armed flag alone (darling_armed=true does not suppress it: it fires WHATEVER
+       the recorded verdict says). */
+    private readonly ConcurrentDictionary<string, bool> _activeRawPurgeOverHorizon = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastRawPurgeOverHorizonAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #4299 alert metric name — deliberately distinct from <see cref="RetentionHoldMetric"/>
+    /// so the two conditions' standing state and cooldowns never collide.</summary>
+    internal const string RawPurgeOverHorizonMetric = "Raw Purge Over Horizon";
+
+    /// <summary>The resolution title <see cref="RawPurgeOverHorizonMetric"/> clears with.</summary>
+    internal const string RawPurgeOverHorizonClearedMetric = "Raw Purge Over Horizon Cleared";
+
+    /// <summary>Prefixes the fleet-level raw-purge-over-horizon alert serverKey so it never parses as a server_id.</summary>
+    private const string RawPurgeOverHorizonKeyPrefix = "rawpurgehorizon:";
+
+    /* Notification Channel Failing edge state (#4750). FLEET-level, MULTI-keyed by channel name (Teams, Slack,
+       Generic, PagerDuty). A webhook channel counts its own failures in a row and logs the first few, but
+       nothing else showed it, so a channel could fail for weeks while another one delivered every alert.
+       Unlike Raw Purge Over Horizon this is an EDGE, not a standing condition: it fires once when a
+       channel's count first reaches WebhookAlertService.FailingChannelThreshold, does not repeat while the
+       count stays there or climbs, and writes one resolution when the count is back at 0 or when the channel
+       has no destination left (turned off). The rule itself is WebhookChannelFailurePolicy, shared with Lite's
+       tray notice so the two apps announce the same edges. */
+    private readonly ConcurrentDictionary<string, bool> _activeNotificationChannelFailing = new(StringComparer.Ordinal);
+
+    /// <summary>The #4750 alert metric name — a WEBHOOK AUTOMATION KEY like its siblings, so it must stay
+    /// stable across releases. Its value is the channel's failure count, a whole number.</summary>
+    internal const string NotificationChannelFailingMetric = "Notification Channel Failing";
+
+    /// <summary>The resolution title <see cref="NotificationChannelFailingMetric"/> clears with. Carries the
+    /// recognized "Recovered" suffix so the shared <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string NotificationChannelRecoveredMetric = "Notification Channel Recovered";
+
+    /// <summary>Prefixes the fleet-level notification-channel alert serverKey so it never parses as a server_id.</summary>
+    private const string NotificationChannelKeyPrefix = "notificationchannel:";
+
+    /// <summary>
+    /// Where the webhook channels' failures in a row come from (#4750): the worker wires it to the same
+    /// <see cref="WebhookAlertService"/> the deliverer sends through. Counts only, never an error — see
+    /// <see cref="WebhookAlertService.GetChannelFailureCounts"/> for why. Unsupplied reads as no channels, so an
+    /// evaluator built without the seam (every harness that does not care) behaves as it did before.
+    /// </summary>
+    private readonly Func<IReadOnlyList<WebhookChannelFailureCount>> _webhookChannelFailures;
+
+    /* -------- the store's own TOAST slack and checkpointer (#3783) -------- */
+
+    /* Store TOAST Slack edge state (#3783). FLEET-level (the dimensions are the store's own tables), MULTI-keyed
+       by dimension table name (two today: query_text_dim, query_plan_dim), STANDING like Retention Held:
+       active flag + a DAILY re-fire while a dimension's TOAST file stays under-utilised past the floor, one
+       "Store TOAST Slack Cleared" resolution when the reclaim lands (or the file drops under the floor). */
+    private readonly ConcurrentDictionary<string, bool> _activeToastSlack = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastToastSlackAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #3783 TOAST-slack metric name. A WEBHOOK AUTOMATION KEY like its siblings — a const, stable
+    /// across releases. Fired with NO severity override, so <c>AlertSeverity.ForMetric</c>'s declared INFO arm
+    /// styles it: the condition is a report about disk the operator may choose to reclaim in a maintenance
+    /// window, not a condition the on-call must act on tonight, and INFO is the one tier the rendering layer
+    /// has for that (the Collector Cost Digest reasoning). Classified as a percent by the value it carries.</summary>
+    internal const string ToastSlackMetric = "Store TOAST Slack";
+
+    /// <summary>The resolution title when a dimension's TOAST utilisation is back over the bar or its file is
+    /// under the floor. "Cleared" so <c>AlertMetricClassifier.IsResolution</c> styles it green (the Retention
+    /// Hold Cleared spelling).</summary>
+    internal const string ToastSlackClearedMetric = "Store TOAST Slack Cleared";
+
+    /// <summary>Prefixes the fleet-level TOAST-slack alert serverKey so it never parses as a server_id.</summary>
+    private const string ToastSlackKeyPrefix = "toastslack:";
+
+    /// <summary>
+    /// Under this utilisation a dimension's TOAST file is SLACK (#3783): 50 %. The measured case was 40 %
+    /// (154 GB holding ~61 GB of live chunks on one production store class, ~93 GB of slack left by the V54
+    /// text→gz conversion plus ~755 k rows a day cycling through row-capped deletes); its near-twin on the same
+    /// build sat at ~64 % and was NOT the finding. Half is the line between "a file with the ordinary breathing
+    /// room a churning table keeps" and "a file more empty than full", and it is also the point at which a
+    /// VACUUM FULL rebuild — which copies the LIVE data into a fresh file — costs less disk than the slack it
+    /// returns, so the reclaim pays for its own working space.
+    ///
+    /// <para><b>Why a constant and not a <c>config_alert_settings</c> knob.</b> A knob needs a migration rung,
+    /// and the rule is one un-landed rung at a time; V137 is the rung this condition rides on and it added
+    /// the columns, not a threshold. The Retention Held tiers are the worked example of the knob being added
+    /// later (#3297, V119) once a store had a reason to tune it; this pair follows the same road when one
+    /// does. Paired with <see cref="ToastSlackFileFloorBytes"/> so a small dimension is never a finding.</para>
+    /// </summary>
+    internal const double ToastSlackUtilisationBarPercent = 50.0;
+
+    /// <summary>
+    /// The file-size floor under which slack is not reported however low the utilisation (#3783): 10 GiB — the
+    /// issue's "10 GB", in the binary unit the tool's byte prose uses. A 2 GB dimension at 30 % is 1.4 GB of
+    /// slack, which is real and not worth an ACCESS EXCLUSIVE lock on the store's plan dimension to recover;
+    /// the finding this exists for was ~93 GB. Ten is well under the smallest production plan dimension seen
+    /// (67 GB) and well over any store a maintenance-window reclaim would not be worth scheduling for. Not a
+    /// knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.
+    /// </summary>
+    internal const long ToastSlackFileFloorBytes = 10L << 30;
+
+    /// <summary>
+    /// How long the slack condition waits before re-stating itself while a file stays slack — its OWN daily
+    /// interval, the <see cref="StaleMuteRefire"/> reasoning exactly: the fact is a file's utilisation, which
+    /// moves on a scale of DAYS (slack accumulates with the delete cycle and is returned only by a VACUUM FULL
+    /// the operator schedules), so the shared 5-to-120-minute cooldown would say the same sentence about the
+    /// same file every sweep. Daily keeps an INFO reminder livable without a mute, which is what leaves the
+    /// mute a real choice; it dominates the cooldown's two-hour ceiling under every setting.
+    /// </summary>
+    internal static readonly TimeSpan ToastSlackRefire = TimeSpan.FromDays(1);
+
+    /* Store Checkpointer Pressure edge state (#3783). FLEET-level (one store, one checkpointer), a single fixed
+       key, STANDING like Store Job Over Cadence: active flag + shared-cooldown re-fire while each new hourly
+       interval keeps breaching, one "Store Checkpointer Pressure Recovered" resolution when an interval comes
+       back clean. The shared cooldown rather than a daily interval, deliberately: every breaching hour is a NEW
+       hour of fsync storms the store's readers sat inside, not a restatement of a standing fact. */
+    private readonly ConcurrentDictionary<string, bool> _activeCheckpointerPressure = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastCheckpointerPressureAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #3783 checkpointer metric name. A WEBHOOK AUTOMATION KEY like its siblings. Fired with NO
+    /// severity override so the declared INFO arm styles it, for <see cref="ToastSlackMetric"/>'s reason: the
+    /// two levers are configuration the maintainer weighs, not a page. The value it carries is the interval's
+    /// average sync milliseconds PER CHECKPOINT (#4037), not the interval's summed sync milliseconds - or, when the
+    /// longest single sync in the interval is what breached, that sync's milliseconds (#4823).</summary>
+    internal const string CheckpointerPressureMetric = "Store Checkpointer Pressure";
+
+    /// <summary>The resolution title when an interval reads clean again. "Recovered" for the classifier.</summary>
+    internal const string CheckpointerPressureRecoveredMetric = "Store Checkpointer Pressure Recovered";
+
+    /// <summary>The fixed key for the fleet-level checkpointer edge (not a real server); non-numeric so the
+    /// deliverer's #1236 int.TryParse override no-ops on it exactly like <see cref="DiskKey"/>.</summary>
+    private const string CheckpointerKey = "checkpointer";
+
+    /// <summary>
+    /// Milliseconds PER CHECKPOINT (#4037; originally #3783) past which the checkpointer's sync (fsync) phase
+    /// is PRESSURE: 10,000. The MCP host's read deadline is the bound this is derived from — a checkpoint
+    /// whose fsync phase runs past ten seconds is one whose I/O stall can outlast a read the deadline kills,
+    /// which is exactly what happened: three unattributed read kills on a production store in one day all sat
+    /// inside sync phases of 25.2 s and 14.0 s. Judged on <c>SyncMs / (timed + requested)</c> — the interval's
+    /// AVERAGE sync milliseconds per checkpoint — rather than the interval's summed sync milliseconds: the
+    /// series stores the cumulative counter and an hourly interval on the default five-minute
+    /// <c>checkpoint_timeout</c> covers about twelve timed checkpoints, so judging the sum against a
+    /// per-checkpoint bar breached on a healthy store whose checkpoints each synced five to eight seconds and
+    /// never recovered (#4037's own measured population). The second arm, <c>checkpoints_requested &gt; 0</c>,
+    /// has no threshold to tune: one requested checkpoint in an hour is worth a look, and it is a look, not a
+    /// verdict, because a requested checkpoint comes from WAL volume reaching <c>max_wal_size</c>, a base backup,
+    /// or a <c>CHECKPOINT</c> statement and the counters do not say which (#4758).
+    /// Both arms are judged on an interval with no postmaster restart inside it: across one, the shutdown
+    /// checkpoint is in the requested count and in the phase times alike, so neither is judged (#3955); and the
+    /// average arm needs a TIMED count on both samples of the pair (V140), so a row from before that rung
+    /// leaves the average unmeasured rather than falling back to the old sum.
+    /// Not a knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.
+    ///
+    /// <para>The same bar judges the longest SINGLE sync too (#4823): an average over several checkpoints hides one
+    /// long sync among short ones, and the once-a-minute samples of the cumulative sync time find it.</para>
+    /// </summary>
+    internal const long CheckpointSyncBarMs = 10_000;
+
     /// <summary>#2136: the Warning tier's percent-of-cadence threshold, read live through the same
     /// by-reference settings seam as the AG thresholds (the clamp lives on DarlingAlertSettings).
     /// The Critical tier is FIXED at 100: a job outrunning its own cadence compounds refresh lag.</summary>
@@ -715,6 +1056,13 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, (int ServerId, AgVantage Vantage)> _agAuthority =
         new(StringComparer.Ordinal);
 
+    /// <summary>How many times each server has been forgotten (#4795); a server never forgotten has no entry and
+    /// reads as 0. The store-alert sweep captures it before its first read and hands it to each of its five
+    /// judgments (<see cref="GenerationOf"/>), which is how a sweep that was reading when its server was removed is
+    /// told from one for the server as it is now: the first would act for a server that is gone, claiming an AG's
+    /// authority or sending and stamping state for a later add of the same server to inherit.</summary>
+    private readonly ConcurrentDictionary<int, int> _generations = new();
+
     /// <summary>When "AG Replica Disconnected" last DELIVERED per ag+replica — the #1659 re-fire clock
     /// (V37). Stamped on delivery only, so a decision suppressed by the master switch cannot consume the
     /// window; cleared on reconnect.</summary>
@@ -739,14 +1087,38 @@ internal sealed class DarlingSelfAlertEvaluator
     private const char AgKeySeparator = '\u001f';
 
 
-    /* Whether the service has successfully connected to this server at least once THIS process-run. Guards
-       collection-stopped: unlike the Dashboard (whose target-side collection_log keeps filling regardless of
-       the app), Darling IS the collector, so the service's own downtime makes collection_log stale. Without
-       this guard a service restart after >30 min of downtime would false-alarm "Collection Stopped" on a
-       perfectly healthy server before its first fresh collection lands. Gating on a prior successful connect
-       makes collection-stopped a clean "was collecting, then stopped" transition (the same philosophy as the
-       connection-lost edge and the Dashboard's skip-first-check) rather than a judgement on pre-restart data. */
+    /* Whether the service has successfully connected to this server at least once THIS process-run. Arms only
+       the consecutive-failure arm of collection-stopped (see JudgeCollectionStopped): that arm counts the last
+       N STORED runs, which are pre-restart rows until a fresh run lands, so it waits for the first online edge
+       the way the connection-lost alert does.
+
+       The staleness arm is not gated on it. Unlike the Dashboard (whose target-side collection_log keeps
+       filling regardless of the app), Darling IS the collector, so the service's own downtime makes
+       collection_log stale, and a restart after >30 min of downtime would false-alarm "Collection Stopped"
+       on a perfectly healthy server before its first fresh collection lands. Skipping the check until the
+       server had been seen online avoided that, but it also meant a server that stays down across the
+       restart never alerted at all (#4757). Staleness is instead judged from the LATER of the server's last
+       success and the moment the service began watching it (_serviceStartUtc), so a healthy server is judged
+       from its fresh rows and a down one fires one staleness window after the watch began. */
     private readonly ConcurrentDictionary<string, bool> _hasBeenOnline = new();
+
+    /// <summary>
+    /// When this evaluator was built, which is when the service began watching every server it holds no
+    /// tombstone for (#4757). The evaluator's state is in memory by design, so a restart moves it.
+    /// </summary>
+    private readonly DateTime _serviceStartUtc;
+
+    /// <summary>
+    /// The moment collection-stopped began watching a server that left the monitored set and came back
+    /// (#4757). <see cref="Forget"/> writes <see cref="Unstamped"/>; the next pass for that server replaces it
+    /// with that pass's own time. A re-enabled server keeps its <c>server_id</c> and its old
+    /// <c>collection_log</c> rows, and without this they would be judged from the service start and page at
+    /// once. Absent means the service start. Nothing here is persisted.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTime> _collectionWatchStart = new();
+
+    /// <summary>The tombstone <see cref="Forget"/> leaves in <see cref="_collectionWatchStart"/>.</summary>
+    private static readonly DateTime Unstamped = DateTime.MinValue;
 
     public DarlingSelfAlertEvaluator(
         IAlertEngineSettings settings,
@@ -766,7 +1138,10 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<double>? retentionHoldWarnRatio = null,
         Func<double>? retentionHoldCriticalRatio = null,
         AlertReadFailureCounter? readFailures = null,
-        string? storeName = null)
+        string? storeName = null,
+        ISelfAlertDeliveryStampStore? deliveryStamps = null,
+        Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
+        Func<IReadOnlyList<WebhookChannelFailureCount>>? webhookChannelFailures = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -774,6 +1149,7 @@ internal sealed class DarlingSelfAlertEvaluator
         _isAlertMuted = isAlertMuted ?? throw new ArgumentNullException(nameof(isAlertMuted));
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _serviceStartUtc = _utcNow();
         _notifyConnectionChanges = notifyConnectionChanges ?? (() => true);
         _notifyConnectionDownAtStartup = notifyConnectionDownAtStartup ?? (() => false);
         _connectionRefireMinutes = connectionRefireMinutes ?? (() => 0);
@@ -801,7 +1177,71 @@ internal sealed class DarlingSelfAlertEvaluator
            seam behaves like a store that never opted in — the AG-seam discipline, and the byte-identical
            promise the opt-in stands on. */
         _storeLabel = EffectiveStoreLabel(storeName);
+        /* #3580: unsupplied means the two daily documents gate on process memory alone — the pre-#3580
+           behavior, and what every test harness that does not care about restarts gets. Production
+           passes the store-backed stamps. */
+        _deliveryStamps = deliveryStamps;
+        /* #3854: the retry pause, injectable for the reason the adapter's is — a pin asserts the seam
+           waited AlertPassRetryDelaySeconds as a VALUE rather than by spending two real seconds. Production
+           gets Task.Delay, which is what the adapter defaults to as well. */
+        _retryDelay = retryDelay ?? Task.Delay;
+        /* #4750: unsupplied reads as no channels, the AG-seam discipline — an evaluator built without it
+           judges no channel, byte-identical to every build before the family existed. */
+        _webhookChannelFailures = webhookChannelFailures ?? (() => Array.Empty<WebhookChannelFailureCount>());
     }
+
+    /// <summary>
+    /// The pause between a retried store read's two attempts (#3854), injectable so the seam's pins cost no
+    /// wall-clock time. See <see cref="DarlingAlertReadAdapter.ExecuteWithOneRetryAsync{T}(Func{CancellationToken, Task{T}}, string, string, AlertReadFailureCounter, Func{TimeSpan, CancellationToken, Task}, CancellationToken)"/>.
+    /// </summary>
+    private readonly Func<TimeSpan, CancellationToken, Task> _retryDelay;
+
+    /// <summary>
+    /// Runs one of this type's store reads through the alert pass's SHARED retry seam (#3854): on a command
+    /// timeout and nothing else, the read is re-asked once, <see cref="DarlingAlertReadAdapter.AlertPassRetryDelaySeconds"/>
+    /// later, and the retry is tallied on this evaluator's own <see cref="_readFailures"/>.
+    ///
+    /// <para><b>The seam is the adapter's, deliberately — one truth, not two.</b> #3848 gave the twelve reads
+    /// on <see cref="DarlingAlertReadAdapter"/> a retry; the seven reads this alert pass issues outside that
+    /// type — the six below and the worker's latest-CPU read — run on the SAME
+    /// <see cref="DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds"/> deadline and are counted on the
+    /// same <see cref="AlertReadFailureCounter"/>, so they want the same retry rather than their own. A
+    /// second seam here would be a second copy of one decision, free to disagree with the first the moment
+    /// either grew an arm — the argument #3848 already makes against fourteen copies inside one file,
+    /// applied one scope out. So this forwards to the adapter's static overload and adds nothing but this
+    /// type's counter and pause.</para>
+    ///
+    /// <para><b>What the shared discrimination deliberately excludes</b>, and why these reads want exactly
+    /// that: <see cref="DarlingAlertReadAdapter.IsCommandTimeout"/> is true for a
+    /// <see cref="TimeoutException"/> anywhere in the chain and for NOTHING else. It is false for a
+    /// <see cref="Npgsql.PostgresException"/> at every level — the store's own <c>statement_timeout</c> at
+    /// SQLSTATE <c>57014</c> is the backend ANSWERING, and an identical second attempt buys an identical
+    /// answer — false for a cancellation through the pass token, because a retry that outlives an orderly
+    /// stop while holding a fleet-sweep permit is guaranteed useless, and false for a reset socket or a torn
+    /// stream, which are connection faults rather than a read taking too long and which this pass's count
+    /// should keep saying out loud. The population the retry is FOR is this store's own write bands: a
+    /// Collection Signals or Agent Status read that crosses ten seconds inside a checkpoint fsync tail or a
+    /// compression band, which used to skip one cycle unretried.</para>
+    ///
+    /// <para>Every read below is a thin non-async forwarder over a private <c>…CoreAsync</c> sibling holding
+    /// its body verbatim, the shape <c>EveryStoreReadOnTheEvaluator_GoesOutThroughTheSeam</c> derives from
+    /// source — so an eighth read written in the old shape reds on the day it is written rather than
+    /// shipping unretried and silently blind.</para>
+    /// </summary>
+    /// <param name="serverId">
+    /// The server whose bucket a retry lands in, keyed exactly as <see cref="Key(int)"/> spells it for this
+    /// type's failure counts, so one read cannot carry two spellings across the two figures.
+    /// </param>
+    private Task<T> ReadWithOneRetryAsync<T>(
+        Func<CancellationToken, Task<T>> read, int serverId, string readName, CancellationToken passToken)
+        => DarlingAlertReadAdapter.ExecuteWithOneRetryAsync(
+            read, Key(serverId), readName, _readFailures, _retryDelay, passToken);
+
+    /// <summary>
+    /// Where the two daily documents' DELIVERED-TODAY stamps live across restarts (#3580), or null when the
+    /// process-memory gate is the only gate. See <see cref="CollectorCostDigestInterval"/> for the arc.
+    /// </summary>
+    private readonly ISelfAlertDeliveryStampStore? _deliveryStamps;
 
     /// <summary>
     /// Where a SWALLOWED self-alert store read is counted (#3013), or null when nothing is counting.
@@ -842,33 +1282,38 @@ internal sealed class DarlingSelfAlertEvaluator
            pass that never looked at the store is not in the denominator. */
         _readFailures?.RecordPass(Key(serverId));
 
-        /* Only judge collection-stopped once the service has actually collected from this server this run
-           (see _hasBeenOnline) — otherwise pre-restart / pre-re-add stale rows would false-alarm before the
-           first fresh collection lands. */
-        if (_hasBeenOnline.ContainsKey(Key(serverId)))
+        /* #4795: the server's generation, read before the first await and handed to all five judgments below
+           (collection stopped, capture down, agent not running and the two AG evaluations). A removal lands on
+           another thread while a read is pending, and a judgment that resumed after it would act for a server
+           that is gone: the AG pair would claim the group's authority, which no surviving node with the same
+           view could then take back, and the other three would send for it and leave the standing-alert flags
+           and cooldown stamps Forget just dropped, for a later add of the same server to inherit (its
+           server_id is a hash of its storage name, so it comes back under the same id). */
+        var generation = GenerationOf(serverId);
+
+        /* Collection-stopped is judged on every pass, whether or not the service has seen this server online
+           this run (#4757): JudgeCollectionStopped measures staleness from the later of the last success and
+           the moment the service began watching, so pre-restart / pre-re-add rows cannot false-alarm before
+           the first fresh collection lands, and a server that stays down across a restart still fires. */
+        var collectionReadClock = Stopwatch.StartNew();
+        try
         {
-            var collectionReadClock = Stopwatch.StartNew();
-            try
-            {
-                /* #2107: store-backed window/threshold (clamped on read); the constants remain
-                   only as the shipped defaults. */
-                var (lastSuccess, recentRuns, recentSuccess) =
-                    await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
-                collectionReadClock.Restart();
-                bool stopped = IsCollectionStopped(
-                    lastSuccess, recentRuns, recentSuccess, _utcNow(),
-                    SettingsStaleWindow, _settings.CollectionFailureThreshold, out var reason);
-                await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
-                _readFailures?.RecordReadFailure(Key(serverId), "collection-health self-alert", collectionReadClock.ElapsedMilliseconds);
-            }
+            /* #2107: store-backed window/threshold (clamped on read); the constants remain
+               only as the shipped defaults. */
+            var (lastSuccess, recentRuns, recentSuccess) =
+                await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
+            collectionReadClock.Restart();
+            bool stopped = JudgeCollectionStopped(serverId, lastSuccess, recentRuns, recentSuccess, out var reason);
+            await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(Key(serverId), CollectionSignalsReadName, collectionReadClock.ElapsedMilliseconds);
         }
 
         if (!connected)
@@ -881,7 +1326,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             var missing = await ReadMissingCaptureSessionsAsync(postgres, serverId, cancellationToken);
             captureReadClock.Restart();
-            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken);
+            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -890,7 +1335,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             _logger?.LogError("[{Server}] Capture-down self-alert failed after {ElapsedMs} ms: {Message}", serverName, captureReadClock.ElapsedMilliseconds, ex.Message);
-            _readFailures?.RecordReadFailure(Key(serverId), "capture-down self-alert", captureReadClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(Key(serverId), MissingCaptureSessionsReadName, captureReadClock.ElapsedMilliseconds);
         }
 
         var agentReadClock = Stopwatch.StartNew();
@@ -926,7 +1371,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 }
             }
 
-            await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken);
+            await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -935,7 +1380,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             _logger?.LogError("[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
-            _readFailures?.RecordReadFailure(Key(serverId), "agent-not-running self-alert", agentReadClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(Key(serverId), AgentStatusReadName, agentReadClock.ElapsedMilliseconds);
         }
 
         /* Availability Group health (#991). Skipped entirely when the master AG switch is off, so a fleet that
@@ -956,7 +1401,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 agReadClock.Restart();
                 if (IsFresh(replicaTimeUtc))
                 {
-                    await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken);
+                    await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken, sweepGeneration: generation);
                     agReadClock.Restart();
                 }
 
@@ -965,7 +1410,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 agReadClock.Restart();
                 if (IsFresh(databaseTimeUtc))
                 {
-                    await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken);
+                    await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken, sweepGeneration: generation);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -975,7 +1420,7 @@ internal sealed class DarlingSelfAlertEvaluator
             catch (Exception ex)
             {
                 _logger?.LogError("[{Server}] Availability-Group self-alert failed after {ElapsedMs} ms: {Message}", serverName, agReadClock.ElapsedMilliseconds, ex.Message);
-                _readFailures?.RecordReadFailure(Key(serverId), "Availability-Group self-alert", agReadClock.ElapsedMilliseconds);
+                _readFailures?.RecordReadFailure(Key(serverId), AgStateReadName, agReadClock.ElapsedMilliseconds);
             }
         }
 
@@ -1026,14 +1471,75 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>
+    /// The collection-stopped decision for one server as the SERVICE sees it (#4757): the pure
+    /// <see cref="IsCollectionStopped(DateTime?, int, int, DateTime, TimeSpan, int, out string)"/> rule, fed
+    /// the store-backed window and threshold and a staleness basis the service's own downtime cannot spoil.
+    /// <para>Darling IS the collector, so <c>collection_log</c> goes stale whenever the service is down. The
+    /// staleness basis is therefore the LATER of the server's last success and the moment the service began
+    /// watching it (the service start, or the first pass after <see cref="Forget"/>). A healthy server is
+    /// judged from its fresh rows and stays silent at startup; a server that stays down across a restart
+    /// reads as "no success since the watch began" and fires once the window has passed. A NEVER-succeeded
+    /// server (null) stays null, so the documented rule that the staleness backstop does not flag it holds.</para>
+    /// <para>The consecutive-failure arm counts the last N STORED runs, which are pre-restart rows until a
+    /// fresh run lands, so it stays behind the first successful connect (its threshold is
+    /// <see cref="int.MaxValue"/> until then) — a stored failure streak must not page at the first pass,
+    /// including on a re-enable.</para>
+    /// </summary>
+    internal bool JudgeCollectionStopped(
+        int serverId, DateTime? lastSuccessUtc, int recentRunCount, int recentSuccessCount, out string reason)
+    {
+        var key = Key(serverId);
+        var now = _utcNow();
+        var watchStart = WatchStartFor(key, now);
+
+        var staleBasis = lastSuccessUtc.HasValue && lastSuccessUtc.Value < watchStart
+            ? watchStart
+            : lastSuccessUtc;
+        var failureThreshold = _hasBeenOnline.ContainsKey(key)
+            ? _settings.CollectionFailureThreshold
+            : int.MaxValue;
+
+        return IsCollectionStopped(
+            staleBasis, recentRunCount, recentSuccessCount, now, SettingsStaleWindow, failureThreshold, out reason);
+    }
+
+    /// <summary>
+    /// When collection-stopped began watching this server: the service start, unless <see cref="Forget"/>
+    /// left a tombstone, in which case this call (the first pass since) stamps <paramref name="now"/> and every
+    /// later call returns it.
+    /// </summary>
+    private DateTime WatchStartFor(string key, DateTime now)
+    {
+        if (!_collectionWatchStart.TryGetValue(key, out var stamped))
+        {
+            return _serviceStartUtc;
+        }
+
+        return stamped != Unstamped
+            ? stamped
+            : _collectionWatchStart.AddOrUpdate(key, now, (_, current) => current == Unstamped ? now : current);
+    }
+
+    /// <summary>
     /// Edge-applies the collection-stopped decision (mirrors the Dashboard's
     /// <c>_activeCollectionStoppedAlert</c>/<c>_lastCollectionStoppedAlert</c>): fire once on entry, re-fire
     /// only after the alert cooldown while it persists, and write ONE "Collection Resumed" history row on
     /// recovery. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: the <see cref="GenerationOf"/> the sweep captured before it started
+    /// reading. When it is given and the server has been forgotten since, the reading belongs to a server that is
+    /// gone, so this judges nothing: it sends nothing and leaves no standing-alert flag or cooldown stamp for a
+    /// later add of the same server to inherit. Null (the default) evaluates whatever it is handed.</param>
     internal async Task ApplyCollectionStoppedAsync(
-        int serverId, string serverName, bool stopped, string reason, CancellationToken cancellationToken)
+        int serverId, string serverName, bool stopped, string reason, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
+        /* #4795: before any state is read or written and before any send; see the parameter. */
+        if (IsStaleSweep(serverId, sweepGeneration))
+        {
+            return;
+        }
+
         var key = Key(serverId);
         var now = _utcNow();
 
@@ -1043,7 +1549,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (CooldownElapsed(_lastCollectionStoppedAlert, key, now))
             {
                 _lastCollectionStoppedAlert[key] = now;
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Collection Stopped", reason, "collecting",
                     detail: reason + " A headless service has no dashboard to watch, so this is the primary " +
                         "signal that a server's data has gone stale. Check the service log and the server's " +
@@ -1054,6 +1560,7 @@ internal sealed class DarlingSelfAlertEvaluator
                        with different units (a run count, or minutes). See AlertMetricClassifier.IsStateOnly. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire("Collection Stopped", _lastCollectionStoppedAlert, key, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCollectionStopped.TryRemove(key, out var was) && was)
@@ -1070,9 +1577,18 @@ internal sealed class DarlingSelfAlertEvaluator
     /// they need to know when the data feeding them stops existing). Fire once on entry, re-fire only after
     /// the cooldown, write ONE "Capture Restored" row on recovery.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
+    /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     internal async Task ApplyCaptureDownAsync(
-        int serverId, string serverName, IReadOnlyList<string> missing, CancellationToken cancellationToken)
+        int serverId, string serverName, IReadOnlyList<string> missing, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
+        /* #4795: before any state is read or written and before any send. */
+        if (IsStaleSweep(serverId, sweepGeneration))
+        {
+            return;
+        }
+
         if (!_settings.BlockingEnabled && !_settings.DeadlockEnabled)
         {
             return;
@@ -1088,7 +1604,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _lastCaptureDownAlert[key] = now;
                 var list = string.Join(" and ", missing);
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Capture Down", list, "session running",
                     detail: $"The {list} Extended Events session(s) are missing and could not be created. " +
                         "Blocking/deadlock data is NOT being captured, so those alerts can never fire. Check the " +
@@ -1099,6 +1615,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* Which capture is missing ("Blocking and Deadlock") against "session running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire("Capture Down", _lastCaptureDownAlert, key, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCaptureDown.TryRemove(key, out var was) && was)
@@ -1185,11 +1702,13 @@ internal sealed class DarlingSelfAlertEvaluator
         var routing = RouteCostRegressions(regressions, census);
         await ApplyCostRegressionsAsync(routing.Paging, cancellationToken);
 
-        /* The digest's own interval, checked here so 23 of every 24 hourly ticks do no extra store work.
-           The master switch already returned above, before the first store read (#3464); AlertsEnabled is
+        /* The digest's own interval, checked here so 23 of every 24 hourly ticks do no extra store work —
+           the delivered-today gate (#3580): memory first, the stamp only when memory cannot answer. The
+           master switch already returned above, before the first store read (#3464); AlertsEnabled is
            ALSO checked inside the apply, like every sibling, so a direct caller cannot skip it. */
-        if (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastDigest)
-            && _utcNow() - lastDigest < CollectorCostDigestInterval)
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastCostDigest, CollectorCostDigestKey, PgSelfAlertDeliveryStampStore.CostDigestStateKey,
+                CollectorCostDigestInterval, _utcNow(), "collector-cost digest", cancellationToken))
         {
             return;
         }
@@ -1245,8 +1764,8 @@ internal sealed class DarlingSelfAlertEvaluator
                into LatestMs — a cooldown-elapsed re-ask against a hourly flush that hasn't landed a new row
                yet must wait for that row rather than re-fire on a total it already reported. Same shape as
                #2704's collection-time gate on Poison Wait. */
-            bool hasFreshDataPoint = !_lastCostRegressionDataPoint.TryGetValue(key, out var lastDataPoint)
-                || regression.LatestMetricTime > lastDataPoint;
+            bool hadPriorDataPoint = _lastCostRegressionDataPoint.TryGetValue(key, out var lastDataPoint);
+            bool hasFreshDataPoint = !hadPriorDataPoint || regression.LatestMetricTime > lastDataPoint;
 
             if (hasFreshDataPoint && CooldownElapsed(_lastCostRegressionAlert, key, now))
             {
@@ -1256,7 +1775,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     ? regression.LatestMsPerRun / regression.BaselineMsPerRun
                     : 0;
                 var threshold = regression.ThresholdMsPerRun(CostRegressionFactor);
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, regression.ServerName, "Collector Cost Regression",
                     currentValue: $"{regression.LatestMsPerRun:N1} ms/run",
                     /* #3441's rule extended by #3462: the reported threshold is the one that actually selected
@@ -1284,7 +1803,17 @@ internal sealed class DarlingSelfAlertEvaluator
                     shortMessage: $"{regression.CollectorName} collection cost on {regression.ServerName} is {ratio:N1}x its per-run baseline",
                     numericCurrentValue: regression.LatestMsPerRun,
                     numericThresholdValue: threshold,
-                    cancellationToken);
+                    cancellationToken,
+                    /* #4223 self-monitor notebook: the collector this firing is about, as structured data,
+                       so the notebook template can scope its collection-log/cost/stall-probe reads to it
+                       instead of showing every collector's log. */
+                    context: new AlertContext { CollectorName = regression.CollectorName });
+                if (AfterSelfFire("Collector Cost Regression", _lastCostRegressionAlert, key, now, SharedCooldown, delivery))
+                {
+                    /* #4795: the data point was marked reported before the send. Put it back to what it was (or to
+                       nothing, when this was the first report), so the retry is not read as already reported. */
+                    RestoreMarker(_lastCostRegressionDataPoint, key, hadPriorDataPoint ? lastDataPoint : (DateTime?)null);
+                }
             }
         }
 
@@ -1457,8 +1986,9 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        if (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastSent)
-            && now - lastSent < CollectorCostDigestInterval)
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastCostDigest, CollectorCostDigestKey, PgSelfAlertDeliveryStampStore.CostDigestStateKey,
+                CollectorCostDigestInterval, now, "collector-cost digest", cancellationToken))
         {
             return;
         }
@@ -1468,10 +1998,13 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        _lastCostDigest[CollectorCostDigestKey] = now;
         var (shortMessage, detail) = RenderCollectorCostDigest(movers, census);
 
-        await FireAsync(
+        /* #3580: the stamp is written AFTER the fire and only on a delivery the deliverer did not report
+           failed — it used to be written before the fire, unconditionally, which is the "fired-today" gate
+           this issue retires. A fire that throws before the deliverer is reached (the mute seam) delivered
+           nothing either, and takes the same path: no stamp, the next tick retries. */
+        var delivery = await FireAsync(
             StoreKey(CollectorCostDigestKey), _storeLabel, CollectorCostDigestMetric,
             currentValue: movers.Count.ToString(CultureInfo.InvariantCulture),
             /* There is no threshold. Saying so in the string is the point of the string: this surface
@@ -1486,7 +2019,17 @@ internal sealed class DarlingSelfAlertEvaluator
                count, the Stale Mute Rules shape). */
             numericCurrentValue: movers.Count,
             numericThresholdValue: 0,
-            cancellationToken);
+            cancellationToken,
+            /* #3834: the same rows the prose lists, as structured items — the prose above is unchanged and
+               still leads every channel (it carries the report-not-incident framing and the materiality
+               floor, which no field list states), and these give every surface that can render a table
+               something to render: the Viewer's dialog, the Teams fact sets, Slack's field sections and
+               {{context_json}}. Carries no Incidents, so this report stays outside per-event splitting. */
+            context: BuildCollectorCostDigestContext(movers, census));
+
+        await RecordDocumentDeliveredAsync(
+            _lastCostDigest, CollectorCostDigestKey, PgSelfAlertDeliveryStampStore.CostDigestStateKey,
+            delivery, CollectorCostDigestInterval, now, "collector-cost digest", cancellationToken);
     }
 
     /// <summary>
@@ -1513,7 +2056,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// baseline day count are that week, compressed, and the closing line names
     /// <c>get_collector_cost</c> as where the series itself lives.</para>
     /// </summary>
-    private static (string ShortMessage, string Detail) RenderCollectorCostDigest(
+    /* Internal rather than private so the pin over the prose can compare the SHIPPED fire's detail_text
+       against this renderer's own output (#3834) — the two sibling documents' renderers are already
+       internal for the same reason. */
+    internal static (string ShortMessage, string Detail) RenderCollectorCostDigest(
         IReadOnlyList<Mcp.DarlingCollectorCostReader.CostMover> movers,
         IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census)
     {
@@ -1596,6 +2142,368 @@ internal sealed class DarlingSelfAlertEvaluator
         return (shortMessage, sb.ToString());
     }
 
+    /* ------------------------- #3834: the three reports' structured rows ------------------------- */
+
+    /// <summary>
+    /// The collector-cost digest's rows as an <see cref="AlertContext"/> (#3834) — ADDITIVE beside the prose
+    /// <see cref="RenderCollectorCostDigest"/> returns, never a replacement for it.
+    ///
+    /// <para><b>Why both.</b> The prose is doing work a table cannot: it states that this is a REPORT and not
+    /// an incident, that nothing is degraded and nothing needs doing before morning, and it names the
+    /// materiality floor and the absence of a ratio factor. A reader handed thirteen rows of milliseconds and
+    /// no sentence reasonably concludes something is wrong. The rows are doing work the paragraph cannot: the
+    /// top mover's run count being 1 (one daily run getting more expensive, not a rate over hundreds of
+    /// executions — a different problem with a different fix) and the least-material row's 45x worst-run
+    /// outlier are both IN the prose and neither survives being read as prose. So the sentence leads and the
+    /// structure follows, and every surface renders whichever it can: the Viewer's dialog binds these items
+    /// as label/value pairs instead of falling back to a 45-character-wide box, the Teams card renders fact
+    /// sets, Slack renders field sections, and <c>{{context_json}}</c> finally carries the figures to the
+    /// automation that was parsing prose for them.</para>
+    ///
+    /// <para><b>The prose is unchanged to the byte, and that is what keeps the delivery gate working.</b>
+    /// <see cref="AlertDetailText.ProseForDelivery"/> suppresses an alert's prose only when it is textually
+    /// EQUAL to <see cref="AlertDetailText.Flatten"/> of its context — the engine alerts, whose detail text IS
+    /// their flattened context. This document's prose is an essay with sentences no field list contains, so
+    /// the equality can never fire and the prose keeps delivering on every channel exactly as it did. The
+    /// fields carry the same figures under the same names the prose speaks, which is duplication a reader
+    /// benefits from rather than noise: one is the argument, the other is the table.</para>
+    ///
+    /// <para><b>The caps are the prose's caps, and a bound that binds says so.</b> Movers arrive already
+    /// capped at <see cref="MaxListedCostMovers"/> by the read; the census is cut at
+    /// <see cref="MaxListedCostHeaviest"/> here exactly as the prose cuts it, and the remainder gets its own
+    /// heading-only item — the <c>+N more</c> line the paragraph prints, as a row, so a surface rendering ONLY
+    /// the rows cannot imply it showed everything. PURE and static like the renderer beside it, so the rows a
+    /// human reads are assertable against the figures the prose prints.</para>
+    /// </summary>
+    internal static AlertContext BuildCollectorCostDigestContext(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostMover> movers,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census)
+    {
+        var context = new AlertContext();
+
+        /* One item per (server, collector) mover, in the ranking the alert already applied — nothing is
+           re-sorted, so the row a reader finds first is the row the prose lists first. The field ORDER is
+           the reading order the issue's worked example settled on: the delta first, because "how much
+           collection time did this move" is the question the ranking answers, then the pair the ratio is
+           between, then the dispersion that makes the ratio judgeable, then the volume the per-run figure
+           averages over. */
+        foreach (var mover in movers)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"{mover.CollectorName} on {mover.ServerName}"),
+                Fields =
+                {
+                    ("Delta", string.Create(CultureInfo.InvariantCulture, $"{mover.AddedMsPerDay / 1000.0:+0.0;-0.0;0.0} s/day")),
+                    ("Per run", string.Create(CultureInfo.InvariantCulture, $"{mover.LatestMsPerRun:N1} ms")),
+                    ("Baseline", string.Create(CultureInfo.InvariantCulture,
+                        $"{mover.BaselineMsPerRun:N1} ms over {mover.BaselineDays:N0} prior days")),
+                    ("Ratio", string.Create(CultureInfo.InvariantCulture, $"{mover.Ratio:N2}x")),
+                    ("Baseline p95", string.Create(CultureInfo.InvariantCulture, $"{mover.BaselineP95MsPerRun:N1} ms")),
+                    ("Baseline worst", string.Create(CultureInfo.InvariantCulture, $"{mover.BaselineWorstDayMsPerRun:N1} ms")),
+                    ("Runs", string.Create(CultureInfo.InvariantCulture, $"{mover.LatestRuns:N0}")),
+                    ("Worst run", string.Create(CultureInfo.InvariantCulture, $"{mover.LatestWorstMs:N0} ms")),
+                }
+            });
+        }
+
+        /* The heaviest-first census, cut where the prose cuts it. Expensive-without-moving is this section's
+           whole catch (#2862), and a movement ranking cannot see it — so the rows carry it too rather than
+           leaving the structured reader with only the movers. */
+        var listed = 0;
+        foreach (var row in census)
+        {
+            if (listed >= MaxListedCostHeaviest)
+            {
+                break;
+            }
+
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Heaviest: {row.CollectorName}"),
+                Fields =
+                {
+                    ("Total", string.Create(CultureInfo.InvariantCulture, $"{row.TotalSqlMs:N0} ms")),
+                    ("Runs", string.Create(CultureInfo.InvariantCulture, $"{row.RunCount:N0}")),
+                    ("Servers", string.Create(CultureInfo.InvariantCulture, $"{row.ServerCount:N0}")),
+                    ("Per run", string.Create(CultureInfo.InvariantCulture, $"{row.AvgSqlMs:N0} ms")),
+                    ("Worst run", string.Create(CultureInfo.InvariantCulture, $"{row.MaxSqlMs:N0} ms")),
+                }
+            });
+            listed++;
+        }
+
+        var remaining = census.Count - listed;
+        if (remaining > 0)
+        {
+            /* A heading-only item, the shape AlertContextBuilders already uses for a stated remainder
+               (BuildBlockingContext's "+N more distinct blocking incident(s)"): a surface that renders only
+               rows must not be able to read this document as complete. */
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture,
+                    $"+{remaining:N0} more collectors not listed (see get_collector_cost)")
+            });
+        }
+
+        return context;
+    }
+
+    /// <summary>
+    /// The fleet-sweep rollup's rows as an <see cref="AlertContext"/> (#3834) — the digest's argument applied
+    /// to the second document: additive beside the prose, one item per thing that HAPPENED, every cap the
+    /// prose applies applied here with its remainder stated as a row.
+    ///
+    /// <para>Band transitions come first because the rollup's own headline ranks them first, then the watch
+    /// items that opened and closed, then the would-have-paged ledger's families — the three lists a reader
+    /// scans. The rollup's aggregate counts (sweeps, muted sweeps, liveness incidents, unreadable items) lead
+    /// as a single summary item rather than being spread across the rows: they describe the WINDOW, not any
+    /// one row in it, and a surface that renders rows alone would otherwise lose the fact that some covered
+    /// sweeps could not prove their instruments — quiet is not clean, and that sentence has to survive into
+    /// the structure.</para>
+    /// </summary>
+    internal static AlertContext BuildFleetSweepRollupContext(
+        FleetSweepRollupFacts facts, DateTime spanStartUtc, DateTime spanEndUtc)
+    {
+        var context = new AlertContext();
+
+        /* The window and its aggregates as one leading item — the frame the #2506 echo discipline requires a
+           report to carry, in the structure as well as in the sentence: a report that does not say what
+           window it covers invites the reader to assume a different one. */
+        var summary = new AlertDetailItem
+        {
+            Heading = "Rollup window",
+            Fields =
+            {
+                ("Window start (UTC)", string.Create(CultureInfo.InvariantCulture, $"{spanStartUtc:o}")),
+                ("Window end (UTC)", string.Create(CultureInfo.InvariantCulture, $"{spanEndUtc:o}")),
+                ("Sweeps", string.Create(CultureInfo.InvariantCulture, $"{facts.Sweeps:N0}")),
+                ("Band transitions", string.Create(CultureInfo.InvariantCulture, $"{facts.Transitions.Count:N0}")),
+                ("Watch opened", string.Create(CultureInfo.InvariantCulture, $"{facts.Opened.Count:N0}")),
+                ("Watch closed", string.Create(CultureInfo.InvariantCulture, $"{facts.Closed.Count:N0}")),
+                ("Liveness incidents", string.Create(CultureInfo.InvariantCulture, $"{facts.LivenessIncidents:N0}")),
+                ("Muted sweeps", string.Create(CultureInfo.InvariantCulture, $"{facts.MutedSweeps:N0}")),
+                ("Unreadable items", string.Create(CultureInfo.InvariantCulture, $"{facts.UnreadableItems:N0}")),
+            }
+        };
+
+        if (facts.NewestBands.Count > 0)
+        {
+            summary.Fields.Add(("Fleet as of newest readable sweep", string.Join(", ", facts.NewestBands.Select(b =>
+                string.Create(CultureInfo.InvariantCulture, $"{b.Key} {b.Value}")))));
+        }
+
+        context.Details.Add(summary);
+
+        var listedTransitions = 0;
+        foreach (var transition in facts.Transitions)
+        {
+            if (listedTransitions >= MaxListedRollupTransitions)
+            {
+                break;
+            }
+
+            var item = new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Band transition: {transition.Server}"),
+                Fields =
+                {
+                    ("Server", transition.Server),
+                    ("From", transition.From),
+                    ("To", transition.To),
+                }
+            };
+            if (transition.Reason is not null)
+            {
+                item.Fields.Add(("Reason", transition.Reason));
+            }
+
+            context.Details.Add(item);
+            listedTransitions++;
+        }
+
+        if (facts.Transitions.Count > listedTransitions)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture,
+                    $"+{facts.Transitions.Count - listedTransitions:N0} more band transitions (see the web timeline)")
+            });
+        }
+
+        AppendWatchItems(context, "opened", facts.Opened);
+        AppendWatchItems(context, "closed", facts.Closed);
+
+        /* The ledger only exists when a covered sweep ran muted; its rows are what the silence cost, and the
+           prose renders them per family with the server names capped. Same shape here. */
+        foreach (var family in facts.Ledger)
+        {
+            var servers = string.Join(", ", family.Servers.Take(MaxListedRollupLedgerServers));
+            if (family.Servers.Count > MaxListedRollupLedgerServers)
+            {
+                servers += string.Create(CultureInfo.InvariantCulture,
+                    $" +{family.Servers.Count - MaxListedRollupLedgerServers:N0} more servers");
+            }
+
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Would have paged: {family.Family}"),
+                Fields =
+                {
+                    ("Family", family.Family),
+                    ("Rows", string.Create(CultureInfo.InvariantCulture, $"{family.Rows:N0}")),
+                    ("Servers", servers),
+                }
+            });
+        }
+
+        return context;
+    }
+
+    /// <summary>One watch-event section's rows ("opened" or "closed"), capped and with the remainder stated
+    /// as its own heading-only item — <see cref="AppendWatchSection"/>'s discipline, in structure.</summary>
+    private static void AppendWatchItems(
+        AlertContext context, string verb, IReadOnlyList<RollupWatchEvent> events)
+    {
+        var listed = 0;
+        foreach (var item in events)
+        {
+            if (listed >= MaxListedRollupWatchEvents)
+            {
+                break;
+            }
+
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Watch {verb}: {item.ItemKey}"),
+                Fields =
+                {
+                    ("Item", item.ItemKey),
+                    ("Subject", item.Subject),
+                    ("Condition", item.Condition),
+                }
+            });
+            listed++;
+        }
+
+        if (events.Count > listed)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture,
+                    $"+{events.Count - listed:N0} more watch items {verb} (see the watch-item worklist)")
+            });
+        }
+    }
+
+    /// <summary>
+    /// The analysis singles digest's rows as an <see cref="AlertContext"/> (#3834) — the third document, on the
+    /// same terms: additive beside the prose, the alert's own ranking preserved, every cap's remainder stated
+    /// as a row.
+    ///
+    /// <para>One item per top mover by severity, each carrying the KEY a page would have carried (the
+    /// alert-history <c>metric_name</c> and the story hash <c>get_analysis_findings</c> resolves), the gate's
+    /// reason and the #1140 dedup fingerprints — which is the whole point of structuring this one: an operator
+    /// promoting a single to a drill-down needs those identifiers by name, and an automation consuming
+    /// <c>{{context_json}}</c> was previously left to parse them out of a sentence. The by-family blocks follow
+    /// as one item per family, the per-family server list capped as the prose caps it.</para>
+    ///
+    /// <para>The dedup keys ride as a FIELD rather than as <see cref="AlertContext.Incidents"/>: these are the
+    /// fingerprints of OTHER alerts' findings, quoted so they can be looked up, not incidents of this report —
+    /// and populating Incidents here would enter this document into per-event splitting and the incident
+    /// delivery filter, which is a paging mechanism this report deliberately stays outside of.</para>
+    /// </summary>
+    internal static AlertContext BuildAnalysisSinglesDigestContext(AnalysisSinglesDigestFacts facts)
+    {
+        var context = new AlertContext();
+
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = "Singles summary",
+            Fields =
+            {
+                ("Singles", string.Create(CultureInfo.InvariantCulture, $"{facts.Singles:N0}")),
+                ("Servers", string.Create(CultureInfo.InvariantCulture, $"{facts.Servers:N0}")),
+                ("Ledger rows", string.Create(CultureInfo.InvariantCulture, $"{facts.Rows:N0}")),
+                ("Families", string.Create(CultureInfo.InvariantCulture, $"{facts.Families.Count:N0}")),
+            }
+        });
+
+        var rank = 0;
+        foreach (var single in facts.TopMovers)
+        {
+            rank++;
+            var item = new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"#{rank} {single.Server} — {single.Family}"),
+                Fields =
+                {
+                    ("Server", single.Server),
+                    ("Family", single.Family),
+                    ("Key", single.Key),
+                    ("Severity", string.Create(CultureInfo.InvariantCulture, $"{single.Severity:F2}")),
+                    ("Last recorded (UTC)", string.Create(CultureInfo.InvariantCulture, $"{single.LastRecordedUtc:o}")),
+                }
+            };
+            if (!string.IsNullOrEmpty(single.Reason))
+            {
+                item.Fields.Add(("Routing reason", single.Reason));
+            }
+            if (single.DedupKeys.Count > 0)
+            {
+                item.Fields.Add(("Dedup keys", string.Join(", ", single.DedupKeys)));
+            }
+
+            context.Details.Add(item);
+        }
+
+        if (facts.Singles > facts.TopMovers.Count)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture,
+                    $"+{facts.Singles - facts.TopMovers.Count:N0} more singles below the top {MaxListedSinglesMovers}, listed by family")
+            });
+        }
+
+        foreach (var family in facts.Families)
+        {
+            var item = new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Family: {family.Family}"),
+                Fields =
+                {
+                    ("Singles", string.Create(CultureInfo.InvariantCulture, $"{family.Singles:N0}")),
+                    ("Servers", string.Create(CultureInfo.InvariantCulture, $"{family.Servers.Count:N0}")),
+                }
+            };
+
+            foreach (var server in family.Servers.Take(MaxListedSinglesServersPerFamily))
+            {
+                var keys = string.Join("; ", server.Singles.Take(MaxListedSinglesPerServer).Select(s =>
+                    string.Create(CultureInfo.InvariantCulture, $"{s.Key} {s.Severity:F2}")));
+                if (server.Singles.Count > MaxListedSinglesPerServer)
+                {
+                    keys += string.Create(CultureInfo.InvariantCulture,
+                        $" +{server.Singles.Count - MaxListedSinglesPerServer:N0} more");
+                }
+
+                item.Fields.Add((server.Server, keys));
+            }
+
+            if (family.Servers.Count > MaxListedSinglesServersPerFamily)
+            {
+                item.Fields.Add(("Not listed",
+                    string.Create(CultureInfo.InvariantCulture,
+                        $"+{family.Servers.Count - MaxListedSinglesServersPerFamily:N0} more servers")));
+            }
+
+            context.Details.Add(item);
+        }
+
+        return context;
+    }
+
     /* ------------------------- #3466 lane 4: the fleet sweep's daily rollup ------------------------- */
 
     /// <summary>
@@ -1626,8 +2534,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// left to discover it.</para>
     ///
     /// <para>Called from the worker's hourly store-metrics tick beside the collector-cost evaluation; 23 of
-    /// every 24 ticks cost one dictionary lookup. Testable through
-    /// <see cref="ApplyFleetSweepRollupAsync"/> with a recording deliverer and a controllable clock.</para>
+    /// every 24 ticks cost one dictionary lookup, and the first tick after a start costs one stamp read
+    /// instead of a re-announcement (#3580 — <see cref="DocumentDeliveredInsideIntervalAsync"/>). Testable
+    /// through <see cref="ApplyFleetSweepRollupAsync"/> with a recording deliverer, a controllable clock and
+    /// an in-memory stamp store.</para>
     /// </summary>
     public async Task EvaluateFleetSweepRollupAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -1639,8 +2549,10 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        if (_lastSweepRollup.TryGetValue(FleetSweepRollupKey, out var lastSent)
-            && now - lastSent < FleetSweepRollupInterval)
+        /* #3580: delivered-today, memory first and the stamp when memory cannot answer. */
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
+                FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken))
         {
             return;
         }
@@ -1720,8 +2632,9 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        if (_lastSweepRollup.TryGetValue(FleetSweepRollupKey, out var lastSent)
-            && now - lastSent < FleetSweepRollupInterval)
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
+                FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken))
         {
             return;
         }
@@ -1732,10 +2645,10 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        _lastSweepRollup[FleetSweepRollupKey] = now;
         var (shortMessage, detail) = RenderFleetSweepRollup(facts, spanStartUtc, spanEndUtc);
 
-        await FireAsync(
+        /* #3580: stamped after the fire, and only on a delivery not reported failed — the digest's rule. */
+        var delivery = await FireAsync(
             StoreKey(FleetSweepRollupKey), _storeLabel, FleetSweepRollupMetric,
             currentValue: facts.Sweeps.ToString(CultureInfo.InvariantCulture),
             /* There is no threshold - the digest's exact posture, stated in the string because the NOT NULL
@@ -1749,7 +2662,551 @@ internal sealed class DarlingSelfAlertEvaluator
                it as a count, the digest's shape). */
             numericCurrentValue: facts.Sweeps,
             numericThresholdValue: 0,
-            cancellationToken);
+            cancellationToken,
+            /* #3834: the digest's structured rows, on the same terms — see BuildFleetSweepRollupContext. */
+            context: BuildFleetSweepRollupContext(facts, spanStartUtc, spanEndUtc));
+
+        await RecordDocumentDeliveredAsync(
+            _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
+            delivery, FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken);
+    }
+
+    /* ------------------------- #3712: the analysis singles digest ------------------------- */
+
+    /// <summary>
+    /// FLEET-level (#3712): the ANALYSIS SINGLES DIGEST — the third daily document, beside the collector-cost
+    /// digest and the fleet-sweep rollup: one message, at most once per <see cref="AnalysisSinglesDigestInterval"/>,
+    /// naming every analysis finding the corroboration gate routed to the digest in the trailing day —
+    /// "Anomaly singles: N across M servers" — grouped by family then server, with the top movers by
+    /// severity, each carrying the same dedup keys a page would have carried (design point 3), so an operator
+    /// can promote any single to a full drill-down without archaeology.
+    ///
+    /// <para><b>Why this document exists.</b> The first day the recalibrated engine ran on a large production
+    /// fleet it paged forty-plus times in seven hours on anomaly stories at severity 1.5–1.9 and confidence
+    /// 0.20–0.35 — lone facts, mostly true and mostly redundant with a page something else had already sent.
+    /// <c>AnalysisNotificationService</c> now routes those to the digest road: persisted, visible on the web
+    /// and MCP surfaces the instant they fire, recorded in the ledger with the reason, and delivered to no
+    /// paging channel. This is the one channel copy that road gets, once a day, as a distribution to read
+    /// rather than a card to act on.</para>
+    ///
+    /// <para><b>The source is the LEDGER, not the findings table</b> (<see cref="AnalysisSinglesDigestReader"/>):
+    /// a digest-routed ledger row exists for exactly the findings the gate decided about, one per
+    /// fresh-or-worsening story, and it already carries the reason and the fingerprints. Rows are deduplicated
+    /// per (server, story) at the newest severity, so a story re-recorded after a restart counts once.</para>
+    ///
+    /// <para><b>Gated on the master switch up front and inside</b>, like every sibling; <b>empty sends
+    /// nothing</b> and does not consume the interval (the rollup's argument verbatim — a report that says a
+    /// read returned no rows is the channel noise #3443 exists to end); a failed read <b>skips the tick
+    /// WITHOUT consuming the interval</b> and is counted into the #3013 census, because a fault folded into
+    /// "no singles today" would convert an unreadable store into a permanently quiet document. Called from the
+    /// worker's hourly store-metrics tick beside the two siblings; 23 of every 24 ticks cost one dictionary
+    /// lookup. Testable through <see cref="ApplyAnalysisSinglesDigestAsync"/> with a recording deliverer, a
+    /// controllable clock and fixture rows.</para>
+    /// </summary>
+    public async Task EvaluateAnalysisSinglesDigestAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
+                AnalysisSinglesDigestInterval, now, "analysis singles digest", cancellationToken))
+        {
+            return;
+        }
+
+        var spanStartUtc = now - AnalysisSinglesDigestInterval;
+
+        List<AnalysisSinglesDigestReader.DigestRoutedRow> rows;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            rows = await AnalysisSinglesDigestReader.GetDigestRoutedRowsAsync(postgres, spanStartUtc, now, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed read skips the tick WITHOUT consuming the interval, and it is counted: the digest posts
+               nothing on an empty day by design, so a fault folded into "empty" would convert an unreadable
+               store into a permanently quiet document — the quiet-is-not-clean misreading at the delivery
+               end. The next hourly tick asks again. */
+            _logger?.LogDebug(ex, "analysis singles digest read failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "analysis singles digest self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyAnalysisSinglesDigestAsync(rows, spanStartUtc, now, cancellationToken);
+    }
+
+    /// <summary>
+    /// The apply half of <see cref="EvaluateAnalysisSinglesDigestAsync"/>, split out so the fire/dedup
+    /// lifecycle is unit-testable with a recording deliverer, a controllable clock and fixture rows — the
+    /// <see cref="ApplyFleetSweepRollupAsync"/> shape, seam for seam. No resolution edge and no severity
+    /// override, for the digest's reason: a report of a period fires with <c>severity: null</c> so the
+    /// per-metric map's DECLARED INFO arm decides. Muted through the shared seam like every sibling.
+    /// </summary>
+    internal async Task ApplyAnalysisSinglesDigestAsync(
+        IReadOnlyList<AnalysisSinglesDigestReader.DigestRoutedRow> rows,
+        DateTime spanStartUtc,
+        DateTime spanEndUtc,
+        CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
+                AnalysisSinglesDigestInterval, now, "analysis singles digest", cancellationToken))
+        {
+            return;
+        }
+
+        var facts = ExtractSinglesDigestFacts(rows);
+        if (facts.Singles == 0)
+        {
+            return;
+        }
+
+        var (shortMessage, detail) = RenderAnalysisSinglesDigest(facts, spanStartUtc, spanEndUtc);
+
+        /* #3580: stamped after the fire, and only on a delivery not reported failed — the digest's rule. */
+        var delivery = await FireAsync(
+            StoreKey(AnalysisSinglesDigestKey), _storeLabel, AnalysisSinglesDigestMetric,
+            currentValue: facts.Singles.ToString(CultureInfo.InvariantCulture),
+            /* There is no threshold — the digest's exact posture, stated in the string because the NOT NULL
+               column demands a value and "report" is the honest one. */
+            thresholdValue: "no threshold (report)",
+            detail: detail,
+            /* No override: the per-metric map's declared INFO arm decides. */
+            severity: null,
+            shortMessage: shortMessage,
+            /* The count of distinct singles the digest covers — a genuine whole number (AlertMetricClassifier
+               renders it as a count, the digest's shape). */
+            numericCurrentValue: facts.Singles,
+            numericThresholdValue: 0,
+            cancellationToken,
+            /* #3834: the digest's structured rows, on the same terms — see
+               BuildAnalysisSinglesDigestContext, including why the dedup keys ride as a field rather than
+               as Incidents. */
+            context: BuildAnalysisSinglesDigestContext(facts));
+
+        await RecordDocumentDeliveredAsync(
+            _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
+            delivery, AnalysisSinglesDigestInterval, now, "analysis singles digest", cancellationToken);
+    }
+
+    /// <summary>One uncorroborated finding the digest names: the server, the family (the finding's category,
+    /// parsed from its metric name), the KEY a page would have carried (<c>Analysis: {category} [{hash8}]</c> —
+    /// the same <c>metric_name</c> the ledger row and <c>get_alert_history</c> spell, and the short story hash
+    /// <c>get_analysis_findings</c> resolves), its newest severity, the gate's reason, the #1140 dedup
+    /// fingerprints its context carried, and when it was last recorded.</summary>
+    internal sealed record AnalysisSingle(
+        string Server, string Family, string Key, double Severity, string Reason,
+        IReadOnlyList<string> DedupKeys, DateTime LastRecordedUtc);
+
+    /// <summary>One server's singles inside a family block, newest-severity-first.</summary>
+    internal sealed record SinglesServer(string Server, IReadOnlyList<AnalysisSingle> Singles);
+
+    /// <summary>One family block: how many singles, on how many servers, and the per-server lines.</summary>
+    internal sealed record SinglesFamily(string Family, int Singles, IReadOnlyList<SinglesServer> Servers);
+
+    /// <summary>
+    /// Everything one singles digest says, extracted pure from the span's ledger rows — so the empty
+    /// decision and the render read one value and the tests drive both with fixtures. <see cref="Singles"/>
+    /// and <see cref="Servers"/> are distinct counts over the deduplicated population; <see cref="Rows"/> is
+    /// the raw row count, stated in the document when it differs so a reader can see the dedup happened.
+    /// </summary>
+    internal sealed record AnalysisSinglesDigestFacts(
+        int Singles,
+        int Servers,
+        int Rows,
+        IReadOnlyList<AnalysisSingle> TopMovers,
+        IReadOnlyList<SinglesFamily> Families);
+
+    /// <summary>
+    /// Extracts the digest's facts from the span's digest-routed rows — PURE (no clock, no I/O). Rows are
+    /// deduplicated per (server, key): the newest row's severity and reason win, because a story that kept
+    /// firing is one single, not one per re-record. The family is the category between the metric name's
+    /// <c>Analysis: </c> prefix and its <c> [</c> hash bracket, the shape <c>FindingMessageFormatter.MetricName</c>
+    /// writes; a name that does not parse keeps its whole text as the family, so nothing is dropped for
+    /// having an unexpected shape. Reason and fingerprints come off the row's context JSON through the shared
+    /// serializer; a row whose context does not parse keeps its place with an empty reason and no keys.
+    /// </summary>
+    internal static AnalysisSinglesDigestFacts ExtractSinglesDigestFacts(
+        IReadOnlyList<AnalysisSinglesDigestReader.DigestRoutedRow> rows)
+    {
+        if (rows is null)
+        {
+            throw new ArgumentNullException(nameof(rows));
+        }
+
+        /* Oldest-first input (the reader's ORDER BY), so the LAST write for a key is the newest row. */
+        var byKey = new Dictionary<(int ServerId, string Key), AnalysisSingle>();
+        foreach (var row in rows)
+        {
+            if (row is null || string.IsNullOrEmpty(row.MetricName))
+            {
+                continue;
+            }
+
+            var reason = AlertContextSerializer.TryReadRouting(row.ContextJson)?.Reason ?? string.Empty;
+            var dedupKeys = ReadDedupKeys(row.ContextJson);
+            var server = string.IsNullOrEmpty(row.ServerName)
+                ? row.ServerId.ToString(CultureInfo.InvariantCulture)
+                : row.ServerName;
+
+            byKey[(row.ServerId, row.MetricName)] = new AnalysisSingle(
+                server, FamilyOf(row.MetricName), row.MetricName, row.Severity, reason, dedupKeys, row.AlertTime);
+        }
+
+        var singles = byKey.Values.ToList();
+        var topMovers = singles
+            .OrderByDescending(s => s.Severity)
+            .ThenBy(s => s.Server, StringComparer.Ordinal)
+            .ThenBy(s => s.Key, StringComparer.Ordinal)
+            .Take(MaxListedSinglesMovers)
+            .ToList();
+
+        /* Families ordered most-populous first, then by name; servers inside a family the same way; singles
+           on a server severity-desc. Deterministic, so the document a human reads is assertable. */
+        var families = singles
+            .GroupBy(s => s.Family, StringComparer.Ordinal)
+            .Select(g => new SinglesFamily(
+                g.Key,
+                g.Count(),
+                g.GroupBy(s => s.Server, StringComparer.Ordinal)
+                    .Select(sg => new SinglesServer(
+                        sg.Key,
+                        sg.OrderByDescending(s => s.Severity).ThenBy(s => s.Key, StringComparer.Ordinal).ToList()))
+                    .OrderByDescending(sg => sg.Singles.Count)
+                    .ThenBy(sg => sg.Server, StringComparer.Ordinal)
+                    .ToList()))
+            .OrderByDescending(f => f.Singles)
+            .ThenBy(f => f.Family, StringComparer.Ordinal)
+            .ToList();
+
+        return new AnalysisSinglesDigestFacts(
+            singles.Count,
+            singles.Select(s => s.Server).Distinct(StringComparer.Ordinal).Count(),
+            rows.Count,
+            topMovers,
+            families);
+    }
+
+    /// <summary>The finding's category out of <c>Analysis: {category} [{hash8}]</c>, or the whole name when
+    /// it is not that shape.</summary>
+    internal static string FamilyOf(string metricName)
+    {
+        const string prefix = "Analysis: ";
+        if (!metricName.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return metricName;
+        }
+
+        var bracket = metricName.IndexOf(" [", prefix.Length, StringComparison.Ordinal);
+        var end = bracket < 0 ? metricName.Length : bracket;
+        var category = metricName[prefix.Length..end].Trim();
+        return category.Length == 0 ? metricName : category;
+    }
+
+    /// <summary>The #1140 dedup fingerprints a row's context carries, in order — the keys a page would have
+    /// delivered under <c>{{dedup_key}}</c>. Empty for a row with no incidents or an unparseable context.</summary>
+    private static IReadOnlyList<string> ReadDedupKeys(string? contextJson)
+    {
+        if (!AlertContextSerializer.TryDeserialize(contextJson, out var context) || context.Incidents is not { Count: > 0 })
+        {
+            return Array.Empty<string>();
+        }
+
+        return context.Incidents
+            .Select(i => i.DedupKey)
+            .Where(k => !string.IsNullOrEmpty(k))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Renders the singles digest (#3712). PURE and static, so the DOCUMENT a human reads is assertable — the
+    /// rollup's discipline. The short message is the headline the issue asked for; the detail states the
+    /// span, what a single IS and where the full finding lives, then the top movers by severity (each with
+    /// its key, its reason and its dedup fingerprints), then the by-family blocks. Every cap states the
+    /// remainder it did not list, so the digest never implies it showed everything.
+    /// </summary>
+    internal static (string ShortMessage, string Detail) RenderAnalysisSinglesDigest(
+        AnalysisSinglesDigestFacts facts, DateTime spanStartUtc, DateTime spanEndUtc)
+    {
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"Anomaly singles: {facts.Singles} across {facts.Servers} servers — uncorroborated findings routed to this digest, not paged");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $" This is a REPORT, not an incident (#3712): the once-a-day channel copy of the analysis findings"
+            + $" the corroboration gate kept off the paging channels between {spanStartUtc:o} and {spanEndUtc:o}"
+            + $" — the trailing day only. A single is a finding at or above the notify severity with ONE fact in"
+            + $" its chain and no matched co-fire check; it was persisted the instant it fired and is readable now"
+            + $" in get_analysis_findings (by the story hash in its key) and get_alert_history (notification_type"
+            + $" 'digest', with routing_reason). A single that gains corroboration pages at that moment as a new"
+            + $" firing; nothing here waits on this digest."));
+
+        if (facts.Rows != facts.Singles)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{facts.Rows} ledger rows collapsed to {facts.Singles} distinct singles (a story re-recorded"
+                + $" after a service restart counts once, at its newest severity)."));
+        }
+
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $"\nTop movers by severity ({Math.Min(facts.TopMovers.Count, MaxListedSinglesMovers)} of {facts.Singles}):"));
+        var rank = 0;
+        foreach (var single in facts.TopMovers)
+        {
+            rank++;
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{rank}. {single.Server} — {single.Key} — severity {single.Severity:F2}"));
+            if (!string.IsNullOrEmpty(single.Reason))
+            {
+                sb.Append(" — ").Append(single.Reason);
+            }
+            if (single.DedupKeys.Count > 0)
+            {
+                sb.Append(" — dedup: ").Append(string.Join(", ", single.DedupKeys));
+            }
+        }
+        if (facts.Singles > facts.TopMovers.Count)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n+ {facts.Singles - facts.TopMovers.Count} more singles below the top {MaxListedSinglesMovers}, listed by family below."));
+        }
+
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $"\nBy family ({facts.Families.Count} families):"));
+        foreach (var family in facts.Families)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n- {family.Family}: {family.Singles} singles across {family.Servers.Count} servers"));
+            foreach (var server in family.Servers.Take(MaxListedSinglesServersPerFamily))
+            {
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"\n    {server.Server}: "));
+                sb.Append(string.Join("; ", server.Singles.Take(MaxListedSinglesPerServer).Select(s =>
+                    string.Create(CultureInfo.InvariantCulture, $"{s.Key} {s.Severity:F2}"))));
+                if (server.Singles.Count > MaxListedSinglesPerServer)
+                {
+                    sb.Append(string.Create(CultureInfo.InvariantCulture,
+                        $" + {server.Singles.Count - MaxListedSinglesPerServer} more"));
+                }
+            }
+            if (family.Servers.Count > MaxListedSinglesServersPerFamily)
+            {
+                sb.Append(string.Create(CultureInfo.InvariantCulture,
+                    $"\n    + {family.Servers.Count - MaxListedSinglesServersPerFamily} more servers"));
+            }
+        }
+
+        sb.Append("\nTo promote a single: open its finding on the web surface or read it with get_analysis_findings;"
+            + " the key above is its alert-history metric_name and the dedup fingerprints are the ones a page"
+            + " would have delivered. To page every notify-worthy finding again, set the route to 'page' in the"
+            + " Viewer's Settings > Automated Analysis or through update_alert_settings (analysis.uncorroborated_route;"
+            + " live within one collection sweep) - the store column wins over darling.json's analysis.uncorroboratedRoute,"
+            + " which governs only while the column is NULL.");
+
+        return (shortMessage, sb.ToString());
+    }
+
+    /* ------------------------- #3580: the daily documents' delivered-today gate ------------------------- */
+
+    /// <summary>
+    /// Whether a daily document was DELIVERED inside its interval as of <paramref name="now"/> — the gate
+    /// both documents' evaluate and apply halves consult (#3580). The store SEEDS process memory after a
+    /// start; memory serves the process; every delivery writes both — the shape #981 gave the email
+    /// cooldown (<c>IAlertHistoryStore.GetLastEmailSentUtcAsync</c> seeds it across restart), applied to
+    /// the one gate that was still memory-only.
+    ///
+    /// <para><b>Memory answers whenever it holds anything.</b> 23 of every 24 hourly ticks fall inside the
+    /// interval of a delivery this process already knows about, and those ticks cost one dictionary lookup
+    /// and no store round-trip — the cost promise the documents' callers make. Memory is also allowed to
+    /// answer "outside the interval, deliver" without re-asking the store, because there is ONE writer per
+    /// store and it is this process: once memory is seeded the store can never hold a newer stamp than
+    /// memory does, so a second read could only return what memory already knows. That is also why the
+    /// evaluate half's pre-check and the apply half's own check cost one store read between them and not
+    /// two — the first seeds, the second finds memory populated.</para>
+    ///
+    /// <para><b>The stamp store is asked ONCE per document per process — on the first tick, when memory is
+    /// empty</b> — and whatever it answers is cached, including "nothing": a stamp inside the interval
+    /// gates; a stamp outside it lets the document proceed to its reads and stays cached, so a subsequent
+    /// failed delivery leaves memory pointing at the last REAL delivery rather than at nothing; no row, or
+    /// a read that failed, caches <see cref="NoDeliveryKnown"/>, which reads as "deliver" from then on.
+    /// Caching the empty answer is exact under the single-writer fact above — a store that had no row for
+    /// this process's first tick cannot gain one except through this process, which would populate memory
+    /// directly — and it is what keeps the cost model honest in the fault case as well as the happy one: the
+    /// evaluate half's pre-check asks, and the apply half's own check, seconds later on the same tick,
+    /// finds memory populated whether the store answered, was empty, or threw. Re-asking on a fault would
+    /// log the same failure twice and count it twice in the #3013 census on every tick the fault persisted,
+    /// for one logical failure. The retry the install night's recovery case needs is unaffected: a document
+    /// that has never delivered reads "deliver" from memory on every tick until a delivery lands.</para>
+    ///
+    /// <para><b>A stamp read that fails falls OPEN to memory, warns, and is counted.</b> Fail-open toward
+    /// delivering is the direction every store-fault posture in this evaluator already takes for its
+    /// documents — the rollup's read fault "skips the tick WITHOUT consuming the interval" so an unreadable
+    /// store cannot become a permanently quiet channel; the digest's does the same — and it is bounded: the
+    /// memory gate still holds within the process once one delivery lands, so a store that cannot answer
+    /// costs at most one extra copy per process, which is exactly the pre-#3580 posture and not a spam
+    /// path. Failing CLOSED (skip when the stamp cannot be read) would let a store hiccup silence a daily
+    /// document, the worse failure. Counted into #3013's census because it is a store read the alert pass
+    /// performed, failed and swallowed, and the census exists so that population is not invisible; the
+    /// warning beside it names the document that could not ask. Counted ONCE per process, per the
+    /// paragraph above — the census measures faults the pass met, and this pass meets this one once.</para>
+    ///
+    /// <para>No store configured (<see cref="_deliveryStamps"/> null) is the pre-#3580 gate exactly: memory
+    /// only.</para>
+    /// </summary>
+    private async Task<bool> DocumentDeliveredInsideIntervalAsync(
+        ConcurrentDictionary<string, DateTime> lastDelivered, string memoryKey, string stampKey,
+        TimeSpan interval, DateTime now, string documentName, CancellationToken cancellationToken)
+    {
+        /* #4732: a delivery time ahead of the clock (it stepped back since the document went out) is replaced by
+           this check's reading and counted from there, so the next send is due one interval later, not the step
+           plus the interval. The sentinel is the minimum time and can never be ahead. */
+        if (LastFiredStamp.TryGet(lastDelivered, memoryKey, now, out var known))
+        {
+            return known != NoDeliveryKnown && now - known < interval;
+        }
+
+        if (_deliveryStamps is null)
+        {
+            return false;
+        }
+
+        DateTime? stamped;
+        var stampClock = Stopwatch.StartNew();
+        try
+        {
+            stamped = await _deliveryStamps.GetDeliveredAtUtcAsync(stampKey, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* One read name for both documents, because the #3013 census keys a counted site on a LITERAL
+               name with its own clock and this is one site serving two callers; the log line beside it
+               names the document, so the actionable half is not lost — it is a line away. The sentinel
+               is what makes this warning and this count fire once per process rather than once per check:
+               the apply half's own gate, seconds from now, finds memory populated and does not re-ask. */
+            _logger?.LogWarning(ex,
+                "{Document} delivery stamp could not be read after {ElapsedMs} ms; gating on process memory from here, which re-announces once per restart until the store answers",
+                documentName, stampClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "daily-document delivery-stamp self-alert", stampClock.ElapsedMilliseconds);
+            lastDelivered[memoryKey] = NoDeliveryKnown;
+            return false;
+        }
+
+        if (stamped is not DateTime deliveredAt)
+        {
+            lastDelivered[memoryKey] = NoDeliveryKnown;
+            return false;
+        }
+
+        /* #4732: the stored delivery time is the one stamp here that comes from a restart's seed. Seeded ahead of the
+           clock (the clock stepped back across the restart), it goes through the same rule as the in-memory stamp. */
+        deliveredAt = LastFiredStamp.Settle(deliveredAt, now);
+        lastDelivered[memoryKey] = deliveredAt;
+        return now - deliveredAt < interval;
+    }
+
+    /// <summary>
+    /// What <see cref="DocumentDeliveredInsideIntervalAsync"/> caches when the store was asked and had no
+    /// answer — no row, or a read that threw — so the store is asked once per document per process and
+    /// never re-asked on the same tick by the apply half (#3580). Reads as "deliver": the gate compares it
+    /// by identity before the interval arithmetic, so it can never be mistaken for a real stamp, and the
+    /// first delivery that lands replaces it with a real one. <see cref="DateTime.MinValue"/> rather than a
+    /// nullable value because the dictionaries are the pre-#3580 shape and every sibling gate in this file
+    /// keys on presence; a value that means "asked, nothing known" keeps presence meaning "asked".
+    /// </summary>
+    private static readonly DateTime NoDeliveryKnown = DateTime.MinValue;
+
+    /// <summary>
+    /// The slot a delivery at <paramref name="now"/> serves (#4652): the latest slot at or before now on the daily
+    /// grid anchored at the previous slot, so a tick that lands late does not push the next day's slot later.
+    /// A missed day is skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). With no previous slot
+    /// (the first delivery, nothing stamped, or a stamp read that failed) the delivery instant starts the grid.
+    /// </summary>
+    internal static DateTime ServedSlot(DateTime? previousSlot, DateTime now, TimeSpan interval) =>
+        previousSlot is DateTime previous && previous != NoDeliveryKnown && now >= previous + interval
+            ? CollectorCadence.NextDue(previous, now, interval) - interval
+            : now;
+
+    /// <summary>
+    /// Records that a daily document was DELIVERED, as the SLOT it served (<see cref="ServedSlot"/>) — into process memory and,
+    /// when a store is configured, into the delivery stamp — unless the deliverer reported the send
+    /// <see cref="AlertDelivery.ChannelFailed"/> (#3580).
+    ///
+    /// <para><b>"Failed" is the one disposition that writes nothing, and the rule is stated as that one
+    /// exclusion on purpose.</b> It is the disposition the install night's recovery case wore: a channel
+    /// was attempted and came back unsuccessful, so nothing reached a reader, and the next tick — restart
+    /// or not — must retry. Every other answer is either a delivery (<see cref="AlertDelivery.Sent"/>) or
+    /// the product's own decision that nothing is owed: <see cref="AlertDelivery.ChannelMuted"/> (a mute
+    /// rule chose the silence), <see cref="AlertDelivery.ChannelNoneConfigured"/> (no channel exists to
+    /// deliver to — the history row IS the delivery, and retrying hourly would write 24 rows a day for
+    /// nothing), <see cref="AlertDelivery.ChannelThrottled"/> (a copy went out inside the cooldown, so this
+    /// one is not owed) and <see cref="AlertDelivery.ChannelFolded"/> (reported on another delivery's
+    /// roster). A <c>null</c> report — a deliverer that does not report, or one whose outer isolation
+    /// caught something outside the channels — is "unreported", not "failed", and stamps: that is how
+    /// every fire before #3580 was treated, and a deliverer that KNOWS a send failed says so. Stating the
+    /// exclusion rather than an allow-list means a disposition added later defaults to the quiet side; one
+    /// that means "not delivered and owed" has to be added here by name.</para>
+    ///
+    /// <para><b>The stamp write is failure-isolated and NOT counted</b> — a write, not a condition read,
+    /// the <see cref="RecordResolutionAsync"/> distinction. Memory is stamped first, so a store that will
+    /// not take the write still gates this process; the warning says the next restart will re-announce.
+    /// The slot recorded is computed from the evaluator's <paramref name="now"/>, the controllable clock, so a test
+    /// can place the stamp and the interval compare is against the same clock it was written from.</para>
+    /// </summary>
+    private async Task RecordDocumentDeliveredAsync(
+        ConcurrentDictionary<string, DateTime> lastDelivered, string memoryKey, string stampKey,
+        AlertDelivery? delivery, TimeSpan interval, DateTime now, string documentName, CancellationToken cancellationToken)
+    {
+        if (delivery is { Channel: AlertDelivery.ChannelFailed })
+        {
+            _logger?.LogWarning(
+                "{Document} delivery failed ({Error}); no delivery stamp written, so the next tick retries it",
+                documentName, delivery.SendError ?? "no error text");
+            return;
+        }
+
+/* #4652: record the SLOT this delivery served, not the send instant, so the next day's slot is one interval
+           after this one however late the tick that sent it ran. The gate above has already cached the previous
+           slot (from memory or the stamp store) under memoryKey. */
+        var previousSlot = lastDelivered.TryGetValue(memoryKey, out var known) ? known : (DateTime?)null;
+        var slot = ServedSlot(previousSlot, now, interval);
+        lastDelivered[memoryKey] = slot;
+
+        if (_deliveryStamps is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _deliveryStamps.RecordDeliveredAtUtcAsync(stampKey, slot, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: a stamp WRITE, not a condition read. */
+            _logger?.LogWarning(ex,
+                "{Document} was delivered but its delivery stamp could not be written; process memory gates it until the next restart, which will re-announce it",
+                documentName);
+        }
     }
 
     /// <summary>One band transition a covered sweep reported: the server by name (the documents carry names
@@ -2172,9 +3629,18 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="HasAgentEverBeenSeenRunningAsync"/>) — a restart must not un-learn that a real server runs
     /// Agent, or a genuinely stopped Agent would go quiet exactly when it matters.</para>
     /// </summary>
+    /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
+    /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     internal async Task ApplyAgentNotRunningAsync(
-        int serverId, string serverName, bool? agentRunningFresh, bool agentEverSeenRunning, CancellationToken cancellationToken)
+        int serverId, string serverName, bool? agentRunningFresh, bool agentEverSeenRunning, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
+        /* #4795: before any state is read or written and before any send. */
+        if (IsStaleSweep(serverId, sweepGeneration))
+        {
+            return;
+        }
+
         if (!_settings.AlertsEnabled)
         {
             return;
@@ -2203,7 +3669,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (CooldownElapsed(_lastAgentDownAlert, key, now))
             {
                 _lastAgentDownAlert[key] = now;
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Agent Not Running", "Stopped", "Running",
                     detail: "The SQL Server Agent service on this server is stopped. Scheduled jobs — backups, " +
                         "index and statistics maintenance, integrity checks, log shipping — will NOT run until it " +
@@ -2214,6 +3680,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* "Stopped" against "Running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire("Agent Not Running", _lastAgentDownAlert, key, now, SharedCooldown, delivery);
             }
         }
         else if (_activeAgentDown.TryRemove(key, out var was) && was)
@@ -2242,21 +3709,37 @@ internal sealed class DarlingSelfAlertEvaluator
     public async Task ApplyConnectionOutcomeAsync(
         int serverId, string serverName, bool online, string? error, CancellationToken cancellationToken)
     {
+        /* #4795: the server's generation, read before anything else. A send to a dead mail host can take 30
+           seconds to fail, and a removal lands on another thread while it does. The state advanced below went with
+           the removal, and whatever the send's answer would write when it returns (the down stamp, the retry due
+           time) would land on the registration that takes the server's place, which has the same id: it is a hash
+           of the storage name. Both delivery branches check the generation after their send. Removal and add both
+           bump it, so a send that spans either is stale. */
+        var generation = GenerationOf(serverId);
         var key = Key(serverId);
         var previous = _connectionState.TryGetValue(key, out var s) ? s : ConnectionState.Unknown;
         _connectionState[key] = online ? ConnectionState.Online : ConnectionState.Offline;
 
-        /* Record that collection is now possible for this server this run — arms the collection-stopped
-           check (tracked regardless of the alerts switch, so re-enabling has a correct baseline). */
+        /* Record that collection is now possible for this server this run — arms the consecutive-failure arm
+           of the collection-stopped check (tracked regardless of the alerts switch, so re-enabling has a
+           correct baseline). The staleness arm needs no arming: see JudgeCollectionStopped. */
         if (online)
         {
             _hasBeenOnline[key] = true;
+
+            /* #4795: an online observation ends the outage, and with it any retry still pending for a down alert
+               that no channel delivered. Cleared here rather than inside the delivery gate below so a restore
+               seen while alerts were off cannot leave the old outage's due time to fire a StillDown in the next. */
+            _connectionRetries.Clear(key);
         }
 
         /* The shared policy (#1659) replaces the inline edge machine: same edge-only semantics by default,
            plus the two OPT-INs — announce a server already down on its first-ever attempt, and re-announce a
            standing outage every N minutes. One definition with Lite (ConnectionAlertPolicy), the
            SqlErrorClassification discipline. */
+        /* #4732: the clock is read once, and that reading is both the policy's "now" and the "now" the retry's due
+           time is clamped against, so a backward clock step cannot leave the still-down retry waiting out the step. */
+        var nowUtc = _utcNow();
         var decision = ConnectionAlertPolicy.Decide(
             previousOnline: previous switch
             {
@@ -2267,8 +3750,10 @@ internal sealed class DarlingSelfAlertEvaluator
             online,
             _notifyConnectionDownAtStartup(),
             _connectionRefireMinutes() is int refire && refire > 0 ? TimeSpan.FromMinutes(refire) : null,
-            _lastConnectionDownAlertUtc.TryGetValue(key, out var lastDown) ? lastDown : null,
-            _utcNow());
+            /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading, not waited out. */
+            LastFiredStamp.TryGet(_lastConnectionDownAlertUtc, key, nowUtc, out var lastDown) ? lastDown : null,
+            nowUtc,
+            _connectionRetries.DueUtc(key, nowUtc));
 
         /* Delivery is gated on the master switch AND the connection-change notify toggle (V20); the state
            machine above already advanced, so toggling either off then back on resumes from the correct
@@ -2300,6 +3785,13 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* "Online" both sides. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                /* #4795: the removal already dropped this server's down stamp. Clearing it now would clear the
+                   stamp of a registration that took its place and went down while this notice was sending. */
+                if (IsStaleSweep(serverId, generation))
+                {
+                    return;
+                }
+
                 _lastConnectionDownAlertUtc.TryRemove(key, out _);
             }
             else if (decision is ConnectionAlertDecision.Lost
@@ -2310,15 +3802,19 @@ internal sealed class DarlingSelfAlertEvaluator
                    automation (the #1659 reporter's webhook-driven auto-heal loop) matches on it, and a
                    re-fire exists precisely to re-trigger that match. The detail says which flavor. */
                 var reason = string.IsNullOrWhiteSpace(error) ? "Connection failed" : error!;
+                /* #4795: with re-fire off a StillDown can only be the retry of an alert no channel delivered, and
+                   "re-alerting every 0 min" would be false. With re-fire on the text stays as it was. */
                 var detail = decision switch
                 {
                     ConnectionAlertDecision.AlreadyDownAtFirstSight =>
                         $"Already unreachable when monitoring started: {reason}",
+                    ConnectionAlertDecision.StillDown when _connectionRefireMinutes() <= 0 =>
+                        $"Still unreachable (the previous alert reached no channel, so it is sent again): {reason}",
                     ConnectionAlertDecision.StillDown =>
                         $"Still unreachable (re-alerting every {_connectionRefireMinutes()} min): {reason}",
                     _ => reason,
                 };
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Server Unreachable", reason, "Online",
                     detail: detail,
                     severity: AlertSeverityLevel.Critical,
@@ -2328,7 +3824,18 @@ internal sealed class DarlingSelfAlertEvaluator
                        was never a measurement of this server's reachability. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                /* #4795: the server was removed (or removed and added again) while this was sending. What the
+                   answer would record, the down stamp and a retry due time, belongs to the registration that was
+                   forgotten, and Forget has cleared both already. Written now, they would make the next
+                   registration's still-down pass send "the previous alert reached no channel" for an alert it
+                   never had, or hold back the announcement its re-fire is about to make. */
+                if (IsStaleSweep(serverId, generation))
+                {
+                    return;
+                }
+
                 _lastConnectionDownAlertUtc[key] = _utcNow();
+                NoteRetrySend(_connectionRetries, key, "Server Unreachable", delivery);
             }
             /* None → steady state or silent baseline. */
         }
@@ -2363,8 +3870,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="ApplyCaptureDownAsync"/> uses for its blocking/deadlock opt-in. Testable directly with a
     /// recording deliverer + a controllable clock.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: the <see cref="GenerationOf"/> the sweep captured before it started
+    /// reading. When it is given and the server has been forgotten since, the reading belongs to a server that is
+    /// gone, so this claims no group and delivers nothing. Null (the default) evaluates whatever it is handed.</param>
     internal async Task ApplyAgReplicaHealthAsync(
-        int serverId, string serverName, IReadOnlyList<AgReplicaReading> replicas, CancellationToken cancellationToken)
+        int serverId,
+        string serverName,
+        IReadOnlyList<AgReplicaReading> replicas,
+        CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
         if (!_settings.AlertsEnabled || !_notifyAgHealth())
         {
@@ -2373,6 +3887,13 @@ internal sealed class DarlingSelfAlertEvaluator
 
         foreach (var replica in replicas)
         {
+            /* #4795: checked per replica, not once, because the loop waits on each delivery and the removal can
+               land in between; the next replica would otherwise claim the group for a server that is gone. */
+            if (IsStaleSweep(serverId, sweepGeneration))
+            {
+                return;
+            }
+
             /* #1696 fleet-side de-dup: one monitored server judges each AG, so a fully-monitored 3-node AG
                reports a failover ONCE instead of once per node that can see it. A server with a strictly
                better vantage takes over — a secondary yielding to the primary, whose view is the only
@@ -2391,11 +3912,39 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _agReplicaRole.TryGetValue(key, out var previousRole);
                 bool failover = AgAlertPolicy.IsFailover(previousRole, replica.RoleDesc);
-                _agReplicaRole[key] = replica.RoleDesc;
 
-                if (failover)
+                /* #4795: a failover is an edge, and the role marker moves to the new role before the send. When
+                   every channel failed the marker goes back to the prior role (below), so the next sweep sees the
+                   change again; until the failed-send delay is up the marker is left alone and the edge held back,
+                   so a lasting channel failure is tried at 1, 2, 4 ... minutes rather than on every sweep. */
+                var failoverRetryKey = AgRetryKey(AgFailoverMetric, key);
+                bool failoverHeld = failover && _agRetries.RetryPending(failoverRetryKey, _utcNow());
+                if (!failoverHeld)
                 {
-                    await FireAsync(
+                    _agReplicaRole[key] = replica.RoleDesc;
+                }
+
+                if (!failover)
+                {
+                    _agRetries.Clear(failoverRetryKey);
+                }
+
+                /* #3653 A5 asked whether this edge should also forget the server's delta baselines
+                   (_deltas.ClearServer), and the answer is no, deliberately. Two reasons, both about WHICH
+                   server. First, this edge fires from the AUTHORITATIVE vantage for the AG (#1696 de-dup above),
+                   which is a monitored connection that can SEE the role change — not necessarily the one whose
+                   counters moved; `serverId` here names the observer. Second, a role change is a fact about a
+                   replica, not about which instance a connection reaches: a registration pointed at a node
+                   directly keeps reading that node's cumulative DMVs through the failover, the counters are
+                   continuous, and forgetting them would throw one honest interval away on every replica of the
+                   AG at the moment the charts matter most. The registration that DOES change instance — one
+                   pointed at the listener — reports a different @@SERVERNAME and sqlserver_start_time after the
+                   failover, and that pair is what the identity-epoch carrier (CpuUtilizationCollector ->
+                   ServerEpoch) compares every minute against the persisted one; the forget happens there, on
+                   the server whose counters actually moved, and this edge stays an alert about a role. */
+                if (failover && !failoverHeld)
+                {
+                    var failoverDelivery = await FireAsync(
                         Key(serverId), serverName, AgFailoverMetric, replica.RoleDesc, previousRole!,
                         detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} changed " +
                             $"role from {previousRole} to {replica.RoleDesc}. A role change is either a failover somebody " +
@@ -2409,6 +3958,11 @@ internal sealed class DarlingSelfAlertEvaluator
                         /* Role descs both sides ("SECONDARY" -> "PRIMARY"). */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
+                    if (NoteRetrySend(_agRetries, failoverRetryKey, AgFailoverMetric, failoverDelivery))
+                    {
+                        /* IsFailover is true only with a known prior role, so this puts back a real value. */
+                        _agReplicaRole[key] = previousRole!;
+                    }
                 }
             }
 
@@ -2429,12 +3983,17 @@ internal sealed class DarlingSelfAlertEvaluator
                    not count as down — are precisely the parts that drift when written twice. What stays
                    here is what is genuinely this app's: the stamp, and the delivery it is stamped on. */
                 int refireMinutes = _agDisconnectRefireMinutes();
+                var disconnectRetryKey = AgRetryKey(AgReplicaDisconnectedMetric, key);
+                /* #4732: one clock reading is the policy's "now" and the "now" the retry's due time is clamped against. */
+                var nowUtc = _utcNow();
                 var connection = AgAlertPolicy.DecideConnection(
                     previousState,
                     replica.ConnectedStateDesc,
                     refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
-                    _lastAgDisconnectAlert.TryGetValue(key, out var lastDown) ? lastDown : (DateTime?)null,
-                    _utcNow());
+                    /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading, not waited out. */
+                    LastFiredStamp.TryGet(_lastAgDisconnectAlert, key, nowUtc, out var lastDown) ? lastDown : (DateTime?)null,
+                    nowUtc,
+                    _agRetries.DueUtc(disconnectRetryKey, nowUtc));
                 _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
 
                 bool stillDisconnected = connection == AgConnectionDecision.StillDisconnected;
@@ -2448,13 +4007,18 @@ internal sealed class DarlingSelfAlertEvaluator
                        the "a week-long outage reads like a blip" problem this knob exists to end. The
                        connection re-fire above already bakes it into detail; this is its AG twin, worded to
                        match Lite's so the two SKUs' history rows say the same thing. */
+                    /* #4795: with re-fire off a still-disconnected decision can only be the retry of an alert no
+                       channel delivered, and "re-alerting every 0 min" would be false. */
                     var opening = stillDisconnected
-                        ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
-                            $"DISCONNECTED from the primary (re-alerting every {refireMinutes.ToString(CultureInfo.InvariantCulture)} min)."
+                        ? refireMinutes <= 0
+                            ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                                "DISCONNECTED from the primary (the previous alert reached no channel, so it is sent again)."
+                            : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                                $"DISCONNECTED from the primary (re-alerting every {refireMinutes.ToString(CultureInfo.InvariantCulture)} min)."
                         : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is DISCONNECTED " +
                             "from the primary.";
 
-                    await FireAsync(
+                    var disconnectDelivery = await FireAsync(
                         Key(serverId), serverName, AgReplicaDisconnectedMetric, replica.ConnectedStateDesc, "CONNECTED",
                         detail: opening +
                             " A disconnected replica receives no log at all, so it falls " +
@@ -2471,8 +4035,13 @@ internal sealed class DarlingSelfAlertEvaluator
                         cancellationToken);
 
                     /* Stamped on DELIVERY, never on the decision: an alert suppressed by the master switch
-                       must not consume the re-fire window (the #1659 discipline). */
-                    _lastAgDisconnectAlert[key] = _utcNow();
+                       must not consume the re-fire window (the #1659 discipline). #4795: nor one no channel
+                       delivered — that alert is due again after the failed-send delay (the tracker, which also
+                       holds it back until then), and the window opens on the send that gets through. */
+                    if (!NoteRetrySend(_agRetries, disconnectRetryKey, AgReplicaDisconnectedMetric, disconnectDelivery))
+                    {
+                        _lastAgDisconnectAlert[key] = _utcNow();
+                    }
                 }
                 else if (connection == AgConnectionDecision.Reconnected)
                 {
@@ -2488,6 +4057,9 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
                     _lastAgDisconnectAlert.TryRemove(key, out _);
+
+                    /* #4795: the notice is not retried, and the outage it closes has nothing left to retry. */
+                    _agRetries.Clear(disconnectRetryKey);
                 }
             }
         }
@@ -2513,8 +4085,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// and <see cref="Forget"/> clears everything when the server leaves the monitored set.</para>
     /// Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: as on <see cref="ApplyAgReplicaHealthAsync"/>: given and out of date,
+    /// this claims no group and delivers nothing.</param>
     internal async Task ApplyAgDatabaseHealthAsync(
-        int serverId, string serverName, IReadOnlyList<AgDatabaseReading> databases, CancellationToken cancellationToken)
+        int serverId,
+        string serverName,
+        IReadOnlyList<AgDatabaseReading> databases,
+        CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
         if (!_settings.AlertsEnabled || !_notifyAgHealth())
         {
@@ -2528,6 +4106,12 @@ internal sealed class DarlingSelfAlertEvaluator
 
         foreach (var database in databases)
         {
+            /* #4795: checked per database, for the same reason as the replica grain's loop. */
+            if (IsStaleSweep(serverId, sweepGeneration))
+            {
+                return;
+            }
+
             /* Same #1696 de-dup as the replica grain: without it a fully-monitored 3-node AG reports the
                same database's lag once per node. */
             if (!IsAuthoritativeFor(serverId, database.AgName))
@@ -2542,14 +4126,29 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 bool seen = _agDatabaseSuspended.TryGetValue(key, out var wasSuspended);
                 var suspension = AgAlertPolicy.DecideSuspension(seen ? wasSuspended : null, suspended);
-                _agDatabaseSuspended[key] = suspended;
 
-                if (suspension == AgSuspensionDecision.Suspended)
+                /* #4795: the same put-back-and-hold as the failover edge above. The suspended marker moves
+                   before the send; when every channel failed it goes back to the prior value, and until the
+                   failed-send delay is up it is left alone and the edge held back. */
+                var suspendedRetryKey = AgRetryKey(AgDatabaseSuspendedMetric, key);
+                bool suspensionHeld = suspension == AgSuspensionDecision.Suspended
+                    && _agRetries.RetryPending(suspendedRetryKey, now);
+                if (!suspensionHeld)
+                {
+                    _agDatabaseSuspended[key] = suspended;
+                }
+
+                if (suspension != AgSuspensionDecision.Suspended)
+                {
+                    _agRetries.Clear(suspendedRetryKey);
+                }
+
+                if (suspension == AgSuspensionDecision.Suspended && !suspensionHeld)
                 {
                     var suspendReason = string.IsNullOrWhiteSpace(database.SuspendReasonDesc)
                         ? "no reason reported"
                         : database.SuspendReasonDesc!;
-                    await FireAsync(
+                    var suspendedDelivery = await FireAsync(
                         Key(serverId), serverName, AgDatabaseSuspendedMetric, suspendReason, "SYNCHRONIZING",
                         detail: $"Availability Group '{database.AgName}': data movement for database " +
                             $"{database.DatabaseName} on replica {database.ReplicaServerName} is SUSPENDED " +
@@ -2565,6 +4164,10 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken,
                         context: AgDatabaseContext(database, ("Suspend Reason", suspendReason)));
+                    if (NoteRetrySend(_agRetries, suspendedRetryKey, AgDatabaseSuspendedMetric, suspendedDelivery))
+                    {
+                        RestoreMarker(_agDatabaseSuspended, key, seen ? wasSuspended : (bool?)null);
+                    }
                 }
                 else if (suspension == AgSuspensionDecision.Resumed)
                 {
@@ -2588,7 +4191,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 if (CooldownElapsed(_lastAgSyncBehindAlert, key, now))
                 {
                     _lastAgSyncBehindAlert[key] = now;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         Key(serverId), serverName, AgSyncFellBehindMetric, behindReason, "caught up",
                         detail: behindReason + " A secondary that trails the primary is a data-loss window: an " +
                             "automatic failover cannot complete until it catches up, and a forced failover throws away " +
@@ -2611,6 +4214,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken,
                         context: AgDatabaseContext(database));
+                    AfterSelfFire(AgSyncFellBehindMetric, _lastAgSyncBehindAlert, key, now, SharedCooldown, delivery);
                 }
             }
         }
@@ -2697,10 +4301,11 @@ internal sealed class DarlingSelfAlertEvaluator
     /* ---------------- store disk pressure (fleet-level, polled) ---------------- */
 
     /// <summary>
-    /// Pure disk-pressure decision: the store volume is under pressure when its FREE space is below
-    /// <see cref="DiskFreeWarnPercent"/> of the volume total. No I/O, so it pins directly. A non-positive
-    /// total is treated as "can't tell" (false — the caller also guards this). The percentage scales across
-    /// disk sizes; see the constant for why it is percent-only.
+    /// Pure disk-pressure decision at the SHIPPED defaults: the store volume is under pressure when its
+    /// FREE space is below <see cref="DiskFreeWarnPercent"/> of the volume total AND below
+    /// <see cref="DiskFreeWarnFloorGb"/> absolute (#3528 — see the floor constant for the composition).
+    /// No I/O, so it pins directly. A non-positive total is treated as "can't tell" (false — the caller
+    /// also guards this).
     /// <para><paramref name="percentFree"/> is the measurement the alert is ABOUT, handed back so the fire
     /// site can store it as a real numeric instead of leaving the history store to find it again by
     /// scanning <paramref name="reason"/> for digits (#1881). It is computed whenever the total is usable,
@@ -2709,12 +4314,16 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the one dangerous ambiguity this metric must never have back into the signature.</para>
     /// </summary>
     internal static bool IsDiskPressure(long freeBytes, long totalBytes, out string reason, out double percentFree)
-        => IsDiskPressure(freeBytes, totalBytes, DiskFreeWarnPercent, out reason, out percentFree);
+        => IsDiskPressure(freeBytes, totalBytes, DiskFreeWarnPercent, DiskFreeWarnFloorGb, out reason, out percentFree);
 
-    /// <summary>#2107: the configurable form — the sweep passes the store-backed
-    /// <c>SelfDiskFreeWarnPercent</c>; the constant-threshold overload keeps the shipped default
-    /// for the tests pinning it.</summary>
+    /// <summary>#2107: the percent-only form — floor disabled, kept for the tests that pin the percent
+    /// edge on its own. The sweep calls the two-knob overload below.</summary>
     internal static bool IsDiskPressure(long freeBytes, long totalBytes, double warnPercent, out string reason, out double percentFree)
+        => IsDiskPressure(freeBytes, totalBytes, warnPercent, 0.0, out reason, out percentFree);
+
+    /// <summary>#3528: the configurable form — the sweep passes the store-backed
+    /// <c>SelfDiskFreeWarnPercent</c> AND <c>SelfDiskFreeWarnGb</c> (0 = no floor).</summary>
+    internal static bool IsDiskPressure(long freeBytes, long totalBytes, double warnPercent, double floorGb, out string reason, out double percentFree)
     {
         if (totalBytes <= 0)
         {
@@ -2724,7 +4333,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         percentFree = (double)freeBytes / totalBytes * 100.0;
-        if (percentFree < warnPercent)
+        double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
+        if (percentFree < warnPercent && (floorGb <= 0 || freeGb < floorGb))
         {
             reason = $"The monitor store's disk volume has only {percentFree.ToString("0.#", CultureInfo.InvariantCulture)}% free ({FormatGb(freeBytes)} of {FormatGb(totalBytes)}).";
             return true;
@@ -2791,10 +4401,11 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        /* #2107: store-backed threshold (clamped on read); the constant remains only as the
-           shipped default. */
+        /* #2107/#3528: store-backed thresholds (clamped on read); the constants remain only as the
+           shipped defaults. */
         double warnPercent = _settings.SelfDiskFreeWarnPercent;
-        bool pressure = IsDiskPressure(free, total, warnPercent, out var reason, out var percentFree);
+        double floorGb = _settings.SelfDiskFreeWarnGb;
+        bool pressure = IsDiskPressure(free, total, warnPercent, floorGb, out var reason, out var percentFree);
 
         if (pressure)
         {
@@ -2825,9 +4436,13 @@ internal sealed class DarlingSelfAlertEvaluator
                 var storeText = storeSizeBytes is long size
                     ? $" The store measured {FormatGb(size)} at its last self-metrics sample."
                     : "";
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(DiskKey), _storeLabel, DiskPressureMetric, reason,
-                    $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
+                    /* #3528: the threshold string names BOTH gates when the floor is active, so the history
+                       row's threshold column states the condition that actually fired. */
+                    floorGb > 0
+                        ? $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free and under {floorGb.ToString("0.#", CultureInfo.InvariantCulture)} GB"
+                        : $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
                     detail: reason + storeText + " When the store volume fills, collection and every write stop " +
                         "for the WHOLE fleet, and a headless service has no dashboard to warn you. Free space on the " +
                         "store volume, shorten retention (config_collector_schedules), enable TimescaleDB compression, " +
@@ -2843,6 +4458,12 @@ internal sealed class DarlingSelfAlertEvaluator
                        bound too, which is what separates this metric from every sibling above. */
                     numericCurrentValue: percentFree, numericThresholdValue: warnPercent,
                     cancellationToken);
+                if (AfterSelfFire(DiskPressureMetric, _lastDiskPressureAlert, DiskKey, now, SharedCooldown, delivery))
+                {
+                    /* #4795: the worsening gate's last-alerted level was advanced before the send. Put it back, so the
+                       retry still sees this level as worse than the last one that was reported. */
+                    RestoreMarker(_lastAlertedDiskPressurePercent, DiskKey, lastAlertedPercent);
+                }
             }
         }
         else if (_activeDiskPressure.TryRemove(DiskKey, out var was) && was)
@@ -2911,7 +4532,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _lastCustomRuleHealthAlert[CustomRuleHealthKey] = now;
                 var (shortMessage, detail) = RenderCustomRuleHealth(report);
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
                     currentValue: report.TotalIssues.ToString(CultureInfo.InvariantCulture),
                     thresholdValue: "0",
@@ -2923,6 +4544,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     numericCurrentValue: report.TotalIssues,
                     numericThresholdValue: 0,
                     cancellationToken);
+                AfterSelfFire(CustomRuleHealthMetric, _lastCustomRuleHealthAlert, CustomRuleHealthKey, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCustomRuleHealth.TryRemove(CustomRuleHealthKey, out var was) && was)
@@ -3096,7 +4718,7 @@ internal sealed class DarlingSelfAlertEvaluator
            CURRENT set is rendered each time, so a rule that ages past the bound later shows up on the next
            re-fire. Its OWN interval rather than the shared CooldownElapsed the siblings use, because the
            fact it reports changes on a scale of days — see StaleMuteRefire. */
-        if (_lastStaleMuteAlert.TryGetValue(StaleMuteKey, out var lastFired)
+        if (LastFiredStamp.TryGet(_lastStaleMuteAlert, StaleMuteKey, now, out var lastFired)
             && now - lastFired < StaleMuteRefire)
         {
             return;
@@ -3106,7 +4728,7 @@ internal sealed class DarlingSelfAlertEvaluator
         bool blanket = stale.Exists(static r => r.MatchesEveryAlert);
         var (shortMessage, detail) = RenderStaleMuteRules(stale, now, blanket);
 
-        await FireAsync(
+        var delivery = await FireAsync(
             StoreKey(StaleMuteKey), _storeLabel, StaleMuteMetric,
             currentValue: stale.Count.ToString(CultureInfo.InvariantCulture),
             thresholdValue: "0",
@@ -3123,6 +4745,7 @@ internal sealed class DarlingSelfAlertEvaluator
                seam returns a single boolean over every rule and cannot say which rule answered — see
                FindExplicitMute. Always non-null, so the seam is never consulted for this metric. */
             muted: FindExplicitMute(rules, now) is not null);
+        AfterSelfFire(StaleMuteMetric, _lastStaleMuteAlert, StaleMuteKey, now, StaleMuteRefire, delivery);
     }
 
     /// <summary>
@@ -3251,6 +4874,221 @@ internal sealed class DarlingSelfAlertEvaluator
         return (shortMessage, sb.ToString());
     }
 
+    /* ---------------- managed store settings needing attention (fleet-level, polled — #4215) ---------------- */
+
+    /// <summary>
+    /// What DarlingWorker knows, once per sweep tick, about this managed store's <c>darling-managed.conf</c>
+    /// outcome (#4215). <paramref name="IsManagedStore"/> false means a bring-your-own store or a non-Windows host:
+    /// nothing here was ever written by this service, so the alert never fires and every other field is
+    /// meaningless. <paramref name="UsedLastGoodConf"/> and <paramref name="HandEdited"/> are THIS START's
+    /// in-process facts (<see cref="DarlingManagedPostgres.LastStartUsedLastGoodManagedConf"/> and
+    /// <see cref="ManagedConfWriteResult.HandEdited"/>) — nothing persists them, so they are re-derived from
+    /// the writer every start, the same way <see cref="StoreUpgradeReport"/> already is.
+    /// <paramref name="RejectedSettingNames"/> is the one fact that IS store-backed: every
+    /// <see cref="HostSettingVerdict.RejectedValue"/> row <c>collect.managed_conf_verdicts</c> (V146) is
+    /// currently holding, read fresh each tick since a rejected value fixed by a later start replaces that
+    /// row without this process restarting. <c>null</c> means the read FAILED this tick — unknown, not
+    /// empty — so the evaluator neither fires nor resolves on this condition alone and instead keeps
+    /// whatever the family's rejected-settings state already was (the read's
+    /// own worker-side catch used to collapse a failure to an empty list, which made one bad read able to
+    /// write a false "Store Settings Resolved" when rejected settings were the only condition standing).
+    /// </summary>
+    internal sealed record StoreSettingsReport(
+        bool IsManagedStore,
+        bool UsedLastGoodConf,
+        bool HandEdited,
+        IReadOnlyList<string>? RejectedSettingNames,
+        ManagedConfMigrationOutcome? Verification = null);
+
+    private readonly ConcurrentDictionary<string, bool> _activeStoreSettings = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastStoreSettingsAlert = new();
+
+    /// <summary>The fixed key for the fleet-level store-settings edge (not a real server); non-numeric so the
+    /// deliverer's #1236 int.TryParse override no-ops on it, like <see cref="StaleMuteKey"/>.</summary>
+    private const string StoreSettingsKey = "storesettings";
+
+    /// <summary>The alert metric name the store-settings self-alert fires under (#4215). A WEBHOOK AUTOMATION
+    /// KEY like its siblings, so it is a const and must stay stable across releases. Classified as a count
+    /// metric by <c>AlertMetricClassifier</c> (the value is the number of conditions in force).</summary>
+    internal const string StoreSettingsMetric = "Store Settings Need Attention";
+
+    /// <summary>The resolution title recorded when none of the four conditions holds any more. Carries a
+    /// recognized resolution suffix ("Resolved") so the shared <c>AlertMetricClassifier.IsResolution</c>
+    /// styles it green.</summary>
+    internal const string StoreSettingsResolvedMetric = "Store Settings Resolved";
+
+    /// <summary>How often a standing store-settings condition re-states itself — the <see cref="StaleMuteRefire"/>
+    /// reasoning exactly: none of the four facts moves inside a run (only a restart changes any of them), so
+    /// re-stating on the shared per-cycle cooldown would just repeat the same sentence every sweep.</summary>
+    internal static readonly TimeSpan StoreSettingsRefire = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// Isolating wrapper for the fleet-level store-settings self-alert (#4215), mirroring
+    /// <see cref="EvaluateStaleMuteRulesAsync"/>. The worker calls THIS; tests call the isolated
+    /// <see cref="ApplyStoreSettingsAsync"/> directly.
+    /// </summary>
+    public async Task EvaluateStoreSettingsAsync(StoreSettingsReport report, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyStoreSettingsAsync(report, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter DarlingWorker already
+               built (its one store read, the rejected-verdict list, is isolated at its own call site); this
+               method performs no store read of its own. */
+            _logger?.LogError("Store settings self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the "a managed store's settings need an operator's attention" condition (#4215, plus
+    /// #4336's failed-verification condition): fires while any of four independent facts about THIS start holds — <paramref
+    /// name="report"/>'s <c>UsedLastGoodConf</c> (the freshly rendered file failed <c>postgres -C</c>
+    /// validation, or the write itself failed, and this start ran on the last file that proved it could start
+    /// PostgreSQL), <c>HandEdited</c> (an operator's hand edit of <c>darling-managed.conf</c> is kept in
+    /// force rather than overwritten), one or more stored verdicts being <see
+    /// cref="HostSettingVerdict.RejectedValue"/> (PostgreSQL itself refused a value this host's own formula
+    /// derived), or <c>Verification</c>'s <c>Status</c> being <see cref="ManagedConfVerificationStatus.Failed"/>
+    /// (the after-write snapshot did not match <c>pg_file_settings</c>, and the backup or previous verified
+    /// <c>darling-managed.conf</c> was restored). <see cref="HostSettingVerdict.PendingRestart"/> and
+    /// <see cref="HostSettingVerdict.StaleAfterHardwareChange"/> do NOT fire this — a value waiting on a
+    /// restart it will cleanly apply, or one merely different from what today's hardware would now derive, is
+    /// not evidence anything is WRONG the way a fallback, a kept override or an outright rejection is.
+    /// <see cref="ManagedConfVerificationStatus.Unknown"/> does not fire this alone either, by the same rule
+    /// as a null <c>RejectedSettingNames</c>.
+    ///
+    /// <para>Never fires on a bring-your-own store or off Windows (<paramref name="report"/>'s
+    /// <c>IsManagedStore</c> false): nothing here was ever written by this service, so there is no fact to
+    /// report.</para>
+    ///
+    /// <para>A STANDING condition like its siblings: fire on entry, re-state per
+    /// <see cref="StoreSettingsRefire"/> while any fact still holds — the CURRENT set is rendered every
+    /// re-fire, so a rejected value fixed by a later start clears from the very next tick's report — and ONE
+    /// resolution when none does. Gated on the master alerts switch. Internal so it pins directly with a
+    /// recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyStoreSettingsAsync(StoreSettingsReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled || !report.IsManagedStore)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var reasons = new List<string>();
+        if (report.UsedLastGoodConf)
+        {
+            reasons.Add(
+                "this start ran PostgreSQL on the last-good copy of darling-managed.conf because the freshly "
+                + "rendered file failed postgres -C validation (or could not be written)");
+        }
+
+        if (report.HandEdited)
+        {
+            reasons.Add("darling-managed.conf is hand-edited, and the edit is being kept in force rather than overwritten");
+        }
+
+        /* #4336: a failed verification is a fourth, independent condition. Failed means a
+           mismatch was found between the after-snapshot and pg_file_settings and the restore already ran
+           (postgresql.conf when a backup path exists, otherwise the previous verified darling-managed.conf).
+           This condition always states plainly when Status is Failed; Unknown is handled below with the
+           other unknown-read fact. */
+        if (report.Verification is { Status: ManagedConfVerificationStatus.Failed } verification)
+        {
+            var mismatchedList = string.Join(", ", verification.MismatchedKeys);
+            var restoredFrom = verification.BackupPath is not null
+                ? FormattableString.Invariant($"postgresql.conf was restored from {verification.BackupPath}")
+                : "the previous verified darling-managed.conf was restored";
+            var runningNote = verification.Step == ManagedConfMigrationStep.B
+                ? "; the running server keeps the new values until its next restart"
+                : string.Empty;
+            reasons.Add(FormattableString.Invariant(
+                $"verifying darling-managed.conf failed (step {verification.Step}): {mismatchedList} did not match pg_file_settings; {restoredFrom}{runningNote}"));
+        }
+
+        /* #4215, extended to the verification read (#4336): null means the rejected-settings read FAILED this tick, and Verification's
+           Status being Unknown means the before/after snapshot itself could not be taken — both UNKNOWN, not
+           empty. An unknown condition neither fires nor resolves on its own; it keeps the family's CURRENT
+           state and lets the other conditions decide. If any of those is already true, the family is firing
+           regardless of what the unknown read says, so fall through to the normal fire/re-state path below
+           without ever stating a fact we didn't read. If none is true, there is nothing else to decide this
+           tick: return without touching _activeStoreSettings or _lastStoreSettingsAlert, so an active alert
+           stays active (no resolve, no stale re-fire) and an inactive family stays inactive (no fire). A
+           successful read — including one that comes back empty — always states exactly what it found. */
+        var otherConditionsActive = reasons.Count > 0;
+        var anyUnknown = report.RejectedSettingNames is null
+            || report.Verification?.Status == ManagedConfVerificationStatus.Unknown;
+
+        if (report.RejectedSettingNames is null)
+        {
+            if (!otherConditionsActive)
+            {
+                return;
+            }
+        }
+        else if (report.RejectedSettingNames.Count > 0)
+        {
+            var rejectedList = string.Join(", ", report.RejectedSettingNames);
+            reasons.Add(string.Create(CultureInfo.InvariantCulture,
+                $"PostgreSQL rejected the managed value for {report.RejectedSettingNames.Count} owned setting(s): {rejectedList}"));
+        }
+
+        if (anyUnknown && reasons.Count == 0)
+        {
+            return;
+        }
+
+        if (reasons.Count == 0)
+        {
+            if (_activeStoreSettings.TryRemove(StoreSettingsKey, out var was) && was)
+            {
+                _lastStoreSettingsAlert.TryRemove(StoreSettingsKey, out _);
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(StoreSettingsKey), _storeLabel, StoreSettingsMetric, StoreSettingsResolvedMetric,
+                    "darling-managed.conf started clean, carries no kept-in-force hand edit, and PostgreSQL "
+                    + "rejects none of its owned settings"), cancellationToken);
+            }
+
+            return;
+        }
+
+        _activeStoreSettings[StoreSettingsKey] = true;
+
+        /* Standing condition: fire on entry, re-state only per StoreSettingsRefire while any fact still
+           holds — its OWN interval rather than the shared cooldown, the StaleMuteRefire reasoning: none of
+           these four facts moves faster than a restart. */
+        if (LastFiredStamp.TryGet(_lastStoreSettingsAlert, StoreSettingsKey, now, out var lastFired)
+            && now - lastFired < StoreSettingsRefire)
+        {
+            return;
+        }
+
+        _lastStoreSettingsAlert[StoreSettingsKey] = now;
+
+        var detail = string.Join(". ", reasons) + ". Run --check-settings for the full picture.";
+        var shortMessage = FormattableString.Invariant($"{reasons.Count} managed-store setting condition(s) need attention");
+
+        var delivery = await FireAsync(
+            StoreKey(StoreSettingsKey), _storeLabel, StoreSettingsMetric,
+            currentValue: reasons.Count.ToString(CultureInfo.InvariantCulture),
+            thresholdValue: "0",
+            detail: detail,
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            /* The count of conditions in force is a genuine whole number; the healthy bound is 0 — the
+               "Custom Alert Rules Unhealthy" / "Stale Mute Rules" shape. */
+            numericCurrentValue: reasons.Count,
+            numericThresholdValue: 0,
+            cancellationToken);
+        AfterSelfFire(StoreSettingsMetric, _lastStoreSettingsAlert, StoreSettingsKey, now, StoreSettingsRefire, delivery);
+    }
+
     /* ---------------- compression-job self-heal (fleet-level, polled — #1581) ---------------- */
 
     /// <summary>
@@ -3274,7 +5112,14 @@ internal sealed class DarlingSelfAlertEvaluator
         string? ToTimescale,
         string? FailedStep,
         string? FailureMessage,
-        bool WithoutRollbackCopy);
+        bool WithoutRollbackCopy,
+        /* #3927: what a FAILED upgrade actually put back, read only when Succeeded is false. The two data
+           directory flags are exclusive: pg_upgrade's hard-link rename of the old cluster's control file was
+           undone, or the directory could not be put back at all. The defaults are the clean revert, which is
+           what every failure report meant before these existed. */
+        bool RuntimeReverted = true,
+        bool ControlFileRestored = false,
+        bool DataDirectoryNotRestored = false);
 
     /// <summary>
     /// Reports the outcome of a store runtime upgrade, ONCE per service start (#1706). Unlike every sibling
@@ -3346,15 +5191,56 @@ internal sealed class DarlingSelfAlertEvaluator
                 return;
             }
 
+            /* #3927: a failure may claim only what it actually put back. This used to say "reverted ... collecting
+               normally, no data was lost, because the pre-upgrade data directory is never modified until the
+               upgrade succeeds" for every failure. In hard-link mode that last clause stops being true once
+               pg_upgrade begins linking and renames the old cluster's pg_control, and a revert refused under a
+               server the upgrade could not stop is not a revert. Each shape states its own facts and nothing
+               more. */
+            string aftermath;
+            string shortAftermath;
+            if (report.DataDirectoryNotRestored)
+            {
+                /* No store starts in this shape, so this text cannot actually reach anyone: the alert engine
+                   needs the store. It is written anyway, because a false claim that is only safe while it is
+                   unreachable is one refactor away from being delivered. */
+                aftermath =
+                    "The store CANNOT start on either runtime until its pre-upgrade data directory is put back by hand. The upgrade had changed it " +
+                    "(in hard-link mode pg_upgrade renames the old cluster's global\\pg_control to global\\pg_control.old, and a failed directory swap can leave the whole directory under its retained name), " +
+                    "and putting it back automatically failed. The data is intact on disk and nothing needs restoring from a backup. The service log's CRITICAL entries name the exact file or directory to move" +
+                    (report.RuntimeReverted ? "." : ", and the previous PostgreSQL runtime has to be put back by hand as well.");
+                shortAftermath = "the store CANNOT start until its data directory is put back by hand";
+            }
+            else if (!report.RuntimeReverted)
+            {
+                /* The one not-reverted shape that can deliver this at all: the service is up, so it attached to a
+                   server that was already running, because the binaries it would start itself cannot open the
+                   store. The next start has no such server to lean on. */
+                aftermath =
+                    $"The previous PostgreSQL {report.FromMajor} runtime could NOT be put back, so the service's pg-runtime\\pgsql still holds the PostgreSQL {report.ToMajor} binaries, which cannot open this store. The store's data is intact. " +
+                    "Collection is running only because a PostgreSQL server was already running on the store's data directory (most likely the old cluster this upgrade started and could not stop) and the service attached to it. The NEXT service start will fail. " +
+                    "Before restarting the service, stop that server, then move pg-runtime\\pgsql aside and move the rescued runtime in pg-runtime-prev\\pgsql into its place. The service log's CRITICAL entries name the exact paths.";
+                shortAftermath = "runtime NOT reverted, act before the next restart";
+            }
+            else
+            {
+                aftermath =
+                    $"The store reverted to PostgreSQL {report.FromMajor} and is collecting normally, and no data was lost" +
+                    (report.ControlFileRestored
+                        ? ". One thing had to be undone first: the upgrade ran in hard-link mode, and pg_upgrade had already renamed the old cluster's global\\pg_control to global\\pg_control.old, which it does so the old cluster cannot be started while the two share files. That rename was undone before the revert, and the new cluster was never started outside pg_upgrade, so the old cluster is intact. "
+                        : ", because the upgrade had not modified the pre-upgrade data directory. ") +
+                    "The service will NOT retry this same package automatically, so the store stays on its current major until someone acts. " +
+                    "Investigate before the next release: a store that cannot move forward accumulates the version drift this machinery exists to end.";
+                shortAftermath = "reverted, still running";
+            }
+
             await FireAsync(
                 StoreKey(StoreUpgradeKey), _storeLabel, StoreUpgradeMetric,
                 $"PostgreSQL {report.FromMajor} (upgrade failed)", $"PostgreSQL {report.ToMajor}",
                 detail: $"The monitor's own store FAILED to upgrade from PostgreSQL {report.FromMajor} to {report.ToMajor}, at step '{report.FailedStep}': {report.FailureMessage} " +
-                    $"The store reverted to PostgreSQL {report.FromMajor} and is collecting normally — no data was lost, because the pre-upgrade data directory is never modified until the upgrade succeeds. " +
-                    "The service will NOT retry this same package automatically, so the store stays on its current major until someone acts. " +
-                    "Investigate before the next release: a store that cannot move forward accumulates the version drift this machinery exists to end.",
+                    aftermath,
                 severity: AlertSeverityLevel.Critical,
-                shortMessage: $"store upgrade to PostgreSQL {report.ToMajor} FAILED at {report.FailedStep} — reverted, still running",
+                shortMessage: $"store upgrade to PostgreSQL {report.ToMajor} FAILED at {report.FailedStep} — {shortAftermath}",
                 /* Versions again, on the failure path — see the success branch above. */
                 numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                 cancellationToken);
@@ -3370,6 +5256,284 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /* ---------------- the store's TimescaleDB extension (#3908) ---------------- */
+
+    /// <summary>
+    /// Fleet-level key for the store's TimescaleDB extension, beside <see cref="StoreUpgradeKey"/>: the same
+    /// metric, a different condition, so a start that upgrades the PostgreSQL major and then cannot move the
+    /// extension raises both.
+    /// </summary>
+    private const string StoreTimescaleKey = "storetimescale";
+
+    /// <summary>
+    /// What one service start found about the store's TimescaleDB extension (#3908): the update to the runtime's
+    /// version failed (<paramref name="Failed"/>), or the extension is behind that version after start and nothing
+    /// moved it. <paramref name="FromVersion"/> is what the store is on, null when it could not be read. A
+    /// platform-neutral copy of the Windows-only bootstrap's outcome, like <see cref="StoreUpgradeReport"/>.
+    /// </summary>
+    internal sealed record StoreTimescaleReport(bool Failed, string? FromVersion, string? ToVersion, string? FailureMessage);
+
+    /// <summary>
+    /// Reports a store whose TimescaleDB extension is not the runtime's version (#3908), ONCE per service start,
+    /// with the discipline of <see cref="EvaluateStoreUpgradeAsync"/>: a start's outcome is an event, fired when
+    /// the alert engine first exists and never re-evaluated. Under the same metric as the major upgrade, because
+    /// it is the same family and the same operator action. CRITICAL either way: the store runs and collects, but
+    /// on an older extension than the release was built and tested with, and a runtime moves TimescaleDB for a
+    /// reason, typically a published advisory against the old version.
+    /// </summary>
+    public async Task EvaluateStoreTimescaleAsync(StoreTimescaleReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            var from = report.FromVersion is null ? "its current TimescaleDB" : $"TimescaleDB {report.FromVersion}";
+            var to = report.ToVersion is null ? "the runtime's TimescaleDB" : $"TimescaleDB {report.ToVersion}";
+            var reason = string.IsNullOrWhiteSpace(report.FailureMessage)
+                ? string.Empty
+                : $" Reason: {report.FailureMessage.Trim().TrimEnd('.')}.";
+
+            var state = report.Failed
+                ? $"The store is running and collecting on {from}, whose library this runtime still carries, so nothing is down. The update is retried on the next service start."
+                : $"The store is running and collecting on {from}. Nothing moved it this start. It moves the next time this service starts the store itself, before anything can connect; a server started by something else, or one this service adopted, keeps this version until then.";
+
+            await FireAsync(
+                StoreKey(StoreTimescaleKey), _storeLabel, StoreUpgradeMetric,
+                from, to,
+                detail: $"The monitor's own store {(report.Failed ? "could not move" : "has not moved")} from {from} to {to}, the version its runtime ships.{reason} {state} " +
+                    "Until it moves, the store runs an older extension than the one this release was built and tested with.",
+                severity: AlertSeverityLevel.Critical,
+                shortMessage: report.Failed
+                    ? $"store {to} update FAILED, still running on {from}"
+                    : $"store is on {from}, runtime ships {to}",
+                /* Versions are identities, not quantities (#1881): they stay in the text. */
+                numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
+            _logger?.LogError("Store TimescaleDB self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /* ---------------- collection falling behind (#4732) ---------------- */
+
+    /// <summary>The fixed fleet-level key for the "Collection Falling Behind" edge (not a real server); non-numeric so
+    /// the deliverer's #1236 int.TryParse no-ops on it, like <see cref="StaleMuteKey"/>.</summary>
+    private const string FleetGateKey = "fleetgate";
+
+    private readonly ConcurrentDictionary<string, bool> _activeFleetGate = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastFleetGateAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _fleetGateQuietSince = new();
+
+    /// <summary>The metric the fleet-gate self-alert fires under (#4732). A WEBHOOK AUTOMATION KEY like its siblings, a
+    /// const, stable across releases. Its numeric columns carry a real measurement: the share of due slots that were
+    /// skipped, against the fire threshold.</summary>
+    internal const string FleetGateMetric = "Collection Falling Behind";
+
+    /// <summary>The resolution title recorded when the fleet has kept up for a full hour. Carries a recognized resolution
+    /// suffix ("Cleared") so <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string FleetGateClearedMetric = "Collection Falling Behind Cleared";
+
+    /// <summary>Fires when at least this percentage of the slots that came due in the last hour were skipped, and at
+    /// least <see cref="FleetGateBehindMinSkipped"/> of them. A constant, not a setting (#4732).</summary>
+    internal const int FleetGateBehindPercent = 5;
+
+    /// <summary>The floor under <see cref="FleetGateBehindPercent"/>: a handful of skips on a small fleet is a
+    /// hiccup, not a pattern, however large a share of a small hour it makes up.</summary>
+    internal const long FleetGateBehindMinSkipped = 20;
+
+    /// <summary>The share the fleet has to stay under to count as caught up: under this percentage of due slots
+    /// skipped, for <see cref="FleetGateQuietHold"/>. Well under the fire threshold so a fleet hovering near it
+    /// does not flap.</summary>
+    internal const int FleetGateQuietPercent = 1;
+
+    /// <summary>How long the last-hour share has to stay under <see cref="FleetGateQuietPercent"/> before the alert
+    /// resolves.</summary>
+    internal static readonly TimeSpan FleetGateQuietHold = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// What the fleet collection gate did over the last hour, carried out to the alert sweep (#4732): the collector
+    /// slots that ran, the slots that came due and were skipped, how long collection bodies queued for a gate slot,
+    /// the gate's width and the instant the hour ends. Built by <c>DarlingWorker.BuildFleetGateReport</c> from
+    /// <see cref="FleetGateStats"/>.
+    /// </summary>
+    internal sealed record FleetGateReport(
+        long Run,
+        long Skipped,
+        long QueueWaits,
+        TimeSpan QueueWaitTotal,
+        TimeSpan QueueWaitMax,
+        int GateWidth,
+        DateTime WindowEndUtc)
+    {
+        /// <summary>Slots that came due in the hour: the ones that ran plus the ones skipped.</summary>
+        public long Due => Run + Skipped;
+
+        /// <summary>The share of due slots that were skipped, as a percentage; 0 when nothing came due.</summary>
+        public double SkippedPercent => Due == 0 ? 0 : 100.0 * Skipped / Due;
+
+        /// <summary>The fire test: at least <see cref="FleetGateBehindMinSkipped"/> skipped AND at least
+        /// <see cref="FleetGateBehindPercent"/> of the due slots. Integer arithmetic, so 5.0% exactly counts and 4.99%
+        /// does not.</summary>
+        public bool IsBehind => Skipped >= FleetGateBehindMinSkipped && Skipped * 100 >= Due * FleetGateBehindPercent;
+
+        /// <summary>The caught-up test: nothing skipped, or under <see cref="FleetGateQuietPercent"/> of the due slots.</summary>
+        public bool IsQuiet => Skipped == 0 || Skipped * 100 < Due * FleetGateQuietPercent;
+
+        public TimeSpan QueueWaitAverage => QueueWaits == 0 ? TimeSpan.Zero : TimeSpan.FromTicks(QueueWaitTotal.Ticks / QueueWaits);
+    }
+
+    /// <summary>
+    /// The isolating entry point the worker's sweep calls for the "Collection Falling Behind" self-alert (#4732), the
+    /// twin of <see cref="EvaluateWebTlsCertificateAsync"/>: wraps <see cref="ApplyFleetGateAsync"/> in the same
+    /// failure isolation so a throwing pre-deliver mute check can never propagate out of the collection sweep.
+    /// Cancellation still propagates. Returns whether the alert is standing after this evaluation, which the worker
+    /// uses to pick the level of its hourly log line; always false while the master alerts switch is off.
+    /// </summary>
+    public async Task<bool> EvaluateFleetGateAsync(FleetGateReport report, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyFleetGateAsync(report, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter built from the worker's
+               in-memory gate counts, and this method performs no store read. */
+            _logger?.LogError("Fleet gate self-alert failed: {Message}", ex.Message);
+        }
+
+        /* With the master switch off ApplyFleetGateAsync returns before it can resolve, so an alert that fired earlier
+           keeps its standing flag for as long as the switch stays off. Nothing is standing to anyone then, and the
+           worker picks its hourly log line's level from this result: a flag left set kept that line at Warning
+           ("falling behind") at 0 slots skipped. Switching alerts back on picks the flag up where it was left. */
+        return _settings.AlertsEnabled
+            && _activeFleetGate.TryGetValue(FleetGateKey, out var active) && active;
+    }
+
+    /// <summary>
+    /// Edge-applies the "the collection schedule is falling behind" condition (#4732).
+    ///
+    /// <para><b>Why this exists.</b> Collectors run on a fixed grid, and a slot that comes due while its run is late is
+    /// skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). When the fleet gate cannot keep up with the
+    /// schedule (too many servers for the gate width, a slow server holding its body, a store that answers slowly)
+    /// that is the only symptom: gaps in the collected series and one Info line, with no count and no alert. This
+    /// counts the skipped slots against the slots that ran and warns when the schedule is losing them.</para>
+    ///
+    /// <para><b>Fires</b> when, over the last hour, at least <see cref="FleetGateBehindMinSkipped"/> slots were skipped
+    /// AND they are at least <see cref="FleetGateBehindPercent"/> of the slots that came due. <b>Resolves</b> once the
+    /// last-hour share has stayed under <see cref="FleetGateQuietPercent"/> for a full <see cref="FleetGateQuietHold"/>;
+    /// a share in between neither re-fires nor resolves, so a fleet hovering near the threshold does not flap.
+    /// Thresholds are constants.</para>
+    ///
+    /// <para>A STANDING condition like its siblings: fire on entry, re-state per the shared cooldown while the share
+    /// stays over the fire threshold, one resolution when it is over. Gated on the master alerts switch. Internal so
+    /// it pins directly with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyFleetGateAsync(FleetGateReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var standing = _activeFleetGate.TryGetValue(FleetGateKey, out var was) && was;
+
+        if (!standing)
+        {
+            if (!report.IsBehind)
+            {
+                return;
+            }
+
+            _activeFleetGate[FleetGateKey] = true;
+            _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
+        }
+        else if (report.IsQuiet)
+        {
+            /* Caught up, but the hour has to be a whole one: the last-hour share is a sliding statistic, so the
+               first quiet reading only starts the clock. */
+            var quietSince = _fleetGateQuietSince.GetOrAdd(FleetGateKey, now);
+            if (now - quietSince < FleetGateQuietHold)
+            {
+                return;
+            }
+
+            _activeFleetGate.TryRemove(FleetGateKey, out _);
+            _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
+            _lastFleetGateAlert.TryRemove(FleetGateKey, out _);
+            await RecordResolutionAsync(new AlertResolution(
+                StoreKey(FleetGateKey), _storeLabel, FleetGateMetric, FleetGateClearedMetric,
+                $"Collection has kept up with its schedule: under {FleetGateQuietPercent}% of the slots that came due were skipped for the last hour"),
+                cancellationToken);
+            return;
+        }
+        else
+        {
+            _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
+
+            /* Between the two thresholds: still standing, not worth re-stating. */
+            if (!report.IsBehind)
+            {
+                return;
+            }
+        }
+
+        /* Standing condition: fire on entry, re-state only per the shared cooldown while it holds. */
+        if (LastFiredStamp.TryGet(_lastFleetGateAlert, FleetGateKey, now, out var lastFired)
+            && now - lastFired < SharedCooldown)
+        {
+            return;
+        }
+
+        _lastFleetGateAlert[FleetGateKey] = now;
+
+        var (shortMessage, detail, currentValue) = RenderFleetGate(report);
+        var delivery = await FireAsync(
+            StoreKey(FleetGateKey), _storeLabel, FleetGateMetric,
+            currentValue: currentValue,
+            thresholdValue: string.Create(CultureInfo.InvariantCulture, $"{FleetGateBehindPercent}% and at least {FleetGateBehindMinSkipped} slots"),
+            detail: detail,
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            /* A real measurement: the share of due slots skipped, against the share that fires. */
+            numericCurrentValue: Math.Round(report.SkippedPercent, 1), numericThresholdValue: FleetGateBehindPercent,
+            cancellationToken);
+        AfterSelfFire(FleetGateMetric, _lastFleetGateAlert, FleetGateKey, now, SharedCooldown, delivery);
+    }
+
+    /// <summary>Renders the (shortMessage, detail, currentValue) for the "Collection Falling Behind" alert: the counts,
+    /// the gate's width and the hour they cover. Pure; pinned by tests.</summary>
+    internal static (string ShortMessage, string Detail, string CurrentValue) RenderFleetGate(FleetGateReport report)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        var percent = report.SkippedPercent.ToString("0.#", inv);
+        var shortMessage = string.Create(inv,
+            $"collection skipped {report.Skipped:N0} of {report.Due:N0} due slots in the last hour ({percent}%)");
+        var detail =
+            string.Create(inv, $"In the hour to {report.WindowEndUtc:yyyy-MM-dd HH:mm} UTC the fleet collection gate (width {report.GateWidth}) ran {report.Run:N0} collector slots and skipped {report.Skipped:N0} ({percent}% of the {report.Due:N0} that came due). ")
+            + "A slot that comes due while its server's previous collection body is still running, or while every gate slot is taken, "
+            + "is skipped rather than replayed, so those samples were never collected. "
+            + string.Create(inv, $"{report.QueueWaits:N0} collection bodies waited for a gate slot, {report.QueueWaitAverage.TotalMilliseconds:N0} ms on average and {report.QueueWaitMax.TotalMilliseconds:N0} ms at the longest. ")
+            + string.Create(inv, $"The gate width is the max_concurrent_sweeps setting, and its ceiling of {DarlingWorker.SweepGateCeiling} is tied to the store's connection pool. ")
+            + string.Create(inv, $"The alert clears after an hour in which under {FleetGateQuietPercent}% of the due slots were skipped.");
+        return (shortMessage, detail, string.Create(inv, $"{percent}% skipped"));
+    }
+
     /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
 
     /// <summary>
@@ -3377,8 +5541,18 @@ internal sealed class DarlingSelfAlertEvaluator
     /// platform-neutral copy of the loaded certificate's facts so the alert path never touches an X.509 type.
     /// <paramref name="Configured"/> is false when there is no LAN TLS certificate to watch (loopback-only, no
     /// <c>tls</c> block, or an unusable one); the other fields are meaningful only when it is true.
+    /// <paramref name="RefusedNotYetValid"/> is the host's own load-time verdict (#3517): it judged
+    /// <paramref name="NotBeforeUtc"/> still ahead of the clock, refused the certificate, and bound loopback-only
+    /// — a decision it does not revisit until its next start, which is why it travels as a flag and is never
+    /// re-derived here from the date.
     /// </summary>
-    internal sealed record WebTlsCertReport(bool Configured, DateTimeOffset NotAfterUtc, string Subject, string Thumbprint);
+    internal sealed record WebTlsCertReport(
+        bool Configured,
+        DateTimeOffset NotBeforeUtc,
+        DateTimeOffset NotAfterUtc,
+        string Subject,
+        string Thumbprint,
+        bool RefusedNotYetValid);
 
     /// <summary>
     /// The isolating entry point the worker's sweep calls for the web-dashboard TLS certificate expiry
@@ -3422,10 +5596,24 @@ internal sealed class DarlingSelfAlertEvaluator
     /// certificate fails every TLS handshake, so the LAN dashboard is already unreachable and binds
     /// loopback-only on the next restart.</para>
     ///
+    /// <para><b>The not-yet-valid arm (#3517).</b> A certificate whose <c>NotBefore</c> was still ahead when
+    /// the host loaded it — a skewed clock, or a certificate minted for a future rotation — is refused by the
+    /// host and the dashboard is loopback-only from the start. Its <c>NotAfter</c> is far out, so on the
+    /// expiry test alone it read as the healthiest certificate in the fleet and the degrade raised nothing
+    /// but a startup log line. This arm fires the SAME family at CRITICAL — the dashboard is exactly as
+    /// unreachable as it is when expired — under the same key and metric, so an operator's mute rule and the
+    /// deliverer's dedup treat it as the one condition it is: "the configured certificate is not being
+    /// served". It fires on the host's carried verdict, NOT on <c>NotBefore</c> against the clock, because
+    /// the host does not re-decide when the date passes: it stays loopback-only until it is restarted, and a
+    /// date-derived arm would have resolved the alert about a dashboard that was still down.</para>
+    ///
     /// <para>A STANDING condition like its siblings: fire on entry, re-state per <see cref="WebTlsCertRefire"/>
     /// while it holds, and ONE resolution when the served certificate is healthy again (renewed past the
-    /// window) or TLS is no longer configured. Gated on the master alerts switch. Internal so it pins directly
-    /// with a recording deliverer and a controllable clock.</para>
+    /// window) or TLS is no longer configured — the not-yet-valid arm shares that resolution: the host
+    /// re-publishes a usable verdict on its next successful start (a fresh evaluator, so no resolution row is
+    /// written, the #3514 in-place-renewal finding), or clears the snapshot when the dashboard is stopped
+    /// (the <c>Configured=false</c> arm, which does resolve). Gated on the master alerts switch. Internal so it
+    /// pins directly with a recording deliverer and a controllable clock.</para>
     /// </summary>
     internal async Task ApplyWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken)
     {
@@ -3436,22 +5624,30 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var now = _utcNow();
 
-        /* Healthy is either "no certificate to watch" or "more than the warning window still to run". The
-           subtraction is DateTime-on-DateTime so it is a pure TimeSpan and never trips the DateTimeOffset(...)
-           Kind guard on a test-injected clock. */
+        /* The host's verdict, not the clock's: see the method summary. Meaningful only when configured. */
+        var refusedNotYetValid = report.Configured && report.RefusedNotYetValid;
+
+        /* Healthy is either "no certificate to watch" or "being served, with more than the warning window
+           still to run". The subtraction is DateTime-on-DateTime so it is a pure TimeSpan and never trips the
+           DateTimeOffset(...) Kind guard on a test-injected clock. */
         var healthy =
             !report.Configured
-            || report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow;
+            || (!refusedNotYetValid && report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow);
 
         if (healthy)
         {
             if (_activeWebTlsCert.TryRemove(WebTlsCertKey, out var was) && was)
             {
                 _lastWebTlsCertAlert.TryRemove(WebTlsCertKey, out _);
+                /* The configured-and-healthy line names BOTH facts the family alerts on — served, and outside
+                   the window — because the active alert it clears may have been either arm (#3517): a
+                   dashboard toggled off and on within one supervisor tick re-publishes a now-usable
+                   certificate before the sweep ever sees the null, so this is the line a cured
+                   not-yet-valid refusal resolves with too. */
                 await RecordResolutionAsync(new AlertResolution(
                     StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric, WebTlsCertRenewedMetric,
                     report.Configured
-                        ? "The web dashboard's TLS certificate is no longer within the expiry window"
+                        ? "The web dashboard's TLS certificate is being served and is outside the expiry window"
                         : "The web dashboard is no longer serving a TLS certificate to watch"), cancellationToken);
             }
 
@@ -3463,7 +5659,7 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Standing condition: fire on entry, re-state only per WebTlsCertRefire while it holds — its OWN
            interval rather than the shared cooldown, for the StaleMuteRefire reason (a fixed date measured
            against the clock, identical every sweep). */
-        if (_lastWebTlsCertAlert.TryGetValue(WebTlsCertKey, out var lastFired)
+        if (LastFiredStamp.TryGet(_lastWebTlsCertAlert, WebTlsCertKey, now, out var lastFired)
             && now - lastFired < WebTlsCertRefire)
         {
             return;
@@ -3472,28 +5668,64 @@ internal sealed class DarlingSelfAlertEvaluator
         _lastWebTlsCertAlert[WebTlsCertKey] = now;
 
         var expired = report.NotAfterUtc.UtcDateTime <= now;
-        var (shortMessage, detail, currentValue) = RenderWebTlsCert(report, now, expired);
+        var (shortMessage, detail, currentValue) = RenderWebTlsCert(report, now, expired, refusedNotYetValid);
 
-        await FireAsync(
+        var delivery = await FireAsync(
             StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric,
             currentValue: currentValue,
-            thresholdValue: $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
+            /* The not-yet-valid arm has no window to name — the bar it failed is "valid now". */
+            thresholdValue: refusedNotYetValid && !expired
+                ? "valid at service start"
+                : $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
             detail: detail,
-            severity: expired ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+            /* Critical for BOTH refusals: expired and not-yet-valid leave the LAN dashboard equally unreachable. */
+            severity: expired || refusedNotYetValid ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
             shortMessage: shortMessage,
             /* State-only: an expiry is a date, not a quantity — see WebTlsCertExpiryMetric. */
             numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
             cancellationToken);
+        AfterSelfFire(WebTlsCertExpiryMetric, _lastWebTlsCertAlert, WebTlsCertKey, now, WebTlsCertRefire, delivery);
     }
 
-    /// <summary>Renders the (shortMessage, detail, currentValue) for the web TLS certificate expiry alert. The
+    /// <summary>Renders the (shortMessage, detail, currentValue) for the web TLS certificate alert. The
     /// subject and thumbprint match the web host's own startup log line, so an operator can tie the alert to
-    /// the certificate it named. Pure but for the caller's clock; pinned by tests.</summary>
+    /// the certificate it named. Pure but for the caller's clock; pinned by tests.
+    ///
+    /// <para>Expired outranks not-yet-valid when both hold (a refused-at-start certificate the process then
+    /// outlived): fixing the clock cannot bring an expired certificate back, so that is the fact to lead
+    /// with; the not-yet-valid text below is for the case a clock fix or the right certificate plus a restart
+    /// actually cures.</para></summary>
     private static (string ShortMessage, string Detail, string CurrentValue) RenderWebTlsCert(
-        WebTlsCertReport report, DateTime now, bool expired)
+        WebTlsCertReport report, DateTime now, bool expired, bool refusedNotYetValid)
     {
         var notAfter = report.NotAfterUtc.UtcDateTime;
         var certRef = $"Certificate: subject {report.Subject}, thumbprint {report.Thumbprint}.";
+
+        if (refusedNotYetValid && !expired)
+        {
+            var notBefore = report.NotBeforeUtc.UtcDateTime;
+            var currentValue = $"not valid until {notBefore:u}; not being served";
+            var shortMessage =
+                $"web dashboard TLS certificate NOT YET VALID (valid from {notBefore:u}) — LAN dashboard is loopback-only";
+
+            /* Two tenses, because the operator reads this on the alert channel at some later hour: while the
+               window is still ahead, the clock is the likely culprit and the date is what to check it
+               against; once the window has opened, the only thing still wrong is that this process decided
+               before it did — and it will not re-decide without a restart, which is the one fact that would
+               otherwise surprise them. */
+            var clockLine = now < notBefore
+                ? $"The window opens {notBefore:u}: if that is in the past by any wall clock you trust, this host's clock "
+                  + "is behind; if it is genuinely ahead, the certificate installed is one issued for a future rotation."
+                : $"The window opened {notBefore:u}, after the service started — the host judged the certificate once, at load, "
+                  + "and stays loopback-only on that verdict until it is restarted.";
+            var detail =
+                $"The web dashboard's configured TLS certificate was not yet valid when the service started (not valid "
+                + $"until {notBefore:u}), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
+                + $"unreachable from the network, and it will not fall back to plain HTTP. {clockLine} Correct the system "
+                + "clock or install the currently-valid certificate, then restart the service so the host loads it "
+                + $"again. {certRef}";
+            return (shortMessage, detail, currentValue);
+        }
 
         if (expired)
         {
@@ -3520,20 +5752,25 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>
-    /// The isolating entry point the worker's hourly compression-job health sweep calls — the fleet-level twin
-    /// of <see cref="EvaluateDiskPressureAsync"/>. Wraps <see cref="ApplyCompressionJobsStuckAsync"/> in the SAME
-    /// failure isolation the sibling store-alerts use, so a throwing seam — the pre-deliver mute check, or the
-    /// caller-supplied re-arm delegate — can never propagate out of the (otherwise un-guarded) collection sweep
-    /// loop and stop collection for the whole fleet. Cancellation still propagates.
+    /// The isolating entry point the worker's hourly store background-job health sweep calls — the
+    /// fleet-level twin of <see cref="EvaluateDiskPressureAsync"/>. Wraps
+    /// <see cref="ApplyPolicyJobsStuckAsync"/> in the SAME failure isolation the sibling store-alerts use, so
+    /// a throwing seam — the pre-deliver mute check, or the caller-supplied re-arm delegate — can never
+    /// propagate out of the (otherwise un-guarded) collection sweep loop and stop collection for the whole
+    /// fleet. Cancellation still propagates.
+    ///
+    /// <para>#3816 changed the parameter from the stuck LIST to the whole <see cref="StorePolicyJobHealth"/>
+    /// reading, because two of the four things this pass now does are about the jobs that are FINE: the
+    /// unconditional census line, and the failure arm over every job's counters.</para>
     /// </summary>
-    public async Task EvaluateCompressionJobsAsync(
-        IReadOnlyList<StuckCompressionJob> stuckJobs,
+    public async Task EvaluatePolicyJobsAsync(
+        StorePolicyJobHealth reading,
         Func<long, Task<bool>> rearmAsync,
         CancellationToken cancellationToken)
     {
         try
         {
-            await ApplyCompressionJobsStuckAsync(stuckJobs, rearmAsync, cancellationToken);
+            await ApplyPolicyJobsStuckAsync(reading, rearmAsync, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -3541,16 +5778,16 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            /* NOT counted by #3013's swallowed-read counter: the stuck-job list is a parameter; the read that
+            /* NOT counted by #3013's swallowed-read counter: the reading is a parameter; the read that
                produces it is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Compression-job health self-alert failed: {Message}", ex.Message);
+            _logger?.LogError("Store policy-job health self-alert failed: {Message}", ex.Message);
         }
     }
 
     /// <summary>
     /// The isolating entry point for the #2136 Store Job Over Cadence check — rides the worker's hourly
     /// compression-job health sweep (same connection, same Timescale gate). Same failure isolation as
-    /// <see cref="EvaluateCompressionJobsAsync"/>; cancellation still propagates.
+    /// <see cref="EvaluatePolicyJobsAsync"/>; cancellation still propagates.
     /// </summary>
     public async Task EvaluateStoreJobCadenceAsync(
         IReadOnlyList<StoreJobCadenceReading> jobs, CancellationToken cancellationToken)
@@ -3623,7 +5860,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _lastJobOverCadenceAlert[key] = now;
                     bool critical = percent >= 100.0;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(JobCadenceKeyPrefix + key), _storeLabel, JobCadenceMetric,
                         $"{percent:F0}% of schedule interval", $"{warnPercent}%",
                         detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
@@ -3650,6 +5887,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: Math.Round(percent, 1),
                         numericThresholdValue: critical ? 100 : warnPercent,
                         cancellationToken);
+                    AfterSelfFire(JobCadenceMetric, _lastJobOverCadenceAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
@@ -3773,7 +6011,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastRetentionHoldAlert[key] = now;
                     bool critical = ratio >= criticalRatio;
                     double spanDays = (policy.SpanSeconds ?? 0) / 86400.0;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
                         $"{ratio:F1}x its {policy.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
@@ -3785,20 +6023,23 @@ internal sealed class DarlingSelfAlertEvaluator
                                 : "The gate is working as designed - it will not let retention drop history a " +
                                   "rollup has never materialized - but the hold has lasted long enough to cost " +
                                   "real disk. ") +
-                            "The policy arms ITSELF once its consumer covers everything raw holds, but it " +
-                            "arms at STARTUP rather than the moment coverage catches up - EnsureRetentionPoliciesAsync " +
-                            "runs on the service start path and nowhere else. So the remedy is two steps, and the " +
-                            "second is not optional: run the --backfill-rollups operator action, then RESTART the " +
-                            "service. Skip the restart and the backfill will have worked while this alert keeps " +
-                            "firing, which reads like the backfill failed. Do NOT arm the policy by hand: the " +
-                            "history it holds exists nowhere else, so arming drops the only copy, which is " +
-                            "precisely what the gate prevents. Check the service log at startup for the " +
-                            "'HELD PAUSED' line naming which consumer is short.",
+                            "The policy arms ITSELF once its consumer covers everything raw holds: the coverage " +
+                            "gate is re-judged at startup and on the running service's hourly maintenance tick " +
+                            "(EnsureRetentionPoliciesAsync, #3812), so the remedy is one step - run the " +
+                            "--backfill-rollups operator action - and the hold clears by itself within about an " +
+                            "hour of the backfill completing. Restart the service only if you want it armed " +
+                            "immediately; this alert resolves on the tick after the one that arms it. Do NOT arm " +
+                            "the policy by hand: the history it holds exists nowhere else, so arming drops the only " +
+                            "copy, which is precisely what the gate prevents - and the hourly pass re-holds a " +
+                            "hand-armed policy whose coverage is still short. Check the service log for the " +
+                            "'HELD PAUSED' line at startup naming which consumer is short, and for the hourly " +
+                            "'Retention re-evaluation:' line, whose 'armed this pass' count is the confirmation.",
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
                         numericCurrentValue: Math.Round(ratio, 2),
                         numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
+                    AfterSelfFire(RetentionHoldMetric, _lastRetentionHoldAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else
@@ -3832,33 +6073,63 @@ internal sealed class DarlingSelfAlertEvaluator
 
         await RecordResolutionAsync(new AlertResolution(
             StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
-            "Retention Hold Cleared",
+            RetentionHoldClearedMetric,
             /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
             $"{_storeLabel}: {label} {why}"), cancellationToken);
     }
 
     /// <summary>
-    /// Edge-applies the fleet-level compression-job self-heal machine (#1581) from the set of currently-stuck
-    /// compression jobs the worker detected. Per job, in one check:
-    /// <list type="bullet">
-    /// <item><b>First detection</b> — re-arm it ONCE (<paramref name="rearmAsync"/> → <c>alter_job</c>), then
-    /// FIRE a CRITICAL "self-healed" alert. If the re-arm itself fails (usually a permission problem the service
-    /// cannot fix), go straight to Escalated and FIRE an "auto-re-arm FAILED" alert instead — so we neither loop
-    /// alter_job nor stay silent.</item>
-    /// <item><b>Re-hang</b> (still stuck after a prior self-heal) — ESCALATE: FIRE a CRITICAL "re-hung after
-    /// self-heal" alert and STOP re-arming (looping alter_job on a job that re-hangs is a product-bug signal for
-    /// a human).</item>
-    /// <item><b>Already escalated</b> — never re-arm; re-fire the CRITICAL only on the alert cooldown.</item>
-    /// </list>
-    /// A job that is no longer stuck has RECOVERED: its state is dropped and one "Compression Job Recovered"
-    /// resolution row is written (the sibling conditions' edge shape). Gated on the master alerts switch.
-    /// Re-arm happens at most ONCE per job per check (only on the first-detection transition). Internal so it
-    /// pins directly with a recording deliverer, a controllable clock, and a fake re-arm delegate.
+    /// The isolating entry point for the #4299 Raw Purge Over Horizon check — rides the SAME hourly
+    /// pass that already reads <see cref="RetentionHoldReading"/>s (<see cref="EvaluateRetentionHoldsAsync"/>'s
+    /// sibling). Same failure isolation.
     /// </summary>
-    internal async Task ApplyCompressionJobsStuckAsync(
-        IReadOnlyList<StuckCompressionJob> stuckJobs,
-        Func<long, Task<bool>> rearmAsync,
-        CancellationToken cancellationToken)
+    public async Task EvaluateRawPurgeOverHorizonAsync(
+        IReadOnlyList<RawPurgeOverHorizonReading> readings, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyRawPurgeOverHorizonAsync(readings, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the readings are a parameter; the reads that
+               produce them are counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
+            _logger?.LogError("Raw-purge-over-horizon self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Raw Purge Over Horizon condition (#4299): for a raw relation whose
+    /// <see cref="RetentionHoldReading.OverHorizonRatio"/> breaches the SAME warn/critical ratio pair
+    /// <see cref="ApplyRetentionHoldsAsync"/> judges non-raw policies on, this fires whenever the LAST
+    /// RECORDED trigger outcome (<see cref="TimescaleSupport.RecordRawLastPurgeOutcomeAsync"/>) is not
+    /// <c>"ran"</c> — unconditionally on the recorded reason, WHATEVER <c>darling_armed</c> says, because
+    /// <c>darling_armed=true</c> only means the coverage
+    /// gate would allow a purge — it says nothing about whether the SEPARATE hourly trigger actually ran one
+    /// (a hole, a stale epoch or a run failure can all block it even while armed). This is the gap the
+    /// existing Retention Held alert (#2813) cannot close: that check reads only the armed flag, so a raw
+    /// relation that is armed but whose trigger keeps failing reports healthy there while staying held here.
+    ///
+    /// <para>A raw relation with no recorded outcome yet (a store that has not run a Periodic pass since this
+    /// build shipped) reads as unmeasured and is skipped without touching standing state — the same
+    /// agent-status discipline <see cref="ApplyRetentionHoldsAsync"/> follows for an unreadable span.</para>
+    ///
+    /// <para>The alert text names the recorded outcome in plain words: "repair pending"
+    /// (<c>epoch_stale</c>), "a hole in the range" (<c>hole</c>), "not covered" (<c>not_covered</c>), or
+    /// "the purge failed" with the SqlState (<c>run_failed</c>). A STANDING condition, same idiom as Retention
+    /// Held: fire once on breach, re-fire only on cooldown while it persists, one clearing resolution when a
+    /// LATER record says <c>"ran"</c> AND the ratio is back under the warning tier — both conditions, so a
+    /// relation that just ran once but is still numerically over-horizon (retention drops whole chunks; the
+    /// first successful run after a long hold does not instantly return to under-horizon) does not falsely
+    /// clear. Gated on the master alerts switch. Internal so it pins directly with a recording deliverer and
+    /// a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyRawPurgeOverHorizonAsync(
+        IReadOnlyList<RawPurgeOverHorizonReading> readings, CancellationToken cancellationToken)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -3866,34 +6137,739 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        var stillStuck = new HashSet<string>(StringComparer.Ordinal);
+        var warnRatio = _retentionHoldWarnRatio();
+        var criticalRatio = _retentionHoldCriticalRatio();
 
-        foreach (var job in stuckJobs)
+        foreach (var reading in readings)
+        {
+            var key = reading.JobId.ToString(CultureInfo.InvariantCulture);
+
+            if (reading.LastPurgeReadFailed)
+            {
+                _readFailures?.RecordReadFailure(null, RawPurgeOverHorizonReadName, 0);
+                continue;
+            }
+
+            var label = string.IsNullOrEmpty(reading.HypertableName)
+                ? $"raw retention job {key}"
+                : $"{reading.HypertableName} raw retention [{key}]";
+
+            var overHorizon = reading.OverHorizonRatio is double ratio && ratio >= warnRatio;
+            var lastRan = string.Equals(reading.LastPurge?.Outcome, "ran", StringComparison.Ordinal);
+            var recordStale = reading.LastPurge is { } rec && now - rec.At > RawPurgeRecordStaleAfter;
+
+            if (overHorizon && (!lastRan || recordStale))
+            {
+                _activeRawPurgeOverHorizon[key] = true;
+                if (CooldownElapsed(_lastRawPurgeOverHorizonAlert, key, now))
+                {
+                    _lastRawPurgeOverHorizonAlert[key] = now;
+                    var ratioValue = reading.OverHorizonRatio!.Value;
+                    bool critical = ratioValue >= criticalRatio;
+                    var reasonText = recordStale
+                        ? $"the purge trigger has not recorded a pass since {reading.LastPurge!.At:yyyy-MM-dd HH:mm} UTC"
+                        : RawPurgeOutcomeReasonText(reading.LastPurge);
+                    var delivery = await FireAsync(
+                        StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
+                        $"{ratioValue:F1}x its {reading.DropAfter} horizon", $"{warnRatio:F1}x",
+                        detail: $"Store {label} is {ratioValue:F1}x its configured {reading.DropAfter} horizon, " +
+                            $"and the last recorded purge-trigger pass did not run it — {reasonText}. " +
+                            (critical
+                                ? "The tier is now several times its intended depth and still growing. "
+                                : "") +
+                            "This is the hourly Periodic trigger's own record (#4299), separate from the " +
+                            "Retention Held coverage gate: the relation may already read covered and still " +
+                            "not be purging if a hole or a run failure keeps blocking the trigger. Check the " +
+                            "service log's 'Raw retention purge for' lines for this relation to see the gate " +
+                            "the trigger is failing.",
+                        severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                        shortMessage: $"{label} over horizon — {reasonText}",
+                        numericCurrentValue: Math.Round(ratioValue, 2),
+                        numericThresholdValue: critical ? criticalRatio : warnRatio,
+                        cancellationToken);
+                    AfterSelfFire(RawPurgeOverHorizonMetric, _lastRawPurgeOverHorizonAlert, key, now, SharedCooldown, delivery);
+                }
+            }
+            else if (_activeRawPurgeOverHorizon.TryRemove(key, out var was) && was)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
+                    RawPurgeOverHorizonClearedMetric,
+                    $"{_storeLabel}: {label} purged successfully and is back under {warnRatio:F1}x its {reading.DropAfter} horizon"), cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>Plain-words rendering of a <see cref="RawLastPurgeRecord"/>'s outcome: the alert names the
+    /// reason, one of repair pending, a hole, not covered, or a failed run (with SqlState).
+    /// <c>null</c> (never recorded yet) reads as "not covered" — the trigger has not recorded a run for this
+    /// relation at all, which is the same unmeasured-as-not-covered posture the coverage gate itself takes.</summary>
+    private static string RawPurgeOutcomeReasonText(RawLastPurgeRecord? lastPurge) => lastPurge?.Outcome switch
+    {
+        "epoch_stale" => "repair pending (the materialization-hole repair epoch is stale or missing)",
+        "hole" => "a hole was found in the range about to be dropped",
+        "not_covered" => "not covered (the coverage sweep measured Short or Unknown for it)",
+        "no_chunks" => "no chunks to evaluate",
+        "run_failed" => $"the purge failed (SqlState {lastPurge!.SqlState ?? "(none)"})",
+        "gate_unknown" => "a successor rollup could not be resolved, so coverage could not be confirmed",
+        "gate_error" => "the trigger's own gate check failed; the service log's 'Raw retention purge for' warning names the error",
+        _ => "not covered (no purge-trigger pass has recorded an outcome for it yet)",
+    };
+
+    /// <summary>
+    /// #4391: how old a last-purge record can be before the Raw Purge Over Horizon alert stops trusting a
+    /// recorded <c>"ran"</c> outcome to mean the trigger is still running. Twice the hourly store-maintenance
+    /// tick the trigger rides on (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>), so one missed tick
+    /// does not false-fire but two in a row does: an old <c>"ran"</c> record must not keep the alert quiet
+    /// forever once the trigger itself has stopped running.
+    /// </summary>
+    internal static readonly TimeSpan RawPurgeRecordStaleAfter = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// The isolating entry point for the #4750 Notification Channel Failing check. The counts are the webhook
+    /// service's own in-memory tallies, so this performs no store read and the worker runs it on every sweep
+    /// tick; failure isolation is the same as the fleet-level siblings (a throw is logged, never propagated)
+    /// and cancellation still propagates.
+    /// </summary>
+    public async Task EvaluateNotificationChannelsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyNotificationChannelsAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the counts are read from memory, not the store. */
+            _logger?.LogError("Notification-channel self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Notification Channel Failing condition (#4750): a webhook channel that has
+    /// failed <see cref="WebhookAlertService.FailingChannelThreshold"/> times in a row. A channel can fail for
+    /// weeks while another channel delivers every alert, and until this the only trace was an Error log line
+    /// for each of its first three failures and every fiftieth after.
+    ///
+    /// <para>Each channel is judged on its own by the shared <see cref="WebhookChannelFailurePolicy"/>: ONE
+    /// alert when the count first reaches the threshold, nothing while it stays there or climbs, and ONE
+    /// <see cref="NotificationChannelRecoveredMetric"/> resolution row when it is back at 0 or when the channel
+    /// has no destination left. An edge, not a standing condition, so there is no cooldown re-fire: the alert
+    /// is delivered through the OTHER channels, and the channel that broke cannot carry its own notice.</para>
+    ///
+    /// <para><b>Turning the channel off closes the alert.</b> Turning a failing channel off is the expected
+    /// response to it, so a channel that is no longer configured (disabled, or its URL or key removed, with no
+    /// enabled route carrying one) resolves as turned off, in words that say so: the channel did not deliver
+    /// again. A channel with no destination is never raised. The two resolutions share the metric names.</para>
+    ///
+    /// <para><b>The text carries no error.</b> It names the channel and the count and points at the service
+    /// log for the reason. A webhook error can carry the endpoint's URL, and a Slack or Teams webhook URL is
+    /// the credential, so the alert row, the history and every channel it is delivered to must not hold it. The
+    /// seam hands over counts only, so the text cannot include an error even by mistake.</para>
+    ///
+    /// <para>Gated on the master alerts switch. Internal so it pins directly with a recording deliverer.</para>
+    /// </summary>
+    internal async Task ApplyNotificationChannelsAsync(CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        foreach (var channel in _webhookChannelFailures())
+        {
+            var name = channel.Channel;
+            var count = channel.ConsecutiveFailures;
+            var wasFailing = _activeNotificationChannelFailing.TryGetValue(name, out var active) && active;
+
+            switch (WebhookChannelFailurePolicy.Decide(wasFailing, count, channel.Configured))
+            {
+                case WebhookChannelNotice.Failing:
+                    _activeNotificationChannelFailing[name] = true;
+                    await FireAsync(
+                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        $"{count} failures in a row", $"{WebhookAlertService.FailingChannelThreshold} failures in a row",
+                        detail: $"The {name} webhook channel has failed {count} times in a row, so alerts sent to " +
+                            $"{name} are not arriving there. The other channels are not affected. The service log's " +
+                            $"'{name.ToUpperInvariant()} WEBHOOK FAILED' lines name the error for each failure. This " +
+                            "is stated once; a 'Notification Channel Recovered' entry follows when the channel " +
+                            "delivers again.",
+                        severity: AlertSeverityLevel.Warning,
+                        shortMessage: $"{name} webhook failed {count} times in a row",
+                        numericCurrentValue: count,
+                        numericThresholdValue: WebhookAlertService.FailingChannelThreshold,
+                        cancellationToken);
+                    break;
+
+                case WebhookChannelNotice.Recovered:
+                    _activeNotificationChannelFailing.TryRemove(name, out _);
+                    await RecordResolutionAsync(new AlertResolution(
+                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        NotificationChannelRecoveredMetric,
+                        $"{_storeLabel}: the {name} webhook channel is delivering again (failures in a row back to 0)"),
+                        cancellationToken);
+                    break;
+
+                case WebhookChannelNotice.TurnedOff:
+                    _activeNotificationChannelFailing.TryRemove(name, out _);
+                    await RecordResolutionAsync(new AlertResolution(
+                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        NotificationChannelRecoveredMetric,
+                        $"{_storeLabel}: the {name} webhook channel was turned off (no destination is configured for it)"),
+                        cancellationToken);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The isolating entry point for the #3783 Store TOAST Slack check — rides the worker's hourly store
+    /// self-metrics tick, right after the sweep that wrote the rows it reads, the way the collector-cost
+    /// check does. Reads the latest-per-object rows through the SAME reader <c>get_store_metrics</c> uses, so
+    /// the percentage the alert judged is the one the tool shows. Same failure isolation as
+    /// <see cref="EvaluateCollectorCostAsync"/>: a failed read logs, counts as a swallowed read (#3013) and
+    /// skips the tick; cancellation propagates. Master-gated up front so master-off reads nothing.
+    /// </summary>
+    public async Task EvaluateToastSlackAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        List<Mcp.DarlingStoreMetricsReader.StoreMetricRow> latest;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            latest = await Mcp.DarlingStoreMetricsReader.GetLatestAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "store TOAST slack evaluation failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "store TOAST slack self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyToastSlackAsync(latest, cancellationToken);
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Store TOAST Slack condition (#3783) from the latest dimension rows: a payload
+    /// dimension whose TOAST file is over <see cref="ToastSlackFileFloorBytes"/> and whose MEASURED utilisation
+    /// is under <see cref="ToastSlackUtilisationBarPercent"/> is holding slack that ordinary VACUUM returns to
+    /// the table and never to the OS — ~93 GB of it on the store that motivated this — and only
+    /// <c>--recompress-plan-dim --vacuum-full</c> compacts it. A STANDING condition (the Retention Held idiom):
+    /// fire once on breach, re-fire only after <see cref="ToastSlackRefire"/> while it persists, one "Store TOAST
+    /// Slack Cleared" resolution when the utilisation is back over the bar or the file is under the floor.
+    /// INFORMATIONAL: fired with no severity override so the declared INFO arm styles it — this is a
+    /// maintenance-window decision for the maintainer, and the detail says so in those words. Keyed per
+    /// dimension table, so the two dims track and clear independently.
+    ///
+    /// <para><b>The arm is DORMANT wherever live bytes are not measured, and that is pinned rather than
+    /// hoped.</b> <see cref="Mcp.DarlingStoreMetricsReader.ToastFacts.IsSlack"/> is false on a NULL utilisation,
+    /// and the utilisation is NULL wherever <c>toast_live_bytes</c> is — which on the shipped store is every
+    /// row, because <c>pg_freespacemap</c> is available and not installed and the rung ruled the install the
+    /// maintainer's dependency decision. A NULL is "unmeasured", never "fine": it neither fires nor RESOLVES a
+    /// standing alert (a store that lost the extension would otherwise announce a reclaim that never ran), so
+    /// an unmeasured row leaves the standing state exactly as it found it — the agent-status discipline every
+    /// sibling follows. The day the maintainer runs <c>CREATE EXTENSION pg_freespacemap</c>, the next sweep
+    /// fills the column and this arm judges real numbers with no further change.</para>
+    ///
+    /// <para><b>This check never acts.</b> It cannot and must not run the reclaim: <c>VACUUM FULL</c> takes an
+    /// ACCESS EXCLUSIVE lock on the store's largest table for the whole rebuild and needs free disk for a
+    /// full copy of the live data — the issue is explicit that it runs at the maintainer's word in a
+    /// maintenance window. This makes the need visible instead of silent. Gated on the master alerts switch.
+    /// Internal so it pins directly with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyToastSlackAsync(
+        IReadOnlyList<Mcp.DarlingStoreMetricsReader.StoreMetricRow> latest, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+
+        foreach (var row in latest)
+        {
+            var facts = Mcp.DarlingStoreMetricsReader.ToastFacts.For(row);
+            if (facts is null)
+            {
+                continue;
+            }
+
+            var key = row.ObjectName;
+
+            /* Unmeasured is unmeasured: no fire, no resolve, standing state untouched. */
+            if (facts.UtilisationPercent is not double pct || facts.ToastBytes is not long file)
+            {
+                continue;
+            }
+
+            if (Mcp.DarlingStoreMetricsReader.ToastFacts.IsSlack(file, pct))
+            {
+                _activeToastSlack[key] = true;
+                if (!LastFiredStamp.TryGet(_lastToastSlackAlert, key, now, out var last) || now - last >= ToastSlackRefire)
+                {
+                    _lastToastSlackAlert[key] = now;
+                    var live = facts.ToastLiveBytes ?? 0;
+                    var slack = Math.Max(file - live, 0);
+                    var delivery = await FireAsync(
+                        StoreKey(ToastSlackKeyPrefix + key), _storeLabel, ToastSlackMetric,
+                        $"{pct.ToString("0.0", CultureInfo.InvariantCulture)}% of {FormatGb(file)} TOAST file live",
+                        $"{ToastSlackUtilisationBarPercent.ToString("0", CultureInfo.InvariantCulture)}% over {FormatGb(ToastSlackFileFloorBytes)}",
+                        detail: $"Store dimension {key}'s TOAST file — where the plan XML / statement text actually lives — is " +
+                            $"{FormatGb(file)} on disk and holds {FormatGb(live)} of live data " +
+                            $"({pct.ToString("0.0", CultureInfo.InvariantCulture)}%); {FormatGb(slack)} is free space INSIDE the file. " +
+                            "That slack is what a cycling delete pattern leaves behind: ordinary VACUUM (and autovacuum) returns " +
+                            "those pages to the table for reuse but never to the operating system, so the file sits at its " +
+                            "high-water mark until it is rebuilt, and pg_total_relation_size keeps reporting it as store size. " +
+                            "The reclaim is the existing operator verb --recompress-plan-dim --vacuum-full, run at the " +
+                            "maintainer's word in a maintenance window: VACUUM FULL takes an ACCESS EXCLUSIVE lock on the " +
+                            "dimension for the whole rebuild (every write that references it waits) and needs free disk for a " +
+                            "full copy of the live data while it runs. The service never runs it by itself; this alert re-states " +
+                            "itself once a day while the file stays slack and clears when the rebuild lands. The series is " +
+                            "collect.store_metrics (object_kind = 'dimension', toast_bytes / toast_live_bytes) and " +
+                            "get_store_metrics publishes toast_utilisation_pct per dimension.",
+                        /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
+                        severity: null,
+                        shortMessage: $"{key} TOAST file at {pct.ToString("0.0", CultureInfo.InvariantCulture)}% — --recompress-plan-dim --vacuum-full reclaims the slack; maintenance window",
+                        numericCurrentValue: pct,
+                        numericThresholdValue: ToastSlackUtilisationBarPercent,
+                        cancellationToken);
+                    AfterSelfFire(ToastSlackMetric, _lastToastSlackAlert, key, now, ToastSlackRefire, delivery);
+                }
+            }
+            else if (_activeToastSlack.TryRemove(key, out var was) && was)
+            {
+                var why = file <= ToastSlackFileFloorBytes
+                    ? $"TOAST file is {FormatGb(file)}, under the {FormatGb(ToastSlackFileFloorBytes)} floor"
+                    : $"TOAST file is back at {pct.ToString("0.0", CultureInfo.InvariantCulture)}% live, over the {ToastSlackUtilisationBarPercent.ToString("0", CultureInfo.InvariantCulture)}% bar";
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(ToastSlackKeyPrefix + key), _storeLabel, ToastSlackMetric,
+                    ToastSlackClearedMetric,
+                    /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
+                    $"{_storeLabel}: {key} {why}"), cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The isolating entry point for the #3783 Store Checkpointer Pressure check — rides the same hourly
+    /// store self-metrics tick as <see cref="EvaluateToastSlackAsync"/>, right after the sweep wrote the newest
+    /// checkpointer row, and differences it against the one before through the SAME reader
+    /// <c>get_store_metrics</c> publishes from. Same failure isolation and master gate.
+    ///
+    /// <para>The hour's longest single checkpoint sync (#4823) is on the reading: the worker's once-a-minute sampler
+    /// finds it, the sweep stores it on the hour's checkpointer row (#4834), and the reader returns it with the
+    /// interval, so this check and <c>get_store_metrics</c> judge one stored value.</para>
+    /// </summary>
+    public async Task EvaluateCheckpointerPressureAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            reading = await Mcp.DarlingStoreMetricsReader.GetCheckpointerAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "store checkpointer pressure evaluation failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "store checkpointer pressure self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyCheckpointerPressureAsync(reading, cancellationToken);
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Store Checkpointer Pressure condition (#3783) from the store's last measured
+    /// checkpointer interval: the sync (fsync) phase averaged more than <see cref="CheckpointSyncBarMs"/> per
+    /// checkpoint (#4037), OR the interval's longest single sync was over it (#4823), OR at least one checkpoint
+    /// was REQUESTED — started by WAL volume reaching <c>max_wal_size</c>, a base backup, or a <c>CHECKPOINT</c>
+    /// statement rather than by the clock. PostgreSQL's counters do not record
+    /// which, only its <c>log_checkpoints</c> lines do, so the text names all three causes and offers raising
+    /// <c>max_wal_size</c> as the remedy for the first only (#4758). Three unattributed read kills on a
+    /// production store in one day all sat inside checkpoint sync phases of 25.2 s and 14.0 s with nothing
+    /// recording that the checkpointer had been there; this is that record, as an alert. A STANDING condition (the Store Job Over Cadence idiom): fire once on
+    /// breach, re-fire on the shared alert cooldown while each new interval keeps breaching, one "Store
+    /// Checkpointer Pressure Recovered" resolution when an interval reads clean. INFORMATIONAL, fired with no
+    /// severity override: the two levers are configuration — #3802's WAL sizing (<c>max_wal_size</c> /
+    /// <c>checkpoint_completion_target</c>, landed for the managed store as the v12 postgresql.conf block) and
+    /// #3745's refresh slicing (smaller aggregate refreshes write less WAL per tick) — which the maintainer
+    /// weighs against the store's disk, not a page.
+    ///
+    /// <para><b>Only an Observed interval is judged.</b> <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Absent"/>
+    /// (no row yet), <c>NoPrevious</c> (one row, nothing to subtract), <c>Reset</c> (the counters went
+    /// backwards — <c>pg_stat_reset_shared</c> or a restart between sweeps) and <c>Restarted</c> carry no
+    /// measurement, and a non-measurement neither fires nor resolves: the standing state is left as found, the
+    /// agent-status discipline. Gated on the master alerts switch. Internal so it pins directly with a recording
+    /// deliverer and a controllable clock.</para>
+    ///
+    /// <para><b>The longest single sync is judged beside the average (#4823).</b> The average divides the hour's
+    /// sync time by its checkpoint count, so one long sync among several short ones hides inside it: in the field one
+    /// checkpoint synced for 23.5 s among four in the hour, the average stayed near 5.9 s, and the alert stayed quiet
+    /// while collection stalled on every server. The worker therefore reads the checkpointer's cumulative
+    /// <c>sync_time</c> once a minute; PostgreSQL adds a checkpoint's whole sync time to it when the checkpoint ends,
+    /// so a minute's difference is one checkpoint's sync (or two that ended in the same minute, which can only
+    /// over-report). The largest such difference in the hour is stored on the hour's checkpointer row by the sweep
+    /// (#4834), and the reading carries it as
+    /// <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerReading.LongestSyncMs"/>, the value
+    /// <c>get_store_metrics</c> publishes. The condition breaches when the average arm or the requested arm does,
+    /// OR when that longest sync is over <see cref="CheckpointSyncBarMs"/>, and the text names how long it took and
+    /// in which minute (UTC). The edge state, cooldown and Recovered resolution are unchanged, so an hour reads
+    /// clean only when the longest sync is under the bar as well. A null stored longest sync (no sample yet, a row
+    /// from before the rung, or every read of the window failed) leaves the other two arms to decide alone.</para>
+    ///
+    /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
+    /// shutdown checkpoint as requested and keeps the count across the restart, so every service restart that
+    /// stopped the store fired this alert as requested-checkpoint pressure the store did not have; and that checkpoint's
+    /// own write and sync phases land in the same counters, where nothing can separate them from the live
+    /// checkpoints' (a fast shutdown flushes every dirty buffer at once, with every client already gone, so a
+    /// long one is not a stall anyone's read sat inside). The reader therefore calls such an interval
+    /// <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted"/> and states no delta, and the
+    /// gate below treats it like every other non-measurement. The cost is one skipped hourly interval after each
+    /// restart; the next interval is judged normally. The minute samples difference the same counters, so the
+    /// shutdown checkpoint's sync sits inside the stored longest sync too, and the same gate keeps it unjudged.</para>
+    /// </summary>
+    internal async Task ApplyCheckpointerPressureAsync(
+        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken)
+    {
+        if (reading is null)
+        {
+            throw new ArgumentNullException(nameof(reading));
+        }
+
+        if (!_settings.AlertsEnabled || reading.Status != Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var syncMs = reading.SyncMs ?? 0;
+        var writeMs = reading.WriteMs ?? 0;
+        var requested = reading.Requested ?? 0;
+        var checkpointCount = reading.CheckpointCount;
+        var averageSyncMs = reading.AverageSyncMsPerCheckpoint;
+        var intervalSeconds = reading.IntervalSeconds ?? 0;
+        var intervalMinutes = (intervalSeconds / 60.0).ToString("0.0", CultureInfo.InvariantCulture);
+        var barSeconds = (CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture);
+        /* #4834: the hour's longest single sync, from the stored row - the reader hands both halves of the pair or neither. */
+        CheckpointSyncMax? longestSync = reading.LongestSyncMs is long longestMs && reading.LongestSyncAtUtc is DateTime longestAt
+            ? new CheckpointSyncMax(longestAt, longestMs)
+            : null;
+        var longestOverBar = longestSync is CheckpointSyncMax overBar && overBar.SyncMs > CheckpointSyncBarMs;
+
+        /* IsPressure already carries the longest-sync arm (Observed only, which the gate above guarantees), so
+           longestOverBar is not repeated here; it only names that arm in the text below. */
+        if (reading.IsPressure)
+        {
+            _activeCheckpointerPressure[CheckpointerKey] = true;
+            if (CooldownElapsed(_lastCheckpointerPressureAlert, CheckpointerKey, now))
+            {
+                _lastCheckpointerPressureAlert[CheckpointerKey] = now;
+                var writeSeconds = (writeMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
+                var averageOverBar = averageSyncMs is double avg && avg > CheckpointSyncBarMs;
+                var averageSecondsText = averageSyncMs is double a ? (a / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) : "unmeasured";
+
+                /* Each arm that breached, in the order average, longest single sync, requested. One arm reads as
+                   itself, two as "a and b", three as "a, b and c" - the first two shapes are the ones the text
+                   had before the longest-sync arm, unchanged. */
+                var armParts = new List<string>(3);
+                if (averageOverBar)
+                {
+                    armParts.Add($"average sync {averageSecondsText}s per checkpoint");
+                }
+
+                if (longestOverBar && longestSync is CheckpointSyncMax named)
+                {
+                    armParts.Add($"longest single sync {FormatSyncSeconds(named.SyncMs)}s in the minute ending {FormatSyncMinute(named.SampledUtc)}");
+                }
+
+                if (requested > 0 || armParts.Count == 0)
+                {
+                    armParts.Add($"{requested} requested checkpoint(s)");
+                }
+
+                var arms = armParts.Count == 1
+                    ? armParts[0]
+                    : string.Join(", ", armParts.Take(armParts.Count - 1)) + " and " + armParts[^1];
+
+                /* The sentence for a sample that exists, breaching or not: what the minute samples saw is part of
+                   the evidence either way. Empty with no sample, which keeps the text of an unsampled hour as it was. */
+                var longestDetail = longestSync is CheckpointSyncMax seen
+                    ? $"The longest single checkpoint sync a once-a-minute sample of the counter saw in that interval was {FormatSyncSeconds(seen.SyncMs)}s, " +
+                      $"in the minute ending {FormatSyncMinute(seen.SampledUtc)}. "
+                    : "";
+
+                var thresholdText = longestSync is null
+                    ? $"average sync > {barSeconds}s per checkpoint, or any requested checkpoint"
+                    : $"average sync > {barSeconds}s per checkpoint, any single checkpoint sync > {barSeconds}s, or any requested checkpoint";
+
+                /* The value the alert carries is the figure that breached: the average when the average did, the
+                   longest single sync when that did (the larger when both did). */
+                var currentValue = averageSyncMs is double current ? (long)Math.Round(current) : syncMs;
+                if (longestOverBar && longestSync is CheckpointSyncMax peak && (!averageOverBar || peak.SyncMs > currentValue))
+                {
+                    currentValue = peak.SyncMs;
+                }
+
+                var delivery = await FireAsync(
+                    StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
+                    $"{arms} over {checkpointCount} checkpoint(s) in {intervalMinutes} min",
+                    thresholdText,
+                    detail: $"The store's own checkpointer ran {checkpointCount} checkpoint(s) over the {intervalMinutes} minutes " +
+                        $"between the last two self-metrics sweeps, spending {(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s " +
+                        $"total in its sync (fsync) phase and {writeSeconds}s in its write phase — an average of {averageSecondsText}s of sync " +
+                        $"per checkpoint — and {requested} of those checkpoints were REQUESTED — started by something other than " +
+                        "checkpoint_timeout: WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement. " +
+                        longestDetail +
+                        (averageOverBar
+                            ? $"A per-checkpoint sync average past {barSeconds}s means at least some of this interval's checkpoints ran " +
+                              "an I/O stall every reader on the store shares: on one production store, three read kills in a day that " +
+                              "nothing else explained all sat inside 25.2 s and 14.0 s sync phases, and the MCP host's read deadline is " +
+                              $"the {barSeconds}s this line is drawn at. "
+                            : longestOverBar
+                            ? $"A single checkpoint whose sync phase ran past {barSeconds}s is an I/O stall every reader on the store shares, " +
+                              $"even though this interval's average per checkpoint ({averageSecondsText}s) stayed under the line: an average " +
+                              "spreads one long sync over the interval's short ones, which is why the sync time is also read once a minute. "
+                            : "PostgreSQL's counters do not say which of those started a requested checkpoint; the log_checkpoints " +
+                              "lines do. Raising max_wal_size is the remedy only for the first cause: when WAL volume did it, the " +
+                              "store wrote more WAL between checkpoints than max_wal_size allows, so the checkpointer ran early and " +
+                              "the next one is closer — checkpoint pressure compounds. ") +
+                        "The interval series is collect.store_metrics (object_kind = 'checkpointer'; the stored columns are the " +
+                        "server's cumulative counters, and get_store_metrics' checkpointer block publishes the per-interval " +
+                        "differences and the same per-checkpoint average). This alert re-fires on the alert cooldown while each " +
+                        "new interval breaches and recovers when one reads clean.",
+                    /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
+                    severity: null,
+                    shortMessage: $"store checkpointer: {arms} over {checkpointCount} checkpoint(s) in the last {intervalMinutes} min",
+                    numericCurrentValue: currentValue,
+                    numericThresholdValue: CheckpointSyncBarMs,
+                    cancellationToken);
+                AfterSelfFire(CheckpointerPressureMetric, _lastCheckpointerPressureAlert, CheckpointerKey, now, SharedCooldown, delivery);
+            }
+        }
+        else if (_activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
+        {
+            var recoveredAverageText = averageSyncMs is double recoveredAvg
+                ? (recoveredAvg / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + "s average sync per checkpoint"
+                : "an unmeasured average sync per checkpoint";
+            await RecordResolutionAsync(new AlertResolution(
+                StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
+                CheckpointerPressureRecoveredMetric,
+                /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
+                $"{_storeLabel}: checkpointer {recoveredAverageText} and {requested} requested checkpoint(s) over {checkpointCount} " +
+                $"checkpoint(s) in the last {intervalMinutes} min" +
+                (longestSync is CheckpointSyncMax recoveredLongest ? $", longest single sync {FormatSyncSeconds(recoveredLongest.SyncMs)}s" : "") +
+                " — under the line again"), cancellationToken);
+        }
+    }
+
+    /// <summary>(#4823) Milliseconds as seconds to one decimal, invariant culture: the form every checkpointer figure in
+    /// the alert text takes ("23.5s").</summary>
+    internal static string FormatSyncSeconds(long syncMs) =>
+        (syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
+
+    /// <summary>(#4823) The minute a sync was seen in, as "HH:mm UTC": the time of the sample that saw it, which is when
+    /// the checkpoint had finished by, to the minute.</summary>
+    internal static string FormatSyncMinute(DateTime sampledUtc) =>
+        sampledUtc.ToString("HH:mm", CultureInfo.InvariantCulture) + " UTC";
+
+    /// <summary>
+    /// Edge-applies the fleet-level policy-job self-heal machine (#1581, widened to every family by #3816)
+    /// from the jobs the worker's read flagged. Per job, in one check:
+    /// <list type="bullet">
+    /// <item><b>First detection</b> — re-arm it ONCE (<paramref name="rearmAsync"/> → <c>alter_job</c>), then
+    /// FIRE its family's "self-healed" alert. If the re-arm itself fails (usually a permission problem the
+    /// service cannot fix), go straight to Escalated and FIRE an "auto-re-arm FAILED" alert instead — so we
+    /// neither loop alter_job nor stay silent.</item>
+    /// <item><b>Re-hang</b> (still stuck after a prior self-heal) — ESCALATE: FIRE a "re-hung after
+    /// self-heal" alert and STOP re-arming (looping alter_job on a job that re-hangs is a product-bug signal for
+    /// a human).</item>
+    /// <item><b>Already escalated</b> — never re-arm; re-fire only on the alert cooldown.</item>
+    /// </list>
+    /// A job that is no longer stuck has RECOVERED: its state is dropped and one "… Recovered" resolution row
+    /// is written under the family it fired as (the sibling conditions' edge shape). Gated on the master
+    /// alerts switch. Re-arm happens at most ONCE per job per check (only on the first-detection transition).
+    /// Internal so it pins directly with a recording deliverer, a controllable clock, and a fake re-arm
+    /// delegate.
+    ///
+    /// <para><b>#3816 added three things to this machine and changed none of #1581's transitions.</b> The
+    /// band (<c>PolicyJobBand</c>) decides the metric name, key prefix, severity and prose per family, so a
+    /// dead rollup refresh does not arrive wearing compression's sentence and a mute on one condition is not
+    /// a mute on the other; a job that is HELD rather than dead is refused a re-arm by a second gate here as
+    /// well as by the reader; every pass writes one unconditional summary line; and the
+    /// <c>total_failures</c> arm reports a job that fails WITHOUT ever going <c>-infinity</c>, which no
+    /// surface in the product reported before. The state machine, the confirm-read it trusts and the
+    /// version-gated re-arm are all unchanged.</para>
+    ///
+    /// <para><b>What this machine trusts, and what it cost when the trust was misplaced (#3575).</b> This takes
+    /// the reading's stuck list as settled fact: first sight re-arms and pages, absence an hour
+    /// later posts Recovered. So one false row in the list is not one false message but three — the page, the
+    /// idempotent re-arm it narrates, and the recovery of a job that was never unwell — on the alert family
+    /// that reports the store's own health. A production store produced exactly that set from a healthy job:
+    /// the detector's <c>-infinity</c> arm already guarded on <c>job_status</c>, but TimescaleDB's
+    /// <c>job_stats</c> view assembles that status from <c>pg_stat_activity</c> and <c>next_start</c> from the
+    /// job-stat row, and for a few milliseconds at either edge of every run the two disagree in exactly the
+    /// dead-job shape; the check's sample landed 53 ms into a 63 ms run that succeeded. The fix is upstream
+    /// of here and deliberately so: <c>TimescaleSupport.ReadStuckPolicyJobsAsync</c> now confirms a
+    /// <c>-infinity</c> trip with a second read five seconds later before a job reaches this list, and the
+    /// worker pins its samples to <c>:30</c> past the minute, off the policies' <c>:MM:00</c> run instants.
+    /// This method keeps its single-sample semantics — first sight IS first sight — because the input is now
+    /// worth that trust, and adding hysteresis here instead would have bought the same protection for an
+    /// hour of detection latency on a genuinely dead job.</para>
+    ///
+    /// <para><b>Which TimescaleDB the dead-job arm's sentence and its re-arm are true on (#3591).</b> "The
+    /// scheduler will never run it again" was true of every TimescaleDB below 2.26.4: a persisted
+    /// <c>next_start = -infinity</c> was returned to the scheduler as the due time and the job was never due
+    /// again — the state #1581 was built against, and the one the re-arm genuinely rescues. Upstream #9360
+    /// ("Sanitize <c>DT_NOBEGIN</c> next_start to recover jobs stuck after primary failover", in 2.26.4 and
+    /// every 2.27+ release; <c>TimescaleSupport.TimescaleNextStartSanitizedFrom</c>) removed that state. On a
+    /// fixed store the only PERSISTENT <c>-infinity</c> is a crashed run — a worker killed between its start
+    /// and end marks by a SIGKILL, a crash-restart or a failover — which the scheduler holds in a CRASH
+    /// BACKOFF of at least five minutes and, for a compression policy with the default one-hour
+    /// <c>retry_period</c>, about an hour (±13 % jitter), and then re-runs by itself. Rows of that kind arrive
+    /// here with <see cref="StuckPolicyJob.SchedulerRetries"/> set, and this machine treats them
+    /// differently on the evidence of a 2.28.1 rig: re-arming a job in crash backoff does not shorten the
+    /// wait, it RESETS it — <c>alter_job</c> refreshes the scheduler's job list and every crash row's backoff
+    /// is recomputed from that instant (the un-re-armed sibling crash row moved too), and the re-arm overwrites
+    /// the <c>-infinity</c> so the next hourly read would call the job healthy before it had run. A re-arm on
+    /// such a row is therefore three untrue messages and a later retry, which is why the first sighting of
+    /// one is NOT re-armed and NOT paged: it is logged at Information and remembered as
+    /// <c>AwaitingSchedulerRetry</c>. If the same job is still on the arm an hour later — the scheduler's own
+    /// retry has not cleared it, because the jittered backoff fell just past the check cadence or because the
+    /// job crashed AGAIN and its backoff doubled — it escalates: one Critical page naming a crash the operator
+    /// should read the PostgreSQL log for, no re-arm, and the cooldown re-fires of the escalated state. A job
+    /// that clears while awaiting the retry is dropped silently, since nothing was paged for it to recover
+    /// from. Stores below 2.26.4, and stores whose version could not be read, keep every #1581 semantic
+    /// exactly — an unknown version is treated as old, because on an old store the re-arm is the rescue.</para>
+    /// </summary>
+    internal async Task ApplyPolicyJobsStuckAsync(
+        StorePolicyJobHealth reading,
+        Func<long, Task<bool>> rearmAsync,
+        CancellationToken cancellationToken)
+    {
+        if (reading is null)
+        {
+            throw new ArgumentNullException(nameof(reading));
+        }
+
+        var census = PolicyJobCensus.Of(reading);
+
+        if (!_settings.AlertsEnabled)
+        {
+            /* #3756: the summary is unconditional, and "alerts are off" is the one thing it has to say
+               differently — a pass that read twelve jobs and deliberately judged none of them must not read
+               like a pass that judged twelve and found nothing wrong. */
+            LogPolicyJobSummary(census, rearmed: 0, fired: 0, alertsEnabled: false);
+            return;
+        }
+
+        var now = _utcNow();
+        var stillStuck = new HashSet<string>(StringComparer.Ordinal);
+        var rearmed = 0;
+        var fired = 0;
+
+        foreach (var job in reading.Stuck)
         {
             var key = job.JobId.ToString(CultureInfo.InvariantCulture);
             stillStuck.Add(key);
 
-            var label = string.IsNullOrEmpty(job.HypertableName)
-                ? $"compression job {key}"
-                : $"compression job {key} on {job.HypertableName}";
-
-            if (!_compressionJobState.TryGetValue(key, out var state))
+            /* A family this vocabulary has no sentence for is NOT paged under another family's name (#3816).
+               Unreachable from StuckPolicyJobsSql as written — every proc name it admits bands — so reaching
+               this is a widening that outran the band table, which is a product defect and says so. Skipping
+               is the conservative half of that: an operator who gets "Retention Job Stuck" about a reorder
+               policy has been told something false, and a WARNING in the log about an unbanded job is
+               findable and harmless. The census still counts it. */
+            if (job.Family == TimescaleSupport.StorePolicyJobFamily.Other)
             {
-                /* First detection this episode: re-arm ONCE, then alert on the outcome. */
-                bool rearmed = await rearmAsync(job.JobId);
-                _lastCompressionJobAlert[key] = now;
-                if (rearmed)
+                _logger?.LogWarning(
+                    "TimescaleDB policy job {JobId}{Relation} was flagged as stuck ({Reason}) but its family is not one this service has alert text for — not re-armed, not alerted. The detection was widened past the band table; report it (#3816)",
+                    key,
+                    string.IsNullOrEmpty(job.HypertableName) ? "" : " on " + job.HypertableName,
+                    job.Reason);
+                continue;
+            }
+
+            var band = PolicyJobBand.For(job.Family);
+            var label = string.IsNullOrEmpty(job.HypertableName)
+                ? $"{band.Noun} {key}"
+                : $"{band.Noun} {key} on {job.HypertableName}";
+
+            /* THE SECOND GATE (#3816, guarding #1680/#1877). TimescaleSupport.ClassifyStuckPolicyJobs already
+               dropped every HELD row, so this cannot fire today — and it is here because the action on the
+               other side of it is DESTRUCTIVE. A held retention policy is paused on purpose until its tier's
+               rollups cover raw, the history it holds exists nowhere else, and alter_job(next_start => now())
+               on one drops exactly the chunks the coverage gate exists to protect. A regression upstream of
+               here — a reader that stops projecting j.scheduled, an upstream view that starts reporting a real
+               next_start for a paused job — must not be able to reach a re-arm. It gets a WARNING naming the
+               job instead. */
+            if (!job.Scheduled)
+            {
+                /* #4299: one of the three raw retention jobs (TimescaleSupport.RawRelations) is
+                   permanently unscheduled by DESIGN, not by the #1680/#1877 coverage gate — its verdict
+                   lives in config->>'darling_armed', not in j.scheduled, so reaching here for one of them
+                   every hourly pass is expected, not a detector defect. */
+                if (!string.IsNullOrEmpty(job.HypertableName) && TimescaleSupport.RawRelations.Contains(job.HypertableName))
                 {
-                    _compressionJobState[key] = CompressionJobHealth.ReArmed;
+                    _logger?.LogDebug(
+                        "TimescaleDB {Label} was reported as stuck while NOT scheduled — this is one of the three raw retention jobs, permanently unscheduled by design (#4299), not a #1680/#1877 coverage hold. Nothing re-armed, nothing alerted; no action needed",
+                        label);
+                    continue;
+                }
+
+                _logger?.LogWarning(
+                    "TimescaleDB {Label} was reported as stuck while NOT scheduled — a paused policy is a HELD one, not an abandoned job, and re-arming it would drop history the #1680/#1877 coverage gate is protecting. Nothing re-armed, nothing alerted; this is a detector defect worth reporting (#3816)",
+                    label);
+                continue;
+            }
+
+            if (!_policyJobState.TryGetValue(key, out var episode))
+            {
+                if (job.SchedulerRetries)
+                {
+                    /* #3591 (and the #3629 measurement behind it): a crash-backoff row on a TimescaleDB whose
+                       scheduler re-runs it by itself. Re-arming would RESET that backoff rather than shorten
+                       it and would erase the evidence; paging would narrate a self-recovering condition as a
+                       rescue. Remember it, say so in the log, and give the scheduler one check cadence.
+                       Inherited UNCHANGED by every family #3816 added, and that is the point: the scheduler's
+                       crash arm is proc-agnostic, so the argument that made this right for compression is the
+                       same argument for a refresh or a retention job. */
+                    _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.AwaitingSchedulerRetry, job.Family);
+                    _logger?.LogInformation(
+                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself after its crash backoff (at least five minutes, about an hour for a policy's default retry period), and a re-arm would reset that backoff rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591)",
+                        label, job.Reason);
+                    continue;
+                }
+
+                /* First detection this episode: re-arm ONCE, then alert on the outcome. */
+                bool jobWasRearmed = await rearmAsync(job.JobId);
+                _lastPolicyJobAlert[key] = now;
+                fired++;
+                if (jobWasRearmed)
+                {
+                    rearmed++;
+                    _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.ReArmed, job.Family);
                     await FireAsync(
-                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                        StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} was stuck ({job.Reason}) and has been automatically re-armed " +
-                            "(alter_job next_start => now). A stuck compression policy halts the store's archival tier, so " +
-                            "uncompressed data grows without bound until the disk fills and collection stops for the WHOLE " +
-                            "fleet, and a headless service has no dashboard to warn you. If it re-hangs the service will " +
-                            "escalate and stop auto-re-arming — investigate the TimescaleDB background-worker health.",
-                        severity: AlertSeverityLevel.Critical,
+                            $"(alter_job next_start => now). {band.Consequence} If it re-hangs the service will " +
+                            "escalate and stop auto-re-arming — investigate the TimescaleDB background-worker health. " +
+                            "(A next_start of -infinity is permanent only below TimescaleDB 2.26.4; from 2.26.4 on, upstream " +
+                            "#9360, the scheduler recovers it by itself and the service leaves such rows to it — if this store " +
+                            "is on 2.26.4 or later, its extension version could not be read on this pass.)",
+                        severity: band.Severity,
                         shortMessage: $"{label} was stuck — auto-re-armed",
                         /* #1881: job.Reason is elapsed minutes when a run HUNG and a scheduler state with no
                            duration at all when next_start is -infinity, so the stored number meant minutes on
@@ -3906,53 +6882,83 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     /* The re-arm failed — usually the store login does not own the job. Treat as escalated so we
                        never loop alter_job on it, and page: a human must re-arm it (or grant ownership). */
-                    _compressionJobState[key] = CompressionJobHealth.Escalated;
-                    await FireAsync(
-                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                    _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
+                    var delivery = await FireAsync(
+                        StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it — " +
-                            "alter_job failed, usually because the store login does not own the job. Compression is halted, " +
-                            "so the store will grow without bound until the disk fills. Re-arm it manually as the store owner " +
+                            "alter_job failed, usually because the store login does not own the job. " +
+                            $"{band.Stalled} Re-arm it manually as the store owner " +
                             "(SELECT alter_job(<job_id>, next_start => now())), or grant ownership, then investigate why it hung.",
-                        severity: AlertSeverityLevel.Critical,
+                        severity: band.Severity,
                         shortMessage: $"{label} stuck — auto-re-arm FAILED",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
+                    AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
                 }
             }
-            else if (state == CompressionJobHealth.ReArmed)
+            else if (episode.State == PolicyJobHealth.AwaitingSchedulerRetry)
+            {
+                /* #3591: an hour on and the scheduler's own retry has not cleared it. Either the jittered backoff
+                   landed just past this check, or the job crashed AGAIN and its backoff doubled — both are worth a
+                   human reading the PostgreSQL log, and neither is helped by alter_job (which would reset the
+                   backoff once more). Escalate: page once now, re-fire on the cooldown, never re-arm. */
+                _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
+                _lastPolicyJobAlert[key] = now;
+                fired++;
+                var delivery = await FireAsync(
+                    StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
+                    job.Reason, "running on schedule",
+                    detail: $"TimescaleDB {label} has sat in the scheduler's crash backoff ({job.Reason}) since at least the previous " +
+                        "hourly check, and the scheduler's own retry has not cleared it. A crashed background worker means the " +
+                        "PostgreSQL cluster crash-restarted, failed over, or the worker was killed mid-run — read the PostgreSQL log " +
+                        "around the job's last_run_started_at for the cause, and check whether it has crashed more than once (each " +
+                        "consecutive crash doubles the backoff). The service did NOT re-arm it: on TimescaleDB 2.26.4+ (upstream " +
+                        "#9360) alter_job(next_start => now()) against a job in crash backoff resets the backoff instead of " +
+                        $"shortening it. {band.Stalled}",
+                    severity: band.Severity,
+                    shortMessage: $"{label} still in crash backoff an hour on — escalated",
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
+                AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
+            }
+            else if (episode.State == PolicyJobHealth.ReArmed)
             {
                 /* Still stuck after last check's self-heal = a RE-HANG. Escalate and STOP re-arming (looping
                    alter_job on a job that re-hangs just churns — it is a product-bug signal for a human). */
-                _compressionJobState[key] = CompressionJobHealth.Escalated;
-                _lastCompressionJobAlert[key] = now;
-                await FireAsync(
-                    StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
+                _lastPolicyJobAlert[key] = now;
+                fired++;
+                var delivery = await FireAsync(
+                    StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle — it " +
-                        "re-hung, so the service has STOPPED auto-re-arming it. This is a product-bug signal: the compression " +
-                        "background worker is failing to make progress. Investigate the PostgreSQL/TimescaleDB logs and the " +
-                        "background-worker settings; compression stays halted until it is fixed.",
-                    severity: AlertSeverityLevel.Critical,
+                        "re-hung, so the service has STOPPED auto-re-arming it. This is a product-bug signal: the background " +
+                        $"worker behind this policy is not making progress. {band.Stalled} Investigate the " +
+                        "PostgreSQL/TimescaleDB logs and the background-worker settings.",
+                    severity: band.Severity,
                     shortMessage: $"{label} re-hung after self-heal — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
             }
             else
             {
                 /* Already escalated: never re-arm again; keep paging on the cooldown while it stays stuck. */
-                if (CooldownElapsed(_lastCompressionJobAlert, key, now))
+                if (CooldownElapsed(_lastPolicyJobAlert, key, now))
                 {
-                    _lastCompressionJobAlert[key] = now;
-                    await FireAsync(
-                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                    _lastPolicyJobAlert[key] = now;
+                    fired++;
+                    var delivery = await FireAsync(
+                        StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
-                        detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation — still not compressing. " +
+                        detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation. {band.Stalled} " +
                             "Manual intervention is required; the service will not auto-re-arm it.",
-                        severity: AlertSeverityLevel.Critical,
+                        severity: band.Severity,
                         shortMessage: $"{label} still stuck after escalation",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
+                    AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
                 }
             }
         }
@@ -3960,26 +6966,321 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Recovery: any job we were tracking that is no longer stuck has recovered — drop its state and write
            one resolution row (the sibling conditions' edge shape). ToList() so the removal does not mutate the
            collection under enumeration. */
-        foreach (var key in _compressionJobState.Keys.ToList())
+        foreach (var key in _policyJobState.Keys.ToList())
         {
             if (stillStuck.Contains(key))
             {
                 continue;
             }
 
-            _compressionJobState.TryRemove(key, out _);
-            _lastCompressionJobAlert.TryRemove(key, out _);
+            _policyJobState.TryRemove(key, out var was);
+            _lastPolicyJobAlert.TryRemove(key, out _);
+
+            /* #3816: the resolution must be addressed to the metric name and key its FIRING used, so the
+               episode remembers the family. Deriving the family from this pass's rows instead would be
+               unanswerable in the one case that matters — the job is not in this pass's stuck list, which is
+               why we are here at all — and a resolution under the wrong metric name resolves nothing and
+               leaves the real alert row open. */
+            var band = PolicyJobBand.For(was.Family);
+            if (was.State == PolicyJobHealth.AwaitingSchedulerRetry)
+            {
+                /* #3591: the scheduler's own retry cleared it and nothing was paged, so there is nothing to
+                   resolve — a lone "Recovered" with no preceding alert would be the very message shape #3575
+                   removed. The log carries the outcome instead. */
+                _logger?.LogInformation(
+                    "TimescaleDB {Noun} {JobId} is running on schedule again — the scheduler's own retry cleared its crash backoff; nothing was re-armed or alerted (#3591)",
+                    band.Noun,
+                    key);
+                continue;
+            }
+
             await RecordResolutionAsync(new AlertResolution(
-                StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
-                "Compression Job Recovered",
-                $"TimescaleDB compression job {key} is running on schedule again"), cancellationToken);
+                StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
+                band.RecoveredMetric,
+                $"TimescaleDB {band.Noun} {key} is running on schedule again"), cancellationToken);
+        }
+
+        await ApplyPolicyJobFailuresAsync(reading.Jobs, now, cancellationToken);
+        LogPolicyJobSummary(census, rearmed, fired, alertsEnabled: true);
+    }
+
+    /// <summary>
+    /// The <c>total_failures</c> arm (#3816): a policy job whose failure count GREW since the previous hourly
+    /// sample and whose last run reports <c>Failed</c>, fired at INFORMATION under
+    /// <see cref="PolicyJobFailingMetric"/> with its family's text.
+    ///
+    /// <para><b>Both halves are required, and each alone is wrong.</b> A grown count alone fires on a job that
+    /// failed once and then succeeded — a retry that worked is the scheduler doing its job. A
+    /// <c>last_run_status = 'Failed'</c> alone re-fires hourly about ONE failure forever, because the column
+    /// keeps saying Failed until the next run: it is a state, not an event. The conjunction reads "it failed
+    /// again since we last looked, and it is still failing", which is the only form that is both an event and
+    /// a condition.</para>
+    ///
+    /// <para><b>The first pass after a start establishes the baseline and cannot fire.</b>
+    /// <c>total_failures</c> is cumulative since the job was created, so treating an absent baseline as 0
+    /// would page about every failure in the store's history the first time the service looked. A
+    /// non-measurement neither fires nor resolves — the checkpointer arm's <c>NoPrevious</c> discipline.</para>
+    ///
+    /// <para><b>A HELD policy is skipped here too.</b> Its counters are frozen because it is not being run, so
+    /// it cannot produce a delta; and if one ever did, the sentence to say about it belongs to the hold, not
+    /// to this arm.</para>
+    ///
+    /// <para>Event-shaped, so there is no standing state and no resolution row: what is reported is "N more
+    /// failures since the previous sample", which is true when it is said and is not a condition that later
+    /// clears. The alert cooldown still gates the re-fire, so a job failing every few minutes cannot outrun
+    /// the channel.</para>
+    /// </summary>
+    private async Task ApplyPolicyJobFailuresAsync(
+        IReadOnlyList<PolicyJobRunReading> jobs, DateTime now, CancellationToken cancellationToken)
+    {
+        /* #3464: the master switch, consulted before the first store write like every sibling apply — the
+           baseline below is still advanced so re-enabling alerts does not replay a quiet hour as new failures. */
+        if (!_settings.AlertsEnabled)
+        {
+            foreach (var job in jobs)
+            {
+                _policyJobFailureBaseline[job.JobId.ToString(CultureInfo.InvariantCulture)] = job.TotalFailures;
+            }
+            return;
+        }
+
+        foreach (var job in jobs)
+        {
+            var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+            var hadBaseline = _policyJobFailureBaseline.TryGetValue(key, out var previous);
+
+            /* #4795: while this job's last alert reached no channel and its retry is not due yet, the baseline
+               stays where the failed send put it back. A sweep that lands inside a retry delay longer than the
+               hourly check would otherwise advance it, and the retry would find no new failures to report. A
+               delivered alert (no pending retry) advances it exactly as before. */
+            var retryWaiting = _policyJobRetryPending.ContainsKey(key)
+                && !CooldownElapsed(_lastPolicyJobFailureAlert, key, now);
+            if (!retryWaiting)
+            {
+                _policyJobFailureBaseline[key] = job.TotalFailures;
+            }
+
+            if (job.Held
+                || !hadBaseline
+                || job.TotalFailures <= previous
+                || job.Family == TimescaleSupport.StorePolicyJobFamily.Other)
+            {
+                continue;
+            }
+
+            if (!string.Equals(job.LastRunStatus, "Failed", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!CooldownElapsed(_lastPolicyJobFailureAlert, key, now))
+            {
+                continue;
+            }
+
+            _lastPolicyJobFailureAlert[key] = now;
+            var band = PolicyJobBand.For(job.Family);
+            var label = string.IsNullOrEmpty(job.RelationName)
+                ? $"{band.Noun} {key}"
+                : $"{band.Noun} {key} on {job.RelationName}";
+            var grew = job.TotalFailures - previous;
+
+            var delivery = await FireAsync(
+                StoreKey(PolicyJobFailingKeyPrefix + key), _storeLabel, PolicyJobFailingMetric,
+                $"{grew} new failure(s), {job.TotalFailures} total", "at least one new failure",
+                detail: $"TimescaleDB {label} recorded {grew} more failed run(s) since the previous hourly sample " +
+                    $"({job.TotalFailures} failures total since the policy was created) and its last run reports Failed. " +
+                    $"{band.Consequence} The job is still SCHEDULED — the scheduler is running it and it is failing — " +
+                    "which is why neither the dead-job arm (next_start = -infinity) nor the #2136 cadence check (which " +
+                    "reads only SUCCESSFUL runs, so it gets quieter as a job gets sicker) reports it. The cause is in the " +
+                    "PostgreSQL log around the job's last_run_started_at; the counter series is collect.store_metrics " +
+                    "(object_kind = 'background_job', total_failures). Information rather than a page: a job that fails " +
+                    "and retries is alive, and a job the scheduler gives up on arrives under its family's own stuck alert.",
+                /* No severity override: the DECLARED INFO arm in AlertSeverity.ForMetric decides, the
+                   #3443/#3783 idiom. The value IS a measurement — how many more failures — so unlike the
+                   stuck family this metric is deliberately not state-only. */
+                severity: null,
+                shortMessage: $"{label} failed {grew} more time(s) since the last sample",
+                numericCurrentValue: grew,
+                numericThresholdValue: 1,
+                cancellationToken);
+            if (AfterSelfFire(PolicyJobFailingMetric, _lastPolicyJobFailureAlert, key, now, SharedCooldown, delivery))
+            {
+                /* #4795: the failure count was taken as the baseline before the send. Put it back, so the retry
+                   still sees these failures as new, and mark the retry pending so a sweep before it is due
+                   leaves the baseline alone (above). */
+                _policyJobFailureBaseline[key] = previous;
+                _policyJobRetryPending[key] = true;
+            }
+            else
+            {
+                _policyJobRetryPending.TryRemove(key, out _);
+            }
         }
     }
 
+    /// <summary>
+    /// The one unconditional INFORMATION line every store policy-job evaluation writes (#3816, #3756's
+    /// discipline): what was read, per family, and what happened to it.
+    ///
+    /// <para><b>Why unconditional.</b> Before this, a healthy pass of this check was indistinguishable from a
+    /// pass that never ran — the only evidence it produced was an alert, so "no alert" meant either "nothing
+    /// is wrong" or "the connection open threw, was swallowed at Debug, and nothing has been checked for
+    /// days". #3815's re-probe and #3812's retention re-evaluation each write their own line on this same
+    /// tick for exactly that reason; this is its third tenant saying so too.</para>
+    ///
+    /// <para><b>HELD is reported and never acted on</b>, which is the number that makes the coverage gate
+    /// legible on a healthy store: a reader who sees "retention 5, 4 held" knows the gate is holding four
+    /// tiers and that nothing in this pass touched them.</para>
+    ///
+    /// <para><paramref name="fired"/> counts fires ATTEMPTED, not delivered — the mute check and the
+    /// per-metric cooldown live downstream inside <c>FireAsync</c>, and a muted alert is still recorded. It is
+    /// the count that says what this pass DECIDED, which is what a reader comparing it to the dead/held
+    /// numbers wants.</para>
+    /// </summary>
+    private void LogPolicyJobSummary(PolicyJobCensus census, int rearmed, int fired, bool alertsEnabled)
+        => _logger?.LogInformation(
+            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled} (#3816)",
+            census.Total,
+            census.Compression,
+            census.Refresh,
+            census.Retention,
+            census.Other == 0 ? "" : ", other " + census.Other.ToString(CultureInfo.InvariantCulture),
+            census.Dead,
+            census.Hung,
+            census.Held,
+            rearmed,
+            fired,
+            alertsEnabled ? "" : " — alerts are DISABLED, so nothing was judged this pass");
+
+    /// <summary>
+    /// What one pass of <c>TimescaleSupport.StuckPolicyJobsSql</c> read, per family, and what the classifier
+    /// made of it (#3816) — the summary line's whole content.
+    ///
+    /// <para>Counted from the pass's OWN census rows rather than from the stuck list, so the two numbers a
+    /// reader compares ("12 read, 1 dead") come from one statement and one instant.
+    /// <see cref="Dead"/> and <see cref="Hung"/> come from the stuck list's ARM, because which arm fired is
+    /// the classifier's answer and not a column: the same <c>-infinity</c> row is a dead job or a run-instant
+    /// edge depending on a second read five seconds later, and only the reader knows which.</para>
+    /// </summary>
+    internal readonly record struct PolicyJobCensus(
+        int Total, int Compression, int Refresh, int Retention, int Other, int Held, int Dead, int Hung)
+    {
+        /// <summary>Counts one pass. A reading with no census rows (the read failed) counts zeroes, which is
+        /// how the summary line says "nothing was read" rather than "a store with no jobs".</summary>
+        internal static PolicyJobCensus Of(StorePolicyJobHealth reading)
+        {
+            var jobs = reading.Jobs ?? Array.Empty<PolicyJobRunReading>();
+            var stuck = reading.Stuck ?? Array.Empty<StuckPolicyJob>();
+
+            return new PolicyJobCensus(
+                jobs.Count,
+                jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Compression),
+                jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Refresh),
+                jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Retention),
+                jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Other),
+                jobs.Count(j => j.Held),
+                stuck.Count(j => j.Arm == StuckPolicyJobArm.NextStartNegativeInfinity),
+                stuck.Count(j => j.Arm == StuckPolicyJobArm.RunningPastBound));
+        }
+    }
+
+    /// <summary>Which state a policy job's episode is in, and the family it fired under (#3816). The family
+    /// is remembered because the RECOVERY has to address the metric name and key the firing used, and by then
+    /// the job is (by definition) absent from the pass's rows.</summary>
+    private readonly record struct PolicyJobEpisode(
+        PolicyJobHealth State, TimescaleSupport.StorePolicyJobFamily Family);
+
+    /// <summary>
+    /// One family's band (#3816): the persisted metric identity it fires under, its key prefix and resolution
+    /// title, its severity, the noun its label is built from, and the two sentences that say what a stall of
+    /// THIS family costs.
+    ///
+    /// <para><b>Why severity differs by family, stated as the choice it is.</b></para>
+    /// <list type="bullet">
+    /// <item><b>Refresh — CRITICAL, and the worst of the three.</b> The rollup stops advancing, so every
+    /// reader of that view is served silently STALE answers (the only one of the three whose consequence is a
+    /// wrong answer rather than a cost), the raw tier it summarizes keeps filling, and #1680/#1877's coverage
+    /// gate then holds that tier's retention. One dead job, three consequences, and the one an operator meets
+    /// first is a retention hold whose named remedy (<c>--backfill-rollups</c>) fixes the symptom and leaves
+    /// the cause running.</item>
+    /// <item><b>Compression — CRITICAL, unchanged.</b> #1581's judgement byte for byte: an uncompressed
+    /// archival tier grows without bound until the disk fills and collection stops for the whole fleet.</item>
+    /// <item><b>Retention — WARNING.</b> The store keeps history it was told to drop. That is disk and
+    /// nothing else: no reader gets a wrong answer, nothing is lost, and it is the SLOWEST growth of the
+    /// three because the tier it stops draining is the compressed one. It is a this-week fact, not a tonight
+    /// fact. It does not escalate to Critical by persisting either — an unhealed retention stall does not
+    /// become more urgent, it becomes disk, and <see cref="DiskPressureMetric"/> owns that and pages for
+    /// it.</item>
+    /// </list>
+    /// </summary>
+    private readonly record struct PolicyJobBand(
+        string Metric,
+        string RecoveredMetric,
+        string KeyPrefix,
+        AlertSeverityLevel Severity,
+        string Noun,
+        string Consequence,
+        string Stalled)
+    {
+        internal static PolicyJobBand For(TimescaleSupport.StorePolicyJobFamily family) => family switch
+        {
+            TimescaleSupport.StorePolicyJobFamily.Refresh => new PolicyJobBand(
+                RefreshJobStuckMetric,
+                RefreshJobRecoveredMetric,
+                RefreshKeyPrefix,
+                AlertSeverityLevel.Critical,
+                "refresh job",
+                "A rollup has stopped materializing, so every reader of that view is served silently stale " +
+                "answers, the raw tier it summarizes keeps filling, and the #1680/#1877 coverage gate will " +
+                "HOLD that tier's retention policy for as long as the rollup is short — the retention hold an " +
+                "operator sees first is this job's SYMPTOM, and --backfill-rollups clears the symptom while " +
+                "leaving this cause in place to do it again.",
+                "The rollup stays where it stopped until the refresh runs."),
+
+            TimescaleSupport.StorePolicyJobFamily.Retention => new PolicyJobBand(
+                RetentionJobStuckMetric,
+                RetentionJobRecoveredMetric,
+                RetentionKeyPrefix,
+                AlertSeverityLevel.Warning,
+                "retention job",
+                "The archival tier is stalled: this policy is ARMED and the scheduler has stopped running it, " +
+                "so the tier keeps every chunk it was configured to drop and grows for as long as that lasts. " +
+                "This is NOT the #2813 Retention Held condition — that one is a policy the rollup-coverage " +
+                "gate paused on purpose, which reports scheduled = false and clears with a backfill. This one " +
+                "is scheduled and abandoned, and no backfill affects it.",
+                "The tier drops nothing until the job runs."),
+
+            /* Compression is the default arm deliberately: it is #1581's family, its text and severity are
+               unchanged, and a family added to the enum later that reached here would at worst wear the
+               oldest and most conservative of the three sentences. StorePolicyJobFamily.Other never reaches
+               this method — both call sites skip it with a WARNING rather than page under a name that does
+               not fit. */
+            _ => new PolicyJobBand(
+                CompressionJobMetric,
+                "Compression Job Recovered",
+                CompressionKeyPrefix,
+                AlertSeverityLevel.Critical,
+                "compression job",
+                "A stuck compression policy halts the store's archival tier, so uncompressed data grows " +
+                "without bound until the disk fills and collection stops for the WHOLE fleet, and a headless " +
+                "service has no dashboard to warn you.",
+                "Compression stays halted for this relation until the job runs."),
+        };
+    }
+
     /// <summary>Drops all edge state for a server removed from the monitored set (reconcile), so a later
-    /// re-add starts fresh at the Unknown baseline rather than inheriting a stale connection/active flag.</summary>
+    /// re-add starts fresh at the Unknown baseline rather than inheriting a stale connection/active flag.
+    /// Collection-stopped starts watching the server afresh too (#4757): the next pass judges it from that
+    /// pass, not from the service start or from the <c>collection_log</c> rows the server kept while it was
+    /// out of the set.</summary>
     public void Forget(int serverId)
     {
+        /* #4795: first, so a store-alert sweep that was reading for this server and resumes from here on finds
+           itself out of date before it can claim a group's authority again, or send and stamp the state dropped
+           below. */
+        _generations.AddOrUpdate(serverId, 1, (_, generation) => generation + 1);
+
         var key = Key(serverId);
         _activeCollectionStopped.TryRemove(key, out _);
         _lastCollectionStoppedAlert.TryRemove(key, out _);
@@ -3989,11 +7290,23 @@ internal sealed class DarlingSelfAlertEvaluator
         _lastAgentDownAlert.TryRemove(key, out _);
         _connectionState.TryRemove(key, out _);
         _hasBeenOnline.TryRemove(key, out _);
+        _collectionWatchStart[key] = Unstamped;
+
+        /* #4795: the pending retry of a "Server Unreachable" that no channel delivered belongs to the connection
+           state dropped above. Left behind, a re-add that is still down would pass its silent first pass and then
+           be paged on the second, as "the previous alert reached no channel", for an outage the removed server had. */
+        _connectionRetries.Clear(key);
+
+        /* #4795: and so does its re-fire clock, the stamp of the last down alert delivered. Left behind, a re-add
+           that is still down would find a down alert on record for an outage the removed server had, and the clock
+           would hold back the announcement re-fire makes when it finds none. */
+        _lastConnectionDownAlertUtc.TryRemove(key, out _);
 
         /* AG state is keyed by the AG GRAIN, not by server (#1696), so there is deliberately nothing here to
            drop: an Availability Group outlives any one of its monitored nodes, and another node may still be
            watching it. Dropping the edge state on removal would re-baseline a group that is still monitored
-           and silently swallow the next failover.
+           and silently swallow the next failover. The same goes for the AG retries (#4795): they are keyed by
+           metric and grain, so they are part of that state and stay with it.
 
            What DOES belong to the departing server is its claim to judge an AG. Releasing it lets a
            surviving node take over on its next sweep; the edge state it inherits is the same state, so the
@@ -4008,7 +7321,47 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /// <summary>How many times the server has been forgotten (#4795). The store-alert sweep captures it before its
+    /// first read and passes it to <see cref="ApplyCollectionStoppedAsync"/>, <see cref="ApplyCaptureDownAsync"/>,
+    /// <see cref="ApplyAgentNotRunningAsync"/>, <see cref="ApplyAgReplicaHealthAsync"/> and
+    /// <see cref="ApplyAgDatabaseHealthAsync"/>, so a sweep that was reading when its server was removed neither
+    /// claims a group nor delivers for it, and leaves no state behind for a later add of the same server.</summary>
+    public int GenerationOf(int serverId) => _generations.TryGetValue(serverId, out var generation) ? generation : 0;
+
+    /// <summary>True when the sweep was started for an earlier generation of this server than the current one
+    /// (#4795). No generation given means no sweep to tell apart, which is every caller before this existed.</summary>
+    private bool IsStaleSweep(int serverId, int? sweepGeneration) =>
+        sweepGeneration.HasValue && sweepGeneration.Value != GenerationOf(serverId);
+
     /* ---------------- store reads ---------------- */
+
+    /* #3854: the name each of these reads is given AT THE SEAM is the same one its condition's catch arm
+       records a failure under, taken from one constant rather than spelled twice — so a read cannot carry
+       one name into the retry count and a different one into the failure count, which is the two-spellings
+       hazard AlertReadFailureSurfaceTests pins for the per-server bucket. The granularity is the CATCH
+       arm's, not the method's: the agent condition issues two reads inside one try and the AG condition
+       two, so each pair shares its condition's name exactly as its failures already do. */
+
+    /// <summary>The counter's name for the collection-stopped condition's read (#3013's spelling).</summary>
+    internal const string CollectionSignalsReadName = "collection-health self-alert";
+
+    /// <summary>The counter's name for the capture-down condition's read.</summary>
+    internal const string MissingCaptureSessionsReadName = "capture-down self-alert";
+
+    /// <summary>
+    /// The counter's name for the agent-not-running condition's TWO reads — the latest status and the
+    /// ever-seen-running capability probe share it because they share one catch arm and one condition.
+    /// </summary>
+    internal const string AgentStatusReadName = "agent-not-running self-alert";
+
+    /// <summary>
+    /// The counter's name for the Availability-Group condition's TWO reads, on the same reasoning: the
+    /// replica grain and the database grain are separately freshness-gated but failure-isolated together.
+    /// </summary>
+    internal const string AgStateReadName = "Availability-Group self-alert";
+
+    /// <summary>The counter's name for the Raw Purge Over Horizon condition's last-purge-record read (#4391).</summary>
+    internal const string RawPurgeOverHorizonReadName = "raw purge over horizon self-alert";
 
     /// <summary>
     /// One round trip for the collection-stopped signals: the newest SUCCESS/SKIPPED time across all of the
@@ -4041,7 +7394,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// 221 ms while the cold/contended excursions clocked 12.0–12.1 s and were swallowed as
     /// <c>instance_read_failures</c>.</para>
     /// </summary>
-    internal static async Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsAsync(
+    internal Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsAsync(
+        NpgsqlDataSource postgres, int serverId, int recentWindow, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadCollectionSignalsCoreAsync(postgres, serverId, recentWindow, token),
+            serverId, CollectionSignalsReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsCoreAsync(
         NpgsqlDataSource postgres, int serverId, int recentWindow, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -4073,33 +7433,76 @@ SELECT
         return (lastSuccess, recentRuns, recentSuccess);
     }
 
+    /// <summary>The shipped capture-down statement, a constant so the #3597 pins and the gated plan test read
+    /// the text the method executes rather than a copy of it.</summary>
+    internal const string MissingCaptureSessionsSql = @"
+SELECT x.collector_name
+FROM
+(
+    (SELECT cl.collector_name, cl.status
+     FROM collection_log AS cl
+     WHERE cl.server_id = $1
+     AND   cl.collector_name = 'deadlocks'
+     ORDER BY cl.collection_time DESC
+     LIMIT 1)
+    UNION ALL
+    (SELECT cl.collector_name, cl.status
+     FROM collection_log AS cl
+     WHERE cl.server_id = $1
+     AND   cl.collector_name = 'blocked_process_report'
+     ORDER BY cl.collection_time DESC
+     LIMIT 1)
+) AS x
+WHERE x.status = 'SESSION_MISSING'
+ORDER BY x.collector_name";
+
     /// <summary>
     /// The blocking/deadlock XE collectors whose LATEST run logged <c>SESSION_MISSING</c> — the session is
     /// absent and couldn't be created, so capture is non-functional even though the tolerant reader "succeeds"
     /// with zero rows. The Darling twin of the Dashboard's <c>GetMissingCaptureSessionsAsync</c>, on Darling's
     /// collector names. Returns the friendly capture names ("Blocking" / "Deadlock").
+    ///
+    /// <para><b>#3597: one chunk-orderable <c>LIMIT 1</c> per collector, not a window function over the
+    /// server's whole history.</b> This read shipped as <c>ROW_NUMBER() OVER (PARTITION BY collector_name
+    /// ORDER BY log_id DESC)</c> over every <c>collection_log</c> row the server had for the two collectors —
+    /// the #3496 shape, which that fix named and deliberately left: a window function cannot early-stop by
+    /// reordering alone. <c>collection_log</c> is a hypertable partitioned on <c>collection_time</c> with no
+    /// index on <c>log_id</c>, so the window had exactly one legal plan: decompress EVERY chunk in the
+    /// retention horizon for the server, Merge Append them, and number 100 K rows to keep two. Measured on a
+    /// rig with 60 days of one server's log across 61 chunks (59 compressed): 9,573 buffers and every chunk
+    /// executed, per alert pass, every 30 seconds, per server — the largest read on the pass by two to three
+    /// orders of magnitude, and one of the issue's four sites that died at the 10 s deadline while the
+    /// interval-hourly refresh starved the store for I/O. The same question asked per collector as
+    /// <c>ORDER BY collection_time DESC LIMIT 1</c> lets ChunkAppend order the chunks newest-first and stop
+    /// at the first row: 14 buffers, the newest chunk only, 120 of 122 chunk scans never executed — and the
+    /// property is horizon-independent, so a longer retention cannot regress it. Two literal arms rather than
+    /// a LATERAL over a VALUES list because the collector names are a closed set the alert owns, and a plan
+    /// with a literal predicate is the one the gated test can pin.</para>
+    ///
+    /// <para><b>Why no <c>log_id</c> tiebreak here, when #3496 kept one.</b> The recent-N read orders across ALL
+    /// of a server's collectors, where many rows share a collection instant and the id decides among them.
+    /// Each arm here is ONE collector on ONE server, and a collector logs one row per run, stamped
+    /// <c>DateTime.UtcNow</c> at log time (<c>DarlingObservability.LogCollectionAsync</c>) — two runs of the
+    /// same collector on the same server cannot share a microsecond, so there is nothing for a tiebreak to
+    /// decide. What it would COST is measured: with <c>, log_id DESC</c> appended, the index on
+    /// <c>(server_id, collection_time)</c> cannot serve the second key, and each arm top-N-heapsorts the
+    /// server's whole newest chunk (1,158 buffers) instead of stopping at its first hit (5).</para>
     /// </summary>
-    internal static async Task<IReadOnlyList<string>> ReadMissingCaptureSessionsAsync(
+
+    internal Task<IReadOnlyList<string>> ReadMissingCaptureSessionsAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadMissingCaptureSessionsCoreAsync(postgres, serverId, token),
+            serverId, MissingCaptureSessionsReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<IReadOnlyList<string>> ReadMissingCaptureSessionsCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var missing = new List<string>();
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
-SELECT x.collector_name
-FROM
-(
-    SELECT
-        cl.collector_name,
-        cl.status,
-        ROW_NUMBER() OVER (PARTITION BY cl.collector_name ORDER BY cl.log_id DESC) AS n
-    FROM collection_log AS cl
-    WHERE cl.server_id = $1
-    AND   cl.collector_name IN ('deadlocks', 'blocked_process_report')
-) AS x
-WHERE x.n = 1
-AND   x.status = 'SESSION_MISSING'
-ORDER BY x.collector_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        using var command = new NpgsqlCommand(MissingCaptureSessionsSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -4125,7 +7528,14 @@ ORDER BY x.collector_name", connection) { CommandTimeout = DarlingAlertReadAdapt
     /// has not run once in the whole retained window is, for alerting purposes, a server that does not use Agent.
     /// It re-arms by itself the moment Agent runs again.</para>
     /// </summary>
-    internal static async Task<bool> HasAgentEverBeenSeenRunningAsync(
+    internal Task<bool> HasAgentEverBeenSeenRunningAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => HasAgentEverBeenSeenRunningCoreAsync(postgres, serverId, token),
+            serverId, AgentStatusReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<bool> HasAgentEverBeenSeenRunningCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -4148,7 +7558,14 @@ SELECT EXISTS
     /// that as "no signal" and does not judge. Static + parameterized so the gated live test can seed a row
     /// and assert the raw signal.
     /// </summary>
-    internal static async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusAsync(
+    internal Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadLatestAgentStatusCoreAsync(postgres, serverId, token),
+            serverId, AgentStatusReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -4192,7 +7609,14 @@ LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassComman
     /// is the NORMAL result on a server with no Availability Groups.</para>
     /// Static + parameterized so a gated live test can seed rows and assert the raw signals.
     /// </summary>
-    internal static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesAsync(
+    internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadLatestAgReplicaStatesCoreAsync(postgres, serverId, token),
+            serverId, AgStateReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var replicas = new List<AgReplicaReading>();
@@ -4235,7 +7659,14 @@ ORDER BY ag_name, replica_server_name", connection) { CommandTimeout = DarlingAl
     /// for its stale rows, which would keep re-firing "AG Sync Fell Behind" off days-old lag readings.
     /// Same NULL-identity drop and same one-statement-per-command rule as the replica read.
     /// </summary>
-    internal static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesAsync(
+    internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadLatestAgDatabaseReplicaStatesCoreAsync(postgres, serverId, token),
+            serverId, AgStateReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var databases = new List<AgDatabaseReading>();
@@ -4345,10 +7776,16 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// own subject. That condition scans the rules it already holds for one that NAMES it and passes the
     /// verdict in here instead (#3348). Nothing else may pass this: a caller that hands in a decision it did
     /// not derive from an explicit naming has re-introduced the self-suppression the seam cannot see.</para></param>
+    /// <returns>What the deliverer reported the channels did (#3580), or <c>null</c> when it reported
+    /// nothing. The daily documents read it for their stamps. A condition arm that keeps it hands it to
+    /// <see cref="AfterSelfFire"/> or <see cref="NoteRetrySend"/> (#4795), which make the alert due again
+    /// when every channel failed. The arms that still discard it are edges with no path that fires again,
+    /// listed with their reasons in <c>SelfAlertFailedSendCensusTests</c>. See
+    /// <see cref="IAlertDeliverer.DeliverAndReportAsync"/> for why the report rides a second method.</returns>
     /* The optional context TRAILS the cancellation token so the dozens of existing positional call
        sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
        database alerts) name it. Same for muted, which defaults to asking the seam like its siblings. */
-    private async Task FireAsync(
+    private async Task<AlertDelivery?> FireAsync(
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
@@ -4358,7 +7795,12 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
            channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
            decision does not even ASK, so a throwing Matches() cannot reach it either. */
         bool isMuted = muted
-            ?? _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
+            ?? _isAlertMuted(new AlertMuteContext
+            {
+                ServerName = serverName,
+                ServerId = ServerIdFromKey(serverKey),
+                MetricName = metricName
+            });
 
         /* #1681: log the FIRING, not just the recovery. RecordResolutionAsync has always logged at Information,
            so the service log showed "… Recovered" with nothing before it — which reads as a spontaneous
@@ -4373,7 +7815,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
             AlertFiringLog.Fired(
                 serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
 
-        await _deliverer.DeliverAsync(new AlertOutcome(
+        return await _deliverer.DeliverAndReportAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
@@ -4404,9 +7846,94 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         }
     }
 
+    /// <summary>The shared alert cooldown (<c>CooldownMinutes</c>), read live. <see cref="CooldownElapsed"/>
+    /// compares against it and the arms that report a send's answer to <see cref="AfterSelfFire"/> pass it, so the
+    /// gate and the back-dated stamp cannot disagree about how long the cooldown is.</summary>
+    private TimeSpan SharedCooldown => TimeSpan.FromMinutes(_settings.CooldownMinutes);
+
+    /// <summary>
+    /// The shared cooldown gate: no prior fire, or <see cref="SharedCooldown"/> has elapsed. #4732: a stamp AHEAD of
+    /// <paramref name="now"/> (the wall clock stepped back since it was written) is replaced by <paramref name="now"/>
+    /// in <paramref name="lastFired"/> and counted from there (<see cref="LastFiredStamp.TryGet"/>), so the repeat is
+    /// due one cooldown after the first check that sees the step, not the step plus the cooldown.
+    /// </summary>
     private bool CooldownElapsed(ConcurrentDictionary<string, DateTime> lastFired, string key, DateTime now) =>
-        !lastFired.TryGetValue(key, out var last)
-        || now - last >= TimeSpan.FromMinutes(_settings.CooldownMinutes);
+        !LastFiredStamp.TryGet(lastFired, key, now, out var last)
+        || now - last >= SharedCooldown;
+
+    /// <summary>
+    /// Runs after a self-alert's fire (#4795), the twin of <c>DarlingWorker.AfterPgFire</c> for the PostgreSQL
+    /// families and <c>AlertEngine.AfterFire</c> (#4752) for the SQL Server ones. The arms stamp their cooldown
+    /// BEFORE they send, so a self-alert whose every channel failed used to be silent for the whole cooldown.
+    /// When it did, this counts the failure in <c>_selfFailedSends</c> and back-dates the stamp so the arm's own
+    /// gate (<c>now - last &gt;= cooldown</c>) opens again after the streak's delay: a minute, doubling, never
+    /// more than <paramref name="cooldown"/>. The next sweep that still sees the condition fires it again. Any
+    /// other result (delivered, partly delivered, muted, throttled, folded, unreported) ends the streak and
+    /// leaves the stamp alone.
+    /// <para><paramref name="cooldown"/> is the interval the arm's gate compares against: the shared cooldown
+    /// for most arms, the arm's own refire interval for the ones that keep one.</para>
+    /// <para>Returns true when every channel failed. An arm that also advanced an "already reported" marker
+    /// before it sent puts the marker back at its own call site on true; this method only knows the stamp.</para>
+    /// </summary>
+    private bool AfterSelfFire(
+        string family, ConcurrentDictionary<string, DateTime> stamps, string key, DateTime now,
+        TimeSpan cooldown, AlertDelivery? delivery) =>
+        DarlingWorker.AfterPgFireCore(
+            _selfFailedSends, _logger ?? NullLogger.Instance, family, stamps, key, now, cooldown, delivery);
+
+    /// <summary>
+    /// Records what a connection or availability group send reported (#4795) in <paramref name="tracker"/>: when
+    /// every channel failed the alert is due again after the failed-send delay (a minute, doubling, never more
+    /// than the shared cooldown), any other answer clears it. Returns true when every channel failed, so an arm
+    /// that advanced an "already reported" marker before it sent puts the marker back.
+    /// </summary>
+    private bool NoteRetrySend(
+        FailedSendRetryTracker tracker, string retryKey, string metric, AlertDelivery? delivery)
+    {
+        var failed = tracker.Record(retryKey, delivery, _utcNow(), SharedCooldown, out var delay, out var failures);
+        if (failed)
+        {
+            _logger?.LogInformation(
+                "Every channel failed for {Metric} on {Key} (failure {Failures}); trying again in {Delay}",
+                metric, retryKey, failures, delay);
+        }
+
+        return failed;
+    }
+
+    /// <summary>The key an availability group alert is tracked under in <c>_agRetries</c>: the metric and the AG
+    /// grain, so a failover and a disconnect on the same replica wait independently.</summary>
+    private static string AgRetryKey(string metric, string grainKey) => metric + "|" + grainKey;
+
+    /// <summary>
+    /// Puts an "already reported" marker back to what it was before a fire (#4795): the prior value when there
+    /// was one, no entry when the failed fire was the first. An arm that advanced the marker before its send calls
+    /// this when <see cref="AfterSelfFire"/> says every channel failed, because the retry sweep would otherwise
+    /// read the same reading as reported and never fire on it. The same prior-or-remove shape as
+    /// <c>DarlingWorker.RestorePgPoisonCollectionTime</c>, for any value type.
+    /// </summary>
+    private static void RestoreMarker<T>(ConcurrentDictionary<string, T> markers, string key, T? prior)
+        where T : struct
+    {
+        if (prior is { } value)
+        {
+            markers[key] = value;
+        }
+        else
+        {
+            markers.TryRemove(key, out _);
+        }
+    }
+
+    /// <summary>The store id a per-server self-alert's key spells, or null for a fleet-level key. A per-server
+    /// key is exactly <see cref="Key"/>, the invariant decimal id; every fleet-level family prefixes or names its
+    /// key non-numerically ("store", "compressjob:", "cost:" ...), so "parses as an integer" is the whole test.
+    /// Ids are SIGNED hashes, so a leading '-' is a real id; only 0 means none. Strict otherwise: the text must be
+    /// exactly what <see cref="Key"/> would write (no '+', no whitespace), so nothing but a real id fills a mute
+    /// context's ServerId.</summary>
+    internal static int? ServerIdFromKey(string serverKey) =>
+        int.TryParse(serverKey, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var id)
+        && id != 0 && id.ToString(CultureInfo.InvariantCulture) == serverKey ? id : null;
 
     private static string Key(int serverId) => serverId.ToString(CultureInfo.InvariantCulture);
 

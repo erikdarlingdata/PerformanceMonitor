@@ -11,6 +11,8 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -43,9 +45,10 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -56,14 +59,14 @@ public sealed class DarlingMcpPgServerStateTools
         try
         {
             var rows = await DarlingPgBufferUsageReader.GetPgBufferUsageAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit, cancellationToken);
 
             if (rows.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_buffer_usage")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_buffer_usage", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_buffer_usage")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_buffer_usage", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No buffer pool contents recorded for {resolved.ServerName} in the last "
@@ -103,31 +106,24 @@ public sealed class DarlingMcpPgServerStateTools
                 relations,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL buffer usage failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_buffer_usage", ex);
         }
     }
 
-    [McpServerTool(Name = "get_pg_extensions"), Description("Gets which PostgreSQL extensions are installed, outdated, merely available, or absent, per database. Use this to answer why another read is empty: pg_stat_statements, pg_wait_sampling, pg_stat_kcache, pg_qualstats, pgstattuple, pg_buffercache and hypopg each back a specific tool, and 'absent' here is the reason that tool has nothing to show. State is one of installed, outdated, available or absent - 'available' means the files are on the server and CREATE EXTENSION would work, which is a different situation from absent and usually a one-line fix. IMPORTANT: extensions are per-DATABASE, so installed_version reflects the database the row names and not the cluster; an extension can be installed in the application database and absent from postgres. Rows are therefore the PRODUCT of databases and extension names - 102 extension names per database on the measured fleet - so a ten-database host needs 1,020 rows against a 1000-row maximum and cannot be completed in one call. Do NOT read a truncated row list as an install census: the ordering puts non-relevant 'installed' rows behind every non-relevant 'available' one, so plpgsql, which is installed in every database of every server, has no row at all once a host reaches ten databases. Read install_census instead - one row per extension created anywhere on the server with databases_installed against databases_total, aggregated so no row limit touches it - and pass database_name to complete one database's 102 rows at a time. The census and reach fields report the population and whether a larger limit would help; sampling this tool at a small limit returns exactly the 8 monitoring-relevant extensions per database and looks like a complete per-database answer.")]
+    [McpServerTool(Name = "get_pg_extensions"), Description("Gets which PostgreSQL extensions are installed, outdated, available or absent, per database, as of as_of (daily collector). Explains why another extension-backed tool is empty. Per-DATABASE, not per-cluster. Rows are databases x extension names, so a multi-database host overflows limit; truncated withholds state totals, and installed rows like plpgsql are cut first. Read install_census for the complete picture, or pass database_name for one database's full slice. <<GUIDE>> Gets which PostgreSQL extensions are installed, outdated, merely available, or absent, per database. Use this to answer why another read is empty: pg_stat_statements, pg_wait_sampling, pg_stat_kcache, pg_qualstats, pgstattuple, pg_buffercache and hypopg each back a specific tool, and 'absent' here is the reason that tool has nothing to show. State is one of installed, outdated, available or absent - 'available' means the files are on the server and CREATE EXTENSION would work, which is a different situation from absent and usually a one-line fix. IMPORTANT: extensions are per-DATABASE, so installed_version reflects the database the row names and not the cluster; an extension can be installed in the application database and absent from postgres. Rows are therefore the PRODUCT of databases and extension names - 102 extension names per database on the measured fleet - so a ten-database host needs 1,020 rows against a 1000-row maximum and cannot be completed in one call. Do NOT read a truncated row list as an install census: the ordering puts non-relevant 'installed' rows behind every non-relevant 'available' one, so plpgsql, which is installed in every database of every server, has no row at all once a host reaches ten databases. Read install_census instead - one row per extension created anywhere on the server with databases_installed against databases_total, aggregated so no row limit touches it - and pass database_name to complete one database's 102 rows at a time. The census and reach fields report the population and whether a larger limit would help; sampling this tool at a small limit returns exactly the 8 monitoring-relevant extensions per database and looks like a complete per-database answer. A sixteen-database host's product is 1,632 rows against the 1,000-row maximum; database_name completes one database at a time instead, sixteen calls that each finish.")]
     public static async Task<string> GetPgExtensions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
         [Description("Maximum rows to return. Default 50.")] int limit = 50,
-        [Description("One database, or omit for every database on the server. Rows are one per (database, "
-            + "extension), so the row count is databases x extension names - 102 extension names per database "
-            + "on the measured fleet, which puts a ten-database host past the 1000-row maximum and a "
-            + "sixteen-database one at 1,632. ONE database's slice is 102 rows, so this is what makes such a "
-            + "host completable: sixteen calls that each finish instead of one that cannot. OMIT it for an "
-            + "install census: install_census is aggregated per extension and no row limit touches it, so "
-            + "one unfiltered call answers what is installed where. It follows this filter when you supply "
-            + "one, so a filtered response describes that database and nothing else - census, install_census "
-            + "and reach all share the rows' scope, and the echoed database_name names it.")]
+        [Description("One database, or omit for every database. Rows are (database x extension), so a multi-database host can exceed limit. Pass this to complete one database's full slice. See the tool's reading guide.")]
             string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -147,13 +143,13 @@ public sealed class DarlingMcpPgServerStateTools
                contradicted by its own label. */
             var scope = DarlingPgExtensionAvailabilityReader.NormalizeDatabaseFilter(database_name);
 
-            var rows = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, limit, scope);
+            var fetched = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
+                postgres, resolved.ServerId, windowStart, windowEnd, limit + 1, scope, cancellationToken);
 
-            if (rows.Count == 0)
+            if (fetched.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_extension_availability")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_extension_availability", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No extension inventory for {resolved.ServerName} in the last {hours_back} "
@@ -171,8 +167,13 @@ public sealed class DarlingMcpPgServerStateTools
                the PAGE and reads as a fact about the SERVER. Measured while writing this: at limit=50 the
                tool reported "installed: 10" for a server with more than that, because 50 was all it had
                looked at. Suppressed rather than renamed — "installed_in_this_page" is a number nobody
-               wants. */
-            var truncated = rows.Count >= limit;
+               wants.
+
+               #3653 (the #3541 A3 class): truncation is OBSERVED off the limit + 1 fetch above, not inferred
+               from a page that happens to be exactly `limit` long — a one-database host whose slice is
+               exactly the limit is complete, and the old `>= limit` withheld its state totals for it. */
+            var truncated = fetched.Count > limit;
+            var rows = truncated ? fetched.Take(limit).ToList() : fetched;
 
             /* THE POPULATION FIGURES AND THE INSTALL CENSUS, from their own query that no row limit touches
                (#3425) — the #3278 pattern, applied to a read whose truncation removes precisely the rows a
@@ -190,7 +191,7 @@ public sealed class DarlingMcpPgServerStateTools
                put 1,632 against a complete 102-row answer and the reach classifier correctly answered
                Unreachable, telling a filtered caller they could not see what they were holding. */
             var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, scope);
+                postgres, resolved.ServerId, windowStart, windowEnd, scope, cancellationToken);
 
             /* FROM THE CENSUS, not from the rows. Every row carries the same two scalars — they hang off a
                one-row relation the per-extension groups join to — so the first row is the whole answer, and
@@ -381,9 +382,9 @@ public sealed class DarlingMcpPgServerStateTools
                 extensions,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL extension availability failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_extensions", ex);
         }
     }
 
@@ -393,9 +394,10 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -405,13 +407,16 @@ public sealed class DarlingMcpPgServerStateTools
 
         try
         {
-            var rows = await DarlingPgLockStatsReader.GetPgLockStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+            /* #3653 (the #3541 A3 class): limit + 1 as the fetch, the extra row as the observed truncation
+               signal. Under the old `rows.Count >= limit`, a window holding exactly `limit` contended
+               (type, mode, relation) groups read as truncated and its ungranted total was withheld. */
+            var fetched = await DarlingPgLockStatsReader.GetPgLockStatsAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
 
-            if (rows.Count == 0)
+            if (fetched.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_lock_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_lock_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No lock activity sampled on {resolved.ServerName} in the last {hours_back} "
@@ -420,7 +425,8 @@ public sealed class DarlingMcpPgServerStateTools
                         + "that nothing was ever locked.");
             }
 
-            var truncated = rows.Count >= limit;
+            var truncated = fetched.Count > limit;
+            var rows = truncated ? fetched.Take(limit).ToList() : fetched;
             var ungranted = rows.Count(r => !r.Granted);
 
             var locks = rows.Select(r => new
@@ -458,20 +464,21 @@ public sealed class DarlingMcpPgServerStateTools
                 locks,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL lock stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_lock_stats", ex);
         }
     }
 
-    [McpServerTool(Name = "get_pg_write_stats"), Description("Gets PostgreSQL checkpoint and WAL write activity across the window: how many checkpoints were timed versus REQUESTED, how long they spent writing and syncing, how many buffers were written by checkpoints, by the background writer and by backends themselves, and the WAL record, full-page-image and byte totals. Requested checkpoints are the signal to look for - a timed checkpoint is the scheduled one, while a requested checkpoint means WAL filled max_wal_size before the interval elapsed, so a high requested share means checkpoints are being forced by write volume. buffers_backend counts writes a query had to do itself because no clean buffer was available, which is backpressure landing on user queries - PostgreSQL 17 removed that column from pg_stat_bgwriter, so it is null on 17 and later and the note says so. wal_fpi counts full-page images, which is why write volume spikes immediately after each checkpoint. Returns one row describing the whole window, not a series.")]
+    [McpServerTool(Name = "get_pg_write_stats"), Description("Gets PostgreSQL checkpoint and WAL activity for the window ending at as_of, as ONE row, not a series. checkpoints_requested is the signal: a high share means max_wal_size filled before the interval, forcing checkpoints. buffers_backend/buffers_backend_fsync are NULL on PostgreSQL 17+ (moved to pg_stat_io; see get_pg_io_stats), not unmeasured. wal_* columns are NULL on Aurora (no pg_stat_wal); get_pg_top_queries has per-statement WAL. A restart inside the window nulls checkpoints_requested, its percent, both checkpoint time fields and buffers_written_checkpoint. <<GUIDE>> Gets PostgreSQL checkpoint and WAL write activity across the window: how many checkpoints were timed versus REQUESTED, how long they spent writing and syncing, how many buffers were written by checkpoints, by the background writer and by backends themselves, and the WAL record, full-page-image and byte totals. Requested checkpoints are the signal to look for - a timed checkpoint is the scheduled one, while a requested checkpoint means WAL filled max_wal_size before the interval elapsed, so a high requested share means checkpoints are being forced by write volume. buffers_backend counts writes a query had to do itself because no clean buffer was available, which is backpressure landing on user queries - PostgreSQL 17 removed that column from pg_stat_bgwriter, so it is null on 17 and later and the note says so. wal_fpi counts full-page images, which is why write volume spikes immediately after each checkpoint. A restart inside the window leaves checkpoints_requested, pct_checkpoints_requested, checkpoint_write_time_ms, checkpoint_sync_time_ms and buffers_written_checkpoint null, with postmaster_restarted true: PostgreSQL counts a shutdown checkpoint as requested and keeps the count across the restart, and that checkpoint's own write and sync work lands in the same counters, so across one those figures cannot be told from the workload's (postmaster_start_time says when the server last started, so a window after it can be chosen). Returns one row describing the whole window, not a series.")]
     public static async Task<string> GetPgWriteStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -480,12 +487,12 @@ public sealed class DarlingMcpPgServerStateTools
         try
         {
             var row = await DarlingPgWriteStatsReader.GetPgWriteStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, cancellationToken);
 
             if (row is null)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_write_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_write_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No checkpoint or WAL activity recorded for {resolved.ServerName} in the last "
@@ -511,7 +518,7 @@ public sealed class DarlingMcpPgServerStateTools
                stale copy, which is the hazard PostgresTargetFactsSql is a single statement for. Same
                discipline on both axes: a registry making no claim produces no claim here. */
             var (postgresMajor, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(
-                postgres, resolved.ServerId);
+                postgres, resolved.ServerId, cancellationToken);
             var backendCountersRemoved = postgresMajor >= BuffersBackendRemovedInMajor;
             var walAbsentOnAurora = MonitoredEngineKind.IsAurora(engineKind);
 
@@ -524,8 +531,10 @@ public sealed class DarlingMcpPgServerStateTools
                 checkpoints_timed = row.CheckpointsTimed,
                 checkpoints_requested = row.CheckpointsRequested,
                 /* The whole reason both numbers are here. Null rather than 0 when there were no
-                   checkpoints at all — 0% requested would claim a healthy result from no evidence. */
-                pct_checkpoints_requested = timed + requested > 0
+                   checkpoints at all — 0% requested would claim a healthy result from no evidence — and null when
+                   the requested count itself is (a restart inside the window, #3955): a share computed from the
+                   timed count alone would read as 0% requested, a clean result from no evidence again. */
+                pct_checkpoints_requested = row.CheckpointsRequested is not null && timed + requested > 0
                     ? Math.Round((double)requested / (timed + requested) * 100, 1)
                     : (double?)null,
                 checkpoint_write_time_ms = row.CheckpointWriteTimeMs,
@@ -562,6 +571,11 @@ public sealed class DarlingMcpPgServerStateTools
                       + "beside these are collected normally."
                     : null,
                 counter_reset = row.ResetDuringWindow,
+                /* #3955: a restart inside the window, found from consecutive rows' postmaster start times; it is
+                   why checkpoints_requested, the checkpoint write and sync time and the checkpoint buffer counts are
+                   null. postmaster_start_time is the window's last sample's. */
+                postmaster_restarted = row.PostmasterRestartedDuringWindow,
+                postmaster_start_time = row.PostmasterStartTimeUtc,
                 note = "Requested checkpoints mean max_wal_size filled before the scheduled interval, so a "
                      + "high requested share means write volume is forcing them. "
                      + (backendCountersRemoved
@@ -583,37 +597,62 @@ public sealed class DarlingMcpPgServerStateTools
                      + (row.ResetDuringWindow
                          ? " The counters were RESET inside this window, so these figures cover only the "
                            + "time since the reset."
+                         : string.Empty)
+                     + (row.PostmasterRestartedDuringWindow
+                         ? " PostgreSQL RESTARTED inside this window"
+                           + (row.PostmasterStartTimeUtc is { } started
+                               ? " (its postmaster started at "
+                                 + started.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " UTC)"
+                               : string.Empty)
+                           + ". A shutdown checkpoint is counted as REQUESTED and the count survives the restart, and "
+                           + "its own write and sync phases and the buffers it flushed land in the same counters, where "
+                           + "nothing can separate them from the workload's checkpoints. So checkpoints_requested, "
+                           + "pct_checkpoints_requested, checkpoint_write_time_ms, checkpoint_sync_time_ms and "
+                           + "buffers_written_checkpoint are null rather than figures that would read "
+                           + "the restart as write pressure. Set hours_back (or as_of) so the window starts after that "
+                           + "restart to see them. The timed count (which a restart does not move) and the WAL figures "
+                           + "are still stated."
                          : string.Empty),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL write stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_write_stats", ex);
         }
     }
 
-    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. Snapshot from the most recent collection, not a window.")]
+    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings: value, default, source, restart-or-reload need. LATEST IS A TIME: the newest stored snapshot, not a window or the live server; captured_at is when it was taken (collector runs hourly). Non-default settings list FIRST; pass include_defaults for the rest. pending_restart=true means the file and server disagree, with no other symptom. Bounded by limit (truncated says if more existed); non_default_count is the snapshot's, not the page's. database_overrides (present only if any exist) is what sessions actually run with. <<GUIDE>> Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Where pg_file_settings is read, true can also mean the file holds a value PostgreSQL rejected, which would stop the next start; the server log names the rejected setting. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident. THE PAGE IS BOUNDED BY limit: settings_returned is how many rows you got, truncated says the population you asked for (the non-default settings, or every setting when include_defaults is true) held more, and the rows are the chosen ones first. COUNTS ARE OF THE SNAPSHOT, NOT OF THE PAGE: non_default_count is how many settings in the whole snapshot differ from their default, computed in the same statement as the rows before the cap, so it is the same number at any limit; non_default_returned is how many of those are on this page, and the gap between the two is what the cap left out. PER-DATABASE AND PER-ROLE OVERRIDES ARE A SEPARATE SECTION: the settings list is the SERVER's configuration, and database_overrides - present only when the cluster has any - carries the values one database or one role was given with ALTER DATABASE/ROLE SET, which are what sessions there actually run with rather than the server-wide value beside them. A setting marked pending_restart is kept in the non-default view whatever its source, because it is the row that says the file and the server disagree.")]
     public static async Task<string> GetPgServerConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Maximum settings to return. Default 100.")] int limit = 100,
-        [Description("When true, include settings still at their default. Default false - the non-default ones are the answer.")] bool include_defaults = false)
+        [Description("Maximum settings to return. Default 100. This is what bounds the page - read truncated to know whether the population held more; non_default_count stays the whole snapshot's whatever this is set to.")] int limit = 100,
+        [Description("When true, include settings still at their default. Default false: non-default settings, plus any pending_restart row, are the answer. See the tool's reading guide.")] bool include_defaults = false,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var limitError = McpHelpers.ValidateTop(limit);
-        if (limitError != null) return McpHelpers.Status("error", limitError);
+        if (limitError != null) return limitError;
 
         try
         {
-            var rows = await DarlingPgServerConfigReader.GetCurrentConfigAsync(
-                postgres, resolved.ServerId, limit);
+            /* #3653 (the #3541 A3 residue on this tool): the caller's limit + 1 as the fetch, the extra row as
+               the OBSERVED truncation signal, and the include_defaults filter inside the statement so the cap
+               cuts the population the caller asked for. The first shape fetched exactly `limit` rows of the
+               whole snapshot, filtered the defaults out in C#, and published `rows.Count >= limit` as
+               truncated: a snapshot of exactly `limit` non-session rows read as truncated, and the default
+               view read as truncated on nearly every call because a server has several hundred parameters. */
+            var page = await DarlingPgServerConfigReader.GetCurrentConfigPageAsync(
+                postgres, resolved.ServerId, limit + 1, include_defaults, cancellationToken);
 
-            if (rows.Count == 0)
+            if (page.Rows.Count == 0)
             {
+                /* Empty on the default view can mean two things: no snapshot, or a snapshot in which nothing
+                   is set and nothing is pending. SnapshotNonDefaultCount cannot tell them apart (it rides on
+                   rows that did not come back), so the capability read decides as it always has. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No configuration snapshot has been collected for {resolved.ServerName} yet. "
@@ -621,19 +660,55 @@ public sealed class DarlingMcpPgServerStateTools
                         + "reached its first collection.");
             }
 
-            var shown = include_defaults ? rows : rows.Where(r => !r.IsDefault).ToList();
+            var truncated = page.Rows.Count > limit;
+            var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
             var pendingRestart = rows.Where(r => r.PendingRestart).Select(r => r.Name).ToList();
 
-            return JsonSerializer.Serialize(new
+            /* #3691 (V138): the per-database and per-role overrides, from the same newest snapshot as the
+               rows above (both statements anchor on MAX(collection_time) for this server, so they agree
+               without an instant threaded between them). A second read on a tool path, not the alert path,
+               behind the table's (server_id, collection_time) index on a snapshot of a few hundred rows.
+
+               UNCAPPED, deliberately, where the settings list is paged: pg_db_role_setting holds one row per
+               scope that has ever been given a setting, which on a real cluster is a handful and on the
+               measured population is zero - and a truncated override list is worse than none, because the
+               question it answers is "is my value overridden anywhere" and a cap turns a No into a maybe. */
+            var overrides = await DarlingPgServerConfigReader.GetOverridesAsync(postgres, resolved.ServerId, cancellationToken);
+
+            /* #4251: attached like database_overrides below, from the collector's own cached verdict (no
+               store read - PgFileSettingsCapability is process-wide and this Darling process is the same one
+               that ran the collector). TryGetCachedVerdict returns false with fileSettingsReadable/
+               fileSettingsIsWindows unset for a target never checked (collector has not run yet, or is SQL
+               Server), which correctly shows no caveat rather than a false one - "readable" is not claimed,
+               only "known unreadable" is. #4251 round-1 review, H1(a): also gated on Windows - the grants
+               this caveat asks for fix nothing on a non-Windows target, where pending_restart is already
+               correct off pg_settings alone, so an unreadable verdict there is not worth a caveat. */
+            var fileSettingsUnreadable =
+                PgFileSettingsCapability.TryGetCachedVerdict(
+                    resolved.ServerName, out var fileSettingsReadable, out var fileSettingsIsWindows)
+                && fileSettingsIsWindows
+                && !fileSettingsReadable;
+
+            var configPage = new
             {
                 server = resolved.ServerName,
                 status = "server_config",
-                /* Both counts, because they answer different questions and one without the other invites
-                   the wrong conclusion: a small returned count is reassuring only if you know it was
-                   filtered rather than truncated. */
-                settings_returned = shown.Count,
-                non_default_count = rows.Count(r => !r.IsDefault),
-                truncated = rows.Count >= limit,
+                /* #3653 (from #3541 A10): the snapshot's own clock, read off the row statement — every row of
+                   this call carries the same collection_time because the reader pins the newest one — so the
+                   answer says when it was true. No age_seconds and no as_of: this read takes no window to
+                   anchor against (the Stamped dialect, McpLatestSnapshotStampTests.DarlingOnlyStamped). */
+                captured_at = rows[0].CollectionTimeUtc.ToString("o"),
+                /* Three counts, each with its denominator in its name (#3653). settings_returned is the page.
+                   non_default_count is the SNAPSHOT's: computed on the reader's statement above the LIMIT, so
+                   it is the same figure at limit = 5 and at limit = 500 — the old `rows.Count(!IsDefault)`
+                   counted the rows fetched and, at a limit below the number of chosen settings, reported the
+                   limit as a fact about the server. non_default_returned is how many of the snapshot's
+                   chosen settings are on THIS page; when it equals non_default_count every chosen setting is
+                   here, whatever truncated says about the rest of the population. */
+                settings_returned = rows.Count,
+                non_default_count = page.SnapshotNonDefaultCount,
+                non_default_returned = rows.Count(r => !r.IsDefault),
+                truncated,
                 pending_restart_count = pendingRestart.Count,
                 pending_restart_settings = pendingRestart.Count > 0 ? pendingRestart : null,
                 note = pendingRestart.Count > 0
@@ -645,7 +720,7 @@ public sealed class DarlingMcpPgServerStateTools
                       + "what changing it would take - postmaster needs a restart, sighup a reload, user "
                       + "nothing. Session-scoped rows are excluded: pg_settings is a per-connection view "
                       + "and those describe the monitoring connection rather than the server.",
-                settings = shown.Select(r => new
+                settings = rows.Select(r => new
                 {
                     name = r.Name,
                     setting = r.Setting,
@@ -661,40 +736,96 @@ public sealed class DarlingMcpPgServerStateTools
                     category = r.Category,
                     description = r.ShortDescription,
                 }),
-            }, McpHelpers.JsonOptions);
+            };
+
+            /* #3691 (V138): the overrides section is ATTACHED, never a property. McpHelpers.JsonOptions writes
+               nulls, so `database_overrides = overrides.Count > 0 ? … : null` would put "database_overrides": null
+               on every page of every cluster with no overrides — and on every pre-V138 snapshot, where the truth is
+               that the collector was not reading the catalog yet. Absent means "nothing to say"; a caller that
+               sees no key reads the description, not the value. The live pin holds the whole page string
+               byte-identical with and without overrides planted (PgServerConfigOverrideLivePostgresTests).
+
+               Why this is not folded into the settings list: an override is keyed by SCOPE plus name while a
+               server setting is keyed by name, so two rows called work_mem on one page would need a column read
+               to tell which one a session actually gets — and every count above (settings_returned,
+               non_default_count, non_default_returned) is a count of the server-wide population, which is what
+               those names have always promised. The overrides sit beside them, not among them. */
+            if (overrides.Count == 0 && !fileSettingsUnreadable)
+            {
+                return JsonSerializer.Serialize(configPage, McpHelpers.JsonOptions);
+            }
+
+            var node = JsonSerializer.SerializeToNode(configPage, McpHelpers.JsonOptions)?.AsObject()
+                ?? throw new InvalidOperationException("the server-config page did not serialize to a JSON object");
+
+            if (overrides.Count > 0)
+            {
+                node["database_overrides"] = JsonSerializer.SerializeToNode(overrides.Select(o => new
+                {
+                    /* NULL means "not scoped to one": a database with no role is ALTER DATABASE ... SET, a role with no
+                       database is ALTER ROLE ... SET (that role in every database), and both is ALTER ROLE ... IN
+                       DATABASE ... SET. Neither-NULL cannot appear here — that is a server-wide row, and the read
+                       excludes it. */
+                    database_name = o.DatabaseName,
+                    role_name = o.RoleName,
+                    name = o.Name,
+                    setting = o.Setting,
+                }).ToList(), McpHelpers.JsonOptions);
+                node["database_overrides_note"] = "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
+                    + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
+                    + "database, or as that role, runs with the override rather than with the server-wide "
+                    + "value listed above - so a setting that appears in both places has TWO answers and "
+                    + "which one applies depends on who is connecting. The stored text is what was SET, "
+                    + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
+                    + "connection at connect time, and the catalog records only the instruction. No unit, "
+                    + "default or context is carried on these rows because the catalog does not hold them "
+                    + "- read those off the server-wide row for the same setting name.";
+            }
+
+            /* #4251: ATTACHED like database_overrides_note just above, and for the same reason — present only
+               when it applies, so every other snapshot's JSON is untouched. */
+            if (fileSettingsUnreadable)
+            {
+                node["pending_restart_caveat"] = PgFileSettingsCapability.UnreadableCaveat;
+            }
+
+            return node.ToJsonString(McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL server config failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_server_config", ex);
         }
     }
 
-    [McpServerTool(Name = "get_pg_server_config_changes"), Description("Gets PostgreSQL configuration parameters whose value CHANGED during the window, newest first, with the old and new value side by side. This is the read that answers 'this got slow sometime last month, what changed' - and nothing else in the stack can reconstruct it after the fact, because a configuration history that was not recorded cannot be recovered from the server. A setting appearing for the first time is deliberately NOT reported as a change: the first snapshot after an upgrade, or after an extension is loaded, would otherwise manufacture hundreds of changes nobody made. Session-scoped rows are excluded, so a monitoring reconnect does not read as a configuration change.")]
+    [McpServerTool(Name = "get_pg_server_config_changes"), Description("Gets PostgreSQL configuration parameters whose value CHANGED in the window ending at as_of, newest first, old and new value side by side. Nothing else can reconstruct this after the fact. A setting appearing for the FIRST time (an upgrade, a new extension) is NOT reported as a change. Session-scoped rows are excluded. Per-database/per-role overrides (ALTER DATABASE/ROLE SET) interleave by changed_at with change_kind: changed, set (old_value null) or reset (new_value null); one already present when first read is not reported as set. <<GUIDE>> Gets PostgreSQL configuration parameters whose value CHANGED during the window, newest first, with the old and new value side by side. This is the read that answers 'this got slow sometime last month, what changed' - and nothing else in the stack can reconstruct it after the fact, because a configuration history that was not recorded cannot be recovered from the server. A setting appearing for the first time is deliberately NOT reported as a change: the first snapshot after an upgrade, or after an extension is loaded, would otherwise manufacture hundreds of changes nobody made. Session-scoped rows are excluded, so a monitoring reconnect does not read as a configuration change. PER-DATABASE AND PER-ROLE OVERRIDES (ALTER DATABASE/ROLE SET) are reported too, interleaved with the server-wide rows by changed_at: such a row carries database_name and/or role_name (only the ones it is scoped to) and change_kind - changed, set (old_value null: the override appeared) or reset (new_value null: it was removed) - while a server-wide row carries neither, and overrides already present when the collector first read them are not reported as set.")]
     public static async Task<string> GetPgServerConfigChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (one week).")] int hours_back = 168,
         [Description("Maximum changes to return. Default 100.")] int limit = 100,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         var limitError = McpHelpers.ValidateTop(limit);
-        if (limitError != null) return McpHelpers.Status("error", limitError);
+        if (limitError != null) return limitError;
 
         try
         {
-            var rows = await DarlingPgServerConfigReader.GetConfigChangesAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+            /* #3653 (the #3541 A3 class): limit + 1 as the fetch, the extra row as the observed truncation
+               signal, so a week with exactly `limit` changes is not reported as holding more. */
+            var fetched = await DarlingPgServerConfigReader.GetConfigChangesAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
 
-            if (rows.Count == 0)
+            if (fetched.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "no_changes",
                         $"No configuration parameter changed value on {resolved.ServerName} in the last "
@@ -702,33 +833,96 @@ public sealed class DarlingMcpPgServerStateTools
                         + "read compares consecutive snapshots, so an unchanged server produces no rows.");
             }
 
-            return JsonSerializer.Serialize(new
+            var truncated = fetched.Count > limit;
+            var rows = truncated ? fetched.Take(limit).ToList() : fetched;
+
+            /* #3937: the rows are typed `object` so one list can carry two shapes. A server-wide row is the SAME
+               anonymous shape it always was, and System.Text.Json serializes an object-typed element by its
+               runtime type, so its bytes do not move. An override row is built as a JsonObject because
+               McpHelpers.JsonOptions writes nulls: a shared shape with database_name / role_name / change_kind
+               would put `"database_name": null` on every server-wide row, and an override scoped to one role
+               would say `"database_name": null` where the truth is "every database". So a scoped row names only
+               the scope it has, plus change_kind, and omits unit / context / description, which the
+               pg_db_role_setting catalog does not hold (read them off the server-wide row for the same name, as
+               get_pg_server_config's database_overrides_note says). old_value and new_value stay on it even
+               when NULL, because there NULL is the answer: set had nothing before, reset has nothing after. */
+            var page = new
             {
                 server = resolved.ServerName,
                 hours_back,
                 status = "config_changes",
                 change_count = rows.Count,
-                truncated = rows.Count >= limit,
+                truncated,
                 note = "changed_at is the time of the snapshot that FIRST reported the new value, so the "
                      + "change happened at some point in the hour before it - this collector runs hourly. "
                      + "A setting appearing for the first time is not reported here.",
-                changes = rows.Select(r => new
-                {
-                    changed_at = r.ChangedAtUtc,
-                    name = r.Name,
-                    old_value = r.OldValue,
-                    new_value = r.NewValue,
-                    unit = r.Unit,
-                    source = r.Source,
-                    context = r.Context,
-                    description = r.ShortDescription,
-                }),
-            }, McpHelpers.JsonOptions);
+                changes = rows.Select(r => r.DatabaseName is null && r.RoleName is null
+                    ? (object)new
+                    {
+                        changed_at = r.ChangedAtUtc,
+                        name = r.Name,
+                        old_value = r.OldValue,
+                        new_value = r.NewValue,
+                        unit = r.Unit,
+                        source = r.Source,
+                        context = r.Context,
+                        description = r.ShortDescription,
+                    }
+                    : ScopedChange(r)),
+            };
+
+            /* The override note is ATTACHED, like get_pg_server_config's database_overrides, so a page with no
+               override row - every page on a cluster with none, and every page before V138 - is byte-identical
+               to what this tool returned before #3937. */
+            if (rows.All(r => r.DatabaseName is null && r.RoleName is null))
+            {
+                return JsonSerializer.Serialize(page, McpHelpers.JsonOptions);
+            }
+
+            var node = JsonSerializer.SerializeToNode(page, McpHelpers.JsonOptions)?.AsObject()
+                ?? throw new InvalidOperationException("the config-changes page did not serialize to a JSON object");
+            node["scoped_changes_note"] = "Rows carrying database_name and/or role_name are per-database or per-role "
+                + "overrides (ALTER DATABASE/ROLE SET), interleaved with the server-wide rows by changed_at. "
+                + "change_kind says what happened between two consecutive snapshots of the server: changed (the "
+                + "override's value moved), set (it appeared - old_value is null) or reset (it was removed - "
+                + "new_value is null). An override already present on the first snapshot after the collector "
+                + "began reading overrides is not reported as set: nobody set it then, the collector started "
+                + "seeing it. An override row has no unit, context or description; read those off the "
+                + "server-wide setting of the same name.";
+            return node.ToJsonString(McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL config changes failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_server_config_changes", ex);
         }
+    }
+
+    /// <summary>
+    /// One override change as the payload renders it (#3937): the scope names it HAS and none it does not, then
+    /// change_kind, then the value pair. Property order follows the server-wide row's where the two share names.
+    /// </summary>
+    private static JsonObject ScopedChange(DarlingPgServerConfigReader.PgConfigChangeRow r)
+    {
+        var o = new JsonObject
+        {
+            ["changed_at"] = JsonSerializer.SerializeToNode(r.ChangedAtUtc, McpHelpers.JsonOptions),
+            ["name"] = r.Name,
+        };
+        if (r.DatabaseName is not null)
+        {
+            o["database_name"] = r.DatabaseName;
+        }
+
+        if (r.RoleName is not null)
+        {
+            o["role_name"] = r.RoleName;
+        }
+
+        o["change_kind"] = r.ChangeKind;
+        o["old_value"] = r.OldValue;
+        o["new_value"] = r.NewValue;
+        o["source"] = r.Source;
+        return o;
     }
 
 }

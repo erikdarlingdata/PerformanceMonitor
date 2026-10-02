@@ -64,8 +64,13 @@ public sealed partial class ViewerDataService
         """;
 
 
+    /* V137 (#3796): the two capture modes trail the original ten, in the collector's payload order; the
+       rung appended them to the table and the passthrough view is SELECT *, so a V137 store answers both.
+       They are the two columns of the eight the rung added that this viewer reads, and the reason the
+       connect-time gate in ViewerDataService.cs holds at V137: a store below it has no such column and this
+       read would throw on the Query Store grid. */
     public const string QueryStoreHealthSql = """
-        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes
+        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode
         FROM v_query_store_health
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
@@ -73,11 +78,28 @@ public sealed partial class ViewerDataService
         ORDER BY database_name
         """;
 
+    /// <summary>
+    /// #3999: anchored on the trace_flags collector's newest SUCCESSFUL run, not the newest row. A capture
+    /// that finds every flag off writes ZERO rows (<c>DBCC TRACESTATUS(-1)</c> only lists flags that are ON),
+    /// so a plain <c>capture_time = MAX(capture_time)</c> falls back to an older capture that still had a
+    /// flag on. The second <c>AND</c> decides on the ROW COUNT of the newest SUCCESS this collector logged
+    /// in <c>v_collection_log</c>: every capture writes the full list of flags that are on, so 0 rows means
+    /// every flag was off and the read reports none. Not on timestamps: the service stamps collection_log at
+    /// a run's END, after its capture rows, so "newest success is newer than the newest capture" holds after
+    /// every ordinary run and would hide every enabled flag. No SUCCESS row, or a NULL count, keeps the
+    /// pre-fix reading. <c>DarlingCurrentConfigReader.TraceFlagsSql</c> and Lite's twin carry the same test.
+    /// </summary>
     public const string TraceFlagsSql = """
         SELECT trace_flag, status, is_global, is_session
         FROM v_trace_flags
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
+        AND   COALESCE(
+                  (SELECT rows_collected FROM v_collection_log
+                   WHERE server_id = $1 AND collector_name = 'trace_flags' AND status = 'SUCCESS'
+                   ORDER BY collection_time DESC NULLS LAST
+                   LIMIT 1),
+                  1) > 0
         ORDER BY trace_flag
         """;
 
@@ -149,7 +171,7 @@ public sealed partial class ViewerDataService
                 DelayedDurability = reader.IsDBNull(++ordinal) ? "" : reader.GetString(ordinal),
                 IsAcceleratedDatabaseRecoveryOn = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 IsMemoryOptimizedEnabled = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
-                IsOptimizedLockingOn = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                IsOptimizedLockingOn = reader.IsDBNull(++ordinal) ? null : reader.GetBoolean(ordinal),
             });
         }
 
@@ -205,6 +227,10 @@ public sealed partial class ViewerDataService
                 StaleQueryThresholdDays = reader.IsDBNull(7) ? 0L : reader.GetInt64(7),
                 MaxPlansPerQuery = reader.IsDBNull(8) ? 0L : reader.GetInt64(8),
                 IntervalLengthMinutes = reader.IsDBNull(9) ? 0L : reader.GetInt64(9),
+                /* V137 (#3796): NULL stays null — the row predates the rung, or the engine is 2016 (wait stats) —
+                   and the display properties render it as the grid's absence glyph rather than as "". */
+                QueryCaptureMode = reader.IsDBNull(10) ? null : reader.GetString(10),
+                WaitStatsCaptureMode = reader.IsDBNull(11) ? null : reader.GetString(11),
             });
         }
 
@@ -279,7 +305,7 @@ public class DatabaseConfigRow
     public string DelayedDurability { get; set; } = "";
     public bool IsAcceleratedDatabaseRecoveryOn { get; set; }
     public bool IsMemoryOptimizedEnabled { get; set; }
-    public bool IsOptimizedLockingOn { get; set; }
+    public bool? IsOptimizedLockingOn { get; set; }
 
     /* Display properties for DataGrid (bool -> Yes/No) */
     public string ReadOnlyDisplay => IsReadOnly ? "Yes" : "No";
@@ -299,7 +325,7 @@ public class DatabaseConfigRow
     public string MixedPageAllocationDisplay => IsMixedPageAllocationOn ? "Yes" : "No";
     public string AdrDisplay => IsAcceleratedDatabaseRecoveryOn ? "Yes" : "No";
     public string MemoryOptimizedDisplay => IsMemoryOptimizedEnabled ? "Yes" : "No";
-    public string OptimizedLockingDisplay => IsOptimizedLockingOn ? "Yes" : "No";
+    public string OptimizedLockingDisplay => IsOptimizedLockingOn is null ? "Unknown" : IsOptimizedLockingOn.Value ? "Yes" : "No";
 }
 
 
@@ -310,6 +336,17 @@ public class DatabaseConfigRow
 /// both, because desired READ_WRITE with actual READ_ONLY is precisely the condition this collector
 /// exists to surface. <see cref="ReadonlyReasonDisplay"/> decodes the bitmask values an operator
 /// actually meets; unknown bits fall back to the raw number rather than guessing.
+///
+/// <para>V137 (#3796) added the two capture modes as the row's trailing pair. <see cref="QueryCaptureMode"/>
+/// is the one option on this row that names a plan-churn factory: <c>ALL</c> captures every query the engine
+/// compiles, one-off ad hoc statements included, so on an ad hoc workload each distinct text is a new query
+/// with a new plan and the store fills toward its cap; <c>AUTO</c> (the engine default since 2019) skips
+/// insignificant queries; <c>CUSTOM</c> (2019+) is <c>AUTO</c> with operator-set thresholds; <c>NONE</c> stops
+/// capturing new queries. <see cref="WaitStatsCaptureMode"/> <c>ON</c> / <c>OFF</c> is whether per-plan wait
+/// statistics are recorded into every runtime interval. Both are the DMV's <c>*_desc</c> spelling verbatim and
+/// both are nullable, because NULL is a real state here — the row predates the rung, or (wait stats) the engine
+/// is SQL Server 2016, where the column does not exist — and the two <c>*Display</c> properties render it as the
+/// grid's absence glyph rather than as a blank that reads like a value.</para>
 /// </summary>
 public class QueryStoreHealthRow
 {
@@ -323,6 +360,21 @@ public class QueryStoreHealthRow
     public long StaleQueryThresholdDays { get; set; }
     public long MaxPlansPerQuery { get; set; }
     public long IntervalLengthMinutes { get; set; }
+
+    /// <summary>V137 (#3796): <c>query_capture_mode_desc</c> verbatim — <c>ALL</c> / <c>AUTO</c> / <c>CUSTOM</c> /
+    /// <c>NONE</c>; null on a pre-rung row.</summary>
+    public string? QueryCaptureMode { get; set; }
+
+    /// <summary>V137 (#3796): <c>wait_stats_capture_mode_desc</c> verbatim — <c>ON</c> / <c>OFF</c>; null on a
+    /// pre-rung row or a 2016 engine, and that null means "the engine cannot say", never <c>OFF</c>.</summary>
+    public string? WaitStatsCaptureMode { get; set; }
+
+    /// <summary>The Capture Mode cell: the mode verbatim, or the absence glyph for a null (pre-rung row).</summary>
+    public string CaptureModeDisplay => QueryCaptureMode ?? "—";
+
+    /// <summary>The Wait Stats Capture cell: <c>ON</c> / <c>OFF</c> verbatim, or the absence glyph for a null
+    /// (pre-rung row, or a 2016 engine that has no such option — not <c>OFF</c>).</summary>
+    public string WaitStatsCaptureModeDisplay => WaitStatsCaptureMode ?? "—";
 
     public string StateDisplay =>
         string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)

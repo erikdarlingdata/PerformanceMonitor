@@ -230,12 +230,17 @@ SET last_attempt_at = $7,
     /// (server, query_hash) — optionally narrowed to one database, the shape both the MCP read (database
     /// optional) and the viewer's (database required) need from one statement.
     ///
-    /// <para><b>Read from the backlog, not joined to the fact table.</b> <c>query_stats</c> does not store
-    /// the statement offsets — they are read for the delta key and never persisted — so a join from a stored
-    /// fact row could only match on <c>plan_handle</c> + <c>sql_handle</c>, which for a multi-statement plan
-    /// is several backlog rows describing DIFFERENT statements' plans. Serving one of those as "the plan for
-    /// this query" is worse than serving nothing. <c>query_hash</c> on the row keys the fallback at exactly
-    /// the grain the readers already ask at.</para>
+    /// <para><b>Read from the backlog, not joined to the fact table.</b> When this was written
+    /// <c>query_stats</c> did not store the statement offsets — they were read for the delta key and never
+    /// persisted — so a join from a stored fact row could only match on <c>plan_handle</c> + <c>sql_handle</c>,
+    /// which for a multi-statement plan is several backlog rows describing DIFFERENT statements' plans.
+    /// Serving one of those as "the plan for this query" is worse than serving nothing. V128 (#3540) stores
+    /// the offsets, so an exact join is POSSIBLE for rows written since; it is not taken here because the
+    /// readers ask at the <c>query_hash</c> grain (the Dashboard's and viewer's key), which
+    /// <c>query_hash</c> on the backlog row already serves, and because every row written before V128
+    /// carries NULL offsets, so an exact join would go dark on an upgraded store for a raw retention's
+    /// worth of history. If a reader ever asks at the statement grain, the join is now available to
+    /// it.</para>
     ///
     /// <para>A non-null <c>plan_xml</c> is itself the "this row was capped" test the caller would otherwise
     /// make against <c>query_plan_xml_bytes</c>: the row exists only because the measurement exceeded the

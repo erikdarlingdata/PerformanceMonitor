@@ -490,6 +490,10 @@ namespace PerformanceMonitorDashboard.Models
             {
                 _healthyCollectorCount = value;
                 OnPropertyChanged();
+                // #3653: the verdict now depends on whether ANY collector was banded, so the healthy count
+                // moving 0 -> N (first collection landing) has to re-render the dot and the display text too.
+                OnPropertyChanged(nameof(CollectorSeverity));
+                OnPropertyChanged(nameof(CollectorDisplayText));
                 OnPropertyChanged(nameof(CollectorDetailText));
             }
         }
@@ -516,18 +520,29 @@ namespace PerformanceMonitorDashboard.Models
                 // Critical when offline, so this governs only the per-metric Collectors dot.
                 if (_isOnline == false) return HealthSeverity.Unknown;
                 if (_failedCollectorCount > 0) return HealthSeverity.Warning;
+                // #3653 (#3635's class): zero banded with nothing failing is UNMEASURED, not healthy. The
+                // report.collection_health SUM comes back NULL (read as 0/0) for a database whose collectors have
+                // never logged a run, and the read's own catch leaves both counts at 0 when the query failed —
+                // both were painted a green "OK" for a collection nobody had classified, the positive claim of
+                // health for an unmeasured metric that the offline arm above already refuses. Any collector banded
+                // is unchanged; a failing count with no healthy denominator still falls to Warning above (a
+                // failure was observed even if the population was not).
+                if (_healthyCollectorCount == 0) return HealthSeverity.Unknown;
                 return HealthSeverity.Healthy;
             }
         }
 
+        private bool NoCollectorBanded => _healthyCollectorCount == 0 && _failedCollectorCount == 0;
+
         // #2784: offline reads a neutral "Stale" instead of a green "OK" — its collector counts are stale, not
         // measured. Reuses IsOnline (a live connection ping here), the same signal ConnectionStatusText and the
-        // offline overlay read, rather than inventing a stale-count threshold.
+        // offline overlay read, rather than inventing a stale-count threshold. #3653: an online card with no
+        // collector banded reads "--" (the card's no-reading word, TopWaitDisplayText's) beside its grey dot.
         public string CollectorDisplayText =>
-            _isOnline == false ? "Stale" : _failedCollectorCount > 0 ? $"{_failedCollectorCount} failed" : "OK";
+            _isOnline == false ? "Stale" : _failedCollectorCount > 0 ? $"{_failedCollectorCount} failed" : NoCollectorBanded ? "--" : "OK";
 
         public string CollectorDetailText =>
-            _isOnline == false ? "No recent collection" : $"Healthy: {_healthyCollectorCount}, Failing: {_failedCollectorCount}";
+            _isOnline == false ? "No recent collection" : NoCollectorBanded ? "No collector banded yet" : $"Healthy: {_healthyCollectorCount}, Failing: {_failedCollectorCount}";
 
         /* Low-disk / failed-job alert presence, for the server-level tab badge (#754/#749).
            Injected from the alert engine's per-server state in UpdateTabBadge; not bound (the

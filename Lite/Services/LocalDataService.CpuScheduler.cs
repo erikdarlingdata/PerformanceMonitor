@@ -25,7 +25,14 @@ public partial class LocalDataService
 
     /// <summary>
     /// The CPU Scheduler pressure trend: the runnable / blocked / queued task counts per collection over
-    /// the window, plotted directly (point-in-time collector, no delta math).
+    /// the window, bucketed to <see cref="TrendBudget.Chart"/>'s point budget (#4234; a gauge, so a
+    /// bucket's value is the plain average of its collections — no delta math, matching the pre-bucket
+    /// point-in-time read). #3936: <c>collection_id</c> is a secondary sort inside <c>raw</c>, not a
+    /// filter — a same-instant collision (rare, see
+    /// <see cref="PerformanceMonitor.Collectors.CollectionTimeClock"/>) still plots both real snapshots
+    /// into the same bucket, just in a deterministic left-to-right order. A bucket holding exactly one
+    /// physical collection is stamped at that collection's own raw time rather than the bucket grid when
+    /// EVERY bucket this call returned is such a singleton (ruling item 3).
     /// </summary>
     public async Task<List<CpuSchedulerTrendPoint>> GetCpuSchedulerTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -33,34 +40,48 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
-        command.CommandText = @"
-SELECT
-    collection_time,
-    total_runnable_tasks_count,
-    total_blocked_task_count,
-    total_queued_request_count
-FROM v_cpu_scheduler_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-ORDER BY collection_time";
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = CpuSchedulerTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<CpuSchedulerTrendPoint>();
+        var rows = new List<(DateTime BucketStart, int Runnable, int Blocked, int Queued, DateTime FirstCollectionTime, long CollectionCount)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var collectionCount = ToInt64(reader.GetValue(5));
+            if (collectionCount != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : (int)Math.Round(ToDouble(reader.GetValue(1))),
+                reader.IsDBNull(2) ? 0 : (int)Math.Round(ToDouble(reader.GetValue(2))),
+                reader.IsDBNull(3) ? 0 : (int)Math.Round(ToDouble(reader.GetValue(3))),
+                reader.GetDateTime(4),
+                collectionCount));
+        }
+
+        var items = new List<CpuSchedulerTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
             items.Add(new CpuSchedulerTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                RunnableTasks = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                BlockedTasks = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                QueuedRequests = reader.IsDBNull(3) ? 0 : reader.GetInt32(3)
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                RunnableTasks = row.Runnable,
+                BlockedTasks = row.Blocked,
+                QueuedRequests = row.Queued
             });
         }
 
@@ -68,9 +89,47 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// The bucketed CPU-scheduler trend statement text (#4234), pulled out of
+    /// <see cref="GetCpuSchedulerTrendAsync"/> so its shape is checkable without a live DuckDB. $1
+    /// server_id, $2/$3 the UTC window (also the GREATEST clamp so the first bucket never renders
+    /// earlier than the window), $4 the bucket width in minutes. A NULL count counts as 0 in the
+    /// average, exactly as the per-collection read always counted it in C#.
+    /// </summary>
+    internal static string CpuSchedulerTrendSql => $@"
+WITH raw AS
+(
+    SELECT
+        collection_time,
+        collection_id,
+        total_runnable_tasks_count,
+        total_blocked_task_count,
+        total_queued_request_count
+    FROM v_cpu_scheduler_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    AVG(COALESCE(total_runnable_tasks_count, 0)) AS total_runnable_tasks_count,
+    AVG(COALESCE(total_blocked_task_count, 0)) AS total_blocked_task_count,
+    AVG(COALESCE(total_queued_request_count, 0)) AS total_queued_request_count,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM raw
+GROUP BY 1
+ORDER BY 1";
+
+    /// <summary>
     /// The CPU Scheduler latest-snapshot: the single most recent cpu_scheduler_stats row in the window
     /// (every scheduler / worker / NUMA / OS-memory pressure column + the collector's CASE-computed
     /// warning flags), feeding the metric grid. Returns null when the window holds no snapshot.
+    /// #3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A run-overlap
+    /// or clock-resolution collision can store two DIFFERENT snapshots under one <c>collection_time</c> —
+    /// <c>collection_id</c> is the per-process monotonic counter every row already carries, so it orders two
+    /// same-instant rows the same way on every read instead of a bare <c>LIMIT 1</c> returning either one
+    /// depending on physical row order. This is also Lite's <c>get_cpu_scheduler_pressure</c> MCP tool's
+    /// read (McpPlanCacheSchedulerTools), so the fix covers both surfaces.
     /// </summary>
     public async Task<CpuSchedulerSnapshot?> GetCpuSchedulerSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
@@ -78,7 +137,7 @@ ORDER BY collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -113,7 +172,7 @@ FROM v_cpu_scheduler_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY collection_time DESC
+ORDER BY collection_time DESC, collection_id DESC
 LIMIT 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

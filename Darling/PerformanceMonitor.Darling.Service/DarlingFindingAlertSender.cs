@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Notifications;
@@ -54,13 +56,47 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
     }
 
     /// <summary>
-    /// <see cref="IFindingAlertSender"/>: latest alert_log time for (serverId, metricName),
-    /// any channel/result — seeds the shared AnalysisNotificationService cooldown across
-    /// restarts (the analysis cooldown is stamped unconditionally, so the persisted
-    /// equivalent is the latest row for that metric_name). Delegates to the PG store.
+    /// <see cref="IFindingAlertSender"/>: latest DELIVERED-page time for (serverId, metricName) —
+    /// seeds the shared AnalysisNotificationService #2054 hold across restarts. #3916: a hold is
+    /// earned by a delivery, so the seed reads only rows that reached someone. Delegates to the PG store.
     /// </summary>
-    public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
-        => _historyStore.GetLastAlertTimeAsync(serverId, metricName);
+    public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
+        => _historyStore.GetLastDeliveredPageUtcAsync(serverId, metricName);
+
+    /// <summary>
+    /// <see cref="IFindingAlertSender"/> (#3916): ONE message naming every held page over the cap, then one
+    /// row per named page under its own metric name carrying the summary's delivery, so the restart seed
+    /// finds every named story. Never throws; null only when this method caught.
+    /// </summary>
+    public async Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+    {
+        if (named is null || named.Count == 0)
+            return null;
+        try
+        {
+            var (serverName, currentValue, context) = FindingSummary.Compose(named);
+            var result = await _core.TrySendAsync(
+                FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(CultureInfo.InvariantCulture),
+                named[0].ServerId, context, attemptChannels: true);
+            var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);
+            foreach (var alert in named)
+            {
+                await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                    alert.ServerId, alert.ServerName, alert.MetricName,
+                    alert.CurrentValue, alert.ThresholdValue,
+                    alert.Severity, alert.NotifyThreshold,
+                    delivery,
+                    false, FindingSummary.RowDetailText(alert, named.Count),
+                    alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null));
+            }
+            return delivery;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("Finding summary delivery failed for {Count} pages: {Message}", named.Count, ex.Message);
+            return null;
+        }
+    }
 
     /// <summary>
     /// <see cref="IFindingAlertSender"/>: dispatches a composed analysis-finding alert.
@@ -68,45 +104,77 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
     /// numeric severity/threshold and the detail text — so no separate fallback row is needed.
     /// <para>The channels get <see cref="FindingAlert.DeliveredProse"/> and the row gets
     /// <c>DetailText</c>: two destinations, two values. See <see cref="FindingAlert"/>.</para>
+    /// <para>#3916: returns the delivery the row recorded; null only when this method caught.</para>
     /// </summary>
-    public async Task SendFindingAlertAsync(FindingAlert alert)
+    public async Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
     {
         if (alert is null)
         {
-            return;
+            return null;
         }
 
         try
         {
-            /* Findings are never muted here — the pipeline's mute filter dropped muted
-               stories before they became findings (Lite passes muted: false identically).
-               DeliveredProse, not DetailText: an analysis finding's prose restates the structured
-               context the channels already render, so delivering both prints the Diagnosis facts
-               twice. The persisted value below is unaffected. */
-            var result = await _core.TrySendAsync(
-                alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
-                alert.ServerId, alert.Context, attemptChannels: true, detailText: alert.DeliveredProse);
+            var context = alert.Context;
+            AlertDelivery delivery;
 
-            /* trayChannelPresent: false — the headless service has no tray; see DarlingAlertDeliverer. */
-            var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);
+            if (alert.Route == FindingRoute.Digest)
+            {
+                /* #3712: the corroboration gate routed this finding to the daily digest. NO channel is
+                   consulted — not the send core, not the webhook fan-out — so neither cooldown is spent and
+                   the row states the route as its disposition. The context already carries the routing
+                   record (AlertContext.Routing) with the reason; the row below persists it with the full
+                   detail text and the drill-down, so the web surface, the MCP history read and the digest
+                   reader see everything a page would have carried. */
+                delivery = AlertDelivery.RoutedToDigest();
+            }
+            else
+            {
+                /* Findings are never muted here — the pipeline's mute filter dropped muted
+                   stories before they became findings (Lite passes muted: false identically).
+                   DeliveredProse, not DetailText: an analysis finding's prose restates the structured
+                   context the channels already render, so delivering both prints the Diagnosis facts
+                   twice. The persisted value below is unaffected. */
+                var result = await _core.TrySendAsync(
+                    alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
+                    alert.ServerId, alert.Context, attemptChannels: true, detailText: alert.DeliveredProse);
+
+                /* trayChannelPresent: false — the headless service has no tray; see DarlingAlertDeliverer. */
+                delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);
+
+                /* #3598: where the posts went, on the finding's context exactly as DarlingAlertDeliverer records it
+                   for engine alerts — an "Analysis: …" finding is a performance-family alert and routes like one,
+                   so its history row must say so too. A finding always carries a context, so nothing is created
+                   here; null when no channel reached resolution. #4750: the record carries each channel's
+                   outcome too, as DarlingAlertDeliverer explains. */
+                if (result.Route is { } route)
+                {
+                    context ??= new AlertContext();
+                    context.Route = route.ToDto(result.ChannelOutcomes);
+                }
+            }
 
             /* Always log the alert, regardless of channel status — the structured context
                persists as JSON alongside the flat detail_text, the numeric severity/threshold
                in the double columns (Lite's shape). DetailText in full here whatever the channels
                were handed: this column is what the MCP reader, the triage endpoint and the Viewer's
                detail pane render, and what the mute pre-fill parses. */
-            string? contextJson = alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null;
+
+            string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
             await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 alert.ServerId, alert.ServerName, alert.MetricName,
                 alert.CurrentValue, alert.ThresholdValue,
                 alert.Severity, alert.NotifyThreshold,
                 delivery,
                 false, alert.DetailText, contextJson));
+
+            return delivery;
         }
         catch (Exception ex)
         {
             _logger.LogError("Finding alert delivery failed for {Metric} on {Server}: {Message}",
                 alert.MetricName, alert.ServerName, ex.Message);
+            return null;
         }
     }
 }

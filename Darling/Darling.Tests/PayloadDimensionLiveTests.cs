@@ -43,16 +43,6 @@ namespace Darling.Tests;
 public sealed class PayloadDimensionLiveTests
 {
     /// <summary>
-    /// The exact line the catalog sweep emits when the #1784 coverage gate holds a tiered drop, pinned in FULL
-    /// for the same reason its dimension-GC sibling is: it is a field signature the client's operator reads,
-    /// and its TAIL is the actionable half — "resumes by itself once a backfill extends coverage" is what tells
-    /// them this is self-correcting rather than a fault to chase. A prefix pin covers only the part that names
-    /// the table, which is exactly the shape that let a wrong line ship earlier in this work.
-    /// </summary>
-    private const string CoverageSkipSignature =
-        "Retention purge SKIPPED for query_stats: its rollup does not yet cover the oldest rows, so dropping would delete history no aggregate holds. Resumes by itself once a backfill extends coverage.";
-
-    /// <summary>
     /// The exact line the dimension GC emits when it stands down, pinned in FULL rather than by prefix: it is
     /// a field signature an operator greps for, and a partial pin would let the wording drift to name a cause
     /// the guard does not actually detect -- which is how it came to say "raw purges held" while the shipped
@@ -198,8 +188,9 @@ public sealed class PayloadDimensionLiveTests
                 Assert.True(reader.IsDBNull(1), "'none' mode must leave query_plan_gz NULL - that is the whole contract");
             }
 
-            /* A gzip-mode batch with the SAME plan (hours later, past the last_seen guard) must not
-               convert the row - the conflict arm only refreshes last_seen. */
+            /* A gzip-mode batch with the SAME plan (hours later) must not convert the row - the
+               conflict arm only refreshes last_seen, and this assertion holds regardless of the guard
+               window's width. */
             await WriteQueryStatsBatchAsync(
                 connection, serverId, serverName, DateTime.UtcNow.AddHours(2),
                 new[] { NewRow("0x2171B", queryText, planXml) }, ct, compressPlanContent: true);
@@ -658,7 +649,7 @@ public sealed class PayloadDimensionLiveTests
     // ── (e) the last_seen watermark and its churn guard ──
 
     [Fact]
-    public async Task LastSeen_RefreshesOnlyOncePerHour_SoAHotDimTakesOneUpdateNotOnePerCycle()
+    public async Task LastSeen_RefreshesOnlyOncePerGuardWindow_SoAHotDimTakesOneUpdateNotOnePerCycle()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
@@ -689,21 +680,22 @@ public sealed class PayloadDimensionLiveTests
             await FlushAtAsync(t0);
             Assert.Equal(t0, await LastSeenAsync());
 
-            /* Within the hour: NOT refreshed. Every referenced dim row would otherwise take an UPDATE every
-               collection cycle — a dead tuple per row per minute on a hot table — for a watermark whose
-               only consumer has a multi-day horizon. */
-            await FlushAtAsync(t0.AddMinutes(30));
+            /* Within the guard window (#4503: 6 hours, widened from 1): NOT refreshed. Every referenced
+               dim row would otherwise take an UPDATE every collection cycle — a dead tuple per row per
+               minute on a hot table — for a watermark whose only consumer has a multi-day horizon. */
+            await FlushAtAsync(t0.AddHours(3));
             Assert.Equal(t0, await LastSeenAsync());
 
-            /* Past the hour: refreshed. The guard caps the churn at 60x less, and stays correct as long as
-               the GC margin exceeds an hour (it is a full day). */
-            await FlushAtAsync(t0.AddHours(2));
-            Assert.Equal(t0.AddHours(2), await LastSeenAsync());
+            /* Past the guard window: refreshed. The guard caps the churn at 4x fewer updates a day than
+               the original 1-hour width, and stays correct as long as the GC margin exceeds the guard
+               width (it is a full day). */
+            await FlushAtAsync(t0.AddHours(7));
+            Assert.Equal(t0.AddHours(7), await LastSeenAsync());
 
             /* And a REPLAYED/backfilled batch cannot stamp content as fresher than it is: the watermark
                never moves backwards, because the guard's comparison is one-directional. */
             await FlushAtAsync(t0.AddMinutes(5));
-            Assert.Equal(t0.AddHours(2), await LastSeenAsync());
+            Assert.Equal(t0.AddHours(7), await LastSeenAsync());
 
             bodySucceeded = true;
         }
@@ -712,6 +704,144 @@ public sealed class PayloadDimensionLiveTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+            });
+        }
+    }
+
+    // ── (e2) #4249: the WHERE NOT EXISTS pre-filter takes no lock on an already-fresh row ──
+
+    /// <summary>
+    /// #4249: before this fix, Postgres locked every conflicting row to evaluate the <c>DO UPDATE
+    /// ... WHERE</c> guard above, even on the digests that guard was about to keep un-updated — a
+    /// <c>Heap/LOCK</c> WAL record and a dirtied page for content that was already fresh. None of
+    /// that is visible from the SQL text alone (a source pin can grep for the <c>WHERE NOT
+    /// EXISTS</c> shape but not for whether Postgres actually took a lock), so this proves it
+    /// against a real server, three ways:
+    ///
+    /// <para>(1) A second upsert of the SAME still-fresh batch, 30 minutes later, leaves every
+    /// row's <c>xmax</c> at 0 (never locked) and its <c>last_seen</c> unchanged — effectively a
+    /// read-only transaction. This is the pin: reverting the <c>WHERE NOT EXISTS</c> pre-filter
+    /// (restoring the pre-#4249 shape) turns it red. Confirmed once by hand with a raw-SQL
+    /// rehearsal of both shapes against this rig: the OLD shape left a real transaction id (781)
+    /// in <c>xmax</c> on a row whose content and <c>last_seen</c> were both unchanged; the NEW
+    /// shape left <c>xmax</c> at 0. See PR #4288.
+    ///
+    /// <para>An earlier revision of this test also asserted a near-zero <c>pg_wal_lsn_diff</c> for
+    /// the same batch. <c>pg_current_wal_lsn()</c> is cluster-wide, not relation-scoped, so any
+    /// other session on the same server — the ~39 own-store classes that create scratch databases
+    /// on this cluster and run in parallel under xunit, plus autovacuum and checkpoints — can push
+    /// the delta well past the bar even when this test's own transaction touched nothing. The
+    /// <c>xmax</c> and <c>last_seen</c> checks above already pin "no lock taken, no row touched"
+    /// directly against the rows this test wrote, with no exposure to unrelated WAL traffic, so
+    /// the WAL assertion was dropped as redundant and flaky (#4354).</para>
+    ///
+    /// <para>(2) A row stamped past the guard window (#4503: 6 hours) is still refreshed — the
+    /// pre-filter's own staleness read uses the same boundary the <c>ON CONFLICT ... WHERE</c> guard
+    /// always used, so a genuinely stale row still reaches the <c>UPDATE</c>.</para>
+    ///
+    /// <para>(3) A digest with no existing row at all is still inserted — the pre-filter is an
+    /// anti-join over existing rows, not a blanket skip of the statement.</para>
+    /// </summary>
+    [Fact]
+    public async Task PreFilter_SkipsLockingFreshRows_ButStillRefreshesStaleOnes_AndInsertsNewDigests()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var runId = Guid.NewGuid().ToString("N");
+
+        var freshPairs = Enumerable.Range(0, 50)
+            .Select(i =>
+            {
+                var payload = $"<ShowPlanXML prefilter=\"{runId}\" fresh=\"{i}\"/>";
+                return (Digest: PayloadDimensions.Digest(payload), Payload: payload);
+            })
+            .ToArray();
+        var stalePayload = $"<ShowPlanXML prefilter=\"{runId}\" stale=\"0\"/>";
+        var staleDigest = PayloadDimensions.Digest(stalePayload);
+        var newPayload = $"<ShowPlanXML prefilter=\"{runId}\" brandnew=\"0\"/>";
+        var newDigest = PayloadDimensions.Digest(newPayload);
+        var freshDigests = freshPairs.Select(p => p.Digest).ToArray();
+        var everyDigestWritten = freshDigests.Append(staleDigest).Append(newDigest).ToArray();
+
+        var t0 = new DateTime(2026, 3, 1, 12, 0, 0, DateTimeKind.Unspecified);
+
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            async Task FlushAsync(IEnumerable<(byte[] Digest, string Payload)> pairs, DateTime collectionTime)
+            {
+                var batch = new PayloadDimensionBatch();
+                foreach (var (digest, payload) in pairs)
+                {
+                    batch.Add(PayloadDimensions.QueryPlanDimTable, digest, payload);
+                }
+
+                await using var transaction = await connection.BeginTransactionAsync(ct);
+                await PayloadDimensionWriter.FlushAsync(connection, transaction, batch, collectionTime, ct);
+                await transaction.CommitAsync(ct);
+            }
+
+            /* A dedicated ANY($1) command rather than the file's params-object ScalarAsync helper:
+               a byte[][] argument there is covariantly assignable to object[], so C# spreads it
+               across the params array (one digest per parameter) instead of binding it as ONE
+               bytea[] array parameter. Explicit typing sidesteps that entirely. */
+            async Task<long> LockedRowCountAsync(byte[][] digests)
+            {
+                await using var command = new NpgsqlCommand(
+                    "SELECT count(*) FROM query_plan_dim WHERE digest = ANY($1) AND xmax <> 0", connection);
+                command.Parameters.Add(new NpgsqlParameter
+                { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
+                return (long)(await command.ExecuteScalarAsync(ct))!;
+            }
+
+            async Task<long> ChangedLastSeenCountAsync(byte[][] digests, DateTime expected)
+            {
+                await using var command = new NpgsqlCommand(
+                    "SELECT count(*) FROM query_plan_dim WHERE digest = ANY($1) AND last_seen <> $2", connection);
+                command.Parameters.Add(new NpgsqlParameter
+                { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
+                command.Parameters.Add(new NpgsqlParameter
+                { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = expected });
+                return (long)(await command.ExecuteScalarAsync(ct))!;
+            }
+
+            // The initial collection cycle: 50 "hot" plans plus one that will go stale.
+            await FlushAsync(freshPairs.Append((staleDigest, stalePayload)), t0);
+            Assert.Equal(0, await LockedRowCountAsync(freshDigests));
+
+            // (1) Same batch, same digests, 3 hours later -- still inside the guard's freshness
+            // window (#4503: 6 hours). The pre-filter excludes every one of them before the statement
+            // ever reaches INSERT/ON CONFLICT: no lock taken, no last_seen change.
+            await FlushAsync(freshPairs, t0.AddHours(3));
+
+            Assert.Equal(0, await LockedRowCountAsync(freshDigests));
+            Assert.Equal(0, await ChangedLastSeenCountAsync(freshDigests, t0));
+
+            // (2) and (3): 7 hours after t0 (past the guard window), the stale row is refreshed and a
+            // brand-new digest is inserted, in the same flush.
+            await FlushAsync([(staleDigest, stalePayload), (newDigest, newPayload)], t0.AddHours(7));
+
+            var refreshedStale = (DateTime)(await ScalarAsync(
+                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, staleDigest))!;
+            Assert.Equal(t0.AddHours(7), refreshedStale);
+
+            var insertedNew = (DateTime)(await ScalarAsync(
+                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, newDigest))!;
+            Assert.Equal(t0.AddHours(7), insertedNew);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var digest in everyDigestWritten)
+                {
+                    await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+                }
             });
         }
     }
@@ -768,7 +898,7 @@ public sealed class PayloadDimensionLiveTests
                    in the oldest slice on the rig. DrainBatchesAsync is the same loop DarlingRetention
                    runs, so this exercises the real termination condition rather than a test-only one. */
                 var swept = await DarlingRetention.DrainBatchesAsync(
-                    token => gc.ExecuteNonQueryAsync(token), batchSize: 1, ct);
+                    async token => (await gc.ExecuteNonQueryAsync(token), 1), ct);
 
                 /* At least this test's expired row. The GC is fleet-wide, so an exact count would be a
                    flake waiting on a rig that happens to hold another ancient row; the two scoped counts
@@ -865,9 +995,9 @@ public sealed class PayloadDimensionLiveTests
                 async batchCt =>
                 {
                     batches++;
-                    return await delete.ExecuteNonQueryAsync(batchCt);
+                    var rows = await delete.ExecuteNonQueryAsync(batchCt);
+                    return (rows, cap);
                 },
-                cap,
                 ct);
 
             /* Every expired row, and only those. */
@@ -877,6 +1007,115 @@ public sealed class PayloadDimensionLiveTests
                deleting 110 rows would mean the LIMIT never bound, which is the unbounded statement
                #2388 replaced — the one that times out on a real backlog. */
             Assert.Equal(5, batches);
+
+            Assert.Equal(0L, await ScalarAsync(
+                connection, "SELECT COUNT(*) FROM query_plan_dim WHERE last_seen < $1", ct, cutoff));
+            Assert.Equal((long)liveCount, await ScalarAsync(
+                connection,
+                "SELECT COUNT(*) FROM query_plan_dim WHERE last_seen = $1", ct, liveSeen));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var digest in expiredDigests.Concat(liveDigests))
+                {
+                    await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+                }
+            });
+        }
+    }
+
+    /// <summary>
+    /// The ADAPTIVE plan-dim drain (#4130) against a real table: <see cref="DarlingRetention.RunPlanDimBatchAsync"/>
+    /// and <see cref="DarlingRetention.NextPlanDimBatchCap"/> composed exactly as <c>PurgeOneAsync</c> composes
+    /// them, rather than the fixed-cap loop the sibling test above drives. Proves the real
+    /// <c>ctid IN (...)</c> statement still deletes correctly when it is REBUILT every attempt at a
+    /// changing cap (rather than one command reused with a constant LIMIT), and that a real (fast, local)
+    /// batch grows the cap the way <see cref="DarlingRetention.NextPlanDimBatchCap"/>'s pure tests say it
+    /// should: every batch here finishes in milliseconds, so each one is "fast" and the next cap doubles.
+    ///
+    /// <para>Cap sequence is exact and deterministic BECAUSE local execution is always fast: 10 -> 20 -> 40,
+    /// each one a FULL batch at its own (grown) cap — including the third, which happens to exactly exhaust
+    /// the seeded rows. A full batch always earns another round (<see cref="DarlingRetention.DrainBatchesAsync"/>'s
+    /// own contract: "an exact multiple of the cap terminates on the following EMPTY batch"), so a fourth,
+    /// zero-row attempt at cap 80 is expected too, not a bug in this test.</para>
+    /// </summary>
+    [Fact]
+    public async Task AdaptivePlanDimDrain_GrowsCapOnFastBatches_AndDrainsExactlyTheExpiredRows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var run = Guid.NewGuid().ToString("N")[..12];
+
+        const int startCap = 10;
+        const int floorCap = 5;
+        const int ceilingCap = 100;
+        const int expiredCount = 70;    // 10 + 20 + 40, exactly, plus one trailing empty batch at 80
+        const int liveCount = 6;
+
+        var expiredSeen = new DateTime(2002, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var liveSeen = new DateTime(2002, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var cutoff = new DateTime(2002, 3, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+        var expiredDigests = new List<byte[]>(expiredCount);
+        var liveDigests = new List<byte[]>(liveCount);
+
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            for (var i = 0; i < expiredCount + liveCount; i++)
+            {
+                var expired = i < expiredCount;
+                var payload = $"<ShowPlanXML adaptivedrain=\"{(expired ? "old" : "new")}-{run}-{i}\"/>";
+                var digest = PayloadDimensions.Digest(payload);
+                (expired ? expiredDigests : liveDigests).Add(digest);
+
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO query_plan_dim (digest, query_plan_xml, last_seen) VALUES ($1, $2, $3)",
+                    connection);
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
+                insert.Parameters.AddWithValue(payload);
+                insert.Parameters.AddWithValue(expired ? expiredSeen : liveSeen);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            var batches = 0;
+            var capsUsed = new List<int>();
+            var cap = startCap;
+
+            var deleted = await DarlingRetention.DrainBatchesAsync(
+                async ct2 =>
+                {
+                    var (rows, usedCap, elapsed) = await DarlingRetention.RunPlanDimBatchAsync(
+                        async (attemptCap, attemptCt) =>
+                        {
+                            batches++;
+                            using var delete = new NpgsqlCommand(
+                                DarlingRetention.RowCappedDeleteSql(
+                                    PayloadDimensions.QueryPlanDimTable, PayloadDimensions.LastSeenColumn, attemptCap),
+                                connection);
+                            delete.Parameters.AddWithValue(cutoff);
+                            return await delete.ExecuteNonQueryAsync(attemptCt);
+                        },
+                        cap,
+                        floorCap,
+                        ct2);
+
+                    capsUsed.Add(usedCap);
+                    cap = DarlingRetention.NextPlanDimBatchCap(usedCap, elapsed.TotalSeconds, floorCap, ceilingCap);
+                    return (rows, usedCap);
+                },
+                ct);
+
+            Assert.Equal(expiredCount, deleted);
+            Assert.Equal(4, batches);
+            Assert.Equal(new[] { 10, 20, 40, 80 }, capsUsed);
 
             Assert.Equal(0L, await ScalarAsync(
                 connection, "SELECT COUNT(*) FROM query_plan_dim WHERE last_seen < $1", ct, cutoff));
@@ -1523,8 +1762,9 @@ public sealed class PayloadDimensionLiveTests
             var log = new CapturingTestLogger();
             await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, log, ct, PurgeDimFeeding(30));
 
-            /* The clamp held (the fact survived its horizon) — and the GC ran ANYWAY, bounded. */
-            Assert.Contains(CoverageSkipSignature, log.Joined, StringComparison.Ordinal);
+            /* #4427: query_stats is a raw relation, so it now leaves the sweep's drop path before the
+               floor check ever runs — there is no coverage-skip log line to look for. The fact itself is
+               the property: the held fact row survives the sweep regardless, and the GC ran ANYWAY, bounded. */
             Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
             Assert.DoesNotContain(DeferralSignature, log.Joined, StringComparison.Ordinal);
             Assert.Contains(BoundedSignature, log.Joined, StringComparison.Ordinal);
@@ -1548,19 +1788,24 @@ public sealed class PayloadDimensionLiveTests
     }
 
     /// <summary>
-    /// The catalog sweep must not drop raw chunks the rollup has not captured (#1784).
+    /// The catalog sweep must never drop raw <c>query_stats</c> chunks (#4427). <c>query_stats</c> is one of
+    /// the three <see cref="TimescaleSupport.RawRelations"/> that #4427 took out of this sweep's drop path
+    /// entirely on a TimescaleDB store: the service-triggered, fully-gated purge
+    /// (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>) owns them now, not the per-collector floor check
+    /// this sweep used to run for them (<c>IsTieredDropSafeAsync</c>/<c>IsRawTierDropSafeAsync</c>).
     ///
-    /// <para>Two purges drop these same chunks: the tiered 4-day POLICY, which the #1680 gate holds paused
-    /// until the hourly aggregate covers the table's history, and this catalog sweep at the per-collector
-    /// 30-day horizon — which had no coverage check at all. On a store where the gate is deliberately holding
-    /// the policy, the sweep destroyed exactly the uncovered history the gate exists to protect, silently.</para>
-    ///
-    /// <para>Both halves are asserted, because a guard that never lets anything drop would pass the first one
-    /// alone: with coverage lagging the old row SURVIVES, and once the aggregate reaches back over it the very
-    /// same row is dropped. The backstop still backstops.</para>
+    /// <para>Both halves are asserted — an ancient row survives the sweep whether the rollup coverage LAGS
+    /// behind it or reaches back OVER it — because the old contract's second half (the floor check granting a
+    /// drop once coverage caught up) no longer applies to this table at all: coverage is irrelevant to whether
+    /// query_stats drops, since it never drops here regardless. There is no OTHER catalog table that reaches
+    /// <c>IsTieredDropSafeAsync</c>'s gated branch — <c>IsCoverageGatedRelation</c> matches only the three raw
+    /// relations, and none of the non-raw tiered rollups (query_stats_hourly and siblings) sit in
+    /// <see cref="PerformanceMonitor.Collectors.CollectorCatalog"/>, the only list this sweep's per-definition
+    /// loop walks — so no live proof of the floor check's "resumes once covered" half exists anywhere else in
+    /// this sweep to preserve.</para>
     /// </summary>
     [Fact]
-    public async Task CatalogSweep_SkipsARawDropTheRollupHasNotCovered_AndResumesOnceItHas()
+    public async Task CatalogSweep_NeverDropsRawQueryStats_TheGatedPurgeOwnsThem()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
@@ -1577,7 +1822,7 @@ public sealed class PayloadDimensionLiveTests
 
         var (serverId, serverName) = NewServer();
 
-        /* Well past the 30-day catalog horizon, so the sweep would certainly take it if allowed. */
+        /* Well past the 30-day catalog horizon, so the sweep would certainly take it if it still could. */
         var ancient = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-45), DateTimeKind.Unspecified);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
@@ -1591,8 +1836,10 @@ public sealed class PayloadDimensionLiveTests
             await EnsureAggregatesWithoutPoliciesAsync(connection, ct);
 
             using (var seed = new NpgsqlCommand(
-                "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash) " +
-                "VALUES ($1, $2, $3, $4, 'pm1784', '0xPM1784')", connection))
+                // #3653 LC: include delta_worker_time so the row qualifies for query_stats_db_interval_hourly
+                // (which filters WHERE delta_worker_time IS NOT NULL) — both successor hourlies must cover raw.
+                "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, delta_worker_time) " +
+                "VALUES ($1, $2, $3, $4, 'pm1784', '0xPM1784', 1)", connection))
             {
                 seed.Parameters.AddWithValue(CollectionIdGenerator.Next());
                 seed.Parameters.AddWithValue(ancient);
@@ -1601,44 +1848,45 @@ public sealed class PayloadDimensionLiveTests
                 await seed.ExecuteNonQueryAsync(ct);
             }
 
-            /* Coverage LAGS: refresh the aggregate only over the recent window, so it holds buckets but none
-               reaching back to the ancient row. That is the field state — a rollup that starts later than raw. */
-            using (var refresh = new NpgsqlCommand(
-                TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsHourlyView), connection))
+            /* Coverage LAGS: refresh BOTH successor hourlies only over the recent window, so they hold buckets
+               but none reaching back to the ancient row. #3653 LC: RawTierCoverage now requires both
+               query_stats_interval_hourly AND query_stats_db_interval_hourly; the frozen legacy hourly is
+               no longer in the coverage gate. */
+            foreach (var lagView in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsDbIntervalHourlyView })
             {
+                using var refresh = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(lagView), connection);
                 refresh.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified));
                 await refresh.ExecuteNonQueryAsync(ct);
             }
 
             Assert.False(
                 await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_stats", ct),
-                "with the rollup starting after raw's oldest row, dropping must NOT be judged safe");
+                "with the rollup starting after raw's oldest row, the floor-only check must still read not-safe (unused by the sweep, but its own contract is unchanged)");
 
-            var skipLog = new CapturingTestLogger();
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, skipLog, ct, OnlyPurge("query_stats", 40));
+            var laggingLog = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, laggingLog, ct, OnlyPurge("query_stats", 40));
 
-            /* THE property: uncovered history survives the sweep. Asserted before the log line so a mutation
-               lands on the data loss, not on missing text. */
+            /* THE property, half one: the ancient row survives while coverage lags. */
             Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
-            Assert.Contains(CoverageSkipSignature, skipLog.Joined, StringComparison.Ordinal);
 
-            /* Now let coverage reach back over the ancient row. force => recompute the older buckets. */
-            using (var refresh = new NpgsqlCommand(
-                TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsHourlyView, force: true), connection))
+            /* Now let coverage reach back over the ancient row for BOTH successor hourlies (force to recompute). */
+            foreach (var coverView in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsDbIntervalHourlyView })
             {
+                using var refresh = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(coverView, force: true), connection);
                 refresh.Parameters.AddWithValue(DateTime.SpecifyKind(ancient.AddDays(-1), DateTimeKind.Unspecified));
                 await refresh.ExecuteNonQueryAsync(ct);
             }
 
             Assert.True(
                 await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_stats", ct),
-                "once the rollup covers raw's oldest row the drop must be judged safe again");
+                "once the rollup covers raw's oldest row the floor-only check must read safe again (its own contract is unchanged; the sweep just never asks it for this table)");
 
-            var dropLog = new CapturingTestLogger();
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, dropLog, ct, OnlyPurge("query_stats", 40));
+            var coveredLog = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, coveredLog, ct, OnlyPurge("query_stats", 40));
 
-            Assert.Equal(0L, await AncientRowCountAsync(connection, serverId, ct));
-            Assert.DoesNotContain(CoverageSkipSignature, dropLog.Joined, StringComparison.Ordinal);
+            /* THE property, half two: the SAME ancient row still survives now that coverage caught up — under
+               #4427 that no longer matters, because query_stats never reaches the floor check in this sweep. */
+            Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
 
             bodySucceeded = true;
         }

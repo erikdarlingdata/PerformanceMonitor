@@ -9,6 +9,7 @@
 using System;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -38,8 +39,10 @@ public sealed class DarlingAlertTuningKnobsTests
         var config = new DarlingConfig();
         var settings = new DarlingAlertSettings(config);
 
-        /* Defaults mirror the V55 DDL — the compile-time constants these knobs replaced. */
+        /* Defaults mirror the V55 DDL — the compile-time constants these knobs replaced — and the V126
+           GB floor mirrors its own shipped constant (#3528). */
         Assert.Equal(10, settings.SelfDiskFreeWarnPercent);
+        Assert.Equal(50, settings.SelfDiskFreeWarnGb);
         Assert.Equal(30, settings.CollectionStaleMinutes);
         Assert.Equal(10, settings.CollectionFailureThreshold);
         Assert.Equal(3, settings.DiskCriticalFreePercent);
@@ -51,6 +54,7 @@ public sealed class DarlingAlertTuningKnobsTests
            0 failure threshold on the fast path would fire on any single failure, and the analysis
            cooldown keeps the shared engine's documented [30, 10080]. */
         config.Alerts.SelfDiskFreeWarnPercent = 150;
+        config.Alerts.SelfDiskFreeWarnGb = -1;
         config.Alerts.CollectionStaleMinutes = 0;
         config.Alerts.CollectionFailureThreshold = 0;
         config.Alerts.DiskCriticalFreePercent = -5;
@@ -58,6 +62,8 @@ public sealed class DarlingAlertTuningKnobsTests
         config.Alerts.AnalysisNotifyCooldownMinutes = 99999;
 
         Assert.Equal(100, settings.SelfDiskFreeWarnPercent);
+        /* #3528: floored at 0 like the sibling GB knobs — 0 is meaningful (it removes the floor). */
+        Assert.Equal(0, settings.SelfDiskFreeWarnGb);
         Assert.Equal(5, settings.CollectionStaleMinutes);
         Assert.Equal(1, settings.CollectionFailureThreshold);
         Assert.Equal(0, settings.DiskCriticalFreePercent);
@@ -80,6 +86,15 @@ public sealed class DarlingAlertTuningKnobsTests
         Assert.True(settings.LongRunningQueryExcludeBackups);
         Assert.True(settings.LongRunningQueryExcludeMiscWaits);
         Assert.True(settings.LongRunningQueryExcludeCdc);
+
+        /* #3653 (A5, Q5): the opt-out knob's fresh-config value is the SEEDED DEFAULTS — the job-step program prefix
+           and the two NT AUTHORITY logins the production read found — never an empty knob, so both SKUs evaluate
+           the same population from day one. By reference since V135 (LongRunningQueryExclusionKnobRungTests holds
+           the reload half); before the rung the seam returned the seeds directly, and the values here did not move. */
+        Assert.Equal(LongRunningQueryExclusions.DefaultProgramNamePrefixes, settings.LongRunningQueryExcludedProgramNamePrefixes);
+        Assert.Equal(LongRunningQueryExclusions.DefaultLogins, settings.LongRunningQueryExcludedLogins);
+        Assert.Equal(new[] { "SQLAgent - TSQL JobStep" }, settings.LongRunningQueryExcludedProgramNamePrefixes);
+        Assert.Equal(new[] { @"NT AUTHORITY\SYSTEM", @"NT AUTHORITY\NETWORK SERVICE" }, settings.LongRunningQueryExcludedLogins);
 
         /* A store reload mutates the held config in place; the SAME adapter instance reflects it (no caching). */
         config.Alerts.LongRunningQueryMaxResults = 25;
@@ -184,6 +199,12 @@ public sealed class DarlingAlertTuningKnobsTests
         config.Alerts.LongRunningQueryExcludeMiscWaits = false;
         config.Alerts.LongRunningQueryExcludeCdc = true;
         config.Alerts.NotifyConnectionChanges = false;
+        /* #3653 (A5, Q5), V135: the opt-out knob's two text[] columns ride the same seed → read path. The prefix
+           list is un-normalised on purpose (padding, a case-duplicate) and the login list is CLEARED — the
+           operator's decision to evaluate every login, which must survive the round-trip as an empty array and
+           not come back re-seeded. */
+        config.Alerts.LongRunningQueryExcludedProgramNamePrefixes = new() { " QueueWorker ", "queueworker", "SQLAgent - TSQL JobStep" };
+        config.Alerts.LongRunningQueryExcludedLogins = new();
         config.Servers.Add(new MonitoredServer { Name = "v20-lrq", Host = "v20-scratch-host", Auth = "integrated" });
 
         await provider.SeedIfEmptyAsync(config, ct);
@@ -198,5 +219,26 @@ public sealed class DarlingAlertTuningKnobsTests
         Assert.False(view.Alerts.LongRunningQueryExcludeMiscWaits);
         Assert.True(view.Alerts.LongRunningQueryExcludeCdc);
         Assert.False(view.Alerts.NotifyConnectionChanges);
+        Assert.Equal(new[] { "QueueWorker", "SQLAgent - TSQL JobStep" }, view.Alerts.LongRunningQueryExcludedProgramNamePrefixes);
+        Assert.Empty(view.Alerts.LongRunningQueryExcludedLogins);
+
+        /* And the rung's column DEFAULTs on the live store are the seeds — what a pre-rung row reads as. Read
+           back from the catalogue, not restated: the pin is that the DDL PostgreSQL accepted carries them. */
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await using var command = new NpgsqlCommand(
+                "SELECT column_name, column_default FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_alert_settings' AND column_name IN ('long_running_query_excluded_program_name_prefixes', 'long_running_query_excluded_logins') ORDER BY column_name",
+                connection);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal("long_running_query_excluded_logins", reader.GetString(0));
+            Assert.Contains(@"NT AUTHORITY\SYSTEM", reader.GetString(1), StringComparison.Ordinal);
+            Assert.Contains(@"NT AUTHORITY\NETWORK SERVICE", reader.GetString(1), StringComparison.Ordinal);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal("long_running_query_excluded_program_name_prefixes", reader.GetString(0));
+            Assert.Contains("SQLAgent - TSQL JobStep", reader.GetString(1), StringComparison.Ordinal);
+            Assert.False(await reader.ReadAsync(ct));
+        }
     }
 }

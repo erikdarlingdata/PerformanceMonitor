@@ -203,7 +203,7 @@ public static class StoreConnectionSelfTest
         NpgsqlConnection? connection = null;
         try
         {
-            connection = new NpgsqlConnection(connectionString);
+            connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
             await connection.OpenAsync(cancellationToken);
 
             results.Add(TlsPassResult(builder, sslDisabled, stopwatch.Elapsed));
@@ -303,7 +303,7 @@ public static class StoreConnectionSelfTest
     {
         try
         {
-            await using var connection = new NpgsqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
             await connection.OpenAsync(cancellationToken);
 
             /* Both tables, both historical homes (V8 moved the store into collect; pre-V8 lived in

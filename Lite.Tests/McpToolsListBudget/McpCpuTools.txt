@@ -1,0 +1,6 @@
+# McpCpuTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_cpu_utilization 249
+param get_cpu_utilization.as_of 167
+param get_cpu_utilization.bucket_minutes 55
+param get_cpu_utilization.hours_back 28
+param get_cpu_utilization.server_name 28

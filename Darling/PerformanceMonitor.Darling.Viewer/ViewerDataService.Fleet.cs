@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using System.Windows.Media;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -58,8 +59,18 @@ public sealed partial class ViewerDataService
     /// lines the two sources up per server, and each server contributes its XE count when it has any XE row
     /// this window else its DMV count (Lite's <c>COALESCE(NULLIF(xe,0), dmv)</c>, applied per server) — so
     /// an AWS RDS server with only DMV snapshots still counts and a server with XE reports is never
-    /// double-counted. <c>total_deadlocks</c> is a plain cross-server COUNT. $1 window start, $2 window end
-    /// (both naive UTC).
+    /// double-counted. <c>total_deadlocks</c> is the SQL Server graph COUNT plus the PostgreSQL counter
+    /// differences (#3539): the second branch is the SAME <c>LAG</c>-per-<c>(server_id, database_name)</c>
+    /// shape the per-server card read (<c>ServerSummaryPgDeadlockSql</c>) and the service's fleet reader
+    /// use — positive differences only, so a statistics reset drops its interval rather than subtracting a
+    /// lifetime — so the fleet total reconciles with the sum of the card counts on both engines. Never a
+    /// <c>SUM(deadlocks)</c>: the column is a lifetime counter repeated in every sample. $1 window start,
+    /// $2 window end, $3 the <see cref="EventWindowFloor"/> for $1 (all naive UTC).
+    ///
+    /// <para>$3 bounds the three event-table scans on the partition column (#3895), the bound the service's
+    /// fleet reader carries on the same counts: bounded on <c>event_time</c> alone they open every retained
+    /// chunk to count the last hour — 69.8 ms on DARLING01, 1.1 ms with it. The PostgreSQL arm is already
+    /// windowed on <c>collection_time</c> and needs no floor.</para>
     /// </summary>
     public const string FleetTotalsSql = @"
 SELECT
@@ -77,6 +88,7 @@ SELECT
                 FROM v_blocked_process_reports
                 WHERE event_time >= $1
                 AND   event_time <= $2
+                AND   collection_time >= $3
                 GROUP BY server_id
             ) AS xe
             FULL OUTER JOIN
@@ -85,6 +97,7 @@ SELECT
                 FROM v_dmv_blocking_snapshots
                 WHERE event_time >= $1
                 AND   event_time <= $2
+                AND   collection_time >= $3
                 GROUP BY server_id
             ) AS dmv ON xe.server_id = dmv.server_id
         ) AS per_server
@@ -94,6 +107,18 @@ SELECT
         FROM v_deadlocks
         WHERE deadlock_time >= $1
         AND   deadlock_time <= $2
+        AND   collection_time >= $3
+    )
+    +
+    (
+        SELECT COALESCE(SUM(GREATEST(sampled.raw_delta, 0)), 0)
+        FROM
+        (
+            SELECT deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time) AS raw_delta
+            FROM pg_database_stats
+            WHERE collection_time >= $1
+            AND   collection_time <= $2
+        ) AS sampled
     ) AS total_deadlocks";
 
     /// <summary>
@@ -113,18 +138,27 @@ SELECT
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+        FleetTotals totals;
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            return new FleetTotals
-            {
-                TotalBlockingEvents = reader.IsDBNull(0) ? 0 : Convert.ToInt64(reader.GetValue(0)),
-                TotalDeadlocks = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-            };
+            totals = await reader.ReadAsync(cancellationToken)
+                ? new FleetTotals
+                {
+                    TotalBlockingEvents = reader.IsDBNull(0) ? 0 : Convert.ToInt64(reader.GetValue(0)),
+                    TotalDeadlocks = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                }
+                : new FleetTotals();
         }
 
-        return new FleetTotals();
+        /* An Azure master's per-server card skips the events of databases monitored on their own, so the
+           fleet total takes the same events out of the master's share (unscoped minus scoped, per master):
+           each event is counted once, on the server that monitors its database. */
+        var overcount = await ReadFleetMasterOvercountAsync(startUtc, endUtc, cancellationToken);
+        totals.TotalBlockingEvents = Math.Max(0, totals.TotalBlockingEvents - overcount.Blocking);
+        totals.TotalDeadlocks = Math.Max(0, totals.TotalDeadlocks - overcount.Deadlocks);
+        return totals;
     }
 }
 
@@ -308,8 +342,9 @@ public sealed class FleetRollup
     /// leading sentence of <see cref="DeadlockCoverageTooltip"/>.
     /// </summary>
     public const string DeadlockSourceNote =
-        "Deadlocks come from the SQL Server extended-event capture and nothing else, so a server this "
-        + "total does not cover contributes nothing to it whatever that server's deadlocks do.";
+        "Deadlocks come from each engine's own instrument - the SQL Server extended-event capture, and on "
+        + "PostgreSQL the server's deadlock counter differenced over the window - so a server whose "
+        + "collector is not running contributes nothing to this total whatever that server's deadlocks do.";
 
     /// <summary>
     /// The sentence that keeps the two figures from being read as one measurement — the desktop wording of
@@ -329,15 +364,18 @@ public sealed class FleetRollup
         + "counts only the last hour. The two windows differ deliberately, and this coverage figure "
         + "therefore makes no claim about what was read in the last hour.";
 
-    /// <summary>What to do about the PostgreSQL arm, appended after its count. Names no tab, because a
-    /// PostgreSQL target's deadlock grid is reached through that server's own tab rather than from here.
+    /// <summary>How the PostgreSQL arm was counted, appended after its count (#3539). Not an uncovered
+    /// cause — these servers ARE in the total — but a reader is owed the instrument: a counter difference
+    /// has no graph to show, and that target's own server tab is where the parsed deadlocks are. Names no
+    /// tab by name, because a PostgreSQL target's deadlock grid is reached through that server's own tab
+    /// rather than from here.
     ///
     /// <para>Every cause here is a VERB-FREE noun phrase, so one form reads correctly after both "1 server:"
     /// and "4 servers:" — an "N are ..." shape needs a second string the moment N is one, and the surface
     /// that forgets it prints "1 are PostgreSQL targets".</para></summary>
     public const string DeadlockPostgresCause =
-        "PostgreSQL targets, whose deadlocks this total cannot count at all - collected separately, and "
-        + "shown on that target's own server tab.";
+        "PostgreSQL targets, counted from the server's own deadlock counter rather than from captured "
+        + "deadlock graphs - the parsed deadlocks are on that target's own server tab.";
 
     /// <summary>What to do about the silent arm, appended after its count.</summary>
     public const string DeadlockCollectorSilentCause =
@@ -552,13 +590,15 @@ public sealed class FleetRollup
     /// registered fleet; a denominator that shrank to whatever loaded this cycle would report a smaller
     /// fleet than exists, which is a new wrong number in place of the old one rather than a fix.</para>
     ///
-    /// <para><b>Only <see cref="FleetDeadlockSource.Read"/> counts as read</b> — every other arm, INCLUDING
-    /// an enum value a later build adds and this switch has never heard of, lands in the silent bucket. A
-    /// new source kind that inflated the read count would restore exactly the defect this exists to fix,
-    /// where one that lands in an uncovered bucket merely attributes a real gap imprecisely.</para>
+    /// <para><b>Only the arms <see cref="FleetDeadlockCoverage.IsCovered"/> names count as read</b> — every
+    /// other arm, INCLUDING an enum value a later build adds and this switch has never heard of, lands in
+    /// the silent bucket. A new source kind that inflated the read count would restore exactly the defect
+    /// this exists to fix, where one that lands in an uncovered bucket merely attributes a real gap
+    /// imprecisely. The PostgreSQL arm is covered AND tallied on its own (#3539): the sub-count names the
+    /// instrument, the read count names the coverage.</para>
     ///
-    /// <para>The four causes therefore need not sum to <paramref name="registeredTotal"/>: a registered
-    /// server with no summary this cycle is classified by none of them, and that shortfall is
+    /// <para>The three uncovered-or-read causes therefore need not sum to <paramref name="registeredTotal"/>:
+    /// a registered server with no summary this cycle is classified by none of them, and that shortfall is
     /// <see cref="UnknownCount"/> — stated in its own words by <see cref="UnknownStatusText"/> and by
     /// <see cref="DeadlockUnreportedCause"/>, rather than attributed to a cause it was not measured to
     /// have.</para>
@@ -574,9 +614,14 @@ public sealed class FleetRollup
 
         foreach (var s in summaries)
         {
+            if (FleetDeadlockCoverage.IsCovered(s.DeadlockSource))
+            {
+                read++;
+            }
+
             switch (s.DeadlockSource)
             {
-                case FleetDeadlockSource.Read: read++; break;
+                case FleetDeadlockSource.Read: break;
                 case FleetDeadlockSource.PostgresTarget: postgres++; break;
                 case FleetDeadlockSource.CollectorDenied: denied++; break;
                 default: silent++; break;
@@ -664,7 +709,11 @@ public sealed class FleetRollup
         }
         if (s.BlockingSeverity >= HealthSeverity.Warning && s.BlockingCount > 0)
         {
-            parts.Add($"Blocking {s.BlockingCount}");
+            /* #3539 A3: the RATE is what the count arm banded, so the reason names it — the deadlock line's
+               rule and the service's wording; an unrateable window prints the count alone. */
+            parts.Add(s.BlockingRatePerHour.HasValue
+                ? $"Blocking {s.BlockingCount} ({s.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                : $"Blocking {s.BlockingCount}");
         }
         if (s.DeadlockSeverity >= HealthSeverity.Warning && s.DeadlockCount > 0)
         {
@@ -677,15 +726,32 @@ public sealed class FleetRollup
         }
         if (s.CollectorSeverity >= HealthSeverity.Warning)
         {
-            parts.Add($"{s.FailedCollectorCount} collector{(s.FailedCollectorCount == 1 ? "" : "s")} failing");
+            /* #3539 A8d: the share grades the band, so the denominator is named when there is one. */
+            parts.Add(s.CollectorCount > 0
+                ? $"{s.FailedCollectorCount} of {s.CollectorCount} collectors failing"
+                : $"{s.FailedCollectorCount} collector{(s.FailedCollectorCount == 1 ? "" : "s")} failing");
         }
         if (s.CollectionStale)
         {
             parts.Add("collection stale");
         }
 
+        if (s.MetricCount > 0 && s.MeasuredMetricCount == 0)
+        {
+            /* #3539 A6: the card banded Warning through OverallMetricSeverity's nothing-measured arm, and no
+               per-metric clause above can fire when every band is Unknown — without this the ranking and the
+               tooltip would fall to UnspecifiedReason against a card that CAN say why. The service's
+               DarlingFleetReader.BuildReason spells it identically. */
+            parts.Add(NoMetricMeasuredReason);
+        }
+
         return parts.Count > 0 ? string.Join(", ", parts) : UnspecifiedReason;
     }
+
+    /// <summary>The reason clause for a card on which no metric was measured (#3539 A6). The same words as
+    /// the service's fleet-card reason, kept as a constant so <see cref="BandHeadline"/> can recognise the
+    /// case it already covers.</summary>
+    public const string NoMetricMeasuredReason = "no metric measured yet";
 
     /// <summary>
     /// What <see cref="BuildReason"/> answers when it can name nothing — a card banded away from Healthy by a
@@ -746,11 +812,55 @@ public sealed class FleetRollup
             /* Online and stale: the band is the headline. A healthy card gets an all-clear rather than
                BuildReason's "Needs attention" fallback, which is written for a ranking that only ever holds
                problem servers and on a grid showing EVERY server would say the opposite of the truth. */
-            _ => band == FleetHealthBand.Healthy
-                ? "Healthy — every metric on this card is inside its threshold"
-                : WithReason(ServerHealthClassifier.BandLabel(band), " — ", s),
+            _ => BandHeadline(band, s),
         };
     }
+
+    /// <summary>
+    /// The band label, qualified by measured-metric coverage when the band folded over unmeasured metrics
+    /// (#3528). The fold behind the band SKIPS Unknown, so an online server with five of six metrics
+    /// structurally Unknown still bands Healthy — and this headline claimed "every metric on this card is
+    /// inside its threshold" for it, an affirmative statement about five readings that were never taken.
+    /// The qualifier is the web fleet card's, wording and gate alike ("1 of 6 measured", only when measured
+    /// &lt; total), so the two surfaces read alike; a fully-measured card is unchanged.
+    /// </summary>
+    private static string BandHeadline(FleetHealthBand band, ServerSummaryItem s)
+    {
+        var coverage = MeasuredCoveragePhrase(s);
+
+        if (band == FleetHealthBand.Healthy)
+        {
+            /* The all-clear's "every metric" claim is earned only at full coverage — at partial coverage
+               the coverage IS the headline's second half, because the claim it replaces is false. */
+            return coverage.Length == 0
+                ? "Healthy — every metric on this card is inside its threshold"
+                : "Healthy — " + coverage;
+        }
+
+        /* The guarded reason-append stays WithReason's (one copy — its own doc says why); the qualifier
+           rides after whatever it produced: beside a named reason as a second " · " phrase (the web status
+           line's list separator), else straight after the bare label. At ZERO measured the reason already
+           says "no metric measured yet" (#3539 A6), and "· 0 of 6 measured" after it would restate the
+           same fact in different words, so the qualifier stands down there and only there. */
+        var label = ServerHealthClassifier.BandLabel(band);
+        var headline = WithReason(label, " — ", s);
+        if (coverage.Length == 0 || s.MeasuredMetricCount == 0)
+        {
+            return headline;
+        }
+
+        return headline.Equals(label, StringComparison.Ordinal)
+            ? label + " — " + coverage
+            : headline + " · " + coverage;
+    }
+
+    /// <summary>"N of M measured" when the card banded over unmeasured metrics, else "" — the web fleet
+    /// card's wording and gate (<c>metric_count &gt; 0 &amp;&amp; measured_metric_count &lt;
+    /// metric_count</c>), over the card's own counts.</summary>
+    private static string MeasuredCoveragePhrase(ServerSummaryItem s) =>
+        s.MetricCount > 0 && s.MeasuredMetricCount < s.MetricCount
+            ? $"{s.MeasuredMetricCount} of {s.MetricCount} measured"
+            : "";
 
     /// <summary>
     /// A headline plus what the card can actually name — or the headline alone when it can name nothing.

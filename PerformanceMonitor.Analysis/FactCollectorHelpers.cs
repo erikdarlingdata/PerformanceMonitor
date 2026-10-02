@@ -22,6 +22,53 @@ namespace PerformanceMonitor.Analysis;
 public static class FactCollectorHelpers
 {
     /// <summary>
+    /// Builds the SERVER_HARDWARE fact from the newest <c>server_properties</c> row, or returns null when there is no CPU count to
+    /// carry (no fact at all: every reader of it takes it by key and treats an absent fact as "not collected").
+    ///
+    /// <para>Off an Azure SQL Database the fact is what it always was. ON one (<paramref name="hardwareIsTheHosts"/>), the stored
+    /// <c>hyperthread_ratio</c>, <c>physical_memory_mb</c>, <c>socket_count</c> and <c>cores_per_socket</c> describe the HOST, not
+    /// what the database is given (a 1-vCore database read 0 sockets, 32 cores per socket and about 912 GB), so the fact carries none
+    /// of them. It carries the vCores instead: <paramref name="cpuCount"/> is then the <c>vcore_count</c> parsed from the service
+    /// objective (not the stored <c>cpu_count</c>, the schedulers the database can see, which can be higher), and it is 0 for an
+    /// objective that names none (a DTU model or an elastic pool), which leaves no fact. The vCores ride twice: as <c>cpu_count</c>,
+    /// and as <c>vcore_count</c>, the figure the recommended MAXDOP is taken from where an Azure SQL Database has no
+    /// <c>cores_per_socket</c> to give (see <c>FactRemediation.MaxdopBasisFrom</c>). Nothing that reads the fact (the MAXDOP advice,
+    /// the config audit, the LPIM advisory) can compute from the host's topology or memory.</para>
+    ///
+    /// <para>Both apps call this, so the two collectors cannot drift in what the fact carries.</para>
+    /// </summary>
+    public static Fact? BuildServerHardwareFact(
+        AnalysisContext context, bool hardwareIsTheHosts, int cpuCount, int hyperthreadRatio, long physicalMemoryMb,
+        int socketCount, int coresPerSocket, bool hadrEnabled)
+    {
+        if (cpuCount == 0)
+            return null;
+
+        var metadata = new Dictionary<string, double> { ["cpu_count"] = cpuCount };
+        if (hardwareIsTheHosts)
+        {
+            metadata["vcore_count"] = cpuCount;
+        }
+        else
+        {
+            metadata["hyperthread_ratio"] = hyperthreadRatio;
+            metadata["physical_memory_mb"] = physicalMemoryMb;
+            metadata["socket_count"] = socketCount;
+            metadata["cores_per_socket"] = coresPerSocket;
+        }
+        metadata["hadr_enabled"] = hadrEnabled ? 1 : 0;
+
+        return new Fact
+        {
+            Source = "config",
+            Key = "SERVER_HARDWARE",
+            Value = cpuCount,
+            ServerId = context.ServerId,
+            Metadata = metadata
+        };
+    }
+
+    /// <summary>
     /// RAM floor below which LPIM-off is not worth flagging — on a small buffer pool the OS paging
     /// SQL out is not the practical risk it is on a large dedicated host.
     /// </summary>
@@ -32,12 +79,16 @@ public static class FactCollectorHelpers
     /// latest server_properties values, applying the noise-control gating both apps share:
     ///   • IFI: emit whenever the value is known (Value = enabled bit) — universally good advice.
     ///   • LPIM: emit only on non-Express editions with meaningful RAM (Value = enabled bit) — so a
-    ///     tiny instance never flags. When LPIM is ON the emitted Value scores 0 (harmless).
+    ///     tiny instance never flags. When LPIM is ON the emitted Value scores 0 (harmless). The RAM
+    ///     gate reads <c>server_properties.physical_memory_mb</c>, which on an Azure SQL Database is the
+    ///     HOST's, so <paramref name="hardwareIsTheHosts"/> leaves the advisory out there: the gate has no
+    ///     figure of the database's own to read.
     ///   • Dumps: emit whenever the count is known (Value = count) — the scorer flags count > 0.
     /// </summary>
     public static void EmitServerHealthFacts(
         AnalysisContext context, List<Fact> facts, string edition, long physicalMemMb,
-        bool? lockPagesInMemory, bool? instantFileInit, int? memoryDumpCount)
+        bool? lockPagesInMemory, bool? instantFileInit, int? memoryDumpCount,
+        bool hardwareIsTheHosts = false)
     {
         var isExpress = edition.Contains("Express", StringComparison.OrdinalIgnoreCase);
 
@@ -56,7 +107,7 @@ public static class FactCollectorHelpers
             });
         }
 
-        if (lockPagesInMemory.HasValue && !isExpress && physicalMemMb >= LpimAdvisoryMinPhysicalMemoryMb)
+        if (lockPagesInMemory.HasValue && !isExpress && !hardwareIsTheHosts && physicalMemMb >= LpimAdvisoryMinPhysicalMemoryMb)
         {
             facts.Add(new Fact
             {
@@ -95,6 +146,13 @@ public static class FactCollectorHelpers
     ///   - LCK_M_RS_*, LCK_M_RIn_*, LCK_M_RX_* (serializable/repeatable read signal)
     ///   - SCH_M, SCH_S (schema locks — DDL/index operations)
     /// Individual constituent wait times are preserved in metadata as "{type}_ms" keys.
+    ///
+    /// <para>The grouped Value is the SUM of the constituents' Values, not a fresh division (#3538 A2).
+    /// Every wait fact in a pass is a fraction of the same denominator — the observed collection time
+    /// stamped on the context, or the nominal window in a collector that does not stamp one — so the
+    /// sum is exactly the grouped fraction, and this helper stays correct whichever denominator the
+    /// collector chose without having to know which. Dividing here by the nominal window again would
+    /// have quietly re-introduced the coverage-blind rate for the LCK and CXPACKET families only.</para>
     /// </summary>
     public static void GroupGeneralLockWaits(List<Fact> facts, AnalysisContext context)
     {
@@ -105,7 +163,7 @@ public static class FactCollectorHelpers
         var totalWaitingTasks = generalLocks.Sum(f => f.Metadata.GetValueOrDefault("waiting_tasks_count"));
         var totalSignalMs = generalLocks.Sum(f => f.Metadata.GetValueOrDefault("signal_wait_time_ms"));
         var avgMsPerWait = totalWaitingTasks > 0 ? totalWaitTimeMs / totalWaitingTasks : 0;
-        var fractionOfPeriod = totalWaitTimeMs / context.PeriodDurationMs;
+        var fractionOfPeriod = generalLocks.Sum(f => f.Value);
 
         var metadata = new Dictionary<string, double>
         {
@@ -117,6 +175,7 @@ public static class FactCollectorHelpers
             ["period_duration_ms"] = context.PeriodDurationMs,
             ["lock_type_count"] = generalLocks.Count
         };
+        AddCoverageFraction(metadata, context);
 
         // Preserve individual constituent wait times for detailed analysis
         foreach (var lck in generalLocks)
@@ -150,7 +209,8 @@ public static class FactCollectorHelpers
         var totalWaitingTasks = cxWaits.Sum(f => f.Metadata.GetValueOrDefault("waiting_tasks_count"));
         var totalSignalMs = cxWaits.Sum(f => f.Metadata.GetValueOrDefault("signal_wait_time_ms"));
         var avgMsPerWait = totalWaitingTasks > 0 ? totalWaitTimeMs / totalWaitingTasks : 0;
-        var fractionOfPeriod = totalWaitTimeMs / context.PeriodDurationMs;
+        // Sum of the constituents' fractions — same denominator, see GroupGeneralLockWaits (#3538 A2).
+        var fractionOfPeriod = cxWaits.Sum(f => f.Value);
 
         var metadata = new Dictionary<string, double>
         {
@@ -161,6 +221,7 @@ public static class FactCollectorHelpers
             ["avg_ms_per_wait"] = avgMsPerWait,
             ["period_duration_ms"] = context.PeriodDurationMs
         };
+        AddCoverageFraction(metadata, context);
 
         // Preserve individual constituent wait times for detailed analysis
         foreach (var cx in cxWaits)
@@ -177,6 +238,22 @@ public static class FactCollectorHelpers
             ServerId = cxWaits[0].ServerId,
             Metadata = metadata
         });
+    }
+
+    /// <summary>
+    /// Stamps <c>coverage_fraction</c> — the observed share of the nominal window the fact's Value was
+    /// divided over — when the collector stamped one (#3538 A2). The wait facts carry it under this
+    /// name rather than as an <c>observed_duration_ms</c> because <c>FactAdvice.DominantLockMode</c>
+    /// reads every non-standard <c>*_ms</c> key on the grouped LCK fact as a lock MODE; a divisor named
+    /// in milliseconds would have been reported as "the largest single contributor". The divisor is
+    /// recoverable as <c>period_duration_ms × coverage_fraction</c>. Omitted, not zeroed, for a
+    /// collector that never stamped coverage (the frozen Dashboard twin), so its facts keep their
+    /// pre-#3538 shape exactly.
+    /// </summary>
+    public static void AddCoverageFraction(Dictionary<string, double> metadata, AnalysisContext context)
+    {
+        if (context.Coverage is { } coverage)
+            metadata["coverage_fraction"] = coverage.Fraction;
     }
 
     /// <summary>

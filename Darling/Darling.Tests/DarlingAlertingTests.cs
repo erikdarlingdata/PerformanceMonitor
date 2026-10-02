@@ -24,7 +24,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins Darling's Phase-5 slice-D pieces. Ungated: <see cref="DarlingAlertSettings"/> mirrors
-/// Lite's App defaults member-for-member (cpu 80/Total, blocking 1, deadlock 1, poison 500,
+/// Lite's App defaults member-for-member (cpu 80/Total, blocking 1, deadlock 1, poison 500 [retired as a threshold by #3539, still a default],
 /// LRQ 30 + the hardcoded 5/all-filters read shape, tempdb 80, low disk 10%/5GB, multiplier 3,
 /// lookback 60, cooldown 5, email cooldown 15) with Lite's load-time clamps, and the V3
 /// "alerting-stores" migration creates the three Lite-twin tables. Gated on DARLING_TEST_PG:
@@ -109,11 +109,12 @@ public sealed class DarlingAlertingTests
         config.Alerts.CpuMode = "banana";
         Assert.Equal(CpuAlertMode.TotalServer, new DarlingAlertSettings(config).CpuAlertMode);
 
-        /* SMTP enabled only when host + from + to are ALL set (no speculative flag). */
+        /* SMTP enabled once host + from are BOTH set (no speculative flag). The default recipient list is not
+           part of it (#4751): a notification route can supply the recipients on its own. */
         config.Smtp.Host = "mail.example.com";
         Assert.False(new DarlingAlertSettings(config).SmtpEnabled);
         config.Smtp.From = "darling@example.com";
-        Assert.False(new DarlingAlertSettings(config).SmtpEnabled);
+        Assert.True(new DarlingAlertSettings(config).SmtpEnabled);
         config.Smtp.To = "dba@example.com";
         Assert.True(new DarlingAlertSettings(config).SmtpEnabled);
 
@@ -199,6 +200,15 @@ public sealed class DarlingAlertingTests
             Outcomes.Add(outcome);
             await _inner.DeliverAsync(outcome, cancellationToken);
         }
+
+        /* #3580: REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store Parity). This wrapper
+           records and forwards, so it forwards the REPORT too — the inner deliverer here is the real
+           DarlingAlertDeliverer, and swallowing its answer would make the wrapper lie about it. */
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            Outcomes.Add(outcome);
+            return await _inner.DeliverAndReportAsync(outcome, cancellationToken);
+        }
     }
 
     [Fact]
@@ -232,9 +242,12 @@ public sealed class DarlingAlertingTests
                 1L, collectionTime, TestServerId, TestServerName, utcNow.AddMinutes(-4),
                 "process1", "UPDATE Users SET Reputation = 1", DeadlockGraphXml);
 
+            /* #3539 A4: 36,000 THREADPOOL waits averaging 20 ms — 720 s of worker starvation inside the
+               ten-minute window, over the shared Warning bar (600 s). The storm shape the retired
+               avg-ms-per-wait read could not fire on; a 20 ms average was invisible to it. */
             await InsertAsync(connection,
                 "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                1L, collectionTime, TestServerId, TestServerName, "THREADPOOL", 50L, 100000L);
+                1L, collectionTime, TestServerId, TestServerName, "THREADPOOL", 36000L, 720000L);
 
             AlertEngine BuildEngine(RecordingDeliverer deliverer, MuteRuleService muteRuleService)
             {
@@ -411,6 +424,72 @@ WHERE server_id = $1 AND metric_name = $2", connection))
             Assert.Equal(cashewSeed, unfiltered);
             /* A subject with no history at all seeds nothing — a restart must not invent a cooldown. */
             Assert.Null(missingSubjectSeed);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #3712: a row the corroboration gate routed to the digest must NOT seed the page cooldown. Design point 2
+    /// makes the escalation that arrives when a story gains corroboration a NEW firing, and a seed that read the
+    /// digest row would hold that page as a repeat of a page that never happened — across a restart, which is
+    /// exactly when the seed is consulted. The exclusion is on the DIGEST disposition, so a page row on the
+    /// same (server, metric) still seeds, and a digest row written AFTER a page row does not move the seed.
+    /// </summary>
+    [Fact]
+    public async Task PgAlertHistoryStore_GetLastAlertTimeAsync_ExcludesDigestRoutedRows_FromThePageSeed()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert-history test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteTestRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var historyStore = new PgAlertHistoryStore(postgres);
+            const string metricName = "Analysis: anomaly [3712abcd]";
+
+            /* Only a digest row: the page seed sees nothing, the same answer as no history at all. */
+            await historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                TestServerKey, TestServerName, metricName,
+                "1.8", "1.5", 1.8, 1.5,
+                Delivery: AlertDelivery.RoutedToDigest(),
+                Muted: false, DetailText: null, ContextJson: null));
+            Assert.Null(await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName));
+
+            /* A page row (no channel configured is still a paging candidate) seeds… */
+            await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
+            await historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                TestServerKey, TestServerName, metricName,
+                "1.8", "1.5", 1.8, 1.5,
+                Delivery: AlertDelivery.FromFanout(
+                    new EmailFanoutResult(AlertChannelOutcome.NotAttempted, null, AlertChannelOutcome.NotAttempted, null, AnyChannelConfigured: false),
+                    muted: false, trayChannelPresent: false),
+                Muted: false, DetailText: null, ContextJson: null));
+            var pageSeed = await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName);
+            Assert.NotNull(pageSeed);
+
+            /* …and a NEWER digest row does not move it. */
+            await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
+            await historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                TestServerKey, TestServerName, metricName,
+                "1.9", "1.5", 1.9, 1.5,
+                Delivery: AlertDelivery.RoutedToDigest(),
+                Muted: false, DetailText: null, ContextJson: null));
+            Assert.Equal(pageSeed, await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName));
 
             bodySucceeded = true;
         }

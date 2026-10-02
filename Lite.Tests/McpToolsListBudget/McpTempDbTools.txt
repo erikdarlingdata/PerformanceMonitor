@@ -1,0 +1,6 @@
+# McpTempDbTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_tempdb_trend 254
+param get_tempdb_trend.as_of 167
+param get_tempdb_trend.bucket_minutes 55
+param get_tempdb_trend.hours_back 29
+param get_tempdb_trend.server_name 28

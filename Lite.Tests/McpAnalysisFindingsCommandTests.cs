@@ -10,9 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -251,6 +253,181 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
         Assert.Equal(
             single.GetProperty("first_seen").GetString(),
             single.GetProperty("last_seen").GetString());
+    }
+
+    /// <summary>
+    /// #3538 A6: every finding carries <c>confidence_basis</c> beside <c>confidence</c>, and the basis is
+    /// derived from the row's own shape at read time — the store has no version column, so a row
+    /// persisted under the pre-change path-shape formula (a lone symptom at 1.0) is recognised by its
+    /// VALUE and labelled as such, while a corroboration-derived value names the formula, and the pileup
+    /// detector's by-construction 1.0 is named by its root key rather than called legacy. Pinned through
+    /// Lite's OWN tool method and serializer (the Darling twin's equivalent lives in the gated e2e) so a
+    /// dropped projection field is caught in a default CI lane.
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFindings_PublishesConfidenceBasis_LabellingLegacyRowsByTheirShape()
+    {
+        var store = new FindingStore(_duckDb);
+        var analysisTime = DateTime.UtcNow;
+        var context = new AnalysisContext
+        {
+            ServerId = _serverId,
+            ServerName = "TestServer",
+            TimeRangeStart = analysisTime.AddHours(-4),
+            TimeRangeEnd = analysisTime
+        };
+
+        /* A pre-#3538 row: lone symptom, confidence 1.0 — the legacy formula's signature. */
+        var legacy = MakeFinding(
+            findingId: 930001, analysisTime, severity: 0.72,
+            rootFactKey: "SCH_M", storyPathHash: "basis_legacy_hash", remediation: null);
+        legacy.Confidence = 1.0;
+        legacy.FactCount = 1;
+
+        /* A post-#3538 row: two-node chain, no catalogue — 0.20 + 0.80 × 0.5. */
+        var corroborated = MakeFinding(
+            findingId: 930002, analysisTime, severity: 1.14,
+            rootFactKey: "IO_WRITE_LATENCY_MS", storyPathHash: "basis_corroborated_hash", remediation: null);
+        corroborated.StoryPath = "IO_WRITE_LATENCY_MS → RUNNING_JOBS";
+        corroborated.FactCount = 2;
+        corroborated.Confidence = StoryConfidence.Compute(0, 0, 2);
+
+        /* The pileup detector's story: 1.0 by construction, one node — the shape a legacy row has, told
+           apart by its root key. */
+        var pileup = MakeFinding(
+            findingId: 930003, analysisTime, severity: 1.8,
+            rootFactKey: SameStatementPileupDetector.RootFactKey, storyPathHash: "basis_pileup_hash", remediation: null);
+        pileup.Confidence = 1.0;
+        pileup.FactCount = 1;
+
+        await store.InsertFindingsAsync(new List<AnalysisFinding> { legacy, corroborated, pileup }, context);
+
+        // #4198: full_text, since this probes confidence_basis CONTENT (the composed sentence), not the
+        // response-budget preview every finding gets by default.
+        var json = await McpAnalysisTools.GetAnalysisFindings(
+            new AnalysisService(_duckDb), _serverManager, "TestServer", 24, full_text: true);
+
+        using var doc = JsonDocument.Parse(json);
+        var findings = doc.RootElement.GetProperty("findings").EnumerateArray().ToList();
+        Assert.Equal(3, findings.Count);
+        Assert.All(findings, f => Assert.True(f.TryGetProperty("confidence_basis", out _),
+            "every finding must expose confidence_basis beside confidence"));
+
+        var legacyOut = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "basis_legacy_hash");
+        Assert.Equal(1.0, legacyOut.GetProperty("confidence").GetDouble());
+        Assert.StartsWith("path-shape (pre-#3538)", legacyOut.GetProperty("confidence_basis").GetString(), StringComparison.Ordinal);
+
+        var corroboratedOut = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "basis_corroborated_hash");
+        Assert.Equal(0.6, corroboratedOut.GetProperty("confidence").GetDouble());
+        var basis = corroboratedOut.GetProperty("confidence_basis").GetString()!;
+        Assert.StartsWith("corroboration (#3538)", basis, StringComparison.Ordinal);
+        Assert.Contains("2-node story path", basis, StringComparison.Ordinal);
+
+        var pileupOut = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "basis_pileup_hash");
+        Assert.StartsWith("detector-measured", pileupOut.GetProperty("confidence_basis").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4198: this tool's own response-budget pin, Lite twin of
+    /// <c>DarlingMcpAnalysisFindingsBudgetLiveTests</c> — see that class for the 66,838-byte production
+    /// measurement this was sized from. Plants 30 distinct chains with realistic-length advice prose and a
+    /// mix of remediation shapes, and asserts the default call (limit 18) stays under
+    /// <see cref="McpResponseBudget.DefaultBytes"/> while <c>limit: 30, full_text: true</c> returns every
+    /// chain with confidence_basis/advice untruncated and remediation_command (never previewed) intact.
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFindings_Default_StaysUnderResponseBudget_WithThirtyDistinctChains()
+    {
+        var store = new FindingStore(_duckDb);
+        var analysisTime = DateTime.UtcNow;
+        var context = new AnalysisContext
+        {
+            ServerId = _serverId,
+            ServerName = "TestServer",
+            TimeRangeStart = analysisTime.AddHours(-4),
+            TimeRangeEnd = analysisTime
+        };
+
+        const string investigation =
+            "Checked wait_stats, query_stats and the current plan cache for corroborating evidence: the fired " +
+            "symptom alone is a weak signal, but this chain matched additional amplifier checks (blocking " +
+            "chains, memory grant pressure and recent plan changes on the same object) within the same " +
+            "analysis window, which is what raises the confidence score above the lone-symptom floor.";
+        const string remediationProse =
+            "Start with the least invasive change and re-measure before going further: confirm the finding is " +
+            "still current, check for an obvious root cause, and only then apply the suggested fix below. " +
+            "Re-run analyze_server after the change to confirm the story cleared rather than assuming it did.";
+
+        var planted = new List<AnalysisFinding>();
+        for (var i = 0; i < 30; i++)
+        {
+            RemediationAction? remediation = (i % 3) switch
+            {
+                0 => new RemediationAction("DB_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
+                    ServerConfigTargets: new[] { new ServerConfigTarget(ServerConfigSetting.Maxdop, 0, 8) }),
+                1 => new RemediationAction("MISSING_INDEX", "set", Array.Empty<ForcePlanTarget>(),
+                    MissingIndexTargets: new[] { new MissingIndexTarget(
+                        "dbo.Posts", 83.2,
+                        $"CREATE NONCLUSTERED INDEX [ix_Posts_OwnerUserId_{i}] ON [dbo].[Posts] ([OwnerUserId], [PostTypeId]) " +
+                        "INCLUDE ([Score], [ViewCount], [CreationDate], [LastActivityDate], [Title]) WITH (ONLINE = ON, SORT_IN_TEMPDB = ON);") }),
+                _ => null,
+            };
+            planted.Add(new AnalysisFinding
+            {
+                FindingId = 940000 + i,
+                AnalysisTime = analysisTime.AddMinutes(i),
+                ServerId = _serverId,
+                ServerName = "TestServer",
+                TimeRangeStart = analysisTime.AddHours(-4),
+                TimeRangeEnd = analysisTime,
+                Severity = 0.72,
+                Confidence = 0.55,
+                Category = "waits",
+                StoryPath = $"HIGH_CPU → PLAN_REGRESSION_{i}",
+                StoryPathHash = $"AF4198_HASH_{i}",
+                StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock($"High CPU with a regressed plan, chain {i}", investigation, remediationProse)),
+                RootFactKey = "HIGH_CPU",
+                RootFactValue = 92.5,
+                LeafFactKey = "PLAN_REGRESSION",
+                LeafFactValue = 4.1,
+                FactCount = 2,
+                IncidentId = $"AF4198_INCIDENT_{i}",
+                Remediation = remediation
+            });
+        }
+        await store.InsertFindingsAsync(planted, context);
+
+        var defaultJson = await McpAnalysisTools.GetAnalysisFindings(new AnalysisService(_duckDb), _serverManager, "TestServer", 24);
+        var defaultBytes = Encoding.UTF8.GetByteCount(defaultJson);
+        using (var doc = JsonDocument.Parse(defaultJson))
+        {
+            var root = doc.RootElement;
+            Assert.Equal(18, root.GetProperty("finding_count").GetInt32());
+            Assert.Equal(30, root.GetProperty("total_finding_count").GetInt32());
+            Assert.True(root.GetProperty("findings_truncated").GetBoolean());
+            var findings = root.GetProperty("findings").EnumerateArray().ToList();
+            Assert.All(findings, f => Assert.True(f.GetProperty("confidence_basis_truncated").GetBoolean()));
+            /* remediation_command is NEVER previewed, even at default. */
+            Assert.Contains(findings, f =>
+                f.TryGetProperty("remediation_command", out var rc) && rc.ValueKind == JsonValueKind.String
+                && rc.GetString()!.Contains("CREATE NONCLUSTERED INDEX", StringComparison.Ordinal));
+        }
+
+        Assert.True(defaultBytes < McpResponseBudget.DefaultBytes,
+            $"get_analysis_findings' default call is {defaultBytes:N0} bytes over 30 planted chains, at or over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+
+        var fullJson = await McpAnalysisTools.GetAnalysisFindings(new AnalysisService(_duckDb), _serverManager, "TestServer", 24, limit: 30, full_text: true);
+        using (var fullDoc = JsonDocument.Parse(fullJson))
+        {
+            var fullRoot = fullDoc.RootElement;
+            Assert.Equal(30, fullRoot.GetProperty("finding_count").GetInt32());
+            Assert.False(fullRoot.GetProperty("findings_truncated").GetBoolean());
+            Assert.All(fullRoot.GetProperty("findings").EnumerateArray(), f =>
+            {
+                Assert.False(f.GetProperty("confidence_basis_truncated").GetBoolean());
+                Assert.False(f.GetProperty("advice_truncated").GetBoolean());
+            });
+        }
     }
 
     private AnalysisFinding MakeFinding(

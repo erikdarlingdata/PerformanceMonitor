@@ -33,7 +33,7 @@ namespace Darling.Tests;
 public sealed class ViewerSessionStatsSqlTests
 {
     [Fact]
-    public void SessionStatsSql_ReadsSessionSummaryView_BothSidesWindow_OrderedOldestFirst()
+    public void SessionStatsSql_ReadsSessionSummaryView_BothSidesWindow_ThenBucketed_OrderedOldestBucketFirst()
     {
         var sql = ViewerDataService.SessionStatsSql;
 
@@ -44,7 +44,11 @@ public sealed class ViewerSessionStatsSqlTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
+
+        /* #4234/#4349: bucketed — the outer read joins agg + latest on bucket_start and orders by
+         * the bucket, not by raw collection_time. */
+        Assert.Contains("AS bucket_start", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY agg.bucket_start", sql, StringComparison.Ordinal);
     }
 
     [Fact]

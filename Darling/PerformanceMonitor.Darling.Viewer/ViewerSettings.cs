@@ -115,6 +115,17 @@ public sealed class ViewerConfigLocation
 /// </summary>
 public sealed class ViewerSettings
 {
+    /// <summary>
+    /// #4535: the last successfully loaded darling.json's <see cref="AnalyzerConfig"/>, so every
+    /// window that constructs its own <c>PlanViewerControl</c> (the main window's tabs, and the
+    /// procedure/query-stats/query-store/wait history popouts) can set the control's
+    /// <c>AnalyzerConfig</c> property without threading a settings reference through each call site.
+    /// <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/> until the first load
+    /// completes (matches <c>MainWindow</c>'s own pre-load state: no analyzer section applies yet).
+    /// </summary>
+    public static PerformanceMonitor.PlanAnalysis.AnalyzerConfig CurrentAnalyzerConfig { get; private set; } =
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
+
     private static readonly JsonSerializerOptions s_jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -137,6 +148,17 @@ public sealed class ViewerSettings
     private const string AdminCredentialFileName = "pg-admin-credential.dpapi";
     private const string ViewerCredentialFileName = "pg-viewer-credential.dpapi";
     private const string ManagedSearchPath = "collect,config,public";
+
+    /// <summary>
+    /// The viewer's own store connection's <c>ApplicationName</c> (#4479) — the twin, under the same
+    /// sliver rule as the role/credential constants above, of the service's
+    /// <c>DarlingManagedPostgres.WebApplicationName</c>. NOT the same string: the web dashboard host's
+    /// STORE pool (which the service opens on its own, unattended, as part of the running service) and
+    /// this desktop app opening its own connection from the operator's machine are different backends in
+    /// <c>pg_stat_activity</c>, and #4442 only named the former. Pinned equal to the service's constant
+    /// only where the two are meant to agree — nowhere yet, since this is the viewer's own surface.
+    /// </summary>
+    public const string ApplicationName = "PerformanceMonitorDarling-Viewer";
 
     /// <summary>
     /// The viewer seat's connection-pool ceiling (#1566), named rather than left a literal in the
@@ -188,12 +210,22 @@ public sealed class ViewerSettings
     /// parse branch can produce settings whose certificate still hangs off the process working directory.
     /// Null (the string-only <see cref="Parse(string)"/> overload) leaves the string alone.
     /// </param>
-    private ViewerSettings(string connectionString, bool managed, string? configDirectory)
+    private ViewerSettings(string connectionString, bool managed, string? configDirectory, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         ConfiguredConnectionString = connectionString;
         ConnectionString = ViewerCertificateAnchor.Anchor(connectionString, configDirectory);
         Managed = managed;
+        AnalyzerConfig = analyzerConfig ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
+        CurrentAnalyzerConfig = AnalyzerConfig;
     }
+
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule config, read from darling.json's optional "analyzer"
+    /// section — the same section the service reads (<see cref="PerformanceMonitor.Darling.Service.DarlingConfig.Analyzer"/>,
+    /// via <see cref="PerformanceMonitor.PlanAnalysis.ConfigLoader.Parse"/>). Never <c>null</c>; a missing
+    /// or malformed section is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>.
+    /// </summary>
+    public PerformanceMonitor.PlanAnalysis.AnalyzerConfig AnalyzerConfig { get; }
 
     /// <param name="explicitPath">A path handed on the command line; wins outright.</param>
     /// <param name="baseDirectory">The viewer binary's directory; null means AppContext.BaseDirectory (tests pass a temp directory).</param>
@@ -278,10 +310,11 @@ public sealed class ViewerSettings
     public static ViewerSettings Parse(string json, string? configDirectory)
     {
         var config = JsonSerializer.Deserialize<ConfigDto>(json, s_jsonOptions);
+        var analyzerConfig = config?.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
 
         if (config?.Postgres?.Managed == true)
         {
-            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres), managed: true, configDirectory);
+            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres), managed: true, configDirectory, analyzerConfig);
         }
 
         var connectionString = config?.Postgres?.ConnectionString;
@@ -290,7 +323,7 @@ public sealed class ViewerSettings
             throw new InvalidDataException("darling.json has no postgres.connectionString (and postgres.managed is not true).");
         }
 
-        return new ViewerSettings(connectionString, managed: false, configDirectory);
+        return new ViewerSettings(connectionString, managed: false, configDirectory, analyzerConfig);
     }
 
     /// <summary>
@@ -357,6 +390,7 @@ public sealed class ViewerSettings
             Password = password,
             Database = "darling",
             SearchPath = ManagedSearchPath,
+            ApplicationName = ApplicationName,
             /* #1566: bound the viewer seat's backend count (the service's pools were capped at 24 in
                #1559, but this string was built independently and rode Npgsql's default of 100). Every
                pooled connection is a live postgres.exe on Windows; a read-only UI seat polling on 30/60s
@@ -436,6 +470,10 @@ public sealed class ViewerSettings
     {
         [JsonPropertyName("postgres")]
         public PostgresDto? Postgres { get; set; }
+
+        /// <summary>#4535: the same "analyzer" section shape the service reads (darling.json).</summary>
+        [JsonPropertyName("analyzer")]
+        public PerformanceMonitor.PlanAnalysis.AnalyzerConfig? Analyzer { get; set; }
     }
 
     private sealed class PostgresDto

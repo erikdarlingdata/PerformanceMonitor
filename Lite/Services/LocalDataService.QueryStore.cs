@@ -28,7 +28,7 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -146,23 +146,37 @@ ORDER BY bucket";
                 SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
                 TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
                 TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                /* Ordinal 4 (total_reads) is the LOGICAL-reads aggregate — TotalReads and TotalLogicalReads
+                   are deliberate aliases of it, same as the query-stats slicer. Physical reads ride
+                   separately at ordinal 6; this reader shipped without that mapping, so the physical
+                   column was computed and then dropped on the floor (#3530). */
                 TotalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
                 TotalWrites = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 TotalLogicalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TotalPhysicalReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
                 Value = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
             });
         }
         return items;
     }
 
-    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        var executionTypeParameterIndex = 5 + dbValues.Count;
+        var executionTypeClause = string.IsNullOrWhiteSpace(executionType)
+            ? ""
+            : $" AND execution_type_desc = ${executionTypeParameterIndex}";
+        /* After the outcome's slot when there is one: DuckDB binds $N by position, in the order added below. */
+        var moduleParameterIndex = executionTypeParameterIndex + (string.IsNullOrWhiteSpace(executionType) ? 0 : 1);
+        var moduleClause = string.IsNullOrWhiteSpace(moduleName)
+            ? ""
+            : $" AND module_name = ${moduleParameterIndex}";
 
         command.CommandText = @"
 WITH deduped AS (
@@ -191,7 +205,7 @@ WITH deduped AS (
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + @"
+    AND   collection_time <= $3" + dbClause + executionTypeClause + @"
 ),
 ranked AS (
     SELECT
@@ -207,6 +221,12 @@ ranked AS (
            and the grid is unchanged. */
         replica_role,
         MAX(module_name) AS module_name,
+        /* A GROUP BY key, like replica_role above: Query Store keeps Regular, Aborted and Exception executions
+           of one plan in separate runtime-stats rows, and MAX() here showed Regular for any mixed group (it
+           sorts last) while the averages blended a timeout's duration into the plan's normal cost. One row per
+           outcome instead. The execution_type filter is applied in deduped, before the ROW_NUMBER: the column
+           is in the partition, so filtering first cannot change which row wins. */
+        execution_type_desc,
         SUM(execution_count) AS total_executions,
         AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) / 1000.0 AS avg_duration_ms,
         AVG(CAST(avg_cpu_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_cpu_time_ms,
@@ -220,7 +240,6 @@ ranked AS (
         MAX(query_plan_hash) AS query_plan_hash,
         MAX(CASE WHEN is_forced_plan THEN TRUE ELSE FALSE END) AS is_forced_plan,
         MAX(plan_forcing_type) AS plan_forcing_type,
-        MAX(execution_type_desc) AS execution_type_desc,
         MIN(first_execution_time) AS first_execution_time,
         AVG(CAST(avg_clr_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_clr_time_ms,
         AVG(CAST(avg_tempdb_space_used AS DOUBLE PRECISION)) AS avg_tempdb_space_used,
@@ -254,8 +273,8 @@ ranked AS (
         MIN(CAST(min_num_physical_io_reads AS DOUBLE PRECISION)) AS min_num_physical_io_reads,
         MAX(CAST(max_num_physical_io_reads AS DOUBLE PRECISION)) AS max_num_physical_io_reads
     FROM deduped
-    WHERE rn = 1
-    GROUP BY database_name, query_id, plan_id, query_hash, replica_role
+    WHERE rn = 1" + moduleClause + @"
+    GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC
     LIMIT $4 + 5
 )
@@ -335,6 +354,10 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = top });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        if (!string.IsNullOrWhiteSpace(executionType))
+            command.Parameters.Add(new DuckDBParameter { Value = executionType });
+        if (!string.IsNullOrWhiteSpace(moduleName))
+            command.Parameters.Add(new DuckDBParameter { Value = moduleName });
 
         var items = new List<QueryStoreRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -569,7 +592,7 @@ FULL OUTER JOIN baseline_period b
     /// One point on the Query Store slicer overlay: the interval's per-interval totals, placed at the hour
     /// the work RAN.
     /// </summary>
-    public sealed record QueryStoreItemTimelinePoint(DateTime PointTime, double CpuMs, double ElapsedMs, double Reads);
+    public sealed record QueryStoreItemTimelinePoint(DateTime PointTime, double CpuMs, double ElapsedMs, double Reads, double PhysicalReads);
 
     /// <summary>
     /// The selected Query Store row's execution timeline, for the grid→slicer overlay (#683).
@@ -595,7 +618,7 @@ FULL OUTER JOIN baseline_period b
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH deduped AS
@@ -618,6 +641,7 @@ WITH deduped AS
         avg_cpu_time_us,
         avg_duration_us,
         avg_logical_io_reads,
+        avg_physical_io_reads,
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -646,7 +670,8 @@ SELECT
     point_time,
     COALESCE(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count, 0) / 1000.0 AS cpu_ms,
     COALESCE(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count, 0) / 1000.0 AS elapsed_ms,
-    COALESCE(CAST(avg_logical_io_reads AS DOUBLE PRECISION) * execution_count, 0) AS reads
+    COALESCE(CAST(avg_logical_io_reads AS DOUBLE PRECISION) * execution_count, 0) AS reads,
+    COALESCE(CAST(avg_physical_io_reads AS DOUBLE PRECISION) * execution_count, 0) AS physical_reads
 FROM deduped
 WHERE rn = 1
 -- Ordered on the axis the points are PLOTTED on: a series whose x-values are not monotonic draws as a
@@ -668,7 +693,8 @@ ORDER BY point_time";
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
                 reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3))));
+                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4))));
         }
         return points;
     }
@@ -690,7 +716,7 @@ ORDER BY point_time";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -889,13 +915,24 @@ OPTION(RECOMPILE);',
     /// no row is counted twice and none is dropped. A window spanning the upgrade therefore renders a
     /// corrected recent section and an un-corrected older one, each behaving as its own generation
     /// always did, and the mixture resolves itself as the pre-upgrade rows age out of retention.</para>
+    /// <para>The first placed interval in the window carries NULL rates, not 0 — see
+    /// <see cref="GetQueryDurationTrendAsync"/> (#3541 A12) — unless it stored its end (below).</para>
+    /// <para><b>The rate is over the interval's own length (#4765).</b> The three delta-family trends divide by
+    /// the interval the store HAS (<c>sample_interval_seconds</c>, #3653 A11), and a Query Store interval now
+    /// stores its END (<c>interval_end_time_utc</c>, v66) beside its start, so this read divides by end minus
+    /// start. It used to divide by the seconds since the previous STORED interval; Query Store stores no row
+    /// for an interval with no executions, so an interval that followed a quiet one divided by the gap plus its
+    /// own length and read too low. Only a row that stored no end (collected before v66) keeps the LAG over
+    /// <c>point_time</c>, the way the delta families fall back to it for a collection that predates
+    /// <c>sample_interval_seconds</c> (#3540); such a first point in the window stays unrated. Darling's Query
+    /// Store reads carry the same expression.</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -907,12 +944,14 @@ WITH placed AS
     -- collapses this series and placement alone leaves it inflated.
     SELECT
         interval_start_time_utc AS point_time,
+        interval_end_time_utc,
         execution_count,
         avg_duration_us
     FROM
     (
         SELECT
             interval_start_time_utc,
+            interval_end_time_utc,
             execution_count,
             avg_duration_us,
             ROW_NUMBER() OVER
@@ -941,9 +980,12 @@ WITH placed AS
     -- Arm 2 — rows collected before tier 2. No interval start exists and none can be reconstructed, so
     -- these keep the pre-tier-2 treatment byte for byte: un-deduped, placed at collection_time, still
     -- overstating. The split is on IS NULL / IS NOT NULL, so the two arms partition the rows exactly —
-    -- nothing is counted twice and nothing is dropped.
+    -- nothing is counted twice and nothing is dropped. The end is stated NULL: a row placed at its
+    -- collection time is not measured from an interval start, so it keeps the gap to the previous point
+    -- below (#4765).
     SELECT
         collection_time AS point_time,
+        CAST(NULL AS TIMESTAMP) AS interval_end_time_utc,
         execution_count,
         avg_duration_us
     FROM v_query_store_stats
@@ -958,14 +1000,20 @@ raw AS
         point_time,
         SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
         SUM(execution_count) AS total_executions,
-        extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+        -- #4765: the interval's OWN length, its stored end less its start. Query Store stores no row for an
+        -- interval with no executions, so the gap to the previous stored point is the interval's length PLUS
+        -- every quiet interval before it. Only a point whose rows stored no end (collected before the column)
+        -- keeps that gap, as sample_interval_seconds does (#3540).
+        COALESCE(extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))), extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))) AS interval_seconds
     FROM placed
     GROUP BY point_time
 )
 SELECT
     point_time AS collection_time,
-    CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds ELSE 0 END AS duration_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+    /* No ELSE: the first placed interval of a row with no stored end has a NULL LAG and an unknowable rate, so
+       the rate is NULL — never a fabricated 0 (#3541 A12). */
+    CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
+    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM raw
 ORDER BY point_time";
 
@@ -979,12 +1027,13 @@ ORDER BY point_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* NULL stays NULL (#3541 A12) — see GetQueryDurationTrendAsync. */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
-                Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
-                ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
+                Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
+                ExecutionCount = reader.IsDBNull(2) ? null : (long)ToDouble(reader.GetValue(2)),
+                ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2))
             });
         }
         return items;
@@ -1137,7 +1186,24 @@ public class QueryStoreHistoryRow
 
     public double TotalDurationMs => ExecutionCount * AvgDurationMs;
     public double TotalCpuMs => ExecutionCount * AvgCpuTimeMs;
-    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string FirstExecutionTimeLocal => ServerTimeHelper.FormatServerTime(FirstExecutionTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
+
+    /// <summary>
+    /// The zone the window that shows this row draws its chart in (#4766): its opening tab's picker zone. The window
+    /// sets it on every row it loads, so <see cref="CollectionTimeLocal"/>, <see cref="FirstExecutionTimeLocal"/> and
+    /// <see cref="LastExecutionTimeLocal"/> are worded in that zone and not in the zone
+    /// of whichever server's tab is selected when the row is drawn (a history window stays open after another tab is
+    /// selected). Null on a row no window set, such as the server tab's own grids, which render only while their tab
+    /// is selected: the text is then <see cref="ServerTimeHelper.FormatServerTime(DateTime?, string)"/>'s. Not bound
+    /// in any grid.
+    /// </summary>
+    public Func<TimeZoneInfo>? Zone { get; set; }
+    public string CollectionTimeLocal => Worded(Zone, CollectionTime);
+    public string FirstExecutionTimeLocal => Worded(Zone, FirstExecutionTime);
+    public string LastExecutionTimeLocal => Worded(Zone, LastExecutionTime);
+
+    /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
+    private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>
+        naiveUtc is not { } instant ? ""
+        : zone is null ? ServerTimeHelper.FormatServerTime(instant)
+        : DisplayZone.Format(instant, zone(), "yyyy-MM-dd HH:mm:ss");
 }

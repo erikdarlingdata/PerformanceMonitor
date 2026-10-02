@@ -18,28 +18,55 @@ namespace PerformanceMonitor.Darling.Analysis;
 
 public sealed partial class PgDrillDownCollector
 {
+    /// <summary>The window's newest deadlocks by when they HAPPENED, the order and window the deadlock grid uses, so the
+    /// exemplars are events the fact counted. $4 is the <see cref="PerformanceMonitor.Darling.Storage.EventWindowFloor"/>
+    /// for $2 (no upper bound on <c>collection_time</c>: a late-collected deadlock is still in the window).</summary>
     public const string TopDeadlocksSql = @"
 SELECT collection_time, deadlock_time, victim_process_id,
        LEFT(victim_sql_text, 500) AS victim_sql,
        deadlock_graph_xml
 FROM v_deadlocks
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-ORDER BY collection_time DESC
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3 AND collection_time >= $4
+ORDER BY deadlock_time DESC
 LIMIT 3";
+
+    /// <summary>The same read for an Azure SQL Database master target: the databases monitored as their
+    /// own targets are applied by the reader. $4 is the list; windowed and ordered on the event time with the floor in $5, as
+    /// <see cref="TopDeadlocksSql"/>. A deadlock is left out only when EVERY process is in one of them, which only the graph shows, so the
+    /// read takes a wider page than it shows and the reader applies the rule.</summary>
+    public const string TopDeadlocksSkippingSeparateSql = @"
+SELECT collection_time, deadlock_time, victim_process_id,
+       LEFT(victim_sql_text, 500) AS victim_sql,
+       deadlock_graph_xml,
+       CASE WHEN database_name IS NOT NULL
+             AND lower(database_name) <> 'master'
+             AND NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))
+            THEN 1 ELSE 0 END AS outside
+FROM v_deadlocks
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3 AND collection_time >= $5
+ORDER BY deadlock_time DESC
+LIMIT 200";
 
     private async Task CollectTopDeadlocks(AnalysisFinding finding, AnalysisContext context)
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(TopDeadlocksSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
+        var separate = context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
+        using var cmd = new NpgsqlCommand(separate is null ? TopDeadlocksSql : TopDeadlocksSkippingSeparateSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        if (separate is not null) cmd.Parameters.AddWithValue(separate);
+        cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-        while (await reader.ReadAsync(context.CancellationToken))
+        while (items.Count < 3 && await reader.ReadAsync(context.CancellationToken))
         {
+            /* A row whose database is outside the list cannot be all-in: it shows without its graph being parsed. */
+            if (separate is not null && reader.GetInt32(5) == 0
+                && PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(reader.IsDBNull(4) ? null : reader.GetString(4), separate))
+                continue;
             /* #1140: parse the involved objects from the graph for the dedup fingerprint + a readable
                Objects field. The raw graph XML is NOT surfaced (it would bloat the alert detail). */
             var objects = DeadlockObjectExtractor.FromGraphXml(reader.IsDBNull(4) ? null : reader.GetString(4));
@@ -59,7 +86,9 @@ LIMIT 3";
 
     /* BPR + always-on DMV blocking snapshot, so the flat top-blocking list isn't empty when the
        blocked-process-report XE captured nothing (AWS RDS). Worst-by-wait surfaces regardless of
-       source; on a box with both, each may contribute (this is a top-5 list, not a count). */
+       source; on a box with both, each may contribute (this is a top-5 list, not a count).
+       The BPR arm windows on event_time with the EventWindowFloor ($4) beside it, like the fact it explains;
+       the DMV arm stays on collection_time because a snapshot's event_time IS its collection time. */
     public const string TopBlockingChainsSql = @"
 SELECT collection_time, database_name, blocked_spid, blocking_spid,
        wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object
@@ -71,7 +100,7 @@ FROM
            LEFT(blocking_sql_text, 500) AS blocking_sql,
            contentious_object
     FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4
 
     UNION ALL
 
@@ -86,14 +115,49 @@ FROM
 ORDER BY wait_time_ms DESC
 LIMIT 5";
 
+    /// <summary>The same read for an Azure SQL Database master target: $4 is the databases monitored as their own
+    /// targets, whose pairs are skipped on both arms (a NULL database still counts), and $5 the event-window floor
+    /// (the list keeps its scoped number, so the floor is $4 in <see cref="TopBlockingChainsSql"/> and $5 here).</summary>
+    public const string TopBlockingChainsSkippingSeparateSql = @"
+SELECT collection_time, database_name, blocked_spid, blocking_spid,
+       wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object
+FROM
+(
+    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+           wait_time_ms, lock_mode,
+           LEFT(blocked_sql_text, 500) AS blocked_sql,
+           LEFT(blocking_sql_text, 500) AS blocking_sql,
+           contentious_object
+    FROM v_blocked_process_reports
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $5
+    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))
+
+    UNION ALL
+
+    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+           wait_time_ms, lock_mode,
+           LEFT(blocked_sql_text, 500) AS blocked_sql,
+           LEFT(blocking_sql_text, 500) AS blocking_sql,
+           contentious_object
+    FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))
+) AS combined
+ORDER BY wait_time_ms DESC
+LIMIT 5";
+
     private async Task CollectTopBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(TopBlockingChainsSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
+        var separate = context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
+        using var cmd = new NpgsqlCommand(separate is null ? TopBlockingChainsSql : TopBlockingChainsSkippingSeparateSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
+        if (separate is not null) cmd.Parameters.AddWithValue(separate);
+        cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -130,6 +194,7 @@ SELECT
     {PgBlockingPairRowQuery.TrailingIdentityColumns}
 FROM v_blocked_process_reports
 WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+AND   collection_time >= $4
 {PgBlockingPairRowQuery.SpidFilter}
 ORDER BY event_time DESC
 LIMIT 5000";
@@ -147,6 +212,7 @@ LIMIT 5000";
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
         var rows = new List<BlockingPairRow>();
         using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
@@ -177,6 +243,12 @@ LIMIT 5000";
             },
             rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
             context.CancellationToken);
+
+        /* A master target leaves out the pairs of databases monitored as their own targets, the same rule
+           the BLOCKING_CHAIN fact applies, so the evidence does not show chains the other targets own. */
+        if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separateDatabases)
+            rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
+                && separateDatabases.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
 
         if (rows.Count == 0) return;
 

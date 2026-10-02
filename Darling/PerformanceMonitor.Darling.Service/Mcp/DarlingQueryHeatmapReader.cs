@@ -30,12 +30,15 @@ public enum HeatmapMetric
 /// <summary>
 /// The service-side read behind get_query_heatmap (#2484) — the viewer's
 /// <c>ViewerDataService.BuildQueryHeatmapSql</c>, which is itself the Postgres port of Lite's DuckDB
-/// heatmap. Copied VERBATIM apart from the two things a desktop chart does not need and an MCP read does:
+/// heatmap. Copied VERBATIM apart from the things a desktop chart does not need and an MCP read does:
 /// the bin width is a bound parameter instead of the literal <c>INTERVAL '5 minutes'</c> (defaulting to
-/// that same 5), and the tail carries <c>ORDER BY time_bin DESC</c> + <c>LIMIT</c> so a capped call keeps
-/// the most RECENT bins rather than the oldest ones. Every other clause — the magnitude CASE, the
-/// <c>delta_execution_count &gt; 0</c> and <c>metric IS NOT NULL</c> filters, the <c>LEFT(query_text, 120)</c>
-/// preview, the top-1 window that replaced DuckDB's <c>ARG_MAX</c> — is the viewer's.
+/// that same 5), the tail carries <c>ORDER BY time_bin DESC</c> + <c>LIMIT</c> so a capped call keeps
+/// the most RECENT bins rather than the oldest ones, and the <c>LEFT(query_text, 120)</c> preview width is
+/// itself a bound parameter rather than a literal 120 (#4198: at 500 cells the FIXED per-cell fields alone —
+/// before one byte of query text — already ran well past the shared response budget, so the cell cap had to
+/// fall regardless of the text width chosen). Every other clause — the magnitude CASE, the
+/// <c>delta_execution_count &gt; 0</c> and <c>metric IS NOT NULL</c> filters, the top-1 window that replaced
+/// DuckDB's <c>ARG_MAX</c> — is the viewer's.
 ///
 /// <para><b>The bucketing is the viewer's, deliberately.</b> The whole point of the web/MCP surface is that
 /// it answers the same question the desktop does, so a browser and a desktop pointed at the same server over
@@ -57,6 +60,15 @@ public enum HeatmapMetric
 /// nobody looked, and an existence probe on the data is the right denominator (see
 /// <see cref="HeatmapCoverageSql"/>).</para>
 ///
+/// <para>#4233: the preview is resolved for the rn = 1 row of each cell only, not every row in the
+/// window. <c>base</c> reads <c>query_stats</c> directly rather than <c>v_query_stats</c> (#1767's
+/// payload-resolving view), so no row pays for the <c>query_text_dim</c> join or a truncation it will
+/// never be shown - the raw inline <c>query_text</c> (pre-#1767 rows only) and the digest ride the
+/// window sorts in its place. The outer rn = 1 filter runs before the SELECT list, so
+/// <c>LEFT(COALESCE(query_text, (SELECT ... FROM query_text_dim ...)), $7)</c> - the same resolution
+/// <c>v_query_stats</c> would have performed, at the same #4198 bound width - executes only for the
+/// one row per cell the caller sees.</para>
+///
 /// <para>The SQL is built by a public method so the tests can pin the dialect and the shape without a live
 /// Postgres.</para>
 /// </summary>
@@ -73,13 +85,17 @@ internal static class DarlingQueryHeatmapReader
     public const int BucketCount = 7;
 
     /// <summary>One heatmap cell: the query count in a (time bin x magnitude bucket) plus the most-executed
-    /// query in it, which is what the desktop shows on hover.</summary>
+    /// query in it, which is what the desktop shows on hover. <see cref="TopQueryTextTruncated"/> is true
+    /// when <see cref="TopQueryText"/> is a preview shorter than the stored statement (#4198) — the caller's
+    /// only way to tell "this is the whole thing" from "this is cut off" without re-asking with full text.
+    /// </summary>
     public sealed record HeatmapCellRow(
         DateTime TimeBucket,
         int BucketIndex,
         long QueryCount,
         string TopQueryHash,
-        string TopQueryText);
+        string TopQueryText,
+        bool TopQueryTextTruncated);
 
     /// <summary>The viewer's per-metric magnitude labels, verbatim. Duration and CPU are milliseconds per
     /// execution; the rest are plain counts, so the two families label the same seven buckets differently.
@@ -157,7 +173,10 @@ internal static class DarlingQueryHeatmapReader
 
     /// <summary>
     /// The viewer's heatmap read for one metric. $1 server_id, $2 window start, $3 window end, $4 database
-    /// filter (text[] or NULL), $5 bin width in minutes, $6 cell cap.
+    /// filter (text[] or NULL), $5 bin width in minutes, $6 cell cap, $7 preview width in characters
+    /// (#4198's <c>GetQueryHeatmapAsync</c> binds this to one more than the caller's preview length, the
+    /// same over-fetch-by-one idiom the cell cap already uses, so the extra character IS the truncation
+    /// signal instead of a second round trip or a computed <c>LENGTH(query_text)</c> column).
     /// <para>Ordered newest bin first ONLY so the cap keeps the recent end of the window; the tool re-sorts
     /// chronologically before returning. The viewer needs no cap and orders ascending.</para>
     /// </summary>
@@ -170,9 +189,10 @@ internal static class DarlingQueryHeatmapReader
                     date_bin(($5::integer * INTERVAL '1 minute'), collection_time, TIMESTAMP '1970-01-01 00:00:00') AS time_bin,
                     {metricExpr} AS metric_value,
                     query_hash,
-                    LEFT(query_text, 120) AS query_preview,
+                    query_text,
+                    query_text_digest,
                     delta_execution_count
-                FROM v_query_stats
+                FROM query_stats
                 WHERE server_id = $1
                 AND   collection_time >= $2
                 AND   collection_time <= $3
@@ -193,7 +213,8 @@ internal static class DarlingQueryHeatmapReader
                         ELSE 6
                     END AS bucket_index,
                     query_hash,
-                    query_preview,
+                    query_text,
+                    query_text_digest,
                     delta_execution_count
                 FROM base
             ),
@@ -202,7 +223,8 @@ internal static class DarlingQueryHeatmapReader
                     time_bin,
                     bucket_index,
                     query_hash,
-                    query_preview,
+                    query_text,
+                    query_text_digest,
                     COUNT(*) OVER (PARTITION BY time_bin, bucket_index) AS query_count,
                     ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC) AS rn
                 FROM binned
@@ -212,7 +234,7 @@ internal static class DarlingQueryHeatmapReader
                 bucket_index,
                 query_count,
                 query_hash AS top_query_hash,
-                query_preview AS top_query_text
+                LEFT(COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)), $7) AS top_query_text
             FROM ranked
             WHERE rn = 1
             ORDER BY time_bin DESC, bucket_index
@@ -228,29 +250,34 @@ internal static class DarlingQueryHeatmapReader
     /// writes a row every cycle for whatever sits in the plan cache, so a server with zero rows in its whole
     /// history is a server nobody collected — unlike blocking or deadlocks, where zero rows is the healthy
     /// answer and a data probe would send someone to fix collection that works.</para>
-    /// <para>Probes <c>v_query_stats</c>, the same relation the read itself uses, so the probe cannot
-    /// disagree with the read about which rows exist. $1 server_id, $2 window start, $3 window end.</para>
+    /// <para>Probes <c>query_stats</c> directly (#4233 moved the read itself off <c>v_query_stats</c>
+    /// onto the fact table; the view's payload-dimension joins are LEFT JOINs, so they never drop a
+    /// fact row, and existence here is identical either way - this keeps the probe's FROM matching the
+    /// read's literally rather than by that argument). $1 server_id, $2 window start, $3 window end.</para>
     /// </summary>
     public const string HeatmapCoverageSql = """
         SELECT
             EXISTS (
                 SELECT 1
-                FROM v_query_stats
+                FROM query_stats
                 WHERE server_id = $1
             ) AS has_any,
             EXISTS (
                 SELECT 1
-                FROM v_query_stats
+                FROM query_stats
                 WHERE server_id = $1
                 AND   collection_time >= $2
                 AND   collection_time <= $3
             ) AS has_in_window
         """;
 
-    /// <summary>Runs <see cref="BuildQueryHeatmapSql"/>. Rows come back newest bin first.</summary>
+    /// <summary>Runs <see cref="BuildQueryHeatmapSql"/>. Rows come back newest bin first. Fetches
+    /// <paramref name="previewLength"/> + 1 characters of query text so the extra character — present only
+    /// when the stored statement ran past the preview — is the truncation signal (#4198); trimmed back to
+    /// <paramref name="previewLength"/> before it reaches <see cref="HeatmapCellRow.TopQueryText"/>.</summary>
     public static async Task<List<HeatmapCellRow>> GetQueryHeatmapAsync(
         NpgsqlDataSource postgres, int serverId, HeatmapMetric metric, DateTime startUtc, DateTime endUtc,
-        string? databaseName, int bucketMinutes, int limit, CancellationToken cancellationToken = default)
+        string? databaseName, int bucketMinutes, int limit, int previewLength, CancellationToken cancellationToken = default)
     {
         var rows = new List<HeatmapCellRow>();
         await using var command = postgres.CreateCommand(BuildQueryHeatmapSql(metric));
@@ -263,16 +290,20 @@ internal static class DarlingQueryHeatmapReader
         });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = previewLength + 1 });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var fetchedText = reader.IsDBNull(4) ? "" : reader.GetString(4);
+            var truncated = fetchedText.Length > previewLength;
             rows.Add(new HeatmapCellRow(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
                 reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
-                reader.IsDBNull(4) ? "" : reader.GetString(4)));
+                truncated ? fetchedText[..previewLength] : fetchedText,
+                truncated));
         }
 
         return rows;

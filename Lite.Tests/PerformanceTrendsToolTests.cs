@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -91,6 +92,27 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         var quietText = quietRoot.GetProperty("message").GetString()!;
         Assert.Contains("widen", quietText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("EVER", quietText, StringComparison.Ordinal);
+
+        /* #3541 A2: both empty envelopes carry the disclosure block Darling's twins carry, so a caller reads
+           `source` without first checking whether it got data. Lite has one tier, so it is always raw, and an
+           empty answer narrows nothing: the requested start stands and nothing is called truncated. #3897: the
+           empty answer names the width the data would have been served at — ten minutes over a day, one over
+           an hour. */
+        foreach (var envelope in new[] { neverRoot, quietRoot })
+        {
+            AssertDisclosureBlock(envelope);
+            Assert.Equal("raw", envelope.GetProperty("source").GetString());
+            Assert.False(envelope.GetProperty("window_truncated").GetBoolean());
+            Assert.StartsWith("Each point summarizes the collections in one ", envelope.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
+        }
+
+        Assert.Equal("10 minutes", neverRoot.GetProperty("bucket").GetString());
+        Assert.Equal(10, neverRoot.GetProperty("bucket_minutes").GetInt32());
+        Assert.Equal("1 minute", quietRoot.GetProperty("bucket").GetString());
+        Assert.Equal(1, quietRoot.GetProperty("bucket_minutes").GetInt32());
+
+        Assert.Equal(1.0, quietRoot.GetProperty("effective_hours_back").GetDouble());
+        Assert.Equal(24.0, neverRoot.GetProperty("effective_hours_back").GetDouble());
     }
 
     [Fact]
@@ -107,6 +129,11 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
             message that led with the collector would send the reader to the wrong place.
         */
         Assert.Contains("Query Store may be OFF", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+        /* #3541 A2: the Query Store sibling's grain word is the interval placement it uses. */
+        AssertDisclosureBlock(root);
+        Assert.Equal("raw", root.GetProperty("source").GetString());
+        Assert.Equal("per-interval", root.GetProperty("bucket").GetString());
     }
 
     [Fact]
@@ -114,14 +141,37 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
     {
         var service = new LocalDataService(_duckDb);
 
-        /* Two snapshots five minutes apart, two executions between them: 0.0067/sec. */
+        /* Two snapshots five minutes apart, two executions between them: 0.0067/sec. The rows carry no
+           sample_interval_seconds (the pre-v61 shape), so the read LAG-derives the interval — and the FIRST
+           snapshot, which has nothing to LAG against, is UNRATED: two points come back, the first with null
+           rates (#3541 A12 — kept rather than dropped, so a lone collection is never an empty series and
+           effective_start is the first collection the store held; never the fabricated 0.0 it was before
+           #3540), the envelope counting it and saying why, and the second carrying the rate under test. */
         var baseNow = Truncate(DateTime.UtcNow);
         await SeedProcedureAsync(baseNow.AddMinutes(-20), executions: 0, elapsedUs: 0);
         await SeedProcedureAsync(baseNow.AddMinutes(-15), executions: 2, elapsedUs: 600_000);
 
         var hit = await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4);
-        var trend = JsonDocument.Parse(hit).RootElement.GetProperty("trend");
+        var root = JsonDocument.Parse(hit).RootElement;
+        var trend = root.GetProperty("trend");
         Assert.Equal(2, trend.GetArrayLength());
+
+        /* #3541 A12: the first snapshot has nothing to difference against, so its rates are null — not the
+           0 this series used to fabricate — and the envelope counts it and says why. Same keys as Darling.
+           The note names BOTH unrated reasons (#3653: the stored-0 restart beside this first-in-window LAG
+           case) in one sentence shared byte-for-byte with Darling (McpMissMessageParityPinTests); the two
+           fragments below are the reason this seed exercises and the reason it does not, so a rewording
+           that drops either is caught here rather than only in the parity pin. */
+        var first = trend[0];
+        Assert.Equal(JsonValueKind.Null, first.GetProperty("value").ValueKind);
+        Assert.Equal(JsonValueKind.Null, first.GetProperty("elapsed_ms_per_second").ValueKind);
+        Assert.Equal(JsonValueKind.Null, first.GetProperty("execution_count").ValueKind);
+        Assert.Equal(JsonValueKind.Null, first.GetProperty("executions_per_second").ValueKind);
+        Assert.Equal(1, root.GetProperty("unrated_points").GetInt32());
+        Assert.Equal(1, root.GetProperty("unrated_collections").GetInt32());
+        var unratedNote = root.GetProperty("unrated_note").GetString()!;
+        Assert.Contains("rated against the PREVIOUS one and has none inside the window", unratedNote, StringComparison.Ordinal);
+        Assert.Contains("STORED sample interval is 0", unratedNote, StringComparison.Ordinal);
 
         var second = trend[1];
         Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
@@ -131,6 +181,55 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.True(
             second.GetProperty("executions_per_second").GetDouble() > 0,
             "executions_per_second must survive a rate below 1/sec that execution_count truncates to zero");
+
+        /* #3541 A2: the unit is in the field name now — same quantity as `value`, kept beside it on the
+           execution_count precedent above. */
+        Assert.Equal(second.GetProperty("value").GetDouble(), second.GetProperty("elapsed_ms_per_second").GetDouble());
+
+        /*
+            #3541 A2: the disclosure block, with Lite's truth. One tier (raw), and the series the store held
+            begins at the 20-minutes-ago seed — the unrated first collection, kept since #3541 A12 exactly so
+            effective_start can say so — and because that head sits three-plus hours past the requested 4-hour
+            start, `window_truncated` is true. The label describes the data, not the request; that is the whole
+            contract. #3897: four hours are two-minute buckets, the note says a point is a bucket, and
+            effective_start is the COLLECTION, not the bucket boundary the point is stamped at.
+        */
+        AssertDisclosureBlock(root);
+        Assert.Equal("raw", root.GetProperty("source").GetString());
+        Assert.Equal("2 minutes", root.GetProperty("bucket").GetString());
+        Assert.Contains("one 2-minute bucket", root.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
+        Assert.False(root.TryGetProperty("routing", out _));
+        Assert.Equal(baseNow.AddMinutes(-20).ToString("o"), root.GetProperty("effective_start").GetString());
+        Assert.True(root.GetProperty("window_truncated").GetBoolean());
+        Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 0.2, 0.5);
+    }
+
+    /// <summary>
+    /// The head sits inside the slack: a series that begins where it was asked to is NOT truncated, and
+    /// effective_start still names the first point. Pinned against the ninety-minute boundary Darling's
+    /// <c>DarlingTrendReader.TruncationSlack</c> carries — neither test project can reference the other's
+    /// assembly, so the value is pinned twice rather than compared once.
+    /// </summary>
+    [Fact]
+    public async Task ASeriesThatBeginsWhereItWasAskedTo_IsNotTruncated()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(90), McpQueryTools.TruncationSlack);
+
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+        await SeedProcedureAsync(baseNow.AddMinutes(-55), executions: 1, elapsedUs: 100_000);
+        await SeedProcedureAsync(baseNow.AddMinutes(-50), executions: 2, elapsedUs: 200_000);
+
+        var root = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 1)).RootElement;
+
+        /* Two points: these pre-v61 rows LAG-derive, and the prior-less first snapshot is present but UNRATED
+           (#3541 A12), so the head is the 55-minutes-ago collection — inside the slack, the property under
+           test — and effective_start names the first collection the store held rather than the first rate. */
+        Assert.Equal(2, root.GetProperty("trend").GetArrayLength());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("trend")[0].GetProperty("value").ValueKind);
+        Assert.False(root.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(baseNow.AddMinutes(-55).ToString("o"), root.GetProperty("effective_start").GetString());
+        Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 0.8, 1.0);
     }
 
     [Fact]
@@ -155,6 +254,8 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         var trend = JsonDocument.Parse(hit).RootElement.GetProperty("trend");
 
         Assert.Equal(2, trend.GetArrayLength());
+        /* The first interval has no predecessor: null rates, not 0 (#3541 A12). */
+        Assert.Equal(JsonValueKind.Null, trend[0].GetProperty("executions_per_second").ValueKind);
 
         /*
             The surviving snapshot is the FINAL one (25 executions over the 3600 seconds between the two
@@ -162,6 +263,29 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
             still return two points and would still look right.
         */
         Assert.Equal(25d / 3600d, trend[1].GetProperty("executions_per_second").GetDouble(), 6);
+
+        /* #3541 A2: the Query Store sibling's grain is the interval placement, and its head is the first
+           interval start — three hours back in a six-hour window, so truncated. */
+        var root = JsonDocument.Parse(hit).RootElement;
+        AssertDisclosureBlock(root);
+        Assert.Equal("per-interval", root.GetProperty("bucket").GetString());
+        /* #3897: not time-bucketed, so no width, and each point is its own interval — no peak finer than it. */
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("bucket_minutes").ValueKind);
+        Assert.Equal(JsonValueKind.Null, trend[1].GetProperty("peak_elapsed_ms_per_second").ValueKind);
+        Assert.Equal(trend[0].GetProperty("time").GetString(), root.GetProperty("effective_start").GetString());
+        Assert.True(root.GetProperty("window_truncated").GetBoolean());
+    }
+
+    /// <summary>The keys every Performance-Trends envelope carries — six since #3541 A2, seven since #3897 added
+    /// <c>bucket_minutes</c> beside its word — in the order they are written: the same order on the data path, the
+    /// empty path, and on Darling.</summary>
+    private static void AssertDisclosureBlock(JsonElement envelope)
+    {
+        var keys = envelope.EnumerateObject().Select(p => p.Name).ToArray();
+        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "bucket", "bucket_minutes", "aggregate_note" };
+        var at = Array.IndexOf(keys, "source");
+        Assert.True(at >= 0, "the envelope has no `source`");
+        Assert.Equal(block, keys.Skip(at).Take(block.Length).ToArray());
     }
 
     private static DateTime Truncate(DateTime value) =>

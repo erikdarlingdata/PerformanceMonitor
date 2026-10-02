@@ -136,6 +136,88 @@ public sealed class MigrationDataMovingRungCensusPins
             + "most one row per DATABASE per server. The eight ADD COLUMNs in the same rung are not "
             + "findings and that is structural rather than measured - none of them carries a DEFAULT at "
             + "all, volatile or literal, so each is a catalog-only entry that rewrites no row"),
+        new(
+            137,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... CHECK on config.config_alert_settings (created V17) validates every "
+            + "existing row, so it does touch pre-existing data - but config_alert_settings is the "
+            + "SINGLETON alert-settings row (id = 1, CHECK (id = 1)), so the scan it forces is over one row "
+            + "and spends none of the budget: V62's shape on the sibling control-plane singleton, for the "
+            + "same reason (an enumeration column whose only clamp is the constraint). The eight ADD COLUMNs "
+            + "in the same rung are not findings and that is structural rather than measured - none carries "
+            + "a DEFAULT, so each is a catalog-only entry that rewrites no row, on a compressed hypertable "
+            + "(query_store_health) and two plain tables alike; and the CREATE OR REPLACE VIEW is a catalog "
+            + "write over no rows"),
+        new(
+            142,
+            SetsTheFloor: false,
+            "CREATE INDEX (server_id, collection_time DESC) over the populated collect.index_object_stats "
+            + "hypertable (#4196) - V104's shape (index-only rung over a real collected series) rather than "
+            + "V113's (a small bounded control table), but costed rather than assumed like V113 was: measured "
+            + "on a rig seeded at real fleet-daily scale (43 servers, ~12,000 rows each in the busiest chunk, "
+            + "matching the issue's own measured rows/server/day), the build took 228 ms end to end across "
+            + "three chunks, one compressed. index_object_stats is the DAILY object-stats collector - "
+            + "roughly half a million rows/day fleet-wide per the issue's own measurement, against "
+            + "pg_deadlocks' event-driven-but-unbounded series - and CompressAfterDays leaves only about one "
+            + "day's chunk uncompressed at migration time, with every older chunk's decompressed relation an "
+            + "empty shell (a compressed chunk's CREATE INDEX cost is one 8 KB page, not the rows inside it - "
+            + "PgTableTuning's ForcePlanFailuresIndexName finding measured the same property). A store many "
+            + "times today's size would still build in low seconds, nowhere near a MigrationCommandTimeoutSeconds "
+            + "window, so this rung does not move the multiple"),
+        new(
+            147,
+            SetsTheFloor: false,
+            "ALTER COLUMN ... SET DEFAULT plus a narrow-predicate UPDATE on config.config_service (#4442) - "
+            + "V62's and V137's shape on the same control-plane singleton (id = 1, CHECK (id = 1)), so the "
+            + "UPDATE's WHERE compose_statement_timeout_seconds = 15 touches at most one row and spends none "
+            + "of the budget"),
+        new(
+            150,
+            SetsTheFloor: false,
+            "two CREATE INDEXes over populated hypertables (#4469, #4477): idx_collection_log_watermark on "
+            + "collect.collection_log (created V2) and idx_job_history_server_run on collect.job_history "
+            + "(created V1/V24). V104's and V142's case rather than V22's/V23's/V39's: real collected series, "
+            + "but costed rather than assumed. Measured on a rig shaped like the field (43 servers, ~40 "
+            + "collectors, 15M collection_log rows, 9 of 11 chunks compressed): the collection_log index built "
+            + "in ~0.94 s. A separate rig for job_history (43 servers, ~2.7M rows over 4 days, 3 of 5 chunks "
+            + "compressed) built its index in well under a second too. CompressAfterDays leaves only the "
+            + "newest day or two of either table uncompressed at migration time, with every older chunk's "
+            + "decompressed relation an empty shell (one 8 KB page per compressed chunk, V142's own measured "
+            + "property) - so a store many times today's size would still build both in low seconds, nowhere "
+            + "near a MigrationCommandTimeoutSeconds window, and this rung does not move the multiple"),
+        new(
+            153,
+            SetsTheFloor: false,
+            "CREATE INDEX over the populated collect.query_store_interval_latest table (created V143) "
+            + "(#4608, split into its own rung #4615) - real collected series, V104's/V142's/V150's shape "
+            + "rather than a same-rung freebie, but a plain (uncompressed) heap rather than a compressed "
+            + "hypertable, so every row is a real page rather than V142's/V150's empty-shell compressed "
+            + "chunks. Measured on a rig seeded at generate_series scale with the same maintenance_work_mem "
+            + "(2047 MB) and max_parallel_maintenance_workers (2) the field store runs: the index built in "
+            + "1.41 s at 5M rows, 3.61 s at 10M, and 8.13 s at 20M rows (near-linear, ~0.28-0.41 ms/row) with "
+            + "max_parallel_maintenance_workers = 2, versus roughly 2.3x slower serial (0 workers) on the same "
+            + "20M-row seed. query_store_interval_latest is kept to 15 days by the purge this rung speeds up, "
+            + "and the field store measured 18.3M rows at that horizon on 2026-09-28 - a full-horizon store "
+            + "(roughly 6-7x today's rows, ~110M) projects to roughly 20-25 s with parallel workers, nowhere "
+            + "near the 280 s MigrationCommandTimeoutSeconds window this rung's own SET LOCAL lock_timeout "
+            + "leaves. V143 is new in 3.9.0 (v3.8.0 was schema 125), so every store upgrading from a released "
+            + "version creates the table EMPTY in this same migrate run and builds the index instantly; only "
+            + "a nightly-build store already holds rows, and only for the few days since it picked up V143 - "
+            + "nowhere near the horizon in practice"),
+        new(
+            154,
+            SetsTheFloor: false,
+            "CREATE INDEX over the populated collect.query_store_interval_wide table (created V145) (#4608, "
+            + "split into its own rung #4615) - V153's twin, same shape and same measurement basis, on the "
+            + "table this rung purges/reads instead: the index built in 3.52 s at 9M rows with "
+            + "max_parallel_maintenance_workers = 2. query_store_interval_wide is kept to 9 days, and the "
+            + "field store measured 9.3M rows at that horizon on 2026-09-28 - a full-horizon store (roughly "
+            + "6-7x today's rows, ~65M) projects to roughly 25-30 s with parallel workers, nowhere near the "
+            + "280 s MigrationCommandTimeoutSeconds window this rung's own SET LOCAL lock_timeout leaves. "
+            + "V145 is new in 3.9.0 (v3.8.0 was schema 125), so every store upgrading from a released version "
+            + "creates the table EMPTY in this same migrate run and builds the index instantly; only a "
+            + "nightly-build store already holds rows, and only for the few days since it picked up V145 - "
+            + "nowhere near the horizon in practice"),
     ];
 
     /// <summary>
@@ -411,16 +493,34 @@ public sealed class MigrationDataMovingRungCensusPins
     }
 
     /// <summary>
+    /// The one rung today whose dynamic SQL is an accepted, hand-costed exception — the scan cannot read
+    /// past <c>EXECUTE format(...)</c> or a parameterised <c>EXECUTE '...' USING ...</c>, so this name has
+    /// to be kept in sync by hand rather than derived. V152's <c>DO $$ ... $$</c> (#4503) uses both forms
+    /// against the catalog only: <c>EXECUTE '...' INTO ... USING v_view</c> reads a continuous aggregate's
+    /// materialization name from <c>timescaledb_information</c>, and <c>EXECUTE format('DROP INDEX IF
+    /// EXISTS %s', ...)</c> then drops a catalog index resolved via <c>pg_index</c>/<c>pg_attribute</c>
+    /// (metadata, not collected rows) — the opposite direction from every shape <see cref="s_declared"/>
+    /// tracks (which are all index BUILDS or DML over pre-existing rows), so it gets no
+    /// <see cref="s_declared"/> entry at all: there is no data-moving cost to declare, only a scan blind
+    /// spot to name.
+    /// </summary>
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152];
+
+    /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has none — 109 rungs, and the only <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's
-    /// trigger definitions. Pinned so the blind spot stays theoretical: a rung that builds DDL with
-    /// <c>format()</c> needs to be costed by hand, and this is where that gets said.
+    /// ladder has one exempted rung today (V152, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// its <c>DO $$ ... EXECUTE format(...)</c> drops a catalog index rather than moving data) and
+    /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
+    /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
+    /// with <c>format()</c> needs to be costed by hand, added either to this exemption list (if it moves
+    /// no data) or to <see cref="s_declared"/> (if it does), and this is where that gets said.
     /// </summary>
     [Fact]
     public void TheLadderStillContainsNoDynamicSql()
     {
         var offenders = PgMigrations.Scripts
             .Where(m => s_dynamicSql.IsMatch(StripComments(m.Sql)))
+            .Where(m => !s_dynamicSqlExemptedRungs.Contains(m.Version))
             .Select(m => $"V{m.Version.ToString(CultureInfo.InvariantCulture)} ({m.Name})")
             .ToList();
 

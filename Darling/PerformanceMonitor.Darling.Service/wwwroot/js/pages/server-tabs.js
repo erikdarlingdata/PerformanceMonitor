@@ -39,9 +39,10 @@
  * touches innerHTML.
  */
 
-import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, windowFromHours } from "../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
+import { READ_FIELDS } from "../read-fields.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -122,6 +123,10 @@ function panelShell(title, subtitle, span = 2) {
  *
  * Each spec is an ordinary panel descriptor minus `read`/`params` — the same viz registry, the same three-kind
  * response mapping renderPanel does — so nothing about the seam changes except how many times the wire is used.
+ *
+ * The same kept-history rule as the descriptor loader, too (util.js readWithinKeptHistory): a read that keeps
+ * less history than the page's Range answers for the hours it keeps, every panel it feeds says so through
+ * keptWindowStrip, and a line spec is windowed over those hours rather than the Range.
  */
 function fanout(read, params, specs) {
   for (const spec of specs) {
@@ -131,11 +136,11 @@ function fanout(read, params, specs) {
   }
   const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2));
   (async () => {
-    const res = await readTool(read, params);
+    const res = await readToolWithinKeptHistory(read, params);
     specs.forEach((spec, i) => {
       const body = shells[i].body;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
            hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
@@ -147,9 +152,9 @@ function fanout(read, params, specs) {
            all pages of a population - the aggregate one beside a capped row list is exactly the pairing
            where only one of them needs saying so. */
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
-        const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: params && params.hours });
+        const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: res.keptHours || (params && params.hours) });
 
-        mount(body, typeof note === "string" && note.trim() ? [noticeStrip(note), rendered] : rendered);
+        mount(body, [keptWindowStrip(res), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -170,12 +175,12 @@ function fanout(read, params, specs) {
 export function waitsPanel(server, ctx) {
   const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the wait you pick");
   (async () => {
-    const res = await readTool("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
+    const res = await readToolWithinKeptHistory("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
     const waits = res.data.waits || [];
-    const parts = [VIZ.table(res.data, { rowsKey: "waits", columns: WAIT_COLUMNS })];
+    const parts = [keptWindowStrip(res), VIZ.table(res.data, { rowsKey: "waits", columns: WAIT_COLUMNS })];
 
     if (waits.length) {
       const chartSlot = el("div", {}, [loadingStrip()]);
@@ -192,15 +197,38 @@ export function waitsPanel(server, ctx) {
   return panel;
 }
 
+/**
+ * #3653 A5: the baseline-discontinuity sentences a trend payload's trailing `discontinuities[]` carries, one
+ * per entry, ready for a noticeStrip beside the chart — the web twin of the dashed marker the desktop viewers
+ * draw. The identity-epoch carriers (#3694, #3705) forget a server's delta baselines when the target restarts,
+ * fails over, is renamed or has its statistics reset, so a delta-rate trend across that instant shows a step
+ * that is the instrument re-baselining, not the workload; without the sentence a reader takes the step for a
+ * change in load. The wording is the shared `baseline discontinuity at {time} ({reason})` both desktop viewers
+ * use (BaselineDiscontinuities.Sentence), with the payload's detail after a dash so the browser reader sees
+ * what moved without opening the JSON; `at` is the store's naive-UTC instant and localTime renders it on the
+ * reader's clock like every other timestamp on this page. Empty array in, empty array out — a fully
+ * continuous window adds no strip. Every value reaches the DOM through noticeStrip's text path (R4).
+ */
+function discontinuityNotes(data) {
+  const list = data && Array.isArray(data.discontinuities) ? data.discontinuities : [];
+  return list.map(
+    (d) => "baseline discontinuity at " + localTime(d.at) + " (" + d.reason + ")" + (d.detail ? " — " + d.detail : "")
+  );
+}
+
 async function drawWaitTrend(slot, server, ctx, waitType) {
   mount(slot, loadingStrip());
-  const trend = await readTool("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours });
+  const trend = await readToolWithinKeptHistory("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours });
   if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : readErrorStrip(trend.message));
+    mount(slot, trend.kind === "empty" ? [keptWindowStrip(trend), emptyStrip(trend.message)] : readErrorStrip(trend.message));
     return;
   }
-  mount(
-    slot,
+  /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the chart whose step a restart or
+     failover most directly manufactures; the payload's discontinuities render as a notice above it. */
+  const notes = discontinuityNotes(trend.data);
+  mount(slot, [
+    keptWindowStrip(trend),
+    notes.length ? noticeStrip(notes.join(" ")) : null,
     renderLineChart({
       points: trend.data.trend || [],
       xKey: "time",
@@ -210,10 +238,11 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
       ],
       formatValue: (v) => Math.round(v).toLocaleString(),
       unit: "ms/s",
-      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
-      ...windowFromHours(ctx.hours),
-    })
-  );
+      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
+         read spans the hours it answered for. */
+      ...windowFromHours(trend.keptHours || ctx.hours),
+    }),
+  ]);
 }
 
 /**
@@ -244,7 +273,7 @@ export function perfmonPanel(server, ctx) {
     const chartSlot = el("div", {}, [loadingStrip()]);
     const picker = pickerControl("Counter", names, (name) => drawPerfmonTrend(chartSlot, server, ctx, name));
     mount(body, [
-      VIZ.table(res.data, {
+      VIZ.table({ ...res.data, counters: perfmonRows(res.data.counters) }, {
         rowsKey: "counters",
         columns: PERFMON_COLUMNS,
         emptyText: "No perfmon counters in the latest snapshot.",
@@ -259,11 +288,12 @@ export function perfmonPanel(server, ctx) {
 
 async function drawPerfmonTrend(slot, server, ctx, counterName) {
   mount(slot, loadingStrip());
-  const trend = await readTool("get_perfmon_trend", { server, counter_name: counterName, hours: ctx.hours });
+  const trend = await readToolWithinKeptHistory("get_perfmon_trend", { server, counter_name: counterName, hours: ctx.hours });
   if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
   if (trend.kind === "empty") {
     const hinted = trend.hints && Array.isArray(trend.hints.collected_counters) ? trend.hints.collected_counters : null;
     mount(slot, [
+      keptWindowStrip(trend),
       emptyStrip(trend.message),
       hinted && hinted.length
         ? el("div", { class: "muted", style: "margin-top:0.4rem", text: "Collected here: " + hinted.join(", ") })
@@ -271,20 +301,55 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
     ]);
     return;
   }
-  mount(
-    slot,
+  /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+  const notes = discontinuityNotes(trend.data);
+  mount(slot, [
+    keptWindowStrip(trend),
+    notes.length ? noticeStrip(notes.join(" ")) : null,
     renderLineChart({
       points: trend.data.trend || [],
       xKey: "time",
-      series: [
-        { key: "value", label: "Value", color: SERIES_COLORS[0] },
-        { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
-      ],
-      formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
-      ...windowFromHours(ctx.hours),
-    })
+      ...perfmonTrendLines(trend.data.trend || []),
+      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
+         read spans the hours it answered for. */
+      ...windowFromHours(trend.keptHours || ctx.hours),
+    }),
+  ]);
+}
+
+/* A rate counter's stored value is its running total since the counter started, not a rate. The Perfmon grid shows
+   such a row two ways: the per-second figure the server worked out for it (per_second, a key only a rate row
+   carries) under Per second, and the running total under Total since counter start. The header says what the
+   number is: the raw counter value, which counts from the counter's own start (an instance restart, or a
+   database's own restart for a per-database counter), not from when monitoring began.
+   The total stays whether or not a rate is known, because for a counter that seldom fires it is the only count
+   there is: a deadlock counter that has fired 37 times can read 0.0033 a second. Where no delta was knowable
+   (per_second is null: a first collection, a counter reset or a restart) the stored delta beside it is a stand-in
+   0, not a count, so that cell is left blank. A gauge's value is its reading and stays under Value, and so does any
+   other row's. */
+function perfmonRows(counters) {
+  return (counters || []).map((c) =>
+    c && "per_second" in c
+      ? { ...c, running_total: c.value, value: null, delta_value: c.per_second == null ? null : c.delta_value }
+      : c
   );
+}
+
+/* The trend chart's lines for the picked counter. A rate counter's points carry per_second, the figure the desktop
+   charts plot for it, and that is the one line: its value only climbs. Its axis and tooltip print through fmtRate,
+   so a small real rate never reads as 0. Every other counter keeps its value and delta lines and its own number
+   format, so a gauge still plots its reading. */
+function perfmonTrendLines(points) {
+  if (points.some((p) => p && "per_second" in p)) {
+    return { series: [{ key: "per_second", label: "Per second", color: SERIES_COLORS[0] }], unit: "/s", formatValue: fmtRate };
+  }
+  return {
+    series: [
+      { key: "value", label: "Value", color: SERIES_COLORS[0] },
+      { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
+    ],
+    formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+  };
 }
 
 /**
@@ -311,9 +376,9 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
 export function topQueriesPanel(server, ctx) {
   const { panel, body } = panelShell("Top Queries by CPU", ctx.label + ", with a per-collection trend for the query you pick");
   (async () => {
-    const res = await readTool("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
+    const res = await readToolWithinKeptHistory("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
     const queries = res.data.queries || [];
     const parts = [
@@ -325,6 +390,14 @@ export function topQueriesPanel(server, ctx) {
           "before it reports non-zero values.",
       }),
     ];
+    /* #4231: this composite calls VIZ.table directly rather than going through table()/renderPanel, so it
+       misses loadPanel's automatic noteKey handling (#3278) and has to render `truncation_note` itself —
+       same field, same meaning, as the plain table() panels below it on this page. */
+    if (typeof res.data.truncation_note === "string" && res.data.truncation_note.trim()) {
+      parts.unshift(noticeStrip(res.data.truncation_note));
+    }
+    const kept = keptWindowStrip(res);
+    if (kept) parts.unshift(kept);
 
     /* get_query_trend keys on both values, so a row carrying neither cannot be trended and is not offered.
        That is a real case rather than defensive coding: rows collected before a column existed read as null,
@@ -359,14 +432,14 @@ export function topQueriesPanel(server, ctx) {
 
 async function drawQueryTrend(slot, server, ctx, query) {
   mount(slot, loadingStrip());
-  const trend = await readTool("get_query_trend", {
+  const trend = await readToolWithinKeptHistory("get_query_trend", {
     server,
     query_hash: query.query_hash,
     database_name: query.database_name,
     hours: ctx.hours,
   });
   if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : readErrorStrip(trend.message));
+    mount(slot, trend.kind === "empty" ? [keptWindowStrip(trend), emptyStrip(trend.message)] : readErrorStrip(trend.message));
     return;
   }
 
@@ -376,7 +449,10 @@ async function drawQueryTrend(slot, server, ctx, query) {
      columns simply go blank, and a blank column reads as "nothing to see" rather than "not measured here". */
   const notes = [];
   if (trend.data.aggregate_note) notes.push(trend.data.aggregate_note);
-  if (trend.data.truncated) {
+  /* #3653 item 17: the window floor is `window_truncated` — the page dialect's `truncated` (a limit biting,
+     which this read has none of) is a different fact with the opposite remedy, and the two used to share a
+     spelling. Reading the old key here would silently drop this notice: undefined is falsy. */
+  if (trend.data.window_truncated) {
     notes.push(
       "History for this query starts " +
         trend.data.effective_hours_back +
@@ -385,8 +461,11 @@ async function drawQueryTrend(slot, server, ctx, query) {
         " the window asked for — earlier collections have aged out of the tier that answered."
     );
   }
+  /* #3653 A5: the payload's baseline discontinuities, beside the #2353 coverage notes above. */
+  notes.push(...discontinuityNotes(trend.data));
 
   mount(slot, [
+    keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
     renderLineChart({
       points: trend.data.trend || [],
@@ -398,8 +477,9 @@ async function drawQueryTrend(slot, server, ctx, query) {
       formatValue: (v) => Math.round(v).toLocaleString() + " ms",
       unit: "ms",
       /* #2802: axis spans the requested window (ctx.hours ending now). When the read is #2353-truncated the data
-         starts later than the window and plots toward the right; the truncation notice above already says so. */
-      ...windowFromHours(ctx.hours),
+         starts later than the window and plots toward the right; the truncation notice above already says so.
+         A narrowed read spans the hours it answered for. */
+      ...windowFromHours(trend.keptHours || ctx.hours),
     }),
     VIZ.table(trend.data, {
       rowsKey: "trend",
@@ -428,24 +508,126 @@ function pickerControl(label, options, onPick) {
   return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
 }
 
-/** File I/O latency: pivot the flat per-(time, database) trend into one read-latency series per database. */
+/**
+ * File I/O latency: pivot the flat trend into one read-latency series per line. #3897: a line is a (database, file
+ * type) pair — or the one "(other)" line pooling everything past the top five — so the label names both; before
+ * #3897 the read projected only the database, and nine tempdb files wrote over each other in this pivot.
+ */
 export function fileIoPanel(server, ctx) {
-  const { panel, body } = panelShell("File I/O Latency", "avg read latency per database, " + ctx.label);
+  const { panel, body } = panelShell("File I/O Latency", "avg read latency per database and file type, " + ctx.label);
   (async () => {
-    const res = await readTool("get_file_io_trend", { server, hours: ctx.hours });
+    const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
-    const { points, series } = pivot(res.data.trend || [], {
+    const rows = (res.data.trend || []).map((r) => ({
+      ...r,
+      line: r.database_name === r.file_type ? r.database_name : r.database_name + " " + r.file_type + (r.file_name ? " " + r.file_name : ""),
+    }));
+    const { points, series } = pivot(rows, {
       xKey: "time",
-      seriesKey: "database_name",
+      seriesKey: "line",
       valueKey: "avg_read_latency_ms",
     });
-    if (!series.length) return mount(body, emptyStrip("No file I/O samples in this window."));
-    /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. */
-    mount(body, renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(ctx.hours) }));
+    if (!series.length) return mount(body, [keptWindowStrip(res), emptyStrip("No file I/O samples in this window.")]);
+    /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+    const notes = discontinuityNotes(res.data);
+    /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. A
+       narrowed read spans the hours it answered for. */
+    mount(body, [
+      keptWindowStrip(res),
+      notes.length ? noticeStrip(notes.join(" ")) : null,
+      renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(res.keptHours || ctx.hours) }),
+    ]);
   })();
   return panel;
+}
+
+/**
+ * The Overview tab's two daily-summary panels, today's tile and the Daily Health Calendar (#2484), over ONE
+ * fetch of get_daily_summary_range (#3905).
+ *
+ * They used to be two reads: get_daily_summary for the tile and the range for the grid. On the largest
+ * production store that pair was 26 of the tab's 28 seconds, mostly for store-side reasons fixed in the
+ * statement and the coverage gate, but the tile's read also recomputed a day the range had just computed. The
+ * range already holds today: its last day is the anchor day, `to_date`, banded against the same clock off the
+ * same aggregate. So the tile is that row, and the store runs one statement per load instead of two. One
+ * figure can change, and the change makes the two panels agree: the tile's unique_queries for today is now
+ * the range's own count, which comes from the rollup tier's materialized hours when the month routes to a
+ * rollup (#3653 A6), where the single-day read counted raw. Before, the tile and the grid's last row could
+ * print different numbers for the same day on the same page. The row is matched on the server's `to_date`
+ * rather than on a date the page computes (R1). A day with nothing collected yet has no row, and the tile
+ * says so rather than rendering dashes.
+ *
+ * #3653 A6: a day the store's rollup tier never materialized for this server answers `unique_queries: null`
+ * (NOT 0 — the tier did not carry the day; nothing says the server ran no queries) and the read names every
+ * such day in `days_missing[]`. The cell renders that null as "not materialized" through DAILY_RANGE_COLUMNS,
+ * but one blank in one column of a thirty-row grid is easy to read past, so the read's list is rendered as ONE
+ * notice line above the rows. A composite rather than a table() descriptor because table()'s `noteKey` carries
+ * a server-authored STRING (#3278) and this disclosure is a server-authored LIST: the dates are the server's,
+ * the sentence around them is the page's, and no figure here is one the page derived (R1). The span is a fixed
+ * 30 days and says so, deliberately not ctx.hours — the page's range tops out well short of a month, and a
+ * calendar drawn over six hours is not a calendar.
+ */
+export function dailySummaryPanels(server) {
+  const tile = panelShell("Daily Summary", "today (UTC)");
+  const calendar = panelShell("Daily Health Calendar", "last 30 days (UTC)");
+  (async () => {
+    const res = await readTool("get_daily_summary_range", { server, days_back: 30 });
+    if (res.kind === "error") {
+      mount(tile.body, readErrorStrip(res.message));
+      return mount(calendar.body, readErrorStrip(res.message));
+    }
+    if (res.kind === "empty") {
+      /* The range's "empty" sentence is about the span and ends in MCP parameter advice (widen days_back, move
+         as_of); for today's tile the fact is simpler. "unavailable" (nothing ever collected) says the same thing
+         to both panels, so it is the server's sentence on both. */
+      mount(tile.body, emptyStrip(res.status === "empty" ? "Nothing has been collected for this server today (UTC)." : res.message));
+      return mount(calendar.body, emptyStrip(res.message));
+    }
+
+    /* Each panel renders on its own, the way fanout() guards its specs: a render fault in one says so in that
+       panel instead of leaving both on their loading strips. */
+    const data = res.data || {};
+    const days = Array.isArray(data.days) ? data.days : [];
+    renderInto(tile.body, () => {
+      const today = days.find((day) => day.summary_date === data.to_date);
+      return today
+        ? VIZ.stat(today, { stats: DAILY_STATS })
+        : emptyStrip("Nothing has been collected for this server yet " + (data.to_date ? "on " + data.to_date : "today") + " (UTC).");
+    });
+
+    renderInto(calendar.body, () => {
+      const grid = VIZ.table(data, {
+        rowsKey: "days",
+        columns: DAILY_RANGE_COLUMNS,
+        emptyText:
+          "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one.",
+      });
+
+      const missing = Array.isArray(data.days_missing) ? data.days_missing : [];
+      if (!missing.length) return grid;
+      const plural = missing.length === 1 ? "" : "s";
+      return [
+        noticeStrip(
+          "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
+            "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
+            " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
+        ),
+        grid,
+      ];
+    });
+  })();
+  return [tile.panel, calendar.panel];
+}
+
+/** Mount what `render` returns into `body`, or an error strip naming the fault if it throws. */
+function renderInto(body, render) {
+  try {
+    mount(body, render());
+  } catch (e) {
+    mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
+  }
 }
 
 /** Reshape flat rows into per-series points, keeping the top `maxSeries` series by peak value. */
@@ -484,10 +666,13 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * computed and the client could not, because a subtitle is written before the read. Optional and absent on
  * every panel but one: a capped page of rows is normally just the top of a ranking, and a panel whose rows
  * cannot be read as a population figure is the exception that needs saying so with figures.
+ *
+ * `moreNoteKeys` is a list of further fields on the same response, each rendered as its own note beneath the
+ * `noteKey` one; an empty or absent value draws nothing. Optional, like `noteKey`.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
-  return renderPanel({ title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, span, noteKey });
+  return renderPanel({ title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey });
 }
 
 /**
@@ -561,10 +746,12 @@ export const SERVER_TABS = [
       }),
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        format: "int",
         emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        format: "int",
         emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       fileIoPanel(server, ctx),
@@ -577,21 +764,11 @@ export const SERVER_TABS = [
         ctx.label,
         "No findings in this window. Findings are written by the analysis pass, which needs at least 24 hours of collected history."
       ),
-      stat("Daily Summary", "get_daily_summary", { server }, DAILY_STATS, "today (UTC)", 2),
-      /* #2484: the month range behind the desktop viewer's Performance Calendar. A SECOND read rather than a
-         wider get_daily_summary, which is also why it can sit beside the tile above: a tab must not fetch one
-         read twice, so the today tile and the month grid cannot be the same read. The span is a fixed 30 days
-         and says so, deliberately not ctx.hours — the page's range tops out well short of a month, and a
-         calendar drawn over six hours is not a calendar. */
-      table(
-        "Daily Health Calendar",
-        "get_daily_summary_range",
-        { server, days_back: 30 },
-        "days",
-        DAILY_RANGE_COLUMNS,
-        "last 30 days (UTC)",
-        "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one."
-      ),
+      /* #2484: today's tile and the month range behind the desktop viewer's Performance Calendar. #3905: both
+         from ONE fetch of get_daily_summary_range, today's tile being the range's anchor-day row, where they
+         used to be two reads (get_daily_summary beside the range) that cost the store the day's aggregate
+         twice per load. See dailySummaryPanels. */
+      ...dailySummaryPanels(server),
     ],
   },
 
@@ -642,6 +819,9 @@ export const SERVER_TABS = [
         emptyText: "No CPU samples in this window.",
       }),
       stat("Scheduler Pressure", "get_cpu_scheduler_pressure", { server }, SCHEDULER_STATS, SNAPSHOT, 2),
+      /* #4231: `noteKey` (#3278) carries `truncation_note` — raw query_stats/procedure_stats are dropped at
+         4 days once the rollups are armed, and a window asking further back than that silently served less
+         than it asked for. Null when the floor did not bite, the same as every other noteKey panel. */
       table(
         "Top Queries by CPU",
         "get_top_queries_by_cpu",
@@ -649,7 +829,9 @@ export const SERVER_TABS = [
         "queries",
         TOP_QUERY_COLUMNS,
         ctx.label,
-        "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values."
+        "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
+        2,
+        "truncation_note"
       ),
       table(
         "Top Procedures by CPU",
@@ -658,7 +840,9 @@ export const SERVER_TABS = [
         "procedures",
         TOP_PROC_COLUMNS,
         ctx.label,
-        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes)."
+        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
+        2,
+        "truncation_note"
       ),
     ],
   },
@@ -684,24 +868,6 @@ export const SERVER_TABS = [
         "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
         1
       ),
-      line(
-        "Memory Grants",
-        "get_memory_grants",
-        { server, hours: ctx.hours },
-        "grants",
-        "collection_time",
-        GRANT_SERIES,
-        { subtitle: ctx.label, format: "mb", emptyText: "No memory grant samples in this window." }
-      ),
-      table(
-        "Resource Semaphore",
-        "get_resource_semaphore",
-        { server, hours: ctx.hours },
-        "grants",
-        SEMAPHORE_COLUMNS,
-        ctx.label,
-        "No resource-semaphore samples in this window."
-      ),
       table(
         "Memory Pressure Events",
         "get_memory_pressure_events",
@@ -712,6 +878,56 @@ export const SERVER_TABS = [
         "No memory pressure events in this window — the healthy state for this read.",
         1
       ),
+      /* #3653: TWO READS UNDER ONE WINDOW (#3637), rendered as the two things they are. The memory-grant
+         pair answers with `grants[]` - the NEWEST snapshot in the window, one row per pool (per semaphore and
+         pool on the semaphore lens), every row stamped with the same instant - and `window[]` - one row per
+         pool aggregating EVERY snapshot in the window: the most sessions ever seen waiting and when, the peak
+         granted, the floor of available, timeouts and forced grants summed across the window's intervals.
+
+         Until #3653 the Memory Grants panel drew `grants[]` as a LINE chart under the page's range label.
+         Every row carried the same collection_time, so the "series" was one x-position with a dot per pool,
+         captioned as if it spanned the window - one instant drawn as a trend. The Resource Semaphore table
+         beside it told the same lie more quietly: `grants[]` rows under a window subtitle. `window[]` is not a
+         series either - it is the window's aggregates per pool, which is what the read chose to store the
+         deltas for - so the honest rendering is two TABLES per read, window first: "was there pressure",
+         then "is there pressure now", the reading order the read's own description gives. A per-collection
+         trend would need a read this service does not serve; drawing one instant as one is not it. */
+      ...fanout("get_memory_grants", { server, hours: ctx.hours }, [
+        {
+          title: "Memory Grant Pressure",
+          subtitle: ctx.label + ", every snapshot in the window, per resource pool",
+          viz: "table",
+          rowsKey: "window",
+          columns: GRANT_WINDOW_COLUMNS,
+          emptyText: "No memory grant snapshots in this window.",
+        },
+        {
+          title: "Memory Grants",
+          subtitle: "newest snapshot in " + ctx.label + ", per resource pool - a moment, not the window",
+          viz: "table",
+          rowsKey: "grants",
+          columns: GRANT_COLUMNS,
+          emptyText: "No memory grant snapshot in this window.",
+        },
+      ]),
+      ...fanout("get_resource_semaphore", { server, hours: ctx.hours }, [
+        {
+          title: "Resource Semaphore Pressure",
+          subtitle: ctx.label + ", every snapshot in the window, per semaphore and pool",
+          viz: "table",
+          rowsKey: "window",
+          columns: SEMAPHORE_WINDOW_COLUMNS,
+          emptyText: "No resource-semaphore snapshots in this window.",
+        },
+        {
+          title: "Resource Semaphore",
+          subtitle: "newest snapshot in " + ctx.label + ", per semaphore and pool - a moment, not the window",
+          viz: "table",
+          rowsKey: "grants",
+          columns: SEMAPHORE_COLUMNS,
+          emptyText: "No resource-semaphore snapshot in this window.",
+        },
+      ]),
       ...fanout("get_plan_cache_bloat", { server, hours: ctx.hours }, [
         { title: "Plan Cache", subtitle: ctx.label, viz: "stat", stats: PLAN_CACHE_STATS },
         {
@@ -735,10 +951,12 @@ export const SERVER_TABS = [
     build: (server, ctx) => [
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        format: "int",
         emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        format: "int",
         emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       table(
@@ -748,7 +966,9 @@ export const SERVER_TABS = [
         "events",
         BLOCKING_COLUMNS,
         ctx.label,
-        "No blocking events in this window."
+        "No blocking events in this window.",
+        2,
+        "separately_monitored_note"
       ),
       table(
         "Deadlocks",
@@ -757,7 +977,9 @@ export const SERVER_TABS = [
         "deadlocks",
         DEADLOCK_COLUMNS,
         ctx.label,
-        "No deadlocks in this window."
+        "No deadlocks in this window.",
+        2,
+        "separately_monitored_note"
       ),
       /* #2484: the Current Waits tab the viewer has and the browser did not. ONE read, two panels --
          via fanout, not two line() calls, because the tab must not fetch the same read twice (there is
@@ -783,13 +1005,14 @@ export const SERVER_TABS = [
           rowsKey: "blocked_sessions",
           xKey: "collection_time",
           series: BLOCKED_SESSION_SERIES,
+          format: "int",
           emptyText: "No blocked sessions in this window.",
         },
       ]),
       /* #2484: the aggregate lock-wait lane, the third chart on the viewer's Blocking Trends tab. Charts ONE
-         numeric key and lets the read's own (collection, wait type) grouping stand, the same choice the two
-         Current Waits panels below make — the wait type is the grouping the read already applied, not a
-         second axis. get_wait_trend can chart one LCK type; this is the whole family. */
+         numeric key: since #3897 the read returns the whole LCK family as one bucketed series (its wait_types[]
+         legend names the types that waited), where it used to return a row per (collection, wait type) that
+         this chart drew as one jagged line. get_wait_trend can chart one LCK type; this is the whole family. */
       line("Lock Waits", "get_lock_wait_trend", { server, hours: ctx.hours }, "trend", "collection_time", LOCK_WAIT_SERIES, {
         subtitle: ctx.label,
         emptyText:
@@ -845,7 +1068,11 @@ export const SERVER_TABS = [
         "objects",
         OBJECT_LOCK_COLUMNS,
         "daily collection",
-        "No lock-wait rows recorded. Index and object stats are collected daily."
+        "No lock-wait rows recorded. Index and object stats are collected daily.",
+        2,
+        "optimized_locking_note",
+        /* #4925: a master target keeps its separately monitored databases' rows here; this line says why. */
+        ["separately_monitored_note"]
       ),
     ],
   },
@@ -870,6 +1097,8 @@ export const SERVER_TABS = [
         span: 2,
         emptyText: "No tempdb samples in this window.",
       }),
+      /* `noteKey` carries the read's own note when a Hyperscale log file is in the snapshot: its size is n/a
+         (log service) and it is left out of these totals, so the page says so instead of looking short. */
       table(
         "Database Sizes",
         "get_database_sizes",
@@ -878,7 +1107,8 @@ export const SERVER_TABS = [
         DB_SIZE_COLUMNS,
         SNAPSHOT,
         "No database sizes in the latest snapshot.",
-        1
+        1,
+        "note"
       ),
       table(
         "Table & Index Sizes",
@@ -981,6 +1211,7 @@ export const SERVER_TABS = [
          plain table — the drill-down belongs where the second question gets asked, and two of these would
          mean two fetches of get_top_queries_by_cpu for one page's worth of the same twenty rows. */
       topQueriesPanel(server, ctx),
+      /* #4231: same `truncation_note` disclosure as the CPU tab's plain tables. */
       table(
         "Top Procedures by CPU",
         "get_top_procedures_by_cpu",
@@ -988,7 +1219,9 @@ export const SERVER_TABS = [
         "procedures",
         TOP_PROC_COLUMNS,
         ctx.label,
-        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes)."
+        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
+        2,
+        "truncation_note"
       ),
       table(
         "Query Store",
@@ -997,7 +1230,9 @@ export const SERVER_TABS = [
         "queries",
         QUERY_STORE_COLUMNS,
         ctx.label,
-        "No Query Store rows in this window."
+        "No Query Store rows in this window.",
+        2,
+        "truncation_note"
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
          unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
@@ -1013,6 +1248,55 @@ export const SERVER_TABS = [
         "No query regressed against its baseline in this window. If this server has no history OLDER than " +
           "the window there is nothing to compare against, and the read says so rather than calling it clear."
       ),
+      /* #3797: the clutter view. ONE fetch, three panels — the per-database rows, the per-server QDS wait
+         block and the per-server memory clerk — because the read composes four arms over two raw hypertables
+         and three separate fetches of it would pay for that three times on one tab (the fanout() reason).
+
+         include_fleet_median is deliberately NOT sent. It walks query_store_stats and wait_stats fleet-wide
+         over the window, which on a large store is the read deadline's whole budget, and a server tab is a
+         per-server question; fleet_median therefore reads null here with the payload's own note saying it was
+         not computed, which an agent calling the tool can ask for and this page does not.
+
+         The last two panels are SERVER blocks beside DATABASE rows, and their titles say so: the QDS_* waits
+         and the Query Store memory clerk are instance-wide, and nothing on this page attributes them to a
+         database. Each shows the payload's own note as its notice — the wait block because the proxy is the
+         NON-sleep QDS types only and a reader who takes it for the whole of Query Store's cost is reading it
+         wrong, the clerk because its absence is a RANK (outside the collector's top 25) and not a zero. */
+      ...fanout("get_query_store_clutter", { server, hours: ctx.hours, limit: 50 }, [
+        {
+          title: "Query Store Clutter",
+          subtitle: ctx.label + ", per database, worst first",
+          viz: "table",
+          rowsKey: "databases",
+          columns: QS_CLUTTER_COLUMNS,
+          noteKey: "server_note",
+          emptyText:
+            "No Query Store rows, no query_store fan-out run and no query_store_health capture for this " +
+            "server in this window. The read says which of those it found rather than showing an empty grid.",
+        },
+        {
+          title: "Query Store Overhead (per server)",
+          subtitle: ctx.label,
+          viz: "table",
+          rowsKey: "qs_overhead.wait_stats.included",
+          columns: QS_OVERHEAD_WAIT_COLUMNS,
+          noteKey: "qs_overhead.wait_stats.excluded_note",
+          emptyText:
+            "No non-sleep QDS_* wait deltas in this window. Query Store's four sleep waits are dropped at " +
+            "collection on purpose, so their absence here is the filter working, not a quiet server.",
+        },
+        {
+          title: "Query Store Memory Clerk",
+          subtitle: SNAPSHOT,
+          span: 1,
+          viz: "stat",
+          stats: QS_CLERK_STATS,
+          noteKey: "qs_overhead.memory_clerk.note",
+          emptyText:
+            "MEMORYCLERK_QUERYDISKSTORE did not appear in any memory_clerks capture in this window. The " +
+            "collector stores the top 25 clerks over 1 MB per capture, so that is a RANK, not a zero.",
+        },
+      ]),
       /* #2484: the Query Heatmap tab. The interactive plot stays desktop-only by design -- there is no
          heatmap viz in this page's vocabulary and inventing a fifth one is not what the issue asked for --
          but the READ is portable, and a bucketed table is the same answer: one row per (time bin x
@@ -1583,7 +1867,11 @@ export const POSTGRES_TABS = [
         "queries",
         PG_TOP_QUERY_COLUMNS,
         ctx.label + ", by total execution time",
-        "No query statistics in this window."
+        "No query statistics in this window.",
+        2,
+        /* #4677: the eviction caveat the read builds (null when the counter was read and no pass happened,
+           the unknown sentence when it was never observed), rendered above the rows. */
+        "evictions.note"
       ),
       /* Directly under the query shapes, joined on queryid: a plan only means something beside the
          statement it belongs to. The plan JSON is REDACTED at collection - query text dropped, literals
@@ -1612,6 +1900,21 @@ export const POSTGRES_TABS = [
         ctx.label + ", the newest reading of each facet in it; in CAUSAL order rather than alphabetically - fix them top to bottom; the remedy is per facet, and on Aurora/RDS it says which changes need a parameter group and a reboot",
         "No readiness state collected. Unlike the grids around it an empty panel here is never the healthy answer - the collector writes one row per facet on every run whatever it finds - so this means it has not run for this server, or the window is shorter than its hourly cadence."
       ),
+      /* #3607: the rest of the logging surface, directly under plan-capture readiness because it is the
+         other half of the same onboarding question - is this target telling us everything it could. Judged
+         from the newest stored pg_server_config snapshot rather than collected, so it takes no window; the
+         read reports the snapshot time as captured_at. Every setting is shown whatever its
+         verdict, for the reason the readiness grid shows satisfied facets: a list of only the failures
+         cannot show that a target IS instrumented. */
+      table(
+        "Logging Settings Audit",
+        "get_pg_logging_audit",
+        { server },
+        "facets",
+        PG_LOGGING_AUDIT_COLUMNS,
+        "newest configuration snapshot; verdict describes the LINES each setting writes - partial means a threshold is filtering and is the recommended posture for log_min_duration_statement; the remedy is worded for this server's hosting flavour",
+        "No configuration snapshot to audit. pg_server_config runs hourly, so a server registered in the last hour has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
+      ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
          time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
          only evidence of that we collect — the statement stats themselves cannot see it. The deadlock and
@@ -1621,7 +1924,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_database_stats", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "Database Activity",
-          subtitle: ctx.label + ", totals over the databases returned",
+          subtitle: ctx.label + ", totals over every database that moved",
           viz: "stat",
           stats: PG_DATABASE_STATS,
           span: 2,
@@ -1648,7 +1951,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours },
         "points",
         PG_DATABASE_TREND_COLUMNS,
-        ctx.label + ", the biggest temp-file spiller in this window; the hit ratio here is the interval's own, not the lifetime average",
+        ctx.label + ", the biggest temp-file spiller in this window; each row's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
         "No differenced intervals for this database in the window. A trend needs at least two snapshots, so a short window is legitimately empty here."
       ),
       /* #2629: sampled lock activity. On Activity rather than a Blocking tab because PostgreSQL has no
@@ -1697,6 +2000,21 @@ export const POSTGRES_TABS = [
         ctx.label + ", newest first; Sightings counts re-reads of the same report, not repeats",
         "No deadlock was reported in this window. That is the healthy answer - but it is the same shape as a server whose log cannot be read, which the Plan Capture Readiness panel above reports on because it reads the same file. pg_stat_database's deadlock counter is the independent check."
       ),
+      /* #3601 the log, classified. Under the deadlocks because the two are the same log read two ways:
+         the deadlock grid is one ERROR line's DETAIL graph parsed out whole, this is every classified line
+         around it - the errors before it, the lock waits that preceded it, the connection churn beside it.
+         The "check the error log" panel. Newest 50 across every family; the MCP read carries the family and
+         severity filters, and total_events on its payload is the window's count, so the panel note says
+         which of the two this grid is. */
+      table(
+        "Log Events",
+        "get_pg_log_events",
+        { server, hours: ctx.hours, limit: 50 },
+        "events",
+        PG_LOG_EVENT_COLUMNS,
+        ctx.label + ", newest 50 across every family; messages as PostgreSQL wrote them, SQL in them normalized, the statement never stored; Sightings counts re-reads of the same line, not repeats",
+        "No classified log event was stored in this window. That is the healthy answer for the error and lock-wait families - and it is also what a target with the relevant log_* setting off looks like (log_connections, log_lock_waits, log_temp_files, log_autovacuum_min_duration), or one whose log cannot be read, is not stamped UTC, or is not written in English: the Plan Capture Readiness panel above reads the same file and reports those three."
+      ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
          The statement grid above ranks by total time across the window, which hides a step change - a query
          that doubled halfway through still ranks where its average puts it. */
@@ -1718,7 +2036,7 @@ export const POSTGRES_TABS = [
         { server, limit: 5 },
         "deadlocks",
         PG_DEADLOCK_GRAPH_COLUMNS,
-        "the whole wait graph as the server wrote it, including every participant's statement",
+        "the whole wait graph as the server wrote it, including every participant's statement, SQL normalized",
         "No deadlock graph stored for this server."
       ),
     ],
@@ -2176,31 +2494,33 @@ export function tabNote(tab) {
 
 /* ─────────────────────────── stat descriptors ─────────────────────────── */
 
-const OVERVIEW_STATS = [
-  { key: "cpu_percent", label: "CPU", format: "pct" },
-  { key: "memory_mb", label: "Memory", format: "mb" },
-  { key: "blocking_count", label: "Blocking (recent)", format: "int" },
-  { key: "deadlock_count", label: "Deadlocks (recent)", format: "int" },
-  { key: "last_collection", label: "Last collection", format: "reltime", small: true },
-];
+const OVERVIEW_STATS = READ_FIELDS.get_server_summary.stat.stats;
+
+/* An Azure SQL Database (engine_edition 5) reports the HOST's sockets, cores per socket, hyperthread ratio and physical
+   memory, none of which is the database's allocation (a 1-vCore database read "0 sockets, 32 cores/socket, HT ratio 64,
+   about 912 GB"). get_server_properties returns those four as null there, and these tiles are not drawn. Logical CPUs
+   is the database's own scheduler count (a 1-vCore database reads 2), so that tile is drawn; the service objective and its
+   vCores say what the database is given. */
+const AZURE_SQL_DATABASE = { key: "engine_edition", equals: 5 };
 
 const PROPERTY_STATS = [
   { key: "product_version", label: "Version", format: "text", small: true },
   { key: "edition", label: "Edition", format: "text", small: true },
   { key: "product_level", label: "Level", format: "text", small: true },
   { key: "cpu_count", label: "Logical CPUs", format: "int" },
-  { key: "socket_count", label: "Sockets", format: "int" },
-  { key: "cores_per_socket", label: "Cores/socket", format: "int" },
-  { key: "hyperthread_ratio", label: "HT ratio", format: "int" },
-  { key: "physical_memory_mb", label: "Physical memory", format: "mb" },
+  { key: "socket_count", label: "Sockets", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "cores_per_socket", label: "Cores/socket", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "hyperthread_ratio", label: "HT ratio", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "physical_memory_mb", label: "Physical memory", format: "mb", hideWhen: AZURE_SQL_DATABASE },
   { key: "is_clustered", label: "Clustered", format: "bool" },
   { key: "is_hadr_enabled", label: "Always On", format: "bool" },
   { key: "service_objective", label: "Service objective", format: "text", small: true },
+  { key: "vcore_count", label: "vCores", format: "int", showWhen: AZURE_SQL_DATABASE },
 ];
 
 const DAILY_STATS = [
   { key: "summary_date", label: "Date", format: "text", small: true },
-  /* One health card, not two. get_daily_summary returns overall_health as the band's LABEL
+  /* One health card, not two. The daily-summary row carried overall_health as the band's LABEL
      (DarlingHealthReader: OverallHealth => DailyHealthBandCalculator.Label(HealthBand)) — the same value
      health_band carries — so an "overall_health" card duplicated this one AND, formatted as num1, rendered
      the label "Critical" as NaN. #2807. A numeric health SCORE would be a new backend field, not this label. */
@@ -2221,7 +2541,17 @@ const DAILY_RANGE_COLUMNS = [
   { key: "health_band", label: "Band" },
   { key: "top_wait_type", label: "Top wait" },
   { key: "total_wait_time_sec", label: "Total wait (s)", format: "int" },
-  { key: "unique_queries", label: "Unique queries", format: "int" },
+  /* #3653 A6: null is "not carried at this tier" (the rollup never materialized this server's day), which is
+     the opposite claim from 0 and from the page's "—" ("there was none of this"), so it gets its own words;
+     dailySummaryPanels lists the same days above the grid from the read's days_missing[]. */
+  {
+    key: "unique_queries",
+    label: "Unique queries",
+    render: (row) =>
+      row.unique_queries == null
+        ? el("span", { class: "muted", title: "The rollup tier that answers this day never materialized it for this server; the day is listed above the grid." }, ["not materialized"])
+        : document.createTextNode(Number(row.unique_queries).toLocaleString(undefined, { maximumFractionDigits: 0 })),
+  },
   { key: "blocking_events", label: "Blocking", format: "int" },
   { key: "max_block_duration_ms", label: "Peak block", format: "ms" },
   { key: "deadlock_count", label: "Deadlocks", format: "int" },
@@ -2245,15 +2575,20 @@ const SCHEDULER_STATS = [
   { key: "recommendation", label: "Recommendation", format: "text", small: true },
 ];
 
+/* On an Azure SQL Database (engine_edition 5) the collector fills total_physical_memory_mb from the database's own committed
+   target and available_physical_memory_mb as that target minus what is committed, so the first two tiles are the database's
+   memory limit and the room left under it, not the host's RAM, and are named that way. */
 const MEMORY_STATS = [
-  { key: "total_physical_memory_mb", label: "Physical", format: "mb" },
-  { key: "available_physical_memory_mb", label: "Available", format: "mb" },
+  { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: AZURE_SQL_DATABASE },
+  { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available", format: "mb", hideWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available under limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
   { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
   { key: "total_server_memory_mb", label: "Total server", format: "mb" },
   { key: "target_server_memory_mb", label: "Target server", format: "mb" },
   { key: "buffer_pool_mb", label: "Buffer pool", format: "mb" },
   { key: "plan_cache_mb", label: "Plan cache", format: "mb" },
-  { key: "system_memory_state", label: "System state", format: "text", small: true },
+  { key: "system_memory_state", label: "System state", format: "text", small: true, nullKey: "system_memory_state_note" },
   { key: "sql_memory_model", label: "Memory model", format: "text", small: true },
 ];
 
@@ -2274,7 +2609,10 @@ const SESSION_STATS = [
   { key: "summary.total_sleeping", label: "Sleeping", format: "int" },
   { key: "summary.total_dormant", label: "Dormant", format: "int" },
   { key: "summary.distinct_applications", label: "Applications", format: "int" },
-  { key: "collection_time", label: "Collected", format: "reltime", small: true },
+  /* #3653: the snapshot's stamp under the census's one spelling. get_session_stats stamped itself as
+     `collection_time` before #3637 fixed the vocabulary, and this tile reading the old key was the only
+     thing that kept the read (and its three siblings) out of the captured_at roster. */
+  { key: "captured_at", label: "Collected", format: "reltime", small: true },
 ];
 
 /* #3013: the alerting subsystem's own swallowed store reads. Its own panel object (not just a stats array)
@@ -2312,6 +2650,14 @@ const ALERT_READ_STATS = [
   { key: "alert_read_health.instance_last_failure_read", label: "Which read (service)", format: "text", small: true },
   { key: "alert_read_health.instance_last_failure_elapsed_ms", label: "Ran for (service)", format: "ms", small: true },
   { key: "alert_read_health.instance_last_failure_at", label: "Newest (service)", format: "reltime", small: true },
+  /* #3848: the second population, beside the failure counts it is read against rather than replacing
+     them. A read that crossed the 10 s deadline once and answered on the retry two seconds later is the
+     store's write bands showing through - it used to be a blind condition, and it is now a count. Read
+     the pair: retries with no failures is write pressure with alerting intact; both moving is a band that
+     was still on twelve seconds later. Neither tile has a "Newest" or "Which read" companion, unlike
+     every count above, because a retried read did not go blind - there is no episode to date. */
+  { key: "alert_read_health.retried_reads", label: "Retried reads (server)", format: "int" },
+  { key: "alert_read_health.instance_retried_reads", label: "Retried reads (service)", format: "int" },
   { key: "alert_read_health.counting_since", label: "Counting since", format: "reltime", small: true },
 ];
 
@@ -2335,12 +2681,9 @@ const SWEEP_STATS = [
 
 /* Neutral series colors assigned by the chart's ramp (B1) — no severity colors on chart lines. idle_cpu is
    dropped (B3): it would force a 0-100 domain and crush the real SQL/other/total series. */
-const CPU_SERIES = [
-  { key: "sql_server_cpu", label: "SQL CPU %" },
-  { key: "other_process_cpu", label: "Other %" },
-  { key: "total_cpu", label: "Total %" },
-];
+const CPU_SERIES = READ_FIELDS.get_cpu_utilization.line.series;
 
+/* Stays local: the PostgreSQL CPU read draws one series, where the catalog entry for the SQL Server read draws three. */
 const PG_CPU_SERIES = [{ key: "cpu_percent", label: "CPU %" }];
 
 const MEMORY_SERIES = [
@@ -2350,11 +2693,13 @@ const MEMORY_SERIES = [
   { key: "plan_cache_mb", label: "Plan Cache" },
 ];
 
-/* The two trend reads that return {time, count}. */
+/* The two trend reads that return {time, count}. Every panel that charts them declares `format: "int"`: counts
+   put their gridlines on whole numbers (charts.js integerTicks) instead of repeating one label down a 0-1 axis. */
 const COUNT_SERIES = [{ key: "count", label: "Events" }];
 
 /* #2484: the aggregate lock-wait rate. One numeric key, per the same reasoning as the Current Waits series
    below — the LCK wait type is the grouping the read applied, not a second axis. */
+/* Stays local: this page labels the series "Lock wait (ms/sec)", not the catalog's label. */
 const LOCK_WAIT_SERIES = [{ key: "wait_time_ms_per_second", label: "Lock wait (ms/sec)" }];
 
 /* #2484: the two Current Waits series. Each charts ONE numeric key; the wait type and database name are
@@ -2386,18 +2731,7 @@ const DURATION_SERIES = [{ key: "value", label: "Avg duration" }];
    simply quiet rather than idle. */
 const EXECUTION_RATE_SERIES = [{ key: "executions_per_second", label: "Executions/sec" }];
 
-const GRANT_SERIES = [
-  { key: "granted_memory_mb", label: "Granted" },
-  { key: "used_memory_mb", label: "Used" },
-  { key: "available_memory_mb", label: "Available" },
-];
-
-const TEMPDB_SERIES = [
-  { key: "total_reserved_mb", label: "Reserved" },
-  { key: "user_objects_mb", label: "User objects" },
-  { key: "internal_objects_mb", label: "Internal objects" },
-  { key: "version_store_mb", label: "Version store" },
-];
+const TEMPDB_SERIES = READ_FIELDS.get_tempdb_trend.line.series;
 
 const HEALTH_CPU_SERIES = [
   { key: "sql_cpu_utilization", label: "SQL CPU %" },
@@ -2496,6 +2830,7 @@ const TOP_PROC_COLUMNS = [
    collapsed into the percent alone -- a 300% regression on a query that went from 1 ms to 4 ms is not the
    same finding as one that went from 1 s to 4 s, and the percent alone cannot tell them apart. Extra
    duration is the ranking key and the column that says whether the regression matters at all. */
+/* Stays local: this page's column set differs from the catalog entry's. */
 const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
   { key: "database_name", label: "Database" },
@@ -2540,6 +2875,75 @@ const QUERY_STORE_COLUMNS = [
   { key: "avg_rowcount", label: "Avg Rows", format: "num1" },
   { key: "last_execution_time", label: "Last Exec", format: "time" },
   { key: "replica_role", label: "Replica" },
+];
+
+/*
+ * #3797: the Query Store CLUTTER rows, and the per-server overhead block beside them.
+ *
+ * The verdict is COLOURED, not re-derived: `sevKey` points the cell at the band the server already computed
+ * (R1 — the browser never recomputes a threshold), and `verdict_reasons` is shown as the token list that
+ * raised it so the colour is never the only evidence. `excluded_reason` is its own column rather than a
+ * footnote: a replica reads Unknown/excluded by architecture, and a reader who cannot see WHY on the row
+ * will file the absence as a defect. `recommendations` is the SERVER's prose (QueryStoreClutter.Recommendations
+ * — the same sentences the MCP payload and the WPF grid carry), behind a disclosure because each one is a
+ * paragraph; it is never re-worded here.
+ */
+const QS_CLUTTER_COLUMNS = [
+  { key: "database_name", label: "Database" },
+  { key: "verdict", label: "Verdict", sevKey: "verdict" },
+  { key: "verdict_reasons", label: "Reasons", render: (r) => listCell(r.verdict_reasons) },
+  /* Excluded is per-ROW and architectural (readonly_reason bit 8). The dash is the ordinary case. */
+  { key: "excluded_reason", label: "Excluded Because" },
+  { key: "read_cost.runs_slowest_pct", label: "Slowest on %", format: "num1" },
+  { key: "read_cost.slowest_share_pct", label: "Share of Pass %", format: "num1" },
+  { key: "read_cost.slowest_item_ms_p50", label: "Slowest ms p50", format: "ms" },
+  { key: "read_cost.dominance_ratio", label: "vs Others", format: "num2" },
+  { key: "plan_churn.plans_per_query_p95", label: "Plans/Query p95", format: "int" },
+  { key: "plan_churn.plans_per_query_max", label: "Plans/Query Max", format: "int" },
+  { key: "plan_churn.new_plans_per_day", label: "New Plans/Day", format: "num1" },
+  { key: "plan_churn.never_seen_twice_fraction", label: "One-Shot Fraction", format: "num2" },
+  { key: "plan_churn.distinct_plans", label: "Plans", format: "int" },
+  { key: "config.actual_state", label: "State" },
+  /* V137 (#3796). A dash here is a health capture older than the rung — never asked — which the payload's
+     capture_mode_note spells out; it is NOT the engine's NONE, and the two must not look alike. */
+  { key: "config.query_capture_mode", label: "Capture Mode" },
+  { key: "config.max_plans_per_query", label: "Max Plans/Query", format: "int" },
+  { key: "config.stale_query_threshold_days", label: "Stale Days", format: "int" },
+  { key: "config.pct_of_cap", label: "% of Cap", format: "num1" },
+  { key: "config.captured_at", label: "Options Captured", format: "time" },
+  {
+    key: "recommendations",
+    label: "Recommendation",
+    wrap: true,
+    render: (r) => {
+      const lines = Array.isArray(r.recommendations) ? r.recommendations : [];
+      if (!lines.length) return document.createTextNode("—");
+      return disclosure(lines[0], el("div", {}, lines.map((line) => el("p", { text: line }))), { max: 90 });
+    },
+  },
+];
+
+/* The per-server overhead proxy's wait rows. wait_ms_per_hour is the server's own rating over the seconds
+   those rows measured; a null is an unknowable interval, which the generic formatter renders as a dash. */
+const QS_OVERHEAD_WAIT_COLUMNS = [
+  { key: "wait_type", label: "Wait Type" },
+  { key: "wait_ms_per_hour", label: "Wait ms/hour", format: "num1" },
+  { key: "wait_ms_total", label: "Wait ms (window)", format: "int" },
+  { key: "waiting_tasks_total", label: "Waiting Tasks", format: "int" },
+  { key: "measured_seconds", label: "Measured s", format: "int" },
+  { key: "rows_observed", label: "Rows", format: "int" },
+  { key: "rows_unknowable", label: "Unrateable Rows", format: "int" },
+  { key: "last_observed", label: "Last Seen", format: "time" },
+];
+
+/* The Query Store memory clerk, the second half of the per-server overhead proxy. All three keys are null
+   together — the clerk never appeared in a capture — which is exactly when vizStat prefers the panel's
+   sentence to a row of em-dashes, and the payload's own `note` (shown as the panel's notice) says whether
+   that is "no captures at all" or "below the collector's top 25", which are different facts. */
+const QS_CLERK_STATS = [
+  { key: "qs_overhead.memory_clerk.latest_memory_mb", label: "Latest MB", format: "num1" },
+  { key: "qs_overhead.memory_clerk.max_memory_mb_in_window", label: "Window Max MB", format: "num1" },
+  { key: "qs_overhead.memory_clerk.latest_clerk_captured_at", label: "Clerk Last Seen", format: "time" },
 ];
 
 const LONG_QUERY_COLUMNS = [
@@ -2604,6 +3008,7 @@ const BLOCKING_COLUMNS = [
   { key: "blocking_client_app", label: "Blocking App" },
 ];
 
+/* Stays local: this page renders the deadlock text through a codeDisclosure and orders the columns differently from the catalog. */
 const DEADLOCK_COLUMNS = [
   { key: "deadlock_time", label: "Deadlock Time", format: "time" },
   { key: "victim_sql_text", label: "Victim SQL", render: (r) => codeDisclosure(r.victim_sql_text) },
@@ -2640,23 +3045,9 @@ const OBJECT_LOCK_COLUMNS = [
   { key: "total_rows", label: "Rows", format: "int" },
 ];
 
-const FILE_IO_COLUMNS = [
-  { key: "database_name", label: "Database" },
-  { key: "file_name", label: "File" },
-  { key: "file_type", label: "Type" },
-  { key: "size_mb", label: "Size", format: "mb" },
-  { key: "avg_read_latency_ms", label: "Read latency", format: "num1" },
-  { key: "avg_write_latency_ms", label: "Write latency", format: "num1" },
-  { key: "delta_reads", label: "Reads", format: "int" },
-  { key: "delta_writes", label: "Writes", format: "int" },
-  { key: "physical_name", label: "Path", wrap: true },
-];
+const FILE_IO_COLUMNS = READ_FIELDS.get_file_io_stats.table.columns;
 
-const DB_SIZE_COLUMNS = [
-  { key: "database_name", label: "Database" },
-  { key: "total_size_mb", label: "Total", format: "mb" },
-  { key: "used_size_mb", label: "Used", format: "mb" },
-];
+const DB_SIZE_COLUMNS = READ_FIELDS.get_database_sizes.table.columns;
 
 const TABLE_SIZE_COLUMNS = [
   { key: "database_name", label: "Database" },
@@ -2671,19 +3062,48 @@ const TABLE_SIZE_COLUMNS = [
   { key: "growth_pct_30d", label: "30d %", format: "num1" },
 ];
 
-const PVS_COLUMNS = [
-  { key: "database_name", label: "Database" },
-  { key: "is_adr_on", label: "ADR", format: "bool" },
-  { key: "pvs_size_mb", label: "PVS size", format: "mb" },
-  { key: "pct_of_database", label: "% of DB", format: "num1" },
-  { key: "database_data_size_mb", label: "Data size", format: "mb" },
-  { key: "aborted_transaction_count", label: "Aborted txns", format: "int" },
-  { key: "oldest_active_transaction_id", label: "Oldest active txn" },
-];
+const PVS_COLUMNS = READ_FIELDS.get_pvs_stats.table.columns;
 
 const CLERK_COLUMNS = [
   { key: "clerk_type", label: "Clerk" },
   { key: "memory_mb", label: "Memory", format: "mb" },
+];
+
+/* #3653: the `window[]` half of the two memory-grant reads (#3637) - one row per pool aggregating EVERY
+   snapshot in the window. Peak waiters and its instant lead because "how many sessions ever queued for a
+   grant, and when" is the question the window exists to answer; the sums come last because they are the
+   per-interval deltas added up across the window, not a counter read at one instant. `snapshots_in_window`
+   is the denominator that says how much of the window the peaks were taken over. */
+const GRANT_WINDOW_COLUMNS = [
+  { key: "pool_id", label: "Pool", format: "int" },
+  { key: "snapshots_in_window", label: "Snapshots", format: "int" },
+  { key: "peak_waiter_count", label: "Peak waiters", format: "int" },
+  { key: "peak_waiters_at", label: "Peak at", format: "time" },
+  { key: "peak_granted_memory_mb", label: "Peak granted", format: "mb" },
+  { key: "min_available_memory_mb", label: "Min available", format: "mb" },
+  { key: "timeout_errors_in_window", label: "Timeouts", format: "int" },
+  { key: "forced_grants_in_window", label: "Forced grants", format: "int" },
+  { key: "first_snapshot_at", label: "First", format: "time", small: true },
+  { key: "last_snapshot_at", label: "Last", format: "time", small: true },
+];
+
+/* The semaphore lens carries the same window shape keyed one level finer; the pool lens's rows carry a null
+   semaphore id by design, so the column is added here rather than shared and rendered as a dash there. */
+const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: "Semaphore", format: "int" }, ...GRANT_WINDOW_COLUMNS];
+
+/* The `grants[]` half of get_memory_grants: the NEWEST snapshot, one row per pool with its semaphores summed.
+   Waiters lead the deltas: the deltas are the interval ending at this snapshot, the waiter count is the
+   instant itself. */
+const GRANT_COLUMNS = [
+  { key: "collection_time", label: "Time", format: "time" },
+  { key: "pool_id", label: "Pool", format: "int" },
+  { key: "granted_memory_mb", label: "Granted", format: "mb" },
+  { key: "used_memory_mb", label: "Used", format: "mb" },
+  { key: "available_memory_mb", label: "Available", format: "mb" },
+  { key: "grantee_count", label: "Grantees", format: "int" },
+  { key: "waiter_count", label: "Waiters", format: "int" },
+  { key: "timeout_error_count_delta", label: "Timeouts", format: "int" },
+  { key: "forced_grant_count_delta", label: "Forced grants", format: "int" },
 ];
 
 const SEMAPHORE_COLUMNS = [
@@ -2755,6 +3175,11 @@ const QS_HEALTH_COLUMNS = [
   { key: "pct_of_cap", label: "% of cap", format: "num1" },
   { key: "size_based_cleanup_mode", label: "Cleanup" },
   { key: "stale_query_threshold_days", label: "Stale (days)", format: "int" },
+  /* V137 (#3796): the payload's two trailing fields. Formatless on purpose: the renderer prints a null as the
+     page's "—", which is the right cell for a pre-rung row (or, for wait stats, a 2016 engine) — an absence,
+     never OFF. ALL is the plan-churn factory the tool's description names; the verdict is #3797's, not this tile's. */
+  { key: "query_capture_mode", label: "Capture mode" },
+  { key: "wait_stats_capture_mode", label: "Wait stats capture" },
 ];
 
 const TRACE_FLAG_COLUMNS = [
@@ -2822,6 +3247,8 @@ const JOB_COLUMNS = [
 const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },
   { key: "instance_name", label: "Instance" },
+  { key: "per_second", label: "Per second", format: "rate" },
+  { key: "running_total", label: "Total since counter start", format: "int" },
   { key: "value", label: "Value", format: "num2" },
   { key: "delta_value", label: "Delta", format: "num2" },
 ];
@@ -2960,19 +3387,7 @@ const MEMORY_OOM_COLUMNS = [
   { key: "last_error", label: "Last error" },
 ];
 
-const DEFAULT_TRACE_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
-  { key: "category", label: "Category" },
-  { key: "event_name", label: "Event" },
-  { key: "database_name", label: "Database" },
-  { key: "object_name", label: "Object" },
-  { key: "login_name", label: "Login" },
-  { key: "application_name", label: "Application" },
-  { key: "duration_ms", label: "Duration", format: "ms" },
-  { key: "growth_mb", label: "Growth", format: "mb" },
-  { key: "error_number", label: "Error", format: "int" },
-  { key: "text_data", label: "Detail", wrap: true },
-];
+const DEFAULT_TRACE_COLUMNS = READ_FIELDS.get_default_trace_events.table.columns;
 
 /* #2484: the raw log's columns. The duration SPLIT is the reason this table earns its place beside the
    rollup -- total time cannot separate a collector that is slow because the monitored server is slow from
@@ -3029,13 +3444,19 @@ const COLLECTOR_COLUMNS = [
      plainly healthy collector; the same column the two WPF grids carry, so the web view is not the one
      Collection Health surface that still hides it. note_summary, not the raw last_note: it carries the
      "(all N runs)" qualifier that separates a persistently empty collector from an occasionally quiet
-     one, composed server-side from the shared formatter so this table cannot render it a third way. */
+     one, composed server-side from the shared formatter so this table cannot render it a third way.
+     A collector's label=value counts read as its latest NOTED run's ("latest run:" only when every run
+     carried them), never a window total. */
   { key: "note_summary", label: "Note", wrap: true },
   /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
      found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
      column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so
      this table cannot render the sentence a second way. */
   { key: "output_finding", label: "Output", wrap: true },
+  /* #4620: why a collector that stopped doing what it used to do reads WARNING. The Status column already
+     showed the floor, but no column showed the sentence behind it, so a regressed row read WARNING with
+     every other cell blank. Composed server-side from the shared formatter, like the two columns above. */
+  { key: "regression_finding", label: "Regression", wrap: true },
 ];
 
 const HEAVIEST_COLUMNS = [
@@ -3089,7 +3510,7 @@ const PG_SLOT_STATS = [
 ];
 
 const PG_AUTOVACUUM_STATS = [
-  { key: "table_count", label: "Tables returned", format: "int" },
+  { key: "tables_returned", label: "Tables returned", format: "int" },
   { key: "past_threshold_count", label: "Past threshold (of those)", format: "int" },
   { key: "growing_count", label: "Still growing (of those)", format: "int" },
   { key: "autovacuum_disabled_count", label: "Autovacuum off (of those)", format: "int" },
@@ -3108,17 +3529,21 @@ const PG_BLOCKING_STATS = [
   { key: "cycles_sampled", label: "Cycles", format: "int" },
 ];
 
-/* Every total here is summed over the rows the read's LIMIT let through, and the read names that in the
-   field itself (`cache_hit_pct_of_returned`), so the labels do too rather than promising a cluster figure the
-   number structurally is not. `limit_reached` is what turns that caveat into something a reader can act on. */
+/* Every total here is the WINDOW's (#3653): the read computes them in the same statement as the rows, above
+   its LIMIT, so "Temp files" is every database that moved and not the twenty the grid below shows. Until
+   #3653 these were sums over the returned rows and the labels said so ("Databases returned", "Cache hit %
+   (of returned)") - the A7 census carried that as its one stated allowance, and relabelling here is half of
+   what retired it. `database_count` is the window's count and `databases_returned` the page's; `truncated`
+   is OBSERVED by the read (a limit + 1 fetch), not inferred from the cap. */
 const PG_DATABASE_STATS = [
-  { key: "database_count", label: "Databases returned", format: "int" },
+  { key: "database_count", label: "Databases active", format: "int" },
+  { key: "databases_returned", label: "Databases returned", format: "int" },
   { key: "total_temp_files", label: "Temp files", format: "int" },
   { key: "total_temp_bytes", label: "Temp bytes", format: "int" },
   { key: "top_spiller", label: "Biggest spiller", format: "text", small: true },
   { key: "total_deadlocks", label: "Deadlocks", format: "int" },
-  { key: "cache_hit_pct_of_returned", label: "Cache hit % (of returned)", format: "num2" },
-  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  { key: "cache_hit_pct", label: "Cache hit %", format: "num2" },
+  { key: "truncated", label: "Window held more", format: "bool" },
   /* Named on the tile rather than only per row: every total beside it is a LOWER BOUND when this is true,
      and a reader has to see that before drawing a conclusion from any of them. */
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
@@ -3130,12 +3555,12 @@ const PG_DATABASE_STATS = [
    `estimated_bloat_*_over_trusted_rows` keeps the read's own name: it is a sum of ESTIMATES over the rows
    whose estimates were fit to publish, and a shorter label would promise reclaimable bytes. */
 const PG_BLOAT_STATS = [
-  { key: "table_count", label: "Tables returned", format: "int" },
+  { key: "tables_returned", label: "Tables returned", format: "int" },
   { key: "estimated_bloat_mb_over_trusted_rows", label: "Est. bloat (trusted rows)", format: "mb" },
   { key: "trusted_estimate_count", label: "Estimates published", format: "int" },
   { key: "suppressed_estimate_count", label: "Estimates suppressed", format: "int" },
   { key: "pgstattuple_available_anywhere", label: "pgstattuple installed", format: "bool" },
-  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  { key: "truncated", label: "Truncated", format: "bool" },
 ];
 
 /* The capture tiles lead, and they are not decoration on this read: it is an EXCEPTION surface sampled once
@@ -3150,27 +3575,31 @@ const PG_BLOAT_STATS = [
 const PG_SESSION_STATE_STATS = [
   { key: "captures_in_window", label: "Captures", format: "int" },
   { key: "captures_with_sessions", label: "With reportable sessions", format: "int" },
-  { key: "session_count", label: "Sessions returned", format: "int" },
+  { key: "sessions_returned", label: "Sessions returned", format: "int" },
   { key: "horizon_holder_count", label: "Pinned the xmin horizon", format: "int" },
   { key: "idle_in_transaction_pinning_nothing", label: "Idle in xact, pinning NOTHING", format: "int" },
   { key: "redacted_row_count", label: "Redacted rows", format: "int" },
-  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  { key: "truncated", label: "Truncated", format: "bool" },
 ];
 
 /* "unscanned_without_a_structural_blocker" is deliberately not shortened to "droppable" on the tile either:
    the field name survived review for saying what it is, and a label that renamed it would undo that where a
    reader actually looks. */
 const PG_INDEX_USAGE_STATS = [
-  { key: "index_count", label: "Indexes returned", format: "int" },
+  { key: "indexes_returned", label: "Indexes returned", format: "int" },
   { key: "unscanned_without_a_structural_blocker", label: "Unscanned, nothing blocking a drop", format: "int" },
   { key: "mb_held_by_those_indexes", label: "Held by those indexes", format: "mb" },
   { key: "invalid_index_count", label: "Invalid indexes", format: "int" },
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
-  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  { key: "truncated", label: "Truncated", format: "bool" },
 ];
 
+/* `total_reads` / `total_read_time_ms` are the WINDOW's (#3613); the combination count is the PAGE's and is
+   labelled as such - the read spells it `combinations_returned` since #3653, the same `<noun>s_returned` key
+   every other paged tool uses, so a bare "Combinations" tile beside two window totals cannot be read as the
+   window's third. */
 const PG_IO_SUMMARY_STATS = [
-  { key: "combination_count", label: "Combinations", format: "int" },
+  { key: "combinations_returned", label: "Combinations returned", format: "int" },
   { key: "total_reads", label: "Reads", format: "int" },
   { key: "total_read_time_ms", label: "Read time", format: "ms" },
   { key: "busiest_by_read_time", label: "Busiest", format: "text", small: true },
@@ -3205,6 +3634,8 @@ const PG_WAIT_TREND_COLUMNS = [
 const PG_QUERY_DURATION_TREND_COLUMNS = [
   { key: "collection_time", label: "When", format: "time" },
   { key: "mean_exec_ms", label: "Mean ms/exec", format: "num2" },
+  /* #3960: a row is a bucket of intervals, so its costliest single interval rides beside the pooled mean. */
+  { key: "peak_mean_exec_ms", label: "Peak ms/exec", format: "num2", small: true },
   { key: "calls", label: "Calls", format: "int" },
   { key: "calls_per_second", label: "Calls/sec", format: "num2" },
   { key: "total_exec_ms", label: "Total ms", format: "num1", small: true },
@@ -3217,6 +3648,8 @@ const PG_QUERY_DURATION_TREND_COLUMNS = [
 const PG_IO_TREND_COLUMNS = [
   { key: "collection_time", label: "When", format: "time" },
   { key: "reads_per_second", label: "Reads/sec", format: "num2" },
+  /* #3897: a row is a bucket of intervals, so its busiest single interval rides beside the pooled rate. */
+  { key: "peak_reads_per_second", label: "Peak Reads/sec", format: "num2", small: true },
   { key: "writes_per_second", label: "Writes/sec", format: "num2" },
   { key: "cache_hit_pct", label: "Hit %", format: "num2" },
   { key: "avg_read_ms", label: "Avg Read (ms)", format: "num2" },
@@ -3232,6 +3665,8 @@ const PG_IO_TREND_COLUMNS = [
 const PG_DATABASE_TREND_COLUMNS = [
   { key: "collection_time", label: "When", format: "time" },
   { key: "cache_hit_pct", label: "Cache Hit %", format: "num2" },
+  /* #3897: a row is a bucket of intervals; the cliff this table exists to show is its worst one. */
+  { key: "worst_cache_hit_pct", label: "Worst Hit %", format: "num2", small: true },
   { key: "temp_files", label: "Temp Files", format: "int" },
   { key: "temp_bytes", label: "Temp Bytes", format: "int" },
   { key: "deadlocks", label: "Deadlocks", format: "int" },
@@ -3253,6 +3688,23 @@ const PG_DEADLOCK_COLUMNS = [
   { key: "lock_modes", label: "Lock Modes" },
   { key: "resources", label: "Resources" },
   { key: "victim_statement", label: "Victim Statement" },
+  { key: "times_seen", label: "Sightings", format: "int", small: true },
+];
+
+/* #3601 the classified log events. No column for statement text, because none is stored: the fingerprint
+   is the statement's identity and get_pg_top_queries carries the shape's normalised text. */
+const PG_LOG_EVENT_COLUMNS = [
+  { key: "occurred_at", label: "When", format: "time" },
+  { key: "family", label: "Family", small: true },
+  { key: "severity", label: "Severity", small: true },
+  { key: "sqlstate", label: "SQLSTATE", small: true },
+  { key: "database_name", label: "Database" },
+  { key: "user_name", label: "User" },
+  { key: "application_name", label: "Application" },
+  { key: "pid", label: "PID", format: "int", small: true },
+  { key: "message", label: "Message" },
+  { key: "detail", label: "Detail" },
+  { key: "context", label: "Context" },
   { key: "times_seen", label: "Sightings", format: "int", small: true },
 ];
 
@@ -3287,6 +3739,9 @@ const PG_WRITE_STATS = [
   { key: "wal_records", label: "WAL records", format: "int" },
   { key: "wal_fpi", label: "WAL full-page images", format: "int" },
   { key: "counter_reset", label: "Counters reset", format: "bool", small: true },
+  /* #3955: a restart inside the window is why Requested, % Requested, Checkpoint write and Buffers (checkpoint)
+     render blank: the shutdown checkpoint is counted as requested and its own write work lands in the same counters. */
+  { key: "postmaster_restarted", label: "Restarted in window", format: "bool", small: true },
 ];
 
 const PG_INDEX_BLOAT_COLUMNS = [
@@ -3461,6 +3916,23 @@ const PG_PLAN_CAPTURE_READINESS_COLUMNS = [
   { key: "last_observed", label: "Last Seen", format: "time", small: true },
 ];
 
+/* Verdict beside the setting, then the value, then the prose columns widest and last - the same reading
+   order as the readiness grid above it: scan down setting and verdict to find the row that is off, then
+   read across for what it unlocks, what it costs, and what to type. remedy is the column the panel exists
+   for and is worded for the server's hosting flavour by the read, not by this file. */
+const PG_LOGGING_AUDIT_COLUMNS = [
+  { key: "setting", label: "Setting", mono: true },
+  { key: "verdict", label: "Verdict" },
+  { key: "value", label: "Value", mono: true },
+  { key: "unit", label: "Unit", small: true },
+  { key: "source", label: "Source", small: true },
+  { key: "change_needs", label: "Change needs", small: true },
+  { key: "unlocks", label: "Unlocks", wrap: true },
+  { key: "recommended", label: "Recommended", wrap: true },
+  { key: "cost_note", label: "Cost", wrap: true },
+  { key: "remedy", label: "Remedy", wrap: true },
+];
+
 const PG_TOP_QUERY_COLUMNS = [
   { key: "queryid", label: "Query ID", mono: true },
   { key: "calls", label: "Calls", format: "int" },
@@ -3609,6 +4081,10 @@ const PG_DATABASE_COLUMNS = [
   { key: "counters_were_reset", label: "Reset", format: "bool" },
   { key: "reset_note", label: "Reset Note", wrap: true },
   { key: "sample_count", label: "Samples", format: "int" },
+  /* The one LEVEL in the row (V133): the window's peak of connected backends for this database, never
+     differenced. Empty on a pre-V133 history rather than 0 — not sampled is not idle. Per-database peaks land
+     at different instants, so there is deliberately no total tile for them above. */
+  { key: "peak_numbackends", label: "Peak Backends", format: "int" },
 ];
 
 /* bloat_pct_estimate and bloat_bytes_estimate are NULL on a suppressed row, which renders as an empty cell

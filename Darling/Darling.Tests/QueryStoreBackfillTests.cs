@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -159,7 +160,7 @@ public sealed class QueryStoreBackfillTests
     public void AdaptiveSpan_HalvesPerFailure_FloorsAtFifteenMinutes_AndResetsAtZero()
     {
         /* #2111 promoted from reserve on field evidence: a member whose 1h window intermittently
-           exceeds the command timeout stayed stuck for hours (Redstone, 3+ hours flat overnight) —
+           exceeds the command timeout stayed stuck for hours (one catalog, 3+ hours flat overnight) —
            halving toward a floor gives it a window that fits, and the skipped range rides the same
            hole records the clamp writes. Zero failures = full width, success resets the counter at
            every call site, and the exponent cap keeps the shift math from wrapping. */
@@ -221,4 +222,101 @@ public sealed class QueryStoreBackfillTests
         Assert.Equal("hole:", QueryStoreBackfillState.HoleKeyPrefix);
         Assert.Empty(QueryStoreCollector.Instance.StateKeys);
     }
+
+    /// <summary>
+    /// #4197: the candidate read is now bound at floorLimit, so a database that has gone fully quiet
+    /// (no row newer than the horizon) can only still surface through a recorded hole key. This pins
+    /// the merge in isolation — no store connection needed — against the exact shape
+    /// <c>RunServerSliceAsync</c> feeds it: a done-key database is never pulled in (only hole keys
+    /// are), a database named by neither surfaces from the store list alone, and the result is sorted
+    /// ordinal so the loop's walk order stays deterministic regardless of dictionary enumeration order.
+    /// </summary>
+    [Fact]
+    public void MergeHoleDatabases_UnionsHoleKeysOnly_DedupesAndSortsOrdinal()
+    {
+        var candidates = new List<string> { "zeta", "alpha" };
+        var state = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [QueryStoreBackfillState.HoleKeyPrefix + "quiet_db"] = QueryStoreBackfillState.EncodeHole(
+                new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 8, 2, 0, 0, 0, DateTimeKind.Utc)),
+            [QueryStoreBackfillState.HoleKeyPrefix + "alpha"] = QueryStoreBackfillState.EncodeHole(
+                new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 8, 2, 0, 0, 0, DateTimeKind.Utc)),
+            [QueryStoreBackfillState.DoneKeyPrefix + "finished_db"] = "2026-08-01T00:00:00.0000000Z",
+        };
+
+        var merged = QueryStoreBackfillState.MergeHoleDatabases(candidates, state);
+
+        Assert.Equal(new[] { "alpha", "quiet_db", "zeta" }, merged);
+        Assert.DoesNotContain("finished_db", merged);
+    }
+
+    /// <summary>
+    /// #4197's SQL-shape pin: fails on the unbounded shapes both reads shipped with. The candidate
+    /// scan's old form bound a hardcoded 7-day <c>CandidateWindow</c> — wider than raw retention, so
+    /// no chunk was ever excluded (206 ms / 21,411 buffers on the design's heavy rig server). The
+    /// floor read's old form had no <c>collection_time</c> bound at all. Reverting either method back
+    /// to its pre-#4197 text fails this test; see the PR body for the measured before/after.
+    /// </summary>
+    [Fact]
+    public void Sql_CandidateAndFloorReadsAreBound_NotTheOldUnboundedShapes()
+    {
+        var source = global::Darling.Tests.RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/QueryStoreBackfill.cs");
+
+        Assert.DoesNotContain(
+            "command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow - CandidateWindow, DateTimeKind.Unspecified));",
+            source, StringComparison.Ordinal);
+        Assert.Contains("command.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));", source, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreBackfillState.MergeHoleDatabases(databases, state)", source, StringComparison.Ordinal);
+
+        /* The old GetStoredFloorAsync text: an unqualified MIN with no collection_time predicate at
+           all. Its absence is the pin — the exact bounded EXISTS/MIN pair replaces it. */
+        Assert.DoesNotContain(
+            "\"SELECT MIN(last_execution_time) FROM query_store_stats WHERE server_id = $1 AND database_name = $2\"",
+            source, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3 LIMIT 1", source, StringComparison.Ordinal);
+        Assert.Contains("SELECT MIN(last_execution_time) FROM query_store_stats WHERE server_id = $1 AND database_name = $2 AND collection_time > $3", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>Lite parity for the pin above — the twin file must carry the same bound shapes.</summary>
+    [Fact]
+    public void Sql_LiteTwinCarriesTheSameBoundShapes()
+    {
+        var source = global::Darling.Tests.RepoFile.ReadRepoFile("Lite/Services/RemoteCollectorService.QueryStoreBackfill.cs");
+
+        Assert.Contains("cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("DateTime.UtcNow.AddDays(-7)", source, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreBackfillState.MergeHoleDatabases(databases, state)", source, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3 LIMIT 1", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "$\"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2\"",
+            source, StringComparison.Ordinal);
+
+        /* #4662: Darling's store switch (a cut-chunk read on TimescaleDB, a walk on plain PostgreSQL) does not
+           apply to DuckDB, which has no chunks. Lite's candidate statement is Darling's fallback statement,
+           character for character - referenced, not copied. */
+        Assert.Contains("\"" + global::PerformanceMonitor.Darling.Service.QueryStoreBackfill.CandidateSql + "\"", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4662: the three statements the store switch runs. The cut-chunk read is bound at the chunk START
+    /// (a <c>&gt;=</c> against the catalog's value) rather than <c>&gt; floor</c>, which inside the chunk that holds
+    /// the floor can only filter; the catalog read is qualified to the hypertable and applies UTC on both sides; the
+    /// walk carries no time bound at all and never lists a NULL name.</summary>
+    [Fact]
+    public void Sql_StoreSwitchStatements_AreBoundAtTheChunkStart_ReadTheCatalogInUtc_AndWalkWithoutATimeBound()
+    {
+        const string cutChunk = global::PerformanceMonitor.Darling.Service.QueryStoreBackfill.CutChunkCandidateSql;
+        const string catalog = global::PerformanceMonitor.Darling.Service.QueryStoreBackfill.CutChunkCatalogSql;
+        const string walk = global::PerformanceMonitor.Darling.Service.QueryStoreBackfill.WalkCandidateSql;
+
+        Assert.Contains("collection_time >= TIMESTAMP '{cut_start}'", cutChunk, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time >", cutChunk.Replace("collection_time >=", "", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats'", catalog, StringComparison.Ordinal);
+        Assert.Contains("range_start AT TIME ZONE 'UTC' AS cut_start", catalog, StringComparison.Ordinal);
+        Assert.Contains("range_start <= TIMESTAMP '{floor}' AT TIME ZONE 'UTC'", catalog, StringComparison.Ordinal);
+        Assert.Contains("range_end > TIMESTAMP '{floor}' AT TIME ZONE 'UTC'", catalog, StringComparison.Ordinal);
+        Assert.StartsWith("WITH RECURSIVE walk AS", walk, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time", walk, StringComparison.Ordinal);
+        Assert.Contains("database_name IS NOT NULL", walk, StringComparison.Ordinal);
+    }
+
 }

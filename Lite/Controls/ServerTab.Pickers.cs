@@ -17,6 +17,7 @@ using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using ScottPlot;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Controls;
@@ -66,6 +67,7 @@ public partial class ServerTab : UserControl
             IsSelected = previouslySelected.Contains(w) || (topWaits != null && topWaits.Contains(w))
         }).ToList();
         /* Sort checked items to top, then preserve original order (by total wait time desc) */
+        _waitTypeRefresh?.Invalidate();
         RefreshWaitTypeListOrder();
     }
 
@@ -111,6 +113,7 @@ public partial class ServerTab : UserControl
             item.IsSelected = topWaits.Contains(item.DisplayName);
         }
         _isUpdatingWaitTypeSelection = false;
+        _waitTypeRefresh?.Invalidate();
         RefreshWaitTypeListOrder();
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
@@ -121,6 +124,7 @@ public partial class ServerTab : UserControl
         var visible = (WaitTypesList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _waitTypeItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingWaitTypeSelection = false;
+        _waitTypeRefresh?.Invalidate();
         RefreshWaitTypeListOrder();
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
@@ -130,11 +134,23 @@ public partial class ServerTab : UserControl
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _waitTypeRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void WaitType_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingWaitTypeSelection) return;
-        RefreshWaitTypeListOrder();
-        _ = UpdateWaitStatsChartFromPickerAsync();
+        (_waitTypeRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshWaitTypeListOrder();
+                _ = UpdateWaitStatsChartFromPickerAsync();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_waitTypeItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
     private int _waitStatsPickerGen;
@@ -158,19 +174,7 @@ public partial class ServerTab : UserControl
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
 
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null;
-            DateTime? toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             double globalMax = 0;
 
             // Batched fetch: one query for all selected wait types (was an N+1 query-per-type loop).
@@ -181,7 +185,7 @@ public partial class ServerTab : UserControl
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = useAvgPerWait
                     ? trend.Select(t => t.AvgMsPerWait).ToArray()
                     : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
@@ -195,7 +199,7 @@ public partial class ServerTab : UserControl
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
 
-            WaitStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            WaitStatsChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
@@ -204,8 +208,7 @@ public partial class ServerTab : UserControl
             }
             else
             {
-                rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-                rangeStart = rangeEnd.AddHours(-hoursBack);
+                (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
             }
             WaitStatsChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(WaitStatsChart);
@@ -231,6 +234,7 @@ public partial class ServerTab : UserControl
             DisplayName = c,
             IsSelected = previouslySelected.Contains(c) || (topClerks != null && topClerks.Contains(c))
         }).ToList();
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
     }
 
@@ -273,6 +277,7 @@ public partial class ServerTab : UserControl
             item.IsSelected = topClerks.Contains(item.DisplayName);
         }
         _isUpdatingMemoryClerkSelection = false;
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
@@ -283,15 +288,28 @@ public partial class ServerTab : UserControl
         var visible = (MemoryClerksList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _memoryClerkItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingMemoryClerkSelection = false;
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _memoryClerkRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void MemoryClerk_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingMemoryClerkSelection) return;
-        RefreshMemoryClerkListOrder();
-        _ = UpdateMemoryClerksChartFromPickerAsync();
+        (_memoryClerkRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshMemoryClerkListOrder();
+                _ = UpdateMemoryClerksChartFromPickerAsync();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_memoryClerkItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
     private int _memoryClerksPickerGen;
@@ -307,21 +325,8 @@ public partial class ServerTab : UserControl
             ApplyTheme(MemoryClerksChart);
             _memoryClerksHover?.Clear();
 
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null;
-            DateTime? toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
-            DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
+            var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
             double xMin = rangeStart.ToOADate();
             double xMax = rangeEnd.ToOADate();
 
@@ -329,7 +334,7 @@ public partial class ServerTab : UserControl
             {
                 MemoryClerksTotalText.Text = "--";
                 MemoryClerksTopText.Text = "--";
-                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
+                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
                 MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
                 ReapplyAxisColors(MemoryClerksChart);
                 MemoryClerksChart.Refresh();
@@ -349,7 +354,7 @@ public partial class ServerTab : UserControl
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = trend.Select(t => t.MemoryMb).ToArray();
 
                 var plot = MemoryClerksChart.Plot.Add.TimeSeries(times, values);
@@ -373,7 +378,7 @@ public partial class ServerTab : UserControl
                 }
             }
 
-            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(MemoryClerksChart);
             MemoryClerksChart.Plot.YLabel("Memory (MB)");
@@ -421,6 +426,7 @@ public partial class ServerTab : UserControl
             IsSelected = previouslySelected.Contains(c)
                 || (previouslySelected.Count == 0 && _defaultPerfmonCounters.Contains(c))
         }).ToList();
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
     }
 
@@ -464,6 +470,7 @@ public partial class ServerTab : UserControl
         }
 
         _isUpdatingPerfmonSelection = false;
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
         _ = UpdatePerfmonChartFromPickerAsync();
     }
@@ -504,6 +511,7 @@ public partial class ServerTab : UserControl
             }
         }
         _isUpdatingPerfmonSelection = false;
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
         _ = UpdatePerfmonChartFromPickerAsync();
     }
@@ -514,19 +522,50 @@ public partial class ServerTab : UserControl
         var visible = (PerfmonCountersList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _perfmonCounterItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingPerfmonSelection = false;
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
         _ = UpdatePerfmonChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _perfmonRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void PerfmonCounter_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingPerfmonSelection) return;
-        RefreshPerfmonListOrder();
-        _ = UpdatePerfmonChartFromPickerAsync();
+        (_perfmonRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshPerfmonListOrder();
+                _ = UpdatePerfmonChartFromPickerAsync();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_perfmonCounterItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
     private int _perfmonPickerGen;
 
+    /// <summary>
+    /// Redraws the picker's selected counters. Each series goes through the shared
+    /// <see cref="DeltaSeriesShaping"/> before it reaches ScottPlot (#3653 A7; the Darling viewer's
+    /// <c>ViewerServerTab.Perfmon.cs</c> is the twin): the reader has fetched <c>MAX(sample_interval_seconds)</c>
+    /// onto every row since #2234 and this chart plotted the raw delta beside it under a Y axis that said
+    /// "Value" — <c>Batch Requests/sec</c> drew batches-per-sweep, not per second, and a restart's fabricated
+    /// (0, 0) drew as a real trough. Each series is classified by its STORED <c>cntr_type</c> (v62, #3653 A7):
+    /// a rate counter plots delta / interval; a gauge plots its raw value as the level it is (the store held it
+    /// all along; only the type was missing); everything else plots its raw delta with " (Δ/interval)" on its
+    /// legend entry. The #3702 name-suffix proxy (<c>/sec</c> = rate) is the fallback for a series with no
+    /// stored type — rows written before the rung, or a counter whose instances mix types — and never says
+    /// "gauge", so history renders as it did before the rung until a row carries the type. A counter's type
+    /// does not change, so the series takes ANY point's non-null type: a gauge's whole window plots as a level
+    /// the morning after the upgrade. A stored interval of 0 plots NaN on a delta series, which ScottPlot
+    /// draws as a line break — the restart reads as absence, composing with #1944's cadence gap rule that
+    /// <c>Add.TimeSeries</c> already applies on X; a level ignores the interval. The Y label is composed from
+    /// the bases actually plotted; the Y ceiling ignores the NaNs.
+    /// </summary>
     private async System.Threading.Tasks.Task UpdatePerfmonChartFromPickerAsync()
     {
         var gen = ++_perfmonPickerGen;
@@ -540,20 +579,9 @@ public partial class ServerTab : UserControl
 
             if (selected.Count == 0) { PerfmonChart.Refresh(); return; }
 
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null;
-            DateTime? toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             double globalMax = 0;
+            var plottedBases = new List<DeltaBasis>();
 
             // Batched fetch: one query for all selected counters (was an N+1 query-per-counter loop).
             var trendsByCounter = await Task.Run(() => _dataService.GetPerfmonTrendsByCountersAsync(_serverId, selected.Select(s => s.DisplayName).ToList(), hoursBack, fromDate, toDate));
@@ -563,19 +591,29 @@ public partial class ServerTab : UserControl
             {
                 if (!trendsByCounter.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
-                var values = trend.Select(t => (double)t.DeltaValue).ToArray();
+                var counterName = selected[i].DisplayName;
+                /* The series' type is any point's non-null type — a counter's type does not change, and the
+                   read reports one only where the point's instance rows agree. Null on every point means
+                   pre-rung rows or a mixed-type family: the name proxy decides, as it did before v62. */
+                var seriesType = trend.Select(t => t.CntrType).LastOrDefault(t => t.HasValue);
+                var basis = DeltaSeriesShaping.BasisFor(counterName, seriesType);
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
+                var values = DeltaSeriesShaping.Shape(
+                    trend.Select(t => new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds, t.Value)).ToList(),
+                    basis);
+                var label = DeltaSeriesShaping.LegendLabel(counterName, basis);
 
                 var plot = PerfmonChart.Plot.Add.TimeSeries(times, values);
-                plot.LegendText = selected[i].DisplayName;
+                plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
-                _perfmonHover?.Add(plot, selected[i].DisplayName);
+                _perfmonHover?.Add(plot, label);
+                plottedBases.Add(basis);
 
-                if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+                globalMax = Math.Max(globalMax, DeltaSeriesShaping.MaxFinite(values, 0));
             }
 
-            PerfmonChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            PerfmonChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
@@ -584,14 +622,30 @@ public partial class ServerTab : UserControl
             }
             else
             {
-                rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-                rangeStart = rangeEnd.AddHours(-hoursBack);
+                (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
             }
             PerfmonChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(PerfmonChart);
-            PerfmonChart.Plot.YLabel("Value");
+            PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases));
             SetChartYLimitsWithLegendPadding(PerfmonChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(PerfmonChart);
+
+            /* #4476: a chart-chrome title naming how many one-sample Wait Statistics spikes this window's
+               plotted counters set aside — null when none, so nothing is shown for the common case. Mirrors
+               the Darling viewer's ViewerServerTab.Perfmon.cs. */
+            var artifactsSetAside = selected
+                .Where(s => trendsByCounter.ContainsKey(s.DisplayName))
+                .SelectMany(s => trendsByCounter[s.DisplayName])
+                .Sum(t => t.ArtifactsSetAside);
+            var caption = WaitStatisticsArtifact.ChartCaption(artifactsSetAside);
+            if (caption != null)
+            {
+                PerfmonChart.Plot.Title(caption);
+                PerfmonChart.Plot.Axes.Title.Label.ForeColor = PerfmonChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+                PerfmonChart.Plot.Axes.Title.Label.FontSize = 11;
+                PerfmonChart.Plot.Axes.Title.Label.Bold = false;
+            }
+
             PerfmonChart.Refresh();
         }
         catch

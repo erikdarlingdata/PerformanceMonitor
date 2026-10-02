@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -75,13 +76,18 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpAlertTools
 {
-    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled' and 'folded' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>>Gets recent alert history from the alert log, NEWEST FIRST: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, so on a noisy fleet a 24-hour request at the default limit may cover minutes. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Viewer's Alert History grid. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate routed it to the daily Analysis Singles Digest and the web/MCP surfaces instead of a paging channel — nothing was attempted, nothing was suppressed, and routing_reason on the row says which components decided; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled', 'folded' and 'digest' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. route says WHERE the posts went: the alert's family (self-monitor / reports / agent-jobs / performance), the notification route that matched it (route_id null = the parent channels in Settings > Notifications answered everything) and each delivered channel with the route that supplied its destination — see get_notification_routes for the taxonomy and the routes. route is null on rows written before routing existed and on rows that never reached a delivery decision (throttled, folded, muted, unconfigured, digest, resolutions), so a null route is not evidence of a routing fault. routing is a DIFFERENT question from route: for an 'Analysis: …' finding it is the corroboration gate's decision one step UPSTREAM of the fan-out — 'page' when the finding earned a channel (two or more facts in its chain, or a matched co-fire check, or one of the two by-construction stories) and 'digest' when it was a lone uncorroborated fact — with routing_reason naming the components the gate read, so 'why didn't this page' is answered by the row. Both are null on every engine alert and on analysis rows written before the gate existed. To see what the digest carried, read the rows with notification_type 'digest' in the window: each is a persisted finding with its full detail_text and context, findable in get_analysis_findings by the story hash in its metric_name. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable.")]
     public static async Task<string> GetAlertHistory(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit to return alerts across all servers (the fleet default).")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum rows to return, newest first. Default 50. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        /* Appended after as_of for the reason get_collection_log's filters are: MCP invokes by name, the
+           /api/read dispatch passes as_of by name, and a trailing optional is the one position no existing
+           positional C# caller can be re-bound by. */
+        [Description("Include alerts an operator has dismissed in the Viewer. Default false, which is the Alert History grid's own read.")] bool include_dismissed = false,
+        CancellationToken cancellationToken = default)
     {
         var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (hoursError != null) return hoursError;
@@ -94,7 +100,7 @@ public sealed class DarlingMcpAlertTools
         var scope = "(all servers)";
         if (!string.IsNullOrWhiteSpace(server_name))
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
             if (error != null) return error;
             serverId = resolved.ServerId;
             scope = resolved.ServerName;
@@ -103,42 +109,103 @@ public sealed class DarlingMcpAlertTools
         try
         {
             var since = windowEnd.AddHours(-hours_back);
-            var rows = await DarlingAlertReader.GetAlertHistoryAsync(postgres, since, windowEnd, serverId, limit);
-            if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No alerts found in the specified time range.");
 
-            var alerts = rows.Select(r => new
+            /* #3541 A3: over-fetch by one so truncation is OBSERVED rather than inferred from count == limit,
+               the pattern get_collection_log and get_query_heatmap use. The cap was already the caller's
+               here; what was missing was any way to tell a window of exactly `limit` alerts from a busier
+               one, and any statement that the dismissed rows had been removed. */
+            var rows = await DarlingAlertReader.GetAlertHistoryPageAsync(postgres, since, windowEnd, serverId, limit + 1, include_dismissed, cancellationToken);
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            /* The hidden filter, measured: how many rows in this window and scope it removed. Zero is a real
+               answer (nothing was hidden) and is what a caller who never sends include_dismissed most needs
+               to see beside a clean-looking page. Not probed when the filter is off, because then it removed
+               nothing by construction. */
+            var dismissedExcludedCount = include_dismissed
+                ? 0L
+                : await DarlingAlertReader.CountDismissedAlertsAsync(postgres, since, windowEnd, serverId, cancellationToken);
+
+            if (page.Count == 0)
             {
-                alert_time = r.AlertTime.ToString("o"),
-                server_id = r.ServerId,
-                server_name = r.ServerName,
-                metric_name = r.MetricName,
-                current_value = r.CurrentValue,
-                threshold_value = r.ThresholdValue,
-                alert_sent = r.AlertSent,
-                notification_type = r.NotificationType,
-                send_error = r.SendError,
-                muted = r.Muted,
-                detail_text = r.DetailText
+                /* An empty default page over a window that DOES hold dismissed rows is not "no alerts": it is
+                   "every alert here was acknowledged", and the one-sentence quiet-window answer would send
+                   the caller off widening a window whose contents they were never shown. */
+                return dismissedExcludedCount > 0
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No undismissed alerts found in the specified time range, but {dismissedExcludedCount} dismissed alert(s) were excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
+                    : McpHelpers.Status("empty", "No alerts found in the specified time range.");
+            }
+
+            var alerts = page.Select(r =>
+            {
+                var (severity, severitySource) = AlertHistoryRowSeverity.Describe(r.MetricName, r.ContextJson);
+                var routing = AlertContextSerializer.TryReadRouting(r.ContextJson);
+                return new
+                {
+                    alert_time = r.AlertTime.ToString("o"),
+                    server_id = r.ServerId,
+                    server_name = r.ServerName,
+                    metric_name = r.MetricName,
+                    current_value = r.CurrentValue,
+                    threshold_value = r.ThresholdValue,
+                    alert_sent = r.AlertSent,
+                    notification_type = r.NotificationType,
+                    send_error = r.SendError,
+                    muted = r.Muted,
+                    /* Per row, so a page that mixes the two populations labels each one. Always false on the
+                       default read, which is a true statement about every row on it. */
+                    dismissed = r.Dismissed,
+                    /* #3539 A8e: the tier the alert FIRED at where the row persisted one ("fired"), else what
+                       the metric NAME implies ("metric_name") — the same two arms both Alert History grids
+                       colour rows by, so a caller reading "Poison Wait" here sees the Warning it fired at
+                       rather than the red the name used to earn every row. The source is published because
+                       the two are not equal evidence; see AlertHistoryRowSeverity.Describe. */
+                    severity,
+                    severity_source = severitySource,
+                    /* #3598 (design point 3): WHERE this firing's posts went — the alert's family, the route
+                       that matched it (null = the parent channels answered everything) and each DELIVERED
+                       channel with the route that supplied its destination. Null on rows written before
+                       routes existed and on rows that never reached resolution (throttled, folded, muted,
+                       unconfigured, resolutions): a row that consulted no destination records none. */
+                    route = RouteHistoryPayload(AlertContextSerializer.TryReadRoute(r.ContextJson)),
+                    /* #3712: the corroboration gate's decision for an analysis finding — 'page' or 'digest' —
+                       and the one sentence naming the components it read, read off the row the way
+                       severity_source is. Null on every engine alert (the gate does not apply) and on every
+                       analysis row written before the gate existed; a null here is not evidence of anything. */
+                    routing = routing?.Route,
+                    routing_reason = routing?.Reason,
+                    detail_text = r.DetailText,
+                };
             });
 
             return JsonSerializer.Serialize(new
             {
                 server = scope,
                 hours_back,
-                total_alerts = rows.Count,
+                /* #3541 A3: `total_alerts` is gone — it was the page count under a name that promised the
+                   window. What is published is what was measured: the page, whether the window held more,
+                   the span the page covers (newest-first, so the oldest stamp IS the reach), and the filter
+                   that shaped the population together with how much it removed. */
+                alerts_returned = page.Count,
+                truncated,
+                oldest_returned_alert_time = page.Min(r => r.AlertTime).ToString("o"),
+                newest_returned_alert_time = page.Max(r => r.AlertTime).ToString("o"),
+                order = "alert_time_desc",
+                dismissed_excluded = !include_dismissed,
+                dismissed_excluded_count = dismissedExcludedCount,
                 alerts
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_alert_history", ex);
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: a PostgreSQL server has no deadlock or blocking health band to calibrate against, and its blocking count is a periodic SAMPLE of pg_stat_activity rather than engine-recorded reports. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
-    public static async Task<string> GetAlertSettings(
-        NpgsqlDataSource postgres)
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers, a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED: since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores the earlier paging of every notify-worthy finding; a corroborated finding pages under either. It is the EFFECTIVE route, never null, resolved from the knob's two homes with the STORE winning: the settings row's analysis_uncorroborated_route column (V137) when it holds a route, else darling.json's analysis.uncorroboratedRoute (read once at service start), else the shipped 'digest'. analysis.uncorroborated_route_source says which home decided — 'store', 'file' or 'default' — and analysis.uncorroborated_route_note restates the precedence beside it; a store column left NULL (every store the morning after the V137 upgrade, and every fresh seed) reads 'file'. Set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis): live in the running service within one collection sweep, consulted on the next scheduled-analysis delivery, no restart; send null through update_alert_settings to clear the column and hand the decision back to the file. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -147,7 +214,7 @@ public sealed class DarlingMcpAlertTools
                SELECTs -- and two independent reads could straddle a concurrent update_alert_settings commit
                and report a mix of pre- and post-update state, which is the very thing the write path takes a
                transaction to avoid producing. See DarlingAlertReader.GetAlertConfigurationAsync. */
-            var (s, deliveryCooldown) = await DarlingAlertReader.GetAlertConfigurationAsync(postgres);
+            var (s, deliveryCooldown) = await DarlingAlertReader.GetAlertConfigurationAsync(postgres, cancellationToken);
             if (s is null)
                 return McpHelpers.Status(
                     "unavailable",
@@ -163,11 +230,46 @@ public sealed class DarlingMcpAlertTools
 
             return JsonSerializer.Serialize(BuildAlertSettingsPayload(s, deliveryCooldown.Value), McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_alert_settings", ex);
         }
     }
+
+    /// <summary>The <c>analysis.uncorroborated_route_note</c> text (#3712): the knob has TWO homes since V137, so
+    /// the reader is told the precedence, how to move the decision between them, and where the EFFECTIVE
+    /// decision is visible per finding. Restates <see cref="DarlingAlertSettings.ResolveUncorroboratedRoute"/>
+    /// in prose; the machine-readable half is <c>uncorroborated_route_source</c> beside it.</summary>
+    internal const string UncorroboratedRouteNote =
+        "#3712: the EFFECTIVE route, resolved store-over-file. config_alert_settings.analysis_uncorroborated_route (V137; "
+        + "set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis), live in the running service within one "
+        + "collection sweep, no restart) wins when it holds 'digest' or 'page'; NULL there defers to darling.json's "
+        + "analysis.uncorroboratedRoute, read once at service start; a file value that is neither spelling defers to the "
+        + "shipped 'digest'. uncorroborated_route_source names the home that decided: 'store', 'file' or 'default'. Send "
+        + "uncorroborated_route: null through update_alert_settings to clear the store column and let the file govern again. "
+        + "A corroborated finding pages under either value. The decision the running service made for each finding is on "
+        + "its get_alert_history row as routing / routing_reason.";
+
+    /// <summary>
+    /// The wire-side deprecation note for <c>poison_wait.threshold_ms</c> (#3653): emitted beside the value by
+    /// <see cref="BuildAlertSettingsPayload"/>, returned under <c>warnings</c> by <c>update_alert_settings</c>
+    /// when a caller sets the value, and pinned word-for-word on both by <c>DarlingMcpAlertToolsTests</c>. One
+    /// constant so the two surfaces cannot say different things about the same retired knob. Lite's
+    /// <c>McpAlertTools</c> carries the same text by hand (Lite.Tests cannot reference this assembly) and its
+    /// test reads this declaration to hold the two equal.
+    /// </summary>
+    internal const string PoisonWaitThresholdMsNote =
+        "retired by #3593 — the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
+
+    /// <summary>The #3712 route knob resolved for the read surface: the row's store half (raw, off
+    /// <see cref="DarlingAlertReader.AlertSettingsReadRow.AnalysisUncorroboratedRoute"/>) beside the file half
+    /// this process published (<see cref="DarlingFileLevelAlertSettings.UncorroboratedRoute"/>), through the ONE
+    /// resolver the engine seam uses, so <c>get_alert_settings</c> and <c>DarlingAlertSettings</c> cannot read one
+    /// row two ways. The publish is the file value's only route into a static tool over the store; where nothing
+    /// has published (a harness) the file half is null and the resolution says <c>default</c>, which is what
+    /// such a process would apply.</summary>
+    private static UncorroboratedRouteResolution UncorroboratedRoute(DarlingAlertReader.AlertSettingsReadRow s) =>
+        DarlingAlertSettings.ResolveUncorroboratedRoute(s.AnalysisUncorroboratedRoute, DarlingFileLevelAlertSettings.UncorroboratedRoute);
 
     /// <summary>The nested JSON shape get_alert_settings returns AND update_alert_settings echoes back — the same
     /// field names update_alert_settings accepts on the way in, so a read → modify → write round-trips.
@@ -230,7 +332,21 @@ public sealed class DarlingMcpAlertTools
             deadlock_warn_per_hour = s.DeadlockWarnPerHour,
             deadlock_critical_per_hour = s.DeadlockCriticalPerHour
         },
-        poison_wait = new { enabled = s.PoisonWaitEnabled, threshold_ms = s.PoisonWaitThresholdMs },
+        poison_wait = new
+        {
+            enabled = s.PoisonWaitEnabled,
+            /* #3653 (from #3541): the key STAYS — it is a published field a client may read or hand back, and
+               removing it would be a contract break for a value that costs nothing to carry — but since #3593
+               nothing consults it. The alert grades ACCUMULATED wait over PoisonWaitEvaluator.WindowMinutes
+               (IAlertEngineSettings.PoisonWaitThresholdMs records why the member survives on the contract);
+               this was the avg-ms-per-wait bar the retired shape judged one collector row against. The note
+               sits BESIDE the value, on the wire, because the description is the only other place an agent
+               could learn it and a description is read once. The writer accepts the note back untouched (a
+               read → modify → write round-trip is this payload's invariant) and warns when the value itself
+               is set. */
+            threshold_ms = s.PoisonWaitThresholdMs,
+            threshold_ms_note = PoisonWaitThresholdMsNote
+        },
         long_running_query = new
         {
             enabled = s.LongRunningQueryEnabled,
@@ -240,7 +356,14 @@ public sealed class DarlingMcpAlertTools
             exclude_wait_for = s.LongRunningQueryExcludeWaitFor,
             exclude_backups = s.LongRunningQueryExcludeBackups,
             exclude_misc_waits = s.LongRunningQueryExcludeMiscWaits,
-            exclude_cdc = s.LongRunningQueryExcludeCdc
+            exclude_cdc = s.LongRunningQueryExcludeCdc,
+            /* #3653 (A5, Q5): the opt-out knob -- sessions whose program_name starts with a prefix / whose login_name
+               equals an entry are NOT EVALUATED by the alert (applied in the read, ahead of its row cap), which is
+               the opposite of a mute rule. Case-insensitive, no wildcard grammar. Reported as the arrays the store
+               holds (seeded by the V135 rung's DEFAULT) so a round-trip through update_alert_settings is
+               byte-identical. */
+            excluded_program_name_prefixes = s.LongRunningQueryExcludedProgramNamePrefixes,
+            excluded_logins = s.LongRunningQueryExcludedLogins
         },
         tempdb_space = new { enabled = s.TempDbSpaceEnabled, threshold_percent = s.TempDbSpaceThresholdPercent },
         low_disk = new
@@ -257,6 +380,10 @@ public sealed class DarlingMcpAlertTools
         self_alerts = new
         {
             disk_free_warn_percent = s.SelfDiskFreeWarnPercent,
+            /* #3528 (V126): the percent's GB floor — pressure requires BOTH the percent above breached
+               AND free space below this many GB (0 removes the floor), so a large store volume at a low
+               percent stops paging CRITICAL. The pvs.floor_gb composition, not low_disk's OR pair. */
+            disk_free_warn_gb = s.SelfDiskFreeWarnGb,
             collection_stale_minutes = s.CollectionStaleMinutes,
             collection_failure_threshold = s.CollectionFailureThreshold,
             /* #2136: the Store Job Over Cadence warning percent (Critical is fixed at 100). */
@@ -278,6 +405,10 @@ public sealed class DarlingMcpAlertTools
         file_growth = new
         {
             enabled = s.FileGrowthEnabled,
+            /* #3539 A8c: MB per HOUR, averaged over lookback_minutes — a rate, not the in-window delta the key's
+               spelling suggests. The key keeps its name (a rename breaks every client that reads or writes it,
+               and Lite's McpAlertSettingsKeyTests derive its shape from this source); the unit is stated in
+               both tool descriptions, which is where an agent reads it. */
             rise_mb = s.FileGrowthRiseMb,
             volume_percent = s.FileGrowthVolumePercent,
             lookback_minutes = s.FileGrowthLookbackMinutes
@@ -324,7 +455,20 @@ public sealed class DarlingMcpAlertTools
             notifications_enabled = s.AnalysisNotificationsEnabled,
             notify_severity = s.AnalysisNotifySeverity,
             /* #2107: was a hardcoded 360 in Darling while Lite passed a configured value through. */
-            notify_cooldown_minutes = s.AnalysisNotifyCooldownMinutes
+            notify_cooldown_minutes = s.AnalysisNotifyCooldownMinutes,
+            /* #3712: where an UNCORROBORATED finding goes — 'digest' (shipped) or 'page' — as the EFFECTIVE route
+               the service applies, resolved by the SAME function the engine seam uses
+               (DarlingAlertSettings.ResolveUncorroboratedRoute) over the knob's two homes: the row's
+               analysis_uncorroborated_route column (V137, read raw off the row above) wins when it holds a route;
+               NULL defers to darling.json's analysis.uncorroboratedRoute, read off the ambient publish both
+               config-loading hosts install (DarlingFileLevelAlertSettings — the file is not in the store, and
+               the alert tools are static methods over the store); neither defers to the shipped digest. Never
+               null: a resolution always ends somewhere, and _source says where — 'store', 'file', or 'default'.
+               An unpublished harness reads 'default' + 'digest', which is a true statement about what that
+               process would apply, where the pre-V137 null claimed only that nothing had been published. */
+            uncorroborated_route = UncorroboratedRoute(s).RouteText,
+            uncorroborated_route_source = UncorroboratedRoute(s).Source,
+            uncorroborated_route_note = UncorroboratedRouteNote
         },
         /* #3466 (V124): the fleet sweep's own switch and cadence — the scheduled whole-fleet report,
            NOT an alert family. The alert master switch deliberately does not govern it (sweeps under
@@ -338,14 +482,182 @@ public sealed class DarlingMcpAlertTools
         }
     };
 
-    [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]
-    public static async Task<string> GetMuteRules(
+    [McpServerTool(Name = "get_notification_routes"), Description(
+        "Gets the alert family taxonomy, and where each family's posts go. Zero routes is the ordinary state: every alert goes to every parent channel configured in Settings. Darling: sparse routes layered over that parent set; an EMPTY channel on a route INHERITS the parent's rather than silencing it; resolution is exact metric, then family, then parent. Lite: routes_supported is false, so no routes exist to edit. Routing decides WHERE a post lands, never WHETHER it is sent.<<GUIDE>>Gets WHERE each alert family is delivered: the closed family taxonomy — which metric names belong to " +
+        "self-monitor, reports, agent-jobs and performance — and the sparse notification routes layered over the " +
+        "parent channel set. Every store starts with ZERO routes, which means every alert goes to every channel " +
+        "configured in the Viewer's Settings > Notifications (the parent). A route names a family (or one exact metric " +
+        "name) and a destination per channel type; an EMPTY channel on a route INHERITS the parent's, so a route " +
+        "can redirect Slack for one family and leave PagerDuty as the parent has it, or ENABLE a channel the parent " +
+        "does not have (a paging key on the performance route alone is how 'only pages page' is spelled). A route " +
+        "cannot silence a channel the parent has: empty means inherit, not off. Resolution order per channel: an " +
+        "enabled route matching the metric EXACTLY, then one matching its FAMILY, then the parent; within a level the " +
+        "lowest route_id with a non-empty column wins. A recovery routes as its firing (Server Restored as Server " +
+        "Unreachable), so a channel that saw the fire sees the clear. Routing sits AFTER the cooldown: it changes " +
+        "where a post lands, never whether it is sent. Destination values (webhook URLs, the PagerDuty routing key) " +
+        "are bearer secrets and are NOT reported — configured_channels lists which channels each route sets by " +
+        "name; smtp_recipients is reported because an address list is not a secret. get_alert_history rows carry a " +
+        "route field naming the family, the matched route_id and the delivered channels, so a misrouted post can " +
+        "be traced. Routes are authored in the Viewer's Settings window; here they can be disabled or deleted " +
+        "(set_notification_route_enabled / delete_notification_route).")]
+    public static async Task<string> GetNotificationRoutes(
         NpgsqlDataSource postgres,
-        [Description("Include only enabled, non-expired rules. Default true.")] bool enabled_only = true)
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            var all = await new PgMuteRuleStore(postgres).LoadAllAsync();
+            var routes = await new PgNotificationRouteStore(postgres).LoadSummariesAsync(cancellationToken);
+
+            return JsonSerializer.Serialize(new
+            {
+                /* The taxonomy first: the vocabulary a route's metric_match is written in, with every metric name
+                   each family owns, so a caller can tell which family an alert it saw in get_alert_history belongs
+                   to without a second tool. Recoveries are listed with the firing they route as. */
+                families = AlertFamily.All.Select(family => new
+                {
+                    family,
+                    description = FamilyDescription(family),
+                    metrics = AlertFamily.MetricFamilies
+                        .Where(kv => kv.Value == family && !AlertFamily.RecoveryPairs.ContainsKey(kv.Key))
+                        .Select(kv => kv.Key)
+                        .OrderBy(m => m, StringComparer.Ordinal),
+                    metric_prefixes = AlertFamily.PrefixFamilies
+                        .Where(p => p.Family == family)
+                        .Select(p => p.Prefix + "*"),
+                }),
+                recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value }),
+                unclassified_metrics_route_as = AlertFamily.Performance,
+                resolution_order = new[] { "exact metric route", "family route", "parent channel (Settings > Notifications)" },
+                route_count = routes.Count,
+                enabled_route_count = routes.Count(r => r.Enabled),
+                /* Zero routes is the ordinary state and the caller must be able to tell it from a failed read: an
+                   empty array here with route_count 0 IS the answer "every alert goes to every parent channel". */
+                routes = routes.Select(r => new
+                {
+                    route_id = r.RouteId,
+                    metric_match = r.MetricMatch,
+                    match_kind = r.Family is null ? "exact_metric" : "family",
+                    family = r.Family ?? AlertFamily.Of(r.MetricMatch),
+                    configured_channels = r.ConfiguredChannels,
+                    smtp_recipients = r.EmailRecipients,
+                    enabled = r.Enabled,
+                    modified_at_utc = r.ModifiedAtUtc,
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_notification_routes", ex);
+        }
+    }
+
+    /// <summary>The <c>route</c> member of a get_alert_history row (#3598): the persisted provenance, re-spelled
+    /// in the tool's snake_case, or null when the row carries none. #4750: each destination's <c>outcome</c> is
+    /// what the send to that channel did ("delivered", "failed" or "not attempted"), or null on a row written
+    /// before it was recorded.</summary>
+    internal static object? RouteHistoryPayload(AlertRouteDto? route) => route is null ? null : new
+    {
+        family = route.Family,
+        route_id = route.RouteId,
+        destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source, outcome = d.Outcome }),
+    };
+
+    /// <summary>The one-line audience each family names, for the taxonomy the read tool publishes.</summary>
+    internal static string FamilyDescription(string family) => family switch
+    {
+        AlertFamily.SelfMonitor => "Alerts about the monitoring tool itself: its store, collectors, jobs and certificates.",
+        AlertFamily.Reports => "Scheduled prose (the collector-cost digest, the fleet sweep rollup) — to read, never to be paged by.",
+        AlertFamily.AgentJobs => "SQL Server Agent: failed and anomalously long jobs, and the Agent service being down.",
+        AlertFamily.Performance => "A monitored server's health: blocking, deadlocks, CPU, long-running queries, space, availability groups, connection loss, custom rules and analysis findings. Also the fall-through for any metric the taxonomy does not name.",
+        _ => "",
+    };
+
+    [McpServerTool(Name = "set_notification_route_enabled"), Description(
+        "Enables or disables a notification route by route_id, WITHOUT deleting it. Changes shared alert configuration the service delivers on: a disabled route is skipped at resolution as if it did not exist, so its alerts fall to the next level (family route, then parent channels). Reversible: re-enabling restores it exactly. Returns updated (route as stored), unchanged (already that value, safe to retry), or not_found. Cannot author or re-point a route; that is Settings-window only." +
+        "<<GUIDE>>" +
+        "Enables or disables a notification route by its route_id (from get_notification_routes) WITHOUT deleting it. " +
+        "A disabled route is skipped at resolution exactly as if it did not exist, so the alerts it matched fall to " +
+        "the next level (a family route, then the parent channels) on the next firing — the reversible form of " +
+        "'send this family to the parent channels for now'. Returns {status:\"updated\", route:{...}} with the route AS " +
+        "STORED, {status:\"unchanged\", route:{...}} when it already holds that value (a retry is safe and costs no " +
+        "write), or {status:\"not_found\"}. The running service picks the change up on its next collection sweep, " +
+        "when the write's config_version bump makes it reload its channel configuration. This tool cannot author or " +
+        "re-point a route: destinations are bearer secrets and are set only in the Viewer's Settings window.")]
+    public static async Task<string> SetNotificationRouteEnabled(
+        NpgsqlDataSource postgres,
+        [Description("The route_id to enable or disable (from get_notification_routes).")] int route_id,
+        [Description("true to put the route back in force, false to skip it at resolution while keeping it.")] bool enabled)
+    {
+        try
+        {
+            var store = new PgNotificationRouteStore(postgres);
+            var existing = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            if (existing is null)
+            {
+                return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            if (existing.Enabled == enabled)
+            {
+                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
+            }
+
+            await store.SetEnabledAsync(route_id, enabled);
+
+            /* Re-read AFTER the write, so the reported row is the stored one (set_mute_rule_enabled's rule). */
+            var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            return JsonSerializer.Serialize(new { status = "updated", route = stored is null ? null : RoutePayload(stored) }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("set_notification_route_enabled", ex);
+        }
+    }
+
+    [McpServerTool(Name = "delete_notification_route"), Description(
+        "Deletes a notification route by its route_id (from get_notification_routes). Permanent: the alerts it " +
+        "matched fall to the next level (a family route, then the parent channels) on the next firing. Returns " +
+        "{status:\"deleted\", route_id} or {status:\"not_found\"}. Prefer set_notification_route_enabled for a " +
+        "temporary change — a deleted route's destinations are gone and only the Viewer's Settings window can author " +
+        "them again. The running service stops honoring the route on its next collection sweep.")]
+    public static async Task<string> DeleteNotificationRoute(
+        NpgsqlDataSource postgres,
+        [Description("The route_id to delete (from get_notification_routes).")] int route_id)
+    {
+        try
+        {
+            var deleted = await new PgNotificationRouteStore(postgres).DeleteAsync(route_id);
+            return deleted == 0
+                ? Outcome("not_found", $"No notification route with route_id {route_id}.")
+                : JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("delete_notification_route", ex);
+        }
+    }
+
+    private static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => new
+    {
+        route_id = r.RouteId,
+        metric_match = r.MetricMatch,
+        match_kind = r.Family is null ? "exact_metric" : "family",
+        family = r.Family ?? AlertFamily.Of(r.MetricMatch),
+        configured_channels = r.ConfiguredChannels,
+        smtp_recipients = r.EmailRecipients,
+        enabled = r.Enabled,
+        modified_at_utc = r.ModifiedAtUtc,
+    };
+
+    [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]
+    public static async Task<string> GetMuteRules(
+        NpgsqlDataSource postgres,
+        [Description("Include only enabled, non-expired rules. Default true.")] bool enabled_only = true,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var all = await new PgMuteRuleStore(postgres).LoadAllAsync(cancellationToken);
             var rules = all.AsEnumerable();
             if (enabled_only)
                 rules = rules.Where(r => r.Enabled && (r.ExpiresAtUtc == null || r.ExpiresAtUtc > DateTime.UtcNow));
@@ -377,7 +689,7 @@ public sealed class DarlingMcpAlertTools
                 mute_rules = list.Select(BuildMuteRulePayload)
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_mute_rules", ex);
         }
@@ -392,6 +704,7 @@ public sealed class DarlingMcpAlertTools
         expires_at_utc = r.ExpiresAtUtc?.ToString("o"),
         reason = r.Reason,
         server_name = r.ServerName,
+        server_id = r.ServerId,
         metric_name = r.MetricName,
         database_pattern = r.DatabasePattern,
         query_text_pattern = r.QueryTextPattern,
@@ -401,6 +714,14 @@ public sealed class DarlingMcpAlertTools
     };
 
     [McpServerTool(Name = "update_alert_settings"), Description(
+        "PARTIAL update of the single global alert-settings row the service delivers on. Call " +
+        "get_alert_settings FIRST; send back only the changed fields, in the same nested shape; " +
+        "omitted fields stay unchanged. An invalid value or unknown field writes NOTHING; returns " +
+        "status invalid. poison_wait.threshold_ms is RETIRED: accepted with a warnings entry but " +
+        "never changes when the Poison Wait alert fires; poison_wait.enabled governs it. " +
+        "health_bands and fleet_sweep are NOT alert families: health_bands only sets card bands " +
+        "(delivers nothing); alerts_enabled does not govern fleet_sweep." +
+        "<<GUIDE>>" +
         "Tunes the alert engine's configuration — a PARTIAL update of the single global alert-settings row. Call " +
         "get_alert_settings FIRST, change only the fields you want, and pass THOSE fields back here as JSON in the " +
         "SAME nested shape get_alert_settings returns (e.g. {\"cpu\":{\"threshold_percent\":90},\"cooldown_minutes\":10}); " +
@@ -429,11 +750,12 @@ public sealed class DarlingMcpAlertTools
         "per hour is the tightest setting that is still a rate, so no value here can restore the 'any deadlock " +
         "is Critical' reading these tiers replaced. Setting critical BELOW warn is accepted and means every " +
         "banded rate is Critical. " +
-        "Two keys govern the PostgreSQL versions of the two count alerts and are NOT the same numbers as their SQL Server neighbours: deadlocks.pg_count_threshold and blocking.pg_count_threshold, both accepting 1 upward. They sit inside those groups rather than a section of their own so both engines' figures are visible together, but tuning deadlocks.count_threshold does NOT move the PostgreSQL gate and tuning deadlocks.pg_count_threshold does NOT move the SQL Server one. The enabled switch in each group DOES govern both engines. They are separate because the reason to move the SQL Server deadlock figure is agreement with health_bands.deadlock_warn_per_hour, and a PostgreSQL server has no deadlock band at all - its deadlocks are served by get_pg_deadlocks and are structurally absent from the fleet deadlock total - while on the blocking side the SQL Server count is engine-recorded blocked-process reports and the PostgreSQL one is distinct root blockers in a periodic SAMPLE of pg_stat_activity. Both PostgreSQL keys are ignored on a store with no PostgreSQL targets. " +
+        "file_growth.rise_mb is megabytes per HOUR averaged over file_growth.lookback_minutes (a rate — the same 10240 is 10 GB/hr on any lookback; the engine scales it to the window), so shortening the lookback does not tighten the rise gate and lengthening it does not loosen it; only the rate does. " +
+        "Two keys govern the PostgreSQL versions of the two count alerts and are NOT the same numbers as their SQL Server neighbours: deadlocks.pg_count_threshold and blocking.pg_count_threshold, both accepting 1 upward. They sit inside those groups rather than a section of their own so both engines' figures are visible together, but tuning deadlocks.count_threshold does NOT move the PostgreSQL gate and tuning deadlocks.pg_count_threshold does NOT move the SQL Server one. The enabled switch in each group DOES govern both engines. They are separate because the two engines count with different instruments - SQL Server's figure is captured deadlock graphs, the PostgreSQL one is deadlocks parsed from the server log (get_pg_deadlocks) - and an operator tuning one should not silently move the other. Both engines' fleet cards now band deadlocks through the SAME health_bands.deadlock_warn_per_hour tiers (the PostgreSQL card differences the server's own pg_stat_database.deadlocks counter over the window), so the move - raising a fire gate to meet the band's Warning bar so a page and an amber dot describe the same server - is available on either knob. On the blocking side the SQL Server count is engine-recorded blocked-process reports and the PostgreSQL one is distinct root blockers in a periodic SAMPLE of pg_stat_activity. Both PostgreSQL keys are ignored on a store with no PostgreSQL targets. " +
         "The fleet_sweep group is NOT an alert family and the alerts_enabled master switch does not govern it: " +
         "fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and " +
         "fleet_sweep.interval_minutes (15\u20131440, default 60) is its cadence. Sweeps deliberately keep running " +
-        "under alerts_enabled: false \u2014 that is when they carry the would-have-paged ledger \u2014 so muting the " +
+        "under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the " +
         "fleet does not blind the report surface. " +
         "For silencing ONE recurring signature for a " +
         "long stretch, use create_mute_rule instead of a long delivery cooldown: a mute is scoped, expires, is " +
@@ -443,7 +765,28 @@ public sealed class DarlingMcpAlertTools
         "— configure them in the standalone Darling Viewer app's Settings window (Notifications section), which " +
         "connects to this store (including remotely, not just localhost) rather than requiring desktop access to " +
         "this specific box. " +
-        "Returns {status:\"updated\", updated_fields:[...], settings:{...}} with the full new settings, or " +
+        "poison_wait.threshold_ms is RETIRED: the Poison Wait alert grades accumulated wait over a ten-minute window, " +
+        "so this value is accepted and stored for round-trip compatibility but consulted by nothing — setting it returns " +
+        "status updated with a warnings entry saying so, and does not change when the alert fires. poison_wait.enabled still governs the alert. " +
+        "analysis.uncorroborated_route is WRITABLE since V137: 'digest' or 'page' (case-insensitive; stored lower-case) writes " +
+        "config_alert_settings.analysis_uncorroborated_route, which the running service reads OVER darling.json's analysis.uncorroboratedRoute " +
+        "from its next collection sweep and consults on the next scheduled-analysis delivery — no restart, no file edit; null CLEARS the column " +
+        "so the file governs again (get_alert_settings then reports uncorroborated_route_source 'file'); any other value is refused and nothing " +
+        "is written. Handing a whole get_alert_settings payload back writes the EFFECTIVE route it reported into the store, so a value the file " +
+        "had been supplying becomes the store's from then on — the response carries a warnings entry when the echoed uncorroborated_route_source " +
+        "was 'file' or 'default', and uncorroborated_route_source / uncorroborated_route_note themselves are read-only companions, accepted and " +
+        "ignored on the way in. A corroborated finding pages under either route. " +
+        "long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the two arrays of the " +
+        "Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH a prefix in the first, or whose login_name " +
+        "IS an entry of the second (both case-insensitive, no wildcard grammar — a * is a character), is NOT EVALUATED by that " +
+        "alert — never read into the decision, never counted, never fingerprinted — which is not a mute (a mute silences a fire " +
+        "already decided; use create_mute_rule for that). Entries are trimmed, blanks and case-insensitive duplicates dropped. " +
+        "Pass the FULL list each time — it replaces, like excluded_databases; an EMPTY array clears that arm and is honoured (the " +
+        "shipped values are DEFAULTS from a 7-day production read — the SQL Agent job-step prefix and the two NT AUTHORITY service " +
+        "logins; the application's admin login is deliberately not one, because it also runs real ad-hoc long-runners). The fired " +
+        "card's Excluded Count item, split by arm, shows the knob working. " +
+        "Returns {status:\"updated\", updated_fields:[...], warnings:[...], settings:{...}} with the full new settings (warnings is " +
+        "empty unless a stored-but-unconsulted field was sent, or a round-trip moved the route knob's source from the file to the store), or " +
         "{status:\"unavailable\"} when the settings row has not been seeded yet.")]
     public static async Task<string> UpdateAlertSettings(
         NpgsqlDataSource postgres,
@@ -466,7 +809,7 @@ public sealed class DarlingMcpAlertTools
                 return Outcome("invalid", "settings_json must be a JSON object of the fields to change (see get_alert_settings for the shape).");
             }
 
-            var (updates, error) = BuildAlertSettingsUpdate(body);
+            var (updates, error, warnings) = BuildAlertSettingsUpdate(body);
             if (error != null)
             {
                 return Outcome("invalid", error);
@@ -547,6 +890,10 @@ public sealed class DarlingMcpAlertTools
                    writable column name appears on both tables, so a bare name is still unambiguous --
                    asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. */
                 updated_fields = updates.Select(u => u.Column).ToArray(),
+                /* #3653: always present, usually empty — a caller branching on it should not have to probe
+                   for the key. Non-empty only when a field was written that nothing consults (today:
+                   poison_wait.threshold_ms); the field IS in updated_fields, because it was updated. */
+                warnings = warnings.ToArray(),
                 settings = reread is null || rereadCooldown is null ? null : BuildAlertSettingsPayload(reread, rereadCooldown.Value)
             }, McpHelpers.JsonOptions);
         }
@@ -557,6 +904,8 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "create_mute_rule"), Description(
+        "Creates an alert mute rule: matching alerts are still logged, just not delivered. Changes shared alert configuration the service delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert across the whole fleet. No confirm step: the rule takes effect on the running service's next collection sweep. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled." +
+        "<<GUIDE>>" +
         "Creates an alert mute rule that suppresses matching alerts (they are still logged, just not delivered) — " +
         "the same rules get_mute_rules lists and the Viewer's Manage Mute Rules surface writes. Provide any " +
         "combination of the scope/pattern fields; a field left out does not narrow the rule, so a rule with NO " +
@@ -564,10 +913,16 @@ public sealed class DarlingMcpAlertTools
         "the alert's exact values (see get_alert_history / get_alert_settings for the names in use); the *_pattern " +
         "fields are case-insensitive substring matches. expires_at is an optional ISO-8601 UTC timestamp after " +
         "which the rule stops applying; omit it for a permanent rule. Returns the stored rule, including its " +
-        "generated id (for delete_mute_rule). The running service applies the rule on its next collection " +
+        "generated id (for delete_mute_rule). Repeating a call is safe: when an enabled, unexpired rule already " +
+        "holds the same six scope and pattern fields and the same expires_at, nothing is created and the answer is " +
+        "status already_exists with that rule's id (a disabled or expired rule does not count; a different " +
+        "expires_at is a different rule). The running service applies the rule on its next collection " +
         "sweep, when the write's config_version bump makes it reload its mute cache — so a matching alert " +
-        "already mid-flight can still be delivered once.")]
-    public static async Task<string> CreateMuteRule(
+        "already mid-flight can still be delivered once. server_id keys the rule on that server's store id: it " +
+        "then matches only that server, whatever its name, and server_name only labels it (filled from the " +
+        "registry when omitted). Two servers can share a display name (a blank name falls back to the host), so " +
+        "server_id is the way to silence one of them. An id that is not a monitored server is refused.")]
+    public static Task<string> CreateMuteRule(
         NpgsqlDataSource postgres,
         [Description("Scope the rule to this server (its display name, as get_alert_history reports). Omit for all servers.")] string? server_name = null,
         [Description("Scope to this alert metric (e.g. 'High CPU', 'Blocking Detected', 'Deadlocks Detected'). Omit for all metrics.")] string? metric_name = null,
@@ -576,7 +931,52 @@ public sealed class DarlingMcpAlertTools
         [Description("Case-insensitive substring the alert's wait type must contain. Omit for any wait type.")] string? wait_type_pattern = null,
         [Description("Case-insensitive substring the alert's job name must contain. Omit for any job.")] string? job_name_pattern = null,
         [Description("Optional human-readable reason, shown in the mute-rule list.")] string? reason = null,
-        [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null)
+        [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
+        [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null) =>
+        CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
+            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id));
+
+    /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
+    /// nothing while reading as if it muted something.</summary>
+    private static string UnknownServerIdOutcome(int serverId) =>
+        Outcome("invalid", $"server_id {serverId} is not a monitored server. Use a server_id from get_fleet_overview, or omit it to scope by server_name.");
+
+    /// <summary>The refusal when <paramref name="serverId"/> is not a registered server's id, else null. With no
+    /// lookup the id cannot be checked, so it is refused rather than trusted.</summary>
+    private static async Task<string?> UnknownServerIdAsync(int serverId, Func<int, Task<string?>>? serverNameLookup) =>
+        serverNameLookup is not null && await serverNameLookup(serverId) is not null
+            ? null
+            : UnknownServerIdOutcome(serverId);
+
+    /// <summary>The display name of the monitored server with this store id, or null when there is none. Reads the
+    /// registry the fleet cards read (<c>servers</c>), disabled servers included: a silence for a server an operator
+    /// has disabled is still a silence on a real registration.</summary>
+    internal static async Task<string?> MonitoredServerDisplayNameAsync(NpgsqlDataSource postgres, int serverId)
+    {
+        await using var command = postgres.CreateCommand(
+            "SELECT COALESCE(display_name, server_name) AS display_name FROM servers WHERE server_id = $1");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        return await command.ExecuteScalarAsync() as string;
+    }
+
+    /// <summary>
+    /// create_mute_rule's body over the <see cref="IMuteRuleStore"/> seam, so the path the MCP tool runs can be
+    /// exercised without a database exactly as <see cref="CreateMuteRuleCore"/> is (#4734). The tool above is a
+    /// one-line hand-off to this with the Postgres-backed store.
+    /// </summary>
+    internal static async Task<string> CreateMuteRuleOver(
+        IMuteRuleStore store,
+        string? server_name,
+        string? metric_name,
+        string? database_pattern,
+        string? query_text_pattern,
+        string? wait_type_pattern,
+        string? job_name_pattern,
+        string? reason,
+        string? expires_at,
+        int? server_id = null,
+        Func<int, Task<string?>>? serverNameLookup = null)
     {
         try
         {
@@ -592,6 +992,19 @@ public sealed class DarlingMcpAlertTools
                 expiresAtUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
             }
 
+            /* A server_id keys the rule on the store id; it must be a monitored server's, or the rule would mute
+               nothing and look like it muted something. server_name then only labels the rule, so an omitted
+               one is filled from the registry. Without a server_id the rule is name-keyed, as it always was. */
+            string? labelFromRegistry = null;
+            if (server_id.HasValue)
+            {
+                labelFromRegistry = serverNameLookup is null ? null : await serverNameLookup(server_id.Value);
+                if (labelFromRegistry is null)
+                {
+                    return UnknownServerIdOutcome(server_id.Value);
+                }
+            }
+
             /* A new MuteRule defaults Id to a fresh GUID — the SAME id-generation the Viewer's mute-create path
                uses (MuteRuleEditDialog builds a `new MuteRule()`), persisted through the SAME PgMuteRuleStore. */
             var rule = new MuteRule
@@ -600,7 +1013,8 @@ public sealed class DarlingMcpAlertTools
                 CreatedAtUtc = DateTime.UtcNow,
                 ExpiresAtUtc = expiresAtUtc,
                 Reason = Trimmed(reason),
-                ServerName = Trimmed(server_name),
+                ServerName = Trimmed(server_name) ?? labelFromRegistry,
+                ServerId = server_id,
                 MetricName = Trimmed(metric_name),
                 DatabasePattern = Trimmed(database_pattern),
                 QueryTextPattern = Trimmed(query_text_pattern),
@@ -608,7 +1022,12 @@ public sealed class DarlingMcpAlertTools
                 JobNamePattern = Trimmed(job_name_pattern)
             };
 
-            await new PgMuteRuleStore(postgres).InsertAsync(rule);
+            var existing = await InsertUnlessDuplicateAsync(store, rule);
+            if (existing != null)
+            {
+                return AlreadyExists(existing);
+            }
+
             return JsonSerializer.Serialize(new { status = "created", mute_rule = BuildMuteRulePayload(rule) }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -631,13 +1050,19 @@ public sealed class DarlingMcpAlertTools
     /// with no constraining fields mutes EVERY alert, and that warning belongs on the surface's description, not
     /// in a refusal its MCP twin does not make.
     ///
+    /// <para><b>Safe to repeat (#4734).</b> The insert goes through <see cref="InsertUnlessDuplicateAsync"/>, the
+    /// one the MCP tool runs too: a body that repeats an enabled, unexpired rule's six scope and pattern fields and
+    /// expiry answers <c>already_exists</c> with that rule and writes nothing. The web route maps that word to HTTP
+    /// 409 (<see cref="DarlingWebEndpoints.MuteRuleEnvelopeStatus"/>), its status for a conflict.</para>
+    ///
     /// <para>The new rule is born ENABLED with a fresh GUID id and <c>created_at_utc</c> = now — the same
     /// <see cref="MuteRule"/> initializer defaults the Viewer's dialog and the MCP tool rely on. The reported
     /// rule is <b>re-read from the store after the insert</b>, the discipline every mute verb follows: the
     /// <c>created_at_utc</c> on the wire — the #3306 clock — is the value the store HOLDS, not a restatement of
     /// the value this method computed, which is the only form in which the two can disagree and be seen to.</para>
     /// </summary>
-    internal static async Task<string> CreateMuteRuleCore(IMuteRuleStore store, string fieldsJson)
+    internal static async Task<string> CreateMuteRuleCore(IMuteRuleStore store, string fieldsJson,
+        Func<int, Task<string?>>? serverNameLookup = null)
     {
         try
         {
@@ -673,7 +1098,24 @@ public sealed class DarlingMcpAlertTools
                 change.Apply(rule);
             }
 
-            await store.InsertAsync(rule);
+            /* The web route creates through here, so a server_id in its body is held to the create tool's rule:
+               it must be a registered server's, and an omitted server_name is labelled from the registry. */
+            if (rule.ServerId.HasValue)
+            {
+                var label = serverNameLookup is null ? null : await serverNameLookup(rule.ServerId.Value);
+                if (label is null)
+                {
+                    return UnknownServerIdOutcome(rule.ServerId.Value);
+                }
+
+                rule.ServerName ??= label;
+            }
+
+            var existing = await InsertUnlessDuplicateAsync(store, rule);
+            if (existing != null)
+            {
+                return AlreadyExists(existing);
+            }
 
             var stored = await FindRuleAsync(store, rule.Id);
             if (stored is null)
@@ -737,6 +1179,8 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "set_mute_rule_enabled"), Description(
+        "Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
+        "<<GUIDE>>" +
         "Enables or disables an existing alert mute rule by its id (from get_mute_rules or create_mute_rule) " +
         "WITHOUT deleting it. A disabled rule suppresses nothing while keeping its id, its scope, its reason " +
         "and its creation date, so silencing a signal for a window and restoring it afterwards is one " +
@@ -828,6 +1272,13 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "update_mute_rule"), Description(
+        "Edits an existing alert mute rule IN PLACE by its id — changes shared alert configuration. PARTIAL " +
+        "update: send only the fields to change, in the same shape get_mute_rules returns; a field you do NOT " +
+        "send stays exactly as stored, and an EXPLICIT JSON null CLEARS that field. enabled is NOT editable " +
+        "here — use set_mute_rule_enabled instead. created_at_utc never moves, whatever changes. Clearing " +
+        "scope fields WIDENS the rule — one left with none mutes EVERY alert. Returns updated, unchanged " +
+        "(nothing to write), not_found, or invalid (nothing written)." +
+        "<<GUIDE>>" +
         "Edits an existing alert mute rule IN PLACE by its id (from get_mute_rules or create_mute_rule) — the " +
         "changes the enabled flag cannot express: narrowing or correcting a pattern, rewording a reason, adding " +
         "an expires_at_utc to a rule that should stop being permanent, or clearing one so it stays. A PARTIAL " +
@@ -835,7 +1286,7 @@ public sealed class DarlingMcpAlertTools
         "{\"reason\":\"root cause found\",\"expires_at_utc\":\"2026-08-01T00:00:00Z\"}); a field you do NOT " +
         "send is left exactly as stored, and an EXPLICIT JSON null clears a field — the same clearing the " +
         "Viewer's edit dialog performs by blanking it — so {\"expires_at_utc\":null} makes a rule permanent and " +
-        "{\"job_name_pattern\":null} stops constraining that dimension. Editable fields: server_name, " +
+        "{\"job_name_pattern\":null} stops constraining that dimension. Editable fields: server_name, server_id, " +
         "metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, " +
         "expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
         "one). enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
@@ -858,7 +1309,7 @@ public sealed class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to edit (from get_mute_rules or create_mute_rule).")] string rule_id,
         [Description("A JSON object with ONLY the mute-rule fields to change, in the shape get_mute_rules returns (e.g. {\"reason\":\"root cause found\"}). An explicit null clears a field; a field not sent does not change.")] string changes_json) =>
-        UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json);
+        UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json, id => MonitoredServerDisplayNameAsync(postgres, id));
 
     /// <summary>
     /// update_mute_rule's body over the <see cref="IMuteRuleStore"/> seam <see cref="PgMuteRuleStore"/>
@@ -890,7 +1341,8 @@ public sealed class DarlingMcpAlertTools
     /// store AFTER the write</b>; a rule deleted in that window reports the absence, naming the write that
     /// landed, rather than folding the race into a failure.</para>
     /// </summary>
-    internal static async Task<string> UpdateMuteRuleCore(IMuteRuleStore store, string ruleId, string changesJson)
+    internal static async Task<string> UpdateMuteRuleCore(IMuteRuleStore store, string ruleId, string changesJson,
+        Func<int, Task<string?>>? serverNameLookup = null)
     {
         try
         {
@@ -940,6 +1392,12 @@ public sealed class DarlingMcpAlertTools
             foreach (var change in changes)
             {
                 change.Apply(merged);
+            }
+
+            if (merged.ServerId.HasValue && merged.ServerId != existing.ServerId
+                && await UnknownServerIdAsync(merged.ServerId.Value, serverNameLookup) is { } unknownServer)
+            {
+                return unknownServer;
             }
 
             if (SameEditableFields(existing, merged))
@@ -1025,6 +1483,23 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        void AddInt(string field, JsonNode? node, Action<MuteRule, int?> set)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange(field, r => set(r, null)));
+            }
+            else if (node is JsonValue v && v.TryGetValue<int>(out var id) && id != 0)
+            {
+                changes.Add(new MuteRuleFieldChange(field, r => set(r, id)));
+            }
+            else
+            {
+                error = $"'{field}' must be a non-zero integer store server id, or null to clear it (the rule is then keyed on server_name alone).";
+            }
+        }
+
         /* `spelling` is the key the caller sent (for the error text); the recorded Field is always the
            canonical expires_at_utc, so both spellings in one body surface as a duplicate below. */
         void AddExpiry(string spelling, JsonNode? node)
@@ -1053,6 +1528,7 @@ public sealed class DarlingMcpAlertTools
             switch (prop.Key)
             {
                 case "server_name": AddText("server_name", prop.Value, (r, v) => r.ServerName = v); break;
+                case "server_id": AddInt("server_id", prop.Value, (r, v) => r.ServerId = v); break;
                 case "metric_name": AddText("metric_name", prop.Value, (r, v) => r.MetricName = v); break;
                 case "database_pattern": AddText("database_pattern", prop.Value, (r, v) => r.DatabasePattern = v); break;
                 case "query_text_pattern": AddText("query_text_pattern", prop.Value, (r, v) => r.QueryTextPattern = v); break;
@@ -1078,7 +1554,7 @@ public sealed class DarlingMcpAlertTools
                     error = "'summary' is derived from the scope fields and is not stored — edit the fields it summarizes instead.";
                     break;
                 default:
-                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at_utc.";
+                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at_utc.";
                     break;
             }
         }
@@ -1100,6 +1576,7 @@ public sealed class DarlingMcpAlertTools
     /// them could only ever mask a difference the caller did not ask about.</summary>
     private static bool SameEditableFields(MuteRule a, MuteRule b) =>
         string.Equals(a.ServerName, b.ServerName, StringComparison.Ordinal)
+        && a.ServerId == b.ServerId
         && string.Equals(a.MetricName, b.MetricName, StringComparison.Ordinal)
         && string.Equals(a.DatabasePattern, b.DatabasePattern, StringComparison.Ordinal)
         && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
@@ -1113,6 +1590,88 @@ public sealed class DarlingMcpAlertTools
     private static async Task<MuteRule?> FindRuleAsync(IMuteRuleStore store, string ruleId) =>
         (await store.LoadAllAsync())
             .FirstOrDefault(r => r is not null && string.Equals(r.Id, ruleId, StringComparison.Ordinal));
+
+    /// <summary>
+    /// Serializes the check-then-insert of <see cref="InsertUnlessDuplicateAsync"/> within this process, so a client
+    /// retry that arrives while the first call is still in flight (the usual reason for a retry: the first answer
+    /// was slow) sees that call's rule instead of racing it. It does not reach a second process writing the same
+    /// table; the check is a guard against a repeated call, not a uniqueness constraint.
+    /// </summary>
+    private static readonly SemaphoreSlim s_createGate = new(1, 1);
+
+    /// <summary>
+    /// The one insert both create paths run — the MCP tool (<see cref="CreateMuteRuleOver"/>) and the web route
+    /// (<see cref="CreateMuteRuleCore"/>) — so neither can create what the other refuses (#4734). A repeated call
+    /// left two identical rules; the sibling write tools are already safe to repeat (custom rules and views answer
+    /// <c>conflict</c>, <c>mute_analysis_finding</c> answers <c>already_muted</c>). Reads the store, and inserts
+    /// <paramref name="rule"/> only when it holds no ENABLED, UNEXPIRED rule with the same six scope and pattern
+    /// fields and the same expiry (see <see cref="FindDuplicate"/>). Returns that existing rule and inserts nothing
+    /// when it does, or null once it has inserted.
+    /// </summary>
+    internal static async Task<MuteRule?> InsertUnlessDuplicateAsync(IMuteRuleStore store, MuteRule rule)
+    {
+        await s_createGate.WaitAsync();
+        try
+        {
+            var existing = FindDuplicate(await store.LoadAllAsync(), rule, DateTime.UtcNow);
+            if (existing != null)
+            {
+                return existing;
+            }
+
+            await store.InsertAsync(rule);
+            return null;
+        }
+        finally
+        {
+            s_createGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// The rule a new <paramref name="candidate"/> would repeat, or null: enabled, not expired as of
+    /// <paramref name="nowUtc"/>, and equal to it on all six scope and pattern fields plus the expiry. A disabled or
+    /// expired rule is not in force, so it does not stand in for a rule the caller asked to have in force. The
+    /// reason is not part of the identity — it describes the rule, it does not narrow what the rule mutes. With
+    /// several matches (rules that predate this check) the OLDEST answers, so a repeat names the original.
+    /// </summary>
+    internal static MuteRule? FindDuplicate(IReadOnlyList<MuteRule> rules, MuteRule candidate, DateTime nowUtc) =>
+        rules
+            .Where(r => r is not null && r.Enabled && !r.IsExpiredAt(nowUtc) && SameScopeAndExpiry(r, candidate))
+            .OrderBy(r => r.CreatedAtUtc)
+            .FirstOrDefault();
+
+    /// <summary>ORDINAL on the text fields, like <see cref="SameEditableFields"/>: the spelling a caller sent is the
+    /// spelling the rule keeps and shows, so a case-only difference is a different rule, not a repeat.</summary>
+    private static bool SameScopeAndExpiry(MuteRule a, MuteRule b) =>
+        string.Equals(a.ServerName, b.ServerName, StringComparison.Ordinal)
+        && a.ServerId == b.ServerId
+        && string.Equals(a.MetricName, b.MetricName, StringComparison.Ordinal)
+        && string.Equals(a.DatabasePattern, b.DatabasePattern, StringComparison.Ordinal)
+        && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
+        && string.Equals(a.WaitTypePattern, b.WaitTypePattern, StringComparison.Ordinal)
+        && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
+        && SameExpiry(a.ExpiresAtUtc, b.ExpiresAtUtc);
+
+    /// <summary>Two expiries are the same instant to the store's precision. Postgres keeps microseconds and a .NET
+    /// tick is 100 ns, so an expiry sent with seven fractional digits comes back from the store truncated: compared
+    /// tick for tick, the same call repeated would never match the rule it created.</summary>
+    private static bool SameExpiry(DateTime? a, DateTime? b) =>
+        a is null || b is null
+            ? a is null && b is null
+            : Math.Abs((a.Value - b.Value).Ticks) < TimeSpan.TicksPerMillisecond / 1000;
+
+    /// <summary>The answer to a create that repeats a rule already in force: the existing rule, whole, and its id
+    /// on its own key. Nothing was written. The web route reads the status word as a conflict (HTTP 409).</summary>
+    private static string AlreadyExists(MuteRule existing) =>
+        JsonSerializer.Serialize(new
+        {
+            status = "already_exists",
+            message = "An enabled mute rule with the same scope, patterns and expiry is already in force, so nothing was created. " +
+                      "Use its rule_id with set_mute_rule_enabled, update_mute_rule or delete_mute_rule; a different expires_at makes a different rule.",
+            rule_id = existing.Id,
+            mute_rule = BuildMuteRulePayload(existing),
+        }, McpHelpers.JsonOptions);
 
     /// <summary>The singleton config rows update_alert_settings writes, in the order it writes them — see
     /// the statement-order note at the write itself. Also the read side's table set: the settings row is
@@ -1143,10 +1702,17 @@ public sealed class DarlingMcpAlertTools
     /// (<c>SettingsWindow.BuildAlertRowFromControls</c>). Returns a non-null <c>Error</c> — and the caller writes
     /// nothing — on the FIRST bad value or unknown field (top-level or nested). Column names are this method's
     /// compile-time constants (never the input), so interpolating them into the UPDATE's SET list is injection-safe.
+    ///
+    /// <para><c>Warnings</c> (#3653) is the third outcome: a field that IS written but that the caller should
+    /// know is inert. Today that is <c>poison_wait.threshold_ms</c> alone — stored, reported, consulted by
+    /// nothing since #3593. Refusing it would break the round-trip this tool's description tells the caller
+    /// to perform (hand the whole read payload back); silently storing it would let an operator believe they
+    /// had tuned an alert. Accept, store, and say so, on the success envelope where the caller is looking.</para>
     /// </summary>
-    private static (List<UpdateTarget> Updates, string? Error) BuildAlertSettingsUpdate(JsonObject body)
+    private static (List<UpdateTarget> Updates, string? Error, List<string> Warnings) BuildAlertSettingsUpdate(JsonObject body)
     {
         var updates = new List<UpdateTarget>();
+        var warnings = new List<string>();
         string? error = null;
 
         void AddBool(string column, JsonNode? node, string field)
@@ -1230,7 +1796,7 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
-        void AddStringArray(string column, JsonNode? node, string field)
+        void AddStringArray(string column, JsonNode? node, string field, Func<IEnumerable<string>, IReadOnlyList<string>>? normalize = null)
         {
             if (error != null) return;
             if (node is JsonArray arr)
@@ -1249,14 +1815,58 @@ public sealed class DarlingMcpAlertTools
                     }
                 }
 
+                /* #3653 (A5, Q5): an optional per-field normaliser, so a list whose meaning has a stated canonical
+                   form (the Long-Running Query opt-out patterns) is stored in that form; excluded_databases keeps
+                   its raw write, as it always has. */
+                var stored = normalize is null ? array.ToArray() : normalize(array).ToArray();
                 updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
-                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = array.ToArray() }));
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = stored }));
             }
             else
             {
                 error = $"'{field}' must be an array of strings.";
             }
         }
+
+        /* #3712 (V137): the route knob's TRI-STATE column, the one nullable text on this row. 'digest' / 'page'
+           (case-insensitive) is stored in the canonical lower-case wire spelling (FindingRouting.RouteText) --
+           the form the V137 CHECK admits and the form every reader compares against, so a 'Page' typed here
+           is not a value no reader wrote. An explicit JSON null is a VALUE, not an omission: it writes SQL
+           NULL, which is "hand the decision back to darling.json's analysis.uncorroboratedRoute" -- the third
+           state, and the only way to reach it once a route has been stored. Anything else is refused by the
+           tool's ordinary invalid arm (400-class on the web surface, #3739) with the three accepted spellings
+           named: a route has no clamp, so there is no "nearest valid value" to store instead, and the CHECK
+           would have refused it at the store anyway -- better to say so here than to surface a 23514. */
+        void AddNullableRoute(string column, JsonNode? node, string field)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }));
+                return;
+            }
+
+            if (node is JsonValue v && v.TryGetValue<string>(out var text) && FindingRouting.TryParseRoute(text) is { } route)
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<string> { TypedValue = FindingRouting.RouteText(route) }));
+                return;
+            }
+
+            error = $"'{field}' must be '{FindingRouting.DigestText}', '{FindingRouting.PageText}', or null (null clears the store column so darling.json's analysis.uncorroboratedRoute governs again).";
+        }
+
+        /* #3712: the route knob's provenance echo. get_alert_settings emits the EFFECTIVE route under
+           analysis.uncorroborated_route and WHICH home decided it under analysis.uncorroborated_route_source, and
+           this tool's own description tells a caller to hand the whole read payload back -- so a round-trip
+           that changed some other knob also hands back a route the FILE had been supplying, and writing it
+           makes the store govern from then on. The value does not change; the provenance does, and a later
+           edit to darling.json would then do nothing. That is stated on the success envelope where the caller
+           is looking, ONLY when the echoed source says the file or the default had been deciding -- a partial
+           update naming the route alone is a deliberate write and gets no such note. The two locals are read
+           after the loop, because the echo may arrive before or after the route in document order. */
+        string? routeSourceEcho = null;
+        var routeWritten = false;
 
         /* Descends one nested group (e.g. "cpu": {...}); an unknown key inside it is rejected like an unknown
            top-level field, so the whole write is refused rather than silently ignoring a typo'd field. */
@@ -1317,7 +1927,10 @@ public sealed class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "enabled": AddBool("blocking_enabled", n, "blocking.enabled"); break;
-                            case "count_threshold": AddInt("blocking_count_threshold", n, "blocking.count_threshold", 1, int.MaxValue); break;
+                            /* #3528: the floor is the named constant rather than the literal 1 it always
+                               was, because the read side now clamps to it — the same structural parity the
+                               pg twin below has held since V122. */
+                            case "count_threshold": AddInt("blocking_count_threshold", n, "blocking.count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
                             /* #2417: get_alert_settings has emitted this key since #1839 and the writer
                                never took it, so handing a whole read payload back -- the round trip this
                                tool's own description tells the caller to perform -- was rejected with
@@ -1328,8 +1941,7 @@ public sealed class DarlingMcpAlertTools
                             /* #3444 (V122): the PostgreSQL count gate. The floor is the SAME named
                                constant DarlingAlertSettings clamps to, not a retyped 1, so this writer
                                cannot ACCEPT a value the read-side clamp then rewrites. The twin above
-                               takes the identical bound and has no read-side clamp; that gap is named on
-                               DarlingAlertSettings rather than reproduced here. */
+                               holds the identical bound-and-clamp pair since #3528. */
                             case "pg_count_threshold": AddInt("pg_blocking_count_threshold", n, "blocking.pg_count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
                             default: error = $"Unknown field 'blocking.{k}'."; break;
                         }
@@ -1342,7 +1954,8 @@ public sealed class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "enabled": AddBool("deadlock_enabled", n, "deadlocks.enabled"); break;
-                            case "count_threshold": AddInt("deadlock_count_threshold", n, "deadlocks.count_threshold", 1, int.MaxValue); break;
+                            /* #3528: the named constant for its blocking sibling's reason. */
+                            case "count_threshold": AddInt("deadlock_count_threshold", n, "deadlocks.count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
                             /* #3444 (V122): the PostgreSQL count gate — same bound sourcing as its
                                blocking sibling. */
                             case "pg_count_threshold": AddInt("pg_deadlock_count_threshold", n, "deadlocks.pg_count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
@@ -1382,7 +1995,23 @@ public sealed class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "enabled": AddBool("poison_wait_enabled", n, "poison_wait.enabled"); break;
-                            case "threshold_ms": AddInt("poison_wait_threshold_ms", n, "poison_wait.threshold_ms", 1, int.MaxValue); break;
+                            /* #3653: accepted and stored under the same bounds it always had, then WARNED about
+                               — nothing has read this column since #3593 (see PoisonWaitThresholdMsNote). The
+                               bound check still runs first, so a value that was never valid is still refused as
+                               invalid rather than stored with a warning. */
+                            case "threshold_ms":
+                                AddInt("poison_wait_threshold_ms", n, "poison_wait.threshold_ms", 1, int.MaxValue);
+                                if (error is null)
+                                {
+                                    warnings.Add("poison_wait.threshold_ms was stored but is " + PoisonWaitThresholdMsNote + ".");
+                                }
+                                break;
+                            /* #3653: the note get_alert_settings emits beside threshold_ms, handed back by a
+                               caller who round-tripped the whole payload. Not a setting, so no column and no
+                               warning — it is our own text coming home, and refusing it would fail the
+                               read → write invariant EveryColumnRead_IsEmittedByThePayload_AndAcceptedByTheWriter
+                               holds. */
+                            case "threshold_ms_note": break;
                             default: error = $"Unknown field 'poison_wait.{k}'."; break;
                         }
                     });
@@ -1401,6 +2030,12 @@ public sealed class DarlingMcpAlertTools
                             case "exclude_backups": AddBool("long_running_query_exclude_backups", n, "long_running_query.exclude_backups"); break;
                             case "exclude_misc_waits": AddBool("long_running_query_exclude_misc_waits", n, "long_running_query.exclude_misc_waits"); break;
                             case "exclude_cdc": AddBool("long_running_query_exclude_cdc", n, "long_running_query.exclude_cdc"); break;
+                            /* #3653 (A5, Q5): normalised through the shared rule on the way in (trim, blanks dropped,
+                               case-insensitive dedupe) -- the same treatment the Viewer's Settings
+                               window and the service's seed give the lists, so what the store holds is what the
+                               engine applies and what the next get_alert_settings reports. */
+                            case "excluded_program_name_prefixes": AddStringArray("long_running_query_excluded_program_name_prefixes", n, "long_running_query.excluded_program_name_prefixes", LongRunningQueryExclusions.Normalize); break;
+                            case "excluded_logins": AddStringArray("long_running_query_excluded_logins", n, "long_running_query.excluded_logins", LongRunningQueryExclusions.Normalize); break;
                             default: error = $"Unknown field 'long_running_query.{k}'."; break;
                         }
                     });
@@ -1443,6 +2078,9 @@ public sealed class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "disk_free_warn_percent": AddInt("self_disk_free_warn_percent", n, "self_alerts.disk_free_warn_percent", 0, 100); break;
+                            /* #3528: bound mirrors DarlingAlertSettings' Math.Max(0, ...) — 0 is IN range
+                               because it removes the floor (the pvs.floor_gb reading), not nonsense. */
+                            case "disk_free_warn_gb": AddInt("self_disk_free_warn_gb", n, "self_alerts.disk_free_warn_gb", 0, int.MaxValue); break;
                             case "collection_stale_minutes": AddInt("collection_stale_minutes", n, "self_alerts.collection_stale_minutes", 5, 1440); break;
                             case "collection_failure_threshold": AddInt("collection_failure_threshold", n, "self_alerts.collection_failure_threshold", 1, 1000); break;
                             case "store_job_cadence_warn_percent": AddInt("store_job_cadence_warn_percent", n, "self_alerts.store_job_cadence_warn_percent", 5, 100); break;
@@ -1484,7 +2122,8 @@ public sealed class DarlingMcpAlertTools
                    [0,100] on the volume percent, [5,1440] on the lookback. If these drift apart the tool
                    accepts a value the engine then silently rewrites, which reads as the setting not
                    sticking. Zero on either gate disables that gate rather than being invalid (#2349),
-                   which is why the rise floor is 0 and not 1. */
+                   which is why the rise floor is 0 and not 1. rise_mb is MB per HOUR (#3539 A8c); the
+                   column takes the same integer it always did, and the engine scales it to the window. */
                 case "file_growth":
                     Group(prop.Value, "file_growth", (k, n) =>
                     {
@@ -1582,6 +2221,21 @@ public sealed class DarlingMcpAlertTools
                             case "notify_severity": AddDouble("analysis_notify_severity", n, "analysis.notify_severity", 0.0, 2.0); break;
                             /* #2107: the clamp matches the shared engine's documented [30, 10080]. */
                             case "notify_cooldown_minutes": AddInt("analysis_notify_cooldown_minutes", n, "analysis.notify_cooldown_minutes", 30, 10080); break;
+                            /* #3712 (V137): the route knob's store half -- 'digest' / 'page' write the column, null clears
+                               it back to "the file governs". Before the rung this arm refused a change by name with the
+                               file key; the store column is now the writable home and the file is what NULL defers to. */
+                            case "uncorroborated_route":
+                                AddNullableRoute("analysis_uncorroborated_route", n, "analysis.uncorroborated_route");
+                                routeWritten = error is null;
+                                break;
+                            /* Read-only companions coming home from a get_alert_settings round-trip: the note is the
+                               tool's own text; the source is the reader's provenance label, remembered so the
+                               post-loop warning can say when a write moved the decision off the file. Neither claims
+                               a column and neither is validated -- our own text is not the caller's input. */
+                            case "uncorroborated_route_source":
+                                routeSourceEcho = n is JsonValue sv && sv.TryGetValue<string>(out var sourceText) ? sourceText : null;
+                                break;
+                            case "uncorroborated_route_note": break;
                             default: error = $"Unknown field 'analysis.{k}'."; break;
                         }
                     });
@@ -1614,6 +2268,20 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        /* #3712: the provenance note described above the locals -- the route was written AND the payload's own
+           echo said the file (or the shipped default) had been deciding, so this write moved the decision into
+           the store. Not an error (the write is exactly what the caller sent) and not a refusal (the round-trip
+           this tool's description prescribes must not fail on a field the caller did not choose); a sentence
+           on the success envelope saying what moved and how to move it back. */
+        if (error == null && routeWritten
+            && (string.Equals(routeSourceEcho, DarlingAlertSettings.RouteSourceFile, StringComparison.Ordinal)
+                || string.Equals(routeSourceEcho, DarlingAlertSettings.RouteSourceDefault, StringComparison.Ordinal)))
+        {
+            warnings.Add("analysis.uncorroborated_route was written to the store, which now governs it; the payload's uncorroborated_route_source said '"
+                + routeSourceEcho + "' had been deciding, so darling.json's analysis.uncorroboratedRoute no longer applies until the column is cleared "
+                + "(send analysis.uncorroborated_route: null).");
+        }
+
         /* Two accepted keys claiming ONE column. The only pair that can do this today is
            delivery.cooldown_minutes and its email_cooldown_minutes alias, and both landing in one SET list
            is a Postgres error (multiple assignments to the same column) -- so refusing it here names the two
@@ -1631,7 +2299,7 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
-        return (updates, error);
+        return (updates, error, warnings);
     }
 
     /// <summary>One validated field of a partial update: the TABLE it writes, the column, the wire field

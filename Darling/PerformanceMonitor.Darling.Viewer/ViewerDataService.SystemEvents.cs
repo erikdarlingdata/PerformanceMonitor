@@ -8,10 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -28,29 +32,45 @@ namespace PerformanceMonitor.Darling.Viewer;
  * The row view-models below are flat projections of the Common records (all shredded columns preserved,
  * so the grids faithfully match sp_HealthParser's per-category table shape) plus an EventTimeLocal
  * display string — the machine-local render of the event's naive-UTC XE @timestamp, via the same
- * ViewerTimeHelper.ForDisplay the deadlock / blocked-process grids use. Only SevereError adds a
- * resolved DatabaseName (see ResolveDatabaseName).
+ * ViewerTimeHelper.FormatForDisplay the deadlock / blocked-process grids use (a Default Trace row is a
+ * stored server wall clock instead, so it renders the bare wall time through
+ * SystemEventRowFormat.StoredWallClock and never takes the repeated-hour offset, #4766). Only SevereError
+ * adds a resolved DatabaseName (see ResolveDatabaseName).
  */
 
 /// <summary>Shared machine-local render of a naive-UTC event timestamp for the System Events grids.</summary>
 internal static class SystemEventRowFormat
 {
+    /// <summary>
+    /// A time converted from a STORED server wall clock (the Default Trace <c>StartTime</c>), as the plain wall time
+    /// (#4766). <see cref="ServerClock.ToUtc"/> maps both passes of a repeated local hour to the first, so the
+    /// instant cannot say which pass the event was in; appending the offset would print the first pass's for an
+    /// event that ran in the second. Every other time reads as <see cref="Local"/> does. Declared before
+    /// <see cref="Local"/> on purpose: the wrapper census reads each wrapper's body as the text that follows its
+    /// signature, and a renderer named in the next member would be read as this one's.
+    /// </summary>
+    public static string StoredWallClock(DateTime? utc) =>
+        utc.HasValue ? ViewerTimeHelper.ForDisplay(utc.Value).ToString("yyyy-MM-dd HH:mm:ss") : "";
+
+    /// <summary>A REAL instant (the system_health XE <c>@timestamp</c> is UTC): the text
+    /// <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> words, so the two passes of the repeated autumn
+    /// hour differ by their UTC offsets.</summary>
     public static string Local(DateTime? utc) =>
-        utc is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
+        utc is { } t ? ViewerTimeHelper.FormatForDisplay(t, "yyyy-MM-dd HH:mm:ss") : "";
 }
 
-/// <summary>One scheduler-monitor WARNING row (Scheduler Issues sub-tab). Mirrors <c>*_SchedulerIssues</c>.</summary>
+/// <summary>One scheduler-monitor utilization sample (Scheduler Issues sub-tab), flagged the way sp_HealthParser flags this section: SQL CPU pinned, other-process CPU high, or memory utilization low.</summary>
 public sealed class SchedulerIssueRow(SchedulerIssueRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
-    public int? SchedulerId => record.SchedulerId;
-    public int? CpuId => record.CpuId;
-    public string? Status => record.Status;
-    public bool? IsOnline => record.IsOnline;
-    public bool? IsRunnable => record.IsRunnable;
-    public bool? IsRunning => record.IsRunning;
-    public long? NonYieldingTimeMs => record.NonYieldingTimeMs;
-    public long? ThreadQuantumMs => record.ThreadQuantumMs;
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
+    public int? SqlCpuUtilization => record.SqlCpuUtilization;
+    public int? OtherProcessCpu => record.OtherProcessCpu;
+    public int? SystemIdle => record.SystemIdle;
+    public int? MemoryUtilization => record.MemoryUtilization;
+    public long? PageFaults => record.PageFaults;
+    public decimal? WorkingSetDeltaMb => record.WorkingSetDeltaMb;
 }
 
 /// <summary>
@@ -61,6 +81,8 @@ public sealed class SchedulerIssueRow(SchedulerIssueRecord record)
 public sealed class SevereErrorRow(SevereErrorRecord record, string databaseName)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public int? ErrorNumber => record.ErrorNumber;
     public int? Severity => record.Severity;
     public int? State => record.State;
@@ -73,6 +95,8 @@ public sealed class SevereErrorRow(SevereErrorRecord record, string databaseName
 public sealed class MemoryConditionsRow(MemoryConditionsRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? LastNotification => record.LastNotification;
     public long? OutOfMemoryExceptions => record.OutOfMemoryExceptions;
     public bool? IsAnyPoolOutOfMemory => record.IsAnyPoolOutOfMemory;
@@ -110,6 +134,8 @@ public sealed class MemoryConditionsRow(MemoryConditionsRecord record)
 public sealed class MemoryBrokerRow(MemoryBrokerRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public long? BrokerId => record.BrokerId;
     public long? PoolMetadataId => record.PoolMetadataId;
     public long? DeltaTime => record.DeltaTime;
@@ -128,6 +154,8 @@ public sealed class MemoryBrokerRow(MemoryBrokerRecord record)
 public sealed class MemoryNodeOomRow(MemoryNodeOomRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public long? NodeId => record.NodeId;
     public long? MemoryNodeId => record.MemoryNodeId;
     public long? MemoryUtilizationPct => record.MemoryUtilizationPct;
@@ -161,6 +189,8 @@ public sealed class MemoryNodeOomRow(MemoryNodeOomRecord record)
 public sealed class SignificantWaitRow(SignificantWaitRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? WaitType => record.WaitType;
     public long? DurationMs => record.DurationMs;
     public long? SignalDurationMs => record.SignalDurationMs;
@@ -173,6 +203,8 @@ public sealed class SignificantWaitRow(SignificantWaitRecord record)
 public sealed class CpuTasksRow(CpuTasksRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? State => record.State;
     public long? MaxWorkers => record.MaxWorkers;
     public long? WorkersCreated => record.WorkersCreated;
@@ -189,6 +221,8 @@ public sealed class CpuTasksRow(CpuTasksRecord record)
 public sealed class IoIssuesRow(IoIssuesRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? State => record.State;
     public long? IoLatchTimeouts => record.IoLatchTimeouts;
     public long? IntervalLongIos => record.IntervalLongIos;
@@ -202,11 +236,14 @@ public sealed class IoIssuesRow(IoIssuesRecord record)
 /// captures (file auto-grow/shrink stalls, severe ErrorLog writes, schema DDL, security audits, Server
 /// Memory Change), classified via <see cref="SystemEventSignificance.ClassifyDefaultTraceEvent"/>. Unlike the
 /// system_health rows, whose <c>event_time</c> is the UTC XE @timestamp, the Default Trace StartTime is the
-/// monitored server's LOCAL wall clock — <see cref="ViewerDataService.GetDefaultTraceEventsAsync"/> de-skews
-/// it to naive-UTC in SQL (via <c>server_properties.utc_offset_minutes</c>) BEFORE it reaches this row, so
-/// <see cref="EventTimeLocal"/> renders through the same <see cref="SystemEventRowFormat.Local"/> as every
-/// other System Events grid and sorts consistently with them (the inverse of the MCP reader's bounds
-/// conversion; mirrors CorrelatedTimelineLanesControl's CPU-lane de-skew).
+/// monitored server's LOCAL wall clock — <see cref="ViewerDataService.GetDefaultTraceEventsAsync"/> converts
+/// it to naive-UTC in C# with the server's <see cref="ServerClock"/> (its time zone where SQL Server reports
+/// one, else the collected <c>server_properties.utc_offset_minutes</c>, else UTC) BEFORE it reaches this row,
+/// so <see cref="EventTimeUtc"/> is the event's real UTC time on either side of a daylight-saving change and
+/// <see cref="EventTimeLocal"/> sorts consistently with every other System Events grid (the inverse of the MCP
+/// reader's bounds conversion; mirrors CorrelatedTimelineLanesControl's CPU-lane de-skew) (#4766). It renders through
+/// <see cref="SystemEventRowFormat.StoredWallClock"/>, not <see cref="SystemEventRowFormat.Local"/>: the wall time is
+/// stored, so an event in the repeated autumn hour cannot say which pass it was in and never takes an offset.
 /// </summary>
 public sealed class DefaultTraceEventRow
 {
@@ -226,7 +263,8 @@ public sealed class DefaultTraceEventRow
         int? errorNumber,
         string? textData)
     {
-        EventTimeLocal = SystemEventRowFormat.Local(eventTimeUtc);
+        EventTimeUtc = eventTimeUtc;
+        EventTimeLocal = SystemEventRowFormat.StoredWallClock(eventTimeUtc);
         Category = category.ToString();
         EventName = eventName;
         DatabaseName = databaseName;
@@ -246,6 +284,8 @@ public sealed class DefaultTraceEventRow
         TextData = textData;
     }
 
+    /// <summary>The event's naive-UTC time (Kind Unspecified), converted from the server's own clock.</summary>
+    public DateTime? EventTimeUtc { get; }
     public string EventTimeLocal { get; }
     public string Category { get; }
     public string? EventName { get; }
@@ -269,7 +309,11 @@ public sealed partial class ViewerDataService
     /// window on <c>event_time</c> (the XE <c>@timestamp</c> — the event's real time, which for the ring-
     /// buffer categories can lag when it was collected), not <c>collection_time</c>, so "last 24 hours"
     /// means events that happened in the last 24 hours. Naive-UTC bounds (the store's timestamps are
-    /// <c>timestamp without time zone</c>). $1 server_id, $2/$3 window (naive UTC), $4 event_type.
+    /// <c>timestamp without time zone</c>). $1 server_id, $2/$3 window (naive UTC), $4 event_type. $5 is the
+    /// <see cref="EventWindowFloor"/> for $2 — <c>v_system_health_events</c> is a hypertable partitioned on
+    /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a
+    /// chunk on (#4229); the floor lets it skip every chunk older than the window, without being able to drop
+    /// a row (an event is collected after it happens).
     /// </summary>
     public const string SystemHealthEventsByTypeSql = """
         SELECT
@@ -280,6 +324,7 @@ public sealed partial class ViewerDataService
         AND   event_time <= $3
         AND   event_type = $4
         AND   event_xml IS NOT NULL
+        AND   collection_time >= $5
         ORDER BY event_time DESC
         """;
 
@@ -334,13 +379,15 @@ public sealed partial class ViewerDataService
         return map;
     }
 
-    /// <summary>The four System Events parameters ($1 server_id, $2/$3 naive-UTC window, $4 XE event_type).</summary>
+    /// <summary>The five System Events parameters ($1 server_id, $2/$3 naive-UTC window, $4 XE event_type,
+    /// $5 the <see cref="EventWindowFloor"/> for $2).</summary>
     private static void AddSystemEventParameters(NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, string eventType)
     {
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = eventType });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
     }
 
     /// <summary>Reads the raw event_xml blobs for one XE event type over the window.</summary>
@@ -601,13 +648,21 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// Significant Default Trace events for the window, newest first. Reads the BASE <c>default_trace_events</c>
     /// table (no <c>v_*</c> view, like server_properties). The Default Trace StartTime is the monitored
-    /// server's LOCAL wall clock, so this DE-SKEWS <c>event_time</c> to naive-UTC in SQL — subtracting the
-    /// collected <c>server_properties.utc_offset_minutes</c> (single-row COALESCE CTE, 0 when none yet) — and
-    /// windows on that de-skewed UTC value against the naive-UTC bounds ($2/$3), so the returned timestamps
-    /// share the same UTC frame as the system_health rows and render/sort consistently on the tab. $1
-    /// server_id, $2/$3 window (naive UTC). The ErrorLog severity gate is applied on read
+    /// server's LOCAL wall clock, so the SQL returns <c>event_time</c> RAW and
+    /// <see cref="GetDefaultTraceEventsAsync"/> converts it to naive-UTC in C# with the server's
+    /// <see cref="ServerClock"/> — the SQL cannot do that (PostgreSQL <c>AT TIME ZONE</c> does not resolve
+    /// Windows zone ids, and one subtracted offset is an hour off on the far side of a daylight-saving
+    /// change). The window ($2/$3, naive UTC) is therefore only a PRE-FILTER here: it subtracts the latest
+    /// collected <c>server_properties.utc_offset_minutes</c> (single-row COALESCE CTE, 0 when none yet) and
+    /// widens each bound by an hour, and the C# side keeps exactly the rows inside [$2, $3] after the
+    /// conversion (#4766). The read has no LIMIT, so the extra hour drops nothing. $1 server_id, $2/$3 window
+    /// (naive UTC). The ErrorLog severity gate is applied on read
     /// (<see cref="SystemEventSignificance.IsSignificantDefaultTraceEvent"/>), the same significance surface
-    /// the tab uses everywhere else.
+    /// the tab uses everywhere else. $5 is the <see cref="EventWindowFloor"/> for $2, bound against
+    /// <c>collection_time</c> directly rather than the offset expression — <c>default_trace_events</c> is a
+    /// hypertable partitioned on <c>collection_time</c>, which this event-time window alone gives the planner
+    /// nothing to exclude a chunk on (#4229). The event's real UTC time is always ≤ <c>collection_time</c>
+    /// (store UTC at collection), so the floor cannot drop a qualifying row.
     /// </summary>
     public const string DefaultTraceEventsByWindowSql = """
         WITH svr AS (
@@ -620,7 +675,7 @@ public sealed partial class ViewerDataService
                 LIMIT 1), 0) AS offset_minutes
         )
         SELECT
-            dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc,
+            dte.event_time AS event_time_local,
             dte.event_name,
             dte.database_name,
             dte.object_name,
@@ -635,22 +690,26 @@ public sealed partial class ViewerDataService
             dte.text_data
         FROM default_trace_events AS dte, svr
         WHERE dte.server_id = $1
-        AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2
-        AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3
+        AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'
+        AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
         AND   ($4::text[] IS NULL OR dte.database_name = ANY($4))
-        ORDER BY event_time_utc DESC
+        AND   dte.collection_time >= $5
+        ORDER BY event_time_local DESC
         """;
 
     /// <summary>
-    /// Significant Default Trace events for the window (server-local StartTime de-skewed to UTC in SQL),
-    /// gated by <see cref="SystemEventSignificance.IsSignificantDefaultTraceEvent"/> and tagged with their
-    /// category. The gate is cheap (a category + severity check), so it runs inline on the read rather than
-    /// off-thread like the XML-shredding system_health categories.
+    /// Significant Default Trace events for the window, newest first by their real UTC time. The SQL returns
+    /// the server-local StartTime and this converts it with the server's <see cref="ServerClock"/> (see
+    /// <see cref="DefaultTraceEventsByWindowSql"/>), then <see cref="ReadDefaultTraceEventsAsync"/> keeps the
+    /// events inside the window exactly. Gated by
+    /// <see cref="SystemEventSignificance.IsSignificantDefaultTraceEvent"/> and tagged with their category.
+    /// The gate is cheap (a category + severity check), so it runs inline on the read rather than off-thread
+    /// like the XML-shredding system_health categories.
     /// </summary>
     public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
-        var rows = new List<DefaultTraceEventRow>();
+        var clock = ClockFor(await GetServerClocksAsync(serverId, cancellationToken), serverId);
 
         await using var command = _dataSource.CreateCommand(DefaultTraceEventsByWindowSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -658,13 +717,33 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await ReadDefaultTraceEventsAsync(reader, clock, startUtc, endUtc, cancellationToken);
+    }
+
+    /// <summary>
+    /// Maps <see cref="DefaultTraceEventsByWindowSql"/>'s result set. The event time arrives as the server's
+    /// own wall clock and leaves as naive UTC, converted with <paramref name="clock"/>; the SQL window is
+    /// only a pre-filter an hour wider on each side, so the rows outside [<paramref name="startUtc"/>,
+    /// <paramref name="endUtc"/>] once converted are dropped here. The rows come back newest first by that UTC
+    /// time; a STABLE sort, so events at the same instant keep the reader's order (the SQL had no tie-break
+    /// either) (#4766).
+    /// </summary>
+    internal static async Task<List<DefaultTraceEventRow>> ReadDefaultTraceEventsAsync(
+        DbDataReader reader, ServerClock clock, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        var rows = new List<DefaultTraceEventRow>();
+
         while (await reader.ReadAsync(cancellationToken))
         {
-            var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0);
+            var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : clock.ToUtc(reader.GetDateTime(0));
             var eventName = reader.IsDBNull(1) ? null : reader.GetString(1);
             var severity = reader.IsDBNull(10) ? (int?)null : reader.GetInt32(10);
+
+            if (eventTimeUtc is not { } utc || utc < startUtc || utc > endUtc)
+                continue;
 
             if (!SystemEventSignificance.IsSignificantDefaultTraceEvent(eventName, severity))
                 continue;
@@ -686,6 +765,7 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(12) ? null : reader.GetString(12)));    /* text_data */
         }
 
-        return rows;
+        /* OrderByDescending is a stable sort (List.Sort is not), so ties keep the reader's order. */
+        return rows.OrderByDescending(static r => r.EventTimeUtc).ToList();
     }
 }

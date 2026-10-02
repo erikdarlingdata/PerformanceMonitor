@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -521,12 +522,12 @@ public sealed class ViewerRecommendationCardTests
             WindowEndUtc = new DateTime(2026, 7, 1, 15, 30, 0, DateTimeKind.Utc),
         };
 
-        // Offset 0 -> the UTC window verbatim (deterministic; the tab passes the machine-local offset).
-        var utc = new RecommendationCardViewModel(item, utcOffsetMinutes: 0).AskAiPrompt;
+        // The UTC clock -> the UTC window verbatim (deterministic; the tab passes the selected server's own clock).
+        var utc = new RecommendationCardViewModel(item, ServerClock.Utc).AskAiPrompt;
         Assert.Contains("14:00–15:30", utc, StringComparison.Ordinal);
 
         // +60 shifts the rendered window an hour forward.
-        var plusOne = new RecommendationCardViewModel(item, utcOffsetMinutes: 60).AskAiPrompt;
+        var plusOne = new RecommendationCardViewModel(item, ServerClock.FixedOffset(60)).AskAiPrompt;
         Assert.Contains("15:00–16:30", plusOne, StringComparison.Ordinal);
     }
 }
@@ -587,7 +588,7 @@ public sealed class ViewerRecommendationGroupingTests
     {
         // data + zero findings -> Empty (the genuine all-clear); the message is empty.
         var vm = RecommendationsViewModel.FromFindings(
-            Array.Empty<ViewerFindingRow>(), "SQL2022", utcOffsetMinutes: 0,
+            Array.Empty<ViewerFindingRow>(), "SQL2022",
             insufficientData: false, insufficientDataMessage: null);
 
         Assert.Equal(RecommendationsState.Empty, vm.State);
@@ -600,7 +601,7 @@ public sealed class ViewerRecommendationGroupingTests
     {
         // insufficient + zero findings -> InsufficientData ("still collecting"), NOT a false all-clear.
         var vm = RecommendationsViewModel.FromFindings(
-            Array.Empty<ViewerFindingRow>(), "SQL2022", utcOffsetMinutes: 0,
+            Array.Empty<ViewerFindingRow>(), "SQL2022",
             insufficientData: true,
             insufficientDataMessage: "Not enough data for reliable analysis. Need 1.0 days, have 3.0 hours.");
 
@@ -616,7 +617,7 @@ public sealed class ViewerRecommendationGroupingTests
         var rows = new List<ViewerFindingRow> { Row(1.6, "CPU is on fire", incidentId: "a") };
 
         var vm = RecommendationsViewModel.FromFindings(
-            rows, "SQL2022", utcOffsetMinutes: 0, insufficientData: true, insufficientDataMessage: "collecting");
+            rows, "SQL2022", insufficientData: true, insufficientDataMessage: "collecting");
 
         Assert.Equal(RecommendationsState.Loaded, vm.State);
         Assert.Single(vm.Sections);
@@ -636,6 +637,82 @@ public sealed class ViewerRecommendationGroupingTests
             "engine says 3.0 hours",
             RecommendationsViewModel.InsufficientData("engine says 3.0 hours").InsufficientDataMessage);
         Assert.Equal(RecommendationsState.InsufficientData, RecommendationsViewModel.InsufficientData(null).State);
+    }
+
+    // ── Window-empty vs all-clear state selection (#3524/#3551, the marker's false-with-a-message shape) ──
+
+    [Fact]
+    public void FromFindings_ZeroFindings_WindowEmptyMarker_ShowsCollectionBroken_NotAllClear()
+    {
+        // window-empty + zero findings -> WindowEmpty ("collection appears broken"), NOT a false all-clear.
+        var vm = RecommendationsViewModel.FromFindings(
+            Array.Empty<ViewerFindingRow>(), "SQL2022",
+            windowEmpty: true,
+            windowEmptyMessage: "No facts were collected in the analysis window.");
+
+        Assert.Equal(RecommendationsState.WindowEmpty, vm.State);
+        Assert.Empty(vm.Sections);
+        Assert.StartsWith("No facts were collected in the analysis window.", vm.WindowEmptyMessage);
+        Assert.EndsWith(RecommendationsViewModel.WindowEmptyCollectionHealthPointer, vm.WindowEmptyMessage);
+        Assert.Equal(string.Empty, vm.InsufficientDataMessage);
+    }
+
+    [Fact]
+    public void FromFindings_WindowEmptyMarker_ButFindingsPresent_FindingsWin_Loaded()
+    {
+        // Same rule as the insufficient marker: it only decides the zero-finding case.
+        var rows = new List<ViewerFindingRow> { Row(1.6, "CPU is on fire", incidentId: "a") };
+
+        var vm = RecommendationsViewModel.FromFindings(
+            rows, "SQL2022", windowEmpty: true, windowEmptyMessage: "window empty");
+
+        Assert.Equal(RecommendationsState.Loaded, vm.State);
+        Assert.Single(vm.Sections);
+        Assert.Equal(string.Empty, vm.WindowEmptyMessage);
+    }
+
+    [Fact]
+    public void WindowEmpty_UsesMarkerMessageWhenPresent_ElseTheDefault_AlwaysWithThePointer()
+    {
+        Assert.StartsWith(
+            RecommendationsViewModel.DefaultWindowEmptyMessage,
+            RecommendationsViewModel.WindowEmpty(null).WindowEmptyMessage);
+        Assert.StartsWith(
+            RecommendationsViewModel.DefaultWindowEmptyMessage,
+            RecommendationsViewModel.WindowEmpty("   ").WindowEmptyMessage);
+        Assert.StartsWith(
+            "engine says the window held nothing",
+            RecommendationsViewModel.WindowEmpty("engine says the window held nothing").WindowEmptyMessage);
+        Assert.EndsWith(
+            RecommendationsViewModel.WindowEmptyCollectionHealthPointer,
+            RecommendationsViewModel.WindowEmpty(null).WindowEmptyMessage);
+        Assert.Equal(RecommendationsState.WindowEmpty, RecommendationsViewModel.WindowEmpty(null).State);
+    }
+
+    [Fact]
+    public void AnalysisStateMarker_WindowEmpty_IsExactlyTheFalseWithMessageShape()
+    {
+        // The marker encoding contract (#3551): false + message = window-empty, the shape only the
+        // worker's window-empty arm writes. Every other persisted shape must NOT read as window-empty —
+        // true + message is the span-gate miss, false + null/empty is a clean pass.
+        var at = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        Assert.True(new AnalysisStateMarker(false, "window empty", at).WindowEmpty);
+        Assert.False(new AnalysisStateMarker(false, null, at).WindowEmpty);
+        Assert.False(new AnalysisStateMarker(false, "", at).WindowEmpty);
+        Assert.False(new AnalysisStateMarker(true, "still collecting", at).WindowEmpty);
+    }
+
+    [Fact]
+    public void FromFindings_BothMarkers_InsufficientWinsDefensively()
+    {
+        // The writer never sets both (the engine nulls both and sets at most one), but if a skewed
+        // store ever did, the span-gate miss is the more fundamental answer.
+        var vm = RecommendationsViewModel.FromFindings(
+            Array.Empty<ViewerFindingRow>(), "SQL2022",
+            insufficientData: true, insufficientDataMessage: "collecting",
+            windowEmpty: true, windowEmptyMessage: "window empty");
+
+        Assert.Equal(RecommendationsState.InsufficientData, vm.State);
     }
 
     [Fact]

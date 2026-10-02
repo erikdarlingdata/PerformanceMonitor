@@ -437,6 +437,49 @@ public sealed class ViewerCollectorScheduleLogicTests
         Assert.True(CollectorScheduleOverlay.ServerHasOverride(overrides, 7));
         Assert.False(CollectorScheduleOverlay.ServerHasOverride(overrides, 8));
     }
+
+    /// <summary>
+    /// #3532: the editor refuses a delta-family cadence past the shared gap-policy cap before the write —
+    /// past it every cycle exceeds <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>, re-baselines,
+    /// and stores zeros forever. The refusal names the cap and the policy; snapshot collectors stay exempt.
+    /// </summary>
+    [Fact]
+    public void ValidateSchedule_RefusesADeltaCadencePastTheCap_NamingThePolicy()
+    {
+        var edited = CollectorSchedulePresets.BuildDefaultSchedule();
+        edited.First(s => s.Name == "wait_stats").FrequencyMinutes = 90;
+
+        Assert.False(CollectorScheduleOverlay.ValidateSchedule(edited, out var error));
+        Assert.Contains("wait_stats", error);
+        Assert.Contains(CollectorDeltaCalculator.MaxDeltaFrequencyMinutes.ToString(), error);
+        Assert.Contains($"{CollectorDeltaCalculator.DefaultMaxGapSeconds / 60}-minute delta gap policy", error);
+    }
+
+    [Fact]
+    public void ValidateSchedule_AllowsTheCapSnapshotLongCadences_AndTheShippedDefaults()
+    {
+        /* The shipped defaults must validate as-is (index_object_stats ships at 1440 — snapshot, exempt). */
+        var edited = CollectorSchedulePresets.BuildDefaultSchedule();
+        Assert.True(CollectorScheduleOverlay.ValidateSchedule(edited, out _));
+
+        edited.First(s => s.Name == "wait_stats").FrequencyMinutes = CollectorDeltaCalculator.MaxDeltaFrequencyMinutes;
+        edited.First(s => s.Name == "database_size_stats").FrequencyMinutes = 90;
+        Assert.True(CollectorScheduleOverlay.ValidateSchedule(edited, out _));
+    }
+
+    [Fact]
+    public void ValidateSchedule_StillRefusesNegativeFrequency_AndSubDayRetention()
+    {
+        var edited = CollectorSchedulePresets.BuildDefaultSchedule();
+        edited.First(s => s.Name == "wait_stats").FrequencyMinutes = -1;
+        Assert.False(CollectorScheduleOverlay.ValidateSchedule(edited, out var negativeError));
+        Assert.Contains("can't be negative", negativeError);
+
+        edited.First(s => s.Name == "wait_stats").FrequencyMinutes = 1;
+        edited.First(s => s.Name == "wait_stats").RetentionDays = 0;
+        Assert.False(CollectorScheduleOverlay.ValidateSchedule(edited, out var retentionError));
+        Assert.Contains("at least 1", retentionError);
+    }
 }
 
 /// <summary>The viewer's control commands agree with the service executor's dispatch (the two ends must use the

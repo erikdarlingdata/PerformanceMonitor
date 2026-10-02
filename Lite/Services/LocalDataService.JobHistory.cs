@@ -43,8 +43,28 @@ public partial class LocalDataService
         var serverFilter = serverId.HasValue ? "AND   server_id = $2" : string.Empty;
         var limitParam = serverId.HasValue ? "$3" : "$2";
 
+        /* #4229 (Darling parity): the per-job average/max used to run as a window function OVER every step
+           row the window matched, forcing a full sort/aggregate of the whole set before ORDER BY/LIMIT could
+           trim it. job_stats computes it once per (server_id, job_id) with a GROUP BY over just the step_id-0
+           SUCCESS rows, filtered by the same window/server predicates as base; base's own ORDER BY/LIMIT then
+           runs unencumbered by any aggregation, and the join attaches the per-job figures to only the rows
+           that survive it. Row selection and values are unchanged — see
+           ViewerDataService.JobHistory.cs's BuildJobHistorySql for the full argument, identical here. */
         command.CommandText = $@"
-WITH base AS (
+WITH job_stats AS (
+    SELECT
+        server_id,
+        job_id,
+        AVG(run_duration_seconds) AS avg_success_duration,
+        MAX(run_datetime) AS last_success_run
+    FROM v_job_history
+    WHERE step_id = 0
+    AND   run_status = 1
+    AND   run_datetime >= $1
+    {serverFilter}
+    GROUP BY server_id, job_id
+),
+base AS (
     SELECT
         collection_time,
         server_id,
@@ -61,45 +81,45 @@ WITH base AS (
         run_datetime,
         run_duration_seconds,
         retries_attempted,
-        message,
-        AVG(CASE WHEN step_id = 0 AND run_status = 1 THEN run_duration_seconds END)
-            OVER (PARTITION BY server_id, job_id) AS avg_success_duration,
-        MAX(CASE WHEN step_id = 0 AND run_status = 1 THEN run_datetime END)
-            OVER (PARTITION BY server_id, job_id) AS last_success_run
+        message
     FROM v_job_history
     WHERE run_datetime >= $1
     {serverFilter}
+    ORDER BY run_datetime DESC, instance_id DESC
+    LIMIT {limitParam}
 )
 SELECT
-    collection_time,
-    server_id,
-    server_name,
-    instance_id,
-    job_id,
-    job_name,
-    job_enabled,
-    category_name,
-    step_id,
-    step_name,
-    run_status,
-    run_status_desc,
-    run_datetime,
-    run_duration_seconds,
-    retries_attempted,
-    message,
-    last_success_run,
+    base.collection_time,
+    base.server_id,
+    base.server_name,
+    base.instance_id,
+    base.job_id,
+    base.job_name,
+    base.job_enabled,
+    base.category_name,
+    base.step_id,
+    base.step_name,
+    base.run_status,
+    base.run_status_desc,
+    base.run_datetime,
+    base.run_duration_seconds,
+    base.retries_attempted,
+    base.message,
+    job_stats.last_success_run,
     CASE
-        WHEN step_id = 0
-        AND  avg_success_duration IS NOT NULL
-        AND  avg_success_duration > 0
-        AND  run_duration_seconds > avg_success_duration * 2
-        AND  run_duration_seconds > 60
+        WHEN base.step_id = 0
+        AND  job_stats.avg_success_duration IS NOT NULL
+        AND  job_stats.avg_success_duration > 0
+        AND  base.run_duration_seconds > job_stats.avg_success_duration * 2
+        AND  base.run_duration_seconds > 60
         THEN TRUE
         ELSE FALSE
     END AS is_long_running
 FROM base
-ORDER BY run_datetime DESC, instance_id DESC
-LIMIT {limitParam}";
+LEFT JOIN job_stats
+    ON  job_stats.server_id = base.server_id
+    AND job_stats.job_id = base.job_id
+ORDER BY base.run_datetime DESC, base.instance_id DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
         if (serverId.HasValue)
@@ -138,10 +158,13 @@ LIMIT {limitParam}";
 
     /// <summary>
     /// The latest SQL Agent status snapshot per server (issue #1433 Phase 2) — Running/Stopped, startup
-    /// type, and next scheduled run — read from the hot <c>agent_status</c> table (the newest row per
-    /// server via a window function). With no <paramref name="serverId"/> it returns one row per server (the
-    /// fleet header summary); with one it returns just that server's row (the Server-filtered header). The
-    /// Job History tab shows this in its header; the "Agent Not Running" alert (Darling) reads the same data.
+    /// type, and next scheduled run — read from <c>v_agent_status</c> (the newest row per server via a window
+    /// function). The archive view, not the hot table: <c>ever_seen_running</c> asks about every stored row, and
+    /// the hot table alone loses the rows that archival (after 7 days, or at the 512 MB reset) moved to Parquet,
+    /// so a stopped Agent would read as one that never ran. With no <paramref name="serverId"/> it returns one
+    /// row per server (the fleet header summary); with one it returns just that server's row (the
+    /// Server-filtered header). The Job History tab shows this in its header; the "Agent Not Running" alert
+    /// (Darling) reads the same data.
     /// </summary>
     public async Task<List<AgentStatusRow>> GetAgentStatusAsync(int? serverId = null)
     {
@@ -175,7 +198,7 @@ FROM (
         collection_time,
         MAX(CASE WHEN agent_running THEN 1 ELSE 0 END) OVER (PARTITION BY server_id) = 1 AS ever_seen_running,
         ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY collection_time DESC) AS rn
-    FROM agent_status
+    FROM v_agent_status
     {serverFilter}
 ) t
 WHERE rn = 1

@@ -11,6 +11,8 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -26,9 +28,9 @@ public partial class LocalDataService
     /// This is the single source of truth for the daily aggregate; <see cref="GetDailySummaryAsync"/>
     /// (single day) delegates here so the calendar cell and the drilled-in day can never disagree.
     /// </summary>
-    private const string DailySummaryRangeSql = @"
+    private static readonly string DailySummaryRangeSql = @"
 WITH wait_per_type AS (
-    SELECT date_trunc('day', collection_time) AS d, wait_type, SUM(delta_wait_time_ms) AS ms
+    SELECT date_trunc('day', collection_time) AS d, rtrim(wait_type) AS wait_type, SUM(delta_wait_time_ms) AS ms
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND delta_wait_time_ms > 0
     GROUP BY 1, 2
@@ -45,26 +47,29 @@ queries AS (
     GROUP BY 1
 ),
 deadlocks AS (
-    SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c
-    FROM v_deadlocks
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    SELECT date_trunc('day', deadlock_time) AS d, " + StoredEventCopies.DeadlockDistinctCount + @" AS c
+    FROM v_deadlocks AS dl
+    WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3
     GROUP BY 1
 ),
 bpr AS (
-    SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3/*scope*/") + @" AS ev
     GROUP BY 1
 ),
 dmv AS (
     SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3/*scope*/
     GROUP BY 1
 ),
 cpu AS (
-    /* Total host CPU = SQL + other-process (NULL on Linux -> 0), matching the alert engine and the
-       Overview headline; sustained >= 80 samples drive the day's band. */
+    /* Total host CPU = SQL + other-process (NULL on Linux -> 0), matching the Overview headline. The 80 is
+       ServerHealthThresholds.CpuWarningPercent, the card band's Warning bar, restated as a literal because
+       this is a SQL string and pinned equal by both suites (#3539 A2). Deliberately NOT the alert engine's
+       configurable CPU threshold: this statement re-counts at read time, so binding it to a knob would
+       recolour every past day the moment the knob moved. The count feeds a bar that scales with the window
+       (DailyHealthThresholds.HighCpuCriticalSamplesFor). */
     SELECT date_trunc('day', collection_time) AS d,
            COUNT(*) FILTER (WHERE (sqlserver_cpu_utilization + COALESCE(other_process_cpu_utilization, 0)) >= 80) AS c
     FROM v_cpu_utilization_stats
@@ -73,7 +78,8 @@ cpu AS (
 ),
 coll AS (
     /* Any run (all statuses) marks the day as collected -> it appears even if every metric is quiet
-       (a quiet monitored day is Healthy/green, not No-Data/grey). errs feeds the Critical band. */
+       (a quiet monitored day is Healthy/green, not No-Data/grey). runs is also the denominator the error
+       SHARE bands on (#3539 A2); errs alone used to make the day Critical on presence. */
     SELECT date_trunc('day', collection_time) AS d,
            COUNT(*) AS runs,
            COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
@@ -133,7 +139,21 @@ SELECT
     /* Peak block wait (ms) from the SAME source the blocking count came from (BPR preferred, DMV-snapshot
        fallback), so the day-detail blocking reason ('N blocking events (peak block X)') reconciles with the
        count. 0 when the blocking came from a source without a wait time. */
-    COALESCE(CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END, 0) AS peak_block_wait_ms
+    COALESCE(CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END, 0) AS peak_block_wait_ms,
+    /* Every collector run in the window (#3539 A2): the denominator that turns collection_errors into a
+       share. Appended after peak_block_wait_ms so every existing ordinal read stays where it was. */
+    COALESCE(cl.runs, 0) AS collection_runs,
+    /* #3541 A9: how many of the seven per-signal sources hold at least one row for the day — the retention
+       arm's PRESENCE fact, Darling's DailySummarySql column of the same name (its comment carries the
+       reasoning). Lite's sources share one archive horizon, so the ghost is narrower here, but the reader
+       judges the day the same way from the same fact. Appended LAST, after collection_runs. */
+    (CASE WHEN w.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN q.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN dl.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present
 FROM day_spine s
 LEFT JOIN waits w ON w.d = s.d
 LEFT JOIN queries q ON q.d = s.d
@@ -150,26 +170,66 @@ ORDER BY s.d";
     /// Returns one <see cref="DailySummaryRow"/> per collected day in the half-open [fromDate, toDate)
     /// window (dates normalized to their date component). Powers the Performance Calendar month grid.
     /// </summary>
-    public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(int serverId, DateTime fromDate, DateTime toDate)
+    public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(int serverId, DateTime fromDate, DateTime toDate, DateTime? asOfUtc = null)
     {
+        /* An Azure SQL Database master's separately monitored databases show on their own days; master's days
+           count only its own events. A null or empty list leaves today's SQL untouched. */
+        var separate = AnalysisService.ResolveSeparatelyMonitoredDatabases(serverId);
+        var scoped = separate is { Count: > 0 };
         using var _q = TimeQuery("GetDailySummaryRangeAsync", "daily summary range aggregation");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = DailySummaryRangeSql;
+        command.CommandText = scoped
+            ? DailySummaryRangeSql.Replace("/*scope*/", SeparatelyMonitoredScope.BprFilter(separate, 4))
+            : DailySummaryRangeSql;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = fromDate.Date });
         command.Parameters.Add(new DuckDBParameter { Value = toDate.Date });
+        SeparatelyMonitoredScope.AddParameters(command, separate);
+
+        /* Deadlocks per day: one row per stored identity, minus those wholly inside the separately monitored
+           databases (every process considered). They replace the SQL's per-day count before the band reads it. */
+        Dictionary<DateTime, long>? scopedDeadlocks = scoped
+            ? await SeparatelyMonitoredScope.CountDeadlocksByDayAsync(connection, serverId, fromDate.Date, toDate.Date, separate!, System.Threading.CancellationToken.None)
+            : null;
+
+        /* #3525 review: the still-forming day's window clamps against the read's own clock — the anchored
+           MCP read hands its resolved window end so a backdated as_of never clamps against the process
+           clock; the live calendar read leaves this null. */
+        var referenceUtc = asOfUtc ?? DateTime.UtcNow;
+
+        /* #3541 A9: the retention horizon, from the READER's wall clock and never the anchor — a purge is a
+           wall-clock event and a backdated as_of cannot un-purge an archive; DailySummaryRetention.HorizonFor
+           says why in full. Lite has ONE horizon for every source (RetentionService.ArchiveRetentionMonths),
+           so a day past it is gone from every table together and cannot ghost the way Darling's per-signal
+           horizons let a day do; the state is stamped all the same so the two SKUs publish one vocabulary
+           and the same day is judged the same way on both. */
+        var retentionHorizon = DailySummaryRetentionHorizon(DateTime.UtcNow);
 
         var results = new List<DailySummaryRow>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            results.Add(ReadDailySummaryRow(reader));
+            results.Add(ReadDailySummaryRow(reader, referenceUtc, retentionHorizon, scopedDeadlocks));
         }
 
         return results;
     }
+
+    /// <summary>
+    /// The oldest UTC day every daily-summary source still holds on Lite (#3541 A9):
+    /// <see cref="RetentionService.OldestRetainedInstant"/>, the first month start at or after the archive
+    /// retention's cutoff. It is not the cutoff day itself: the cleanup deletes an archive file whole once the
+    /// month it is named for falls before the cutoff, so the rows between the cutoff and the next month start
+    /// are gone with it, and a horizon at the cutoff read those days as held and uncollected rather than
+    /// purged. The Overview freshness band reads the same instant (#3967), so the two surfaces agree on when
+    /// Lite's history ends. Month arithmetic rather than <see cref="DailySummaryRetention.HorizonFor"/>'s
+    /// day count, because Lite's horizon is DECLARED in months
+    /// (<see cref="RetentionService.ArchiveRetentionMonths"/>).
+    /// </summary>
+    internal static DateTime DailySummaryRetentionHorizon(DateTime utcNow) =>
+        RetentionService.OldestRetainedInstant(utcNow);
 
     /// <summary>
     /// Gets the daily summary for a specific date (or today if null). Delegates to the range query for a
@@ -180,15 +240,30 @@ ORDER BY s.d";
     {
         var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
         var rows = await GetDailySummaryRangeAsync(serverId, targetDate, targetDate.AddDays(1));
-        return rows.Count > 0
-            ? rows[0]
-            : new DailySummaryRow { SummaryDate = targetDate, HasData = false, HealthBand = DailyHealthBand.NoData };
+        if (rows.Count > 0)
+        {
+            return rows[0];
+        }
+
+        /* #3541 A9: a day the spine does not hold is not "collected" either — before the horizon it is purged
+           like any other, inside it simply without a run record — so the single-day tool can say which. */
+        var horizon = DailySummaryRetentionHorizon(DateTime.UtcNow);
+        return new DailySummaryRow
+        {
+            SummaryDate = targetDate,
+            HasData = false,
+            HealthBand = DailyHealthBand.NoData,
+            DataState = DailySummaryRetention.StateFor(targetDate, 0, 0, horizon),
+            RetentionHorizon = horizon,
+        };
     }
 
-    private static DailySummaryRow ReadDailySummaryRow(System.Data.Common.DbDataReader reader)
+    private static DailySummaryRow ReadDailySummaryRow(System.Data.Common.DbDataReader reader, DateTime referenceUtc, DateTime retentionHorizon, Dictionary<DateTime, long>? scopedDeadlocks = null)
     {
         var row = new DailySummaryRow
         {
+            ReferenceUtc = referenceUtc,
+            RetentionHorizon = retentionHorizon,
             SummaryDate = reader.IsDBNull(0) ? DateTime.MinValue : Convert.ToDateTime(reader.GetValue(0)),
             TotalWaitTimeSec = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
             TopWaitType = reader.IsDBNull(2) ? "" : reader.GetString(2),
@@ -201,8 +276,20 @@ ORDER BY s.d";
             MemoryCriticalEvents = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
             AlertCount = reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
             MaxBlockDurationMs = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
+            /* #3539 A2: the trailing collection_runs column — the collection-error share's denominator. */
+            CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+            /* #3541 A9: the signal-presence count, after collection_runs. */
+            SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
             HasData = true,
         };
+        if (scopedDeadlocks != null)
+        {
+            row.DeadlockCount = scopedDeadlocks.TryGetValue(row.SummaryDate.Date, out var own) ? own : 0L;
+        }
+        /* #3541 A9: judged from the day, its run count, its signal presence and the horizon; ToSignals folds
+           a non-collected state into HasData = false so the shared band reads NoData rather than
+           measured-zero-Healthy. */
+        row.DataState = DailySummaryRetention.StateFor(row.SummaryDate, row.CollectionRuns, row.SignalSourcesPresent, retentionHorizon);
         row.HealthBand = DailyHealthBandCalculator.Classify(row.ToSignals());
         return row;
     }
@@ -211,6 +298,11 @@ ORDER BY s.d";
 public class DailySummaryRow
 {
     public DateTime SummaryDate { get; set; }
+
+    /// <summary>The clock the still-forming day's window clamps against (#3525 review): the anchored
+    /// MCP range read hands its resolved window end so a backdated as_of clamps against its own "now";
+    /// the live calendar read leaves the wall-clock default.</summary>
+    public DateTime ReferenceUtc { get; set; } = DateTime.UtcNow;
     public decimal TotalWaitTimeSec { get; set; }
     public string TopWaitType { get; set; } = "";
     public long UniqueQueries { get; set; }
@@ -220,14 +312,34 @@ public class DailySummaryRow
     public long MemoryPressureEvents { get; set; }
     public long MemoryCriticalEvents { get; set; }
     public long CollectionErrors { get; set; }
+
+    /// <summary>Collector runs of every status that day (#3539 A2) — the denominator the collection-error
+    /// share bands on, read from the daily SQL's trailing <c>collection_runs</c> column.</summary>
+    public long CollectionRuns { get; set; }
     public long AlertCount { get; set; }
 
     /// <summary>The day's peak/max block wait in ms (0 when no blocking, or blocking from a source without a
-    /// wait time). Surfaced on the day-detail panel's blocking reason.</summary>
+    /// wait time). Surfaced on the day-detail panel's blocking reason, and the blocking band's wait arm
+    /// (#3539 A2).</summary>
     public long MaxBlockDurationMs { get; set; }
 
-    /// <summary>True when the day had any collection. False renders the calendar cell as No-Data (grey).</summary>
+    /// <summary>True when the spine holds the day at all. Together with <see cref="DataState"/> this decides
+    /// the band's HasData: a held day that is purged or past the horizon renders the calendar cell No-Data (grey)
+    /// exactly as an absent day does (#3541 A9).</summary>
     public bool HasData { get; set; }
+
+    /// <summary>Whether this row's counts are a measurement or the shape retention left behind (#3541 A9) —
+    /// see <see cref="DailySummaryDataState"/>. Defaults to Collected so a row built without the reader
+    /// (the tests' hand-built rows) bands as it always did.</summary>
+    public DailySummaryDataState DataState { get; set; } = DailySummaryDataState.Collected;
+
+    /// <summary>The horizon <see cref="DataState"/> was judged against; null on a row nobody judged.</summary>
+    public DateTime? RetentionHorizon { get; set; }
+
+    /// <summary>How many of the seven per-signal sources hold at least one row for the day (#3541 A9) — the
+    /// aggregate's trailing <c>signal_sources_present</c> column, the fact that tells a purged shell from a
+    /// day the purge has not reached.</summary>
+    public int SignalSourcesPresent { get; set; }
 
     /// <summary>The composite health band that colors this day's calendar cell.</summary>
     public DailyHealthBand HealthBand { get; set; } = DailyHealthBand.NoData;
@@ -240,19 +352,31 @@ public class DailySummaryRow
         ? $"{TotalWaitTimeSec:N1} s"
         : $"{TotalWaitTimeSec / 60:N1} min";
 
-    /// <summary>Multi-line hover text summarizing the day's signals, for the calendar cell tooltip.</summary>
-    public string SignalsTooltip => DailyHealthBandCalculator.Describe(ToSignals());
+    /// <summary>Multi-line hover text summarizing the day's signals, for the calendar cell tooltip — with the
+    /// retention state spoken (#3653, twinned with the Darling viewer): a purged cell says retention took the
+    /// day, not "No data collected."</summary>
+    public string SignalsTooltip => DailyHealthBandCalculator.Describe(ToSignals(), DataState, RetentionHorizon, SignalSourcesPresent);
 
     /// <summary>Projects this row's counts into the shared banding input.</summary>
     public DailyHealthSignals ToSignals() => new()
     {
-        HasData = HasData,
+        /* #3541 A9: a purged or past-horizon day is a NoData day to the band, whatever the spine still holds
+           for it — its COALESCEd zeros may be absences, and measured-zero-Healthy was the lie. Inside retention
+           (Collected, NoRunRecord) a zero IS a measurement and the band stands. */
+        HasData = HasData && DataState is not (DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
         Deadlocks = DeadlockCount,
         CollectionErrors = CollectionErrors,
+        CollectionRuns = CollectionRuns,
         HighCpuEvents = HighCpuEvents,
         BlockingEvents = BlockingEvents,
+        /* #3539 A2: the blocking band's wait arm reads the longest block, so the peak rides in the signals. */
+        PeakBlockWaitMs = MaxBlockDurationMs,
         MemoryPressureEvents = MemoryPressureEvents,
         MemoryCriticalEvents = MemoryCriticalEvents,
         AlertCount = AlertCount,
+        /* #3525: a finished calendar day bands over its full 24 hours; the still-forming day clamps to
+           its elapsed portion so an active storm is not diluted by hours that have not happened yet
+           (review finding on #3525). Anchored MCP reads hand their window end; the calendar is live. */
+        Window = DailyHealthBandCalculator.CalendarDayWindow(SummaryDate, ReferenceUtc),
     };
 }

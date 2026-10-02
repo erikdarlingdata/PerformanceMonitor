@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
 
@@ -44,7 +45,7 @@ WHERE d.name = @database_name;", connection);
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -89,14 +90,23 @@ ORDER BY bucket";
         return items;
     }
 
-    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    /// <summary>
+    /// The top-N query-stats groups by CPU over the window. <paramref name="minMaxDop"/> is the lifetime
+    /// <c>max_dop</c> floor a group must reach to be RANKED at all (#3541 A13): 0 for no parallelism filter
+    /// (the grids' read, byte-identical to before), 2 for the MCP tool's <c>parallel_only</c>, the caller's
+    /// <c>min_dop</c> otherwise. It is a HAVING predicate on the grouped population, before the CPU ordering
+    /// and the cap, so the page is the top-N of the filtered population — the tool used to filter the
+    /// returned top-N page in C#, and a box whose hottest plans were all serial answered an empty page while
+    /// the window held parallel plans. Darling's <c>TopQueriesSql</c> carries the same floor as its $6.
+    /// </summary>
+    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int minMaxDop = 0)
     {
         using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
 
         command.CommandText = @"
 WITH ranked AS (
@@ -157,8 +167,12 @@ WITH ranked AS (
     AND   collection_time <= $3
     AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
     GROUP BY database_name, query_hash, host_object_name
-    HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-    ORDER BY SUM(delta_elapsed_time) DESC
+    HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+    /* #3541 A13: the parallelism floor is part of the QUERY, on the grouped population before the ranking
+       and the cap — see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
+       as 0 and stays out of a filtered page, as the C# arm it replaces did. */
+    AND   COALESCE(MAX(max_dop), 0) >= $6
+    ORDER BY SUM(delta_worker_time) DESC
     LIMIT $4 + 5
 ),
 module AS (
@@ -210,14 +224,18 @@ LEFT JOIN LATERAL (
 ) t ON TRUE
 LEFT JOIN module m ON m.sql_handle = r.sql_handle
 WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-ORDER BY r.total_elapsed_us DESC
+ORDER BY r.total_cpu_us DESC
 LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = top });
-        command.Parameters.Add(new DuckDBParameter { Value = utcOffsetMinutes });
+        /* $5 shifts the window's UTC start into the server's clock for the last_execution_time floor (a
+           server-local column). It converts ONE bound, so it is the offset in force at that bound (#4766); no
+           serverClock means UTC, as the old zero default did. */
+        command.Parameters.Add(new DuckDBParameter { Value = (serverClock ?? ServerClock.Utc).OffsetMinutesAt(startTime) });
+        command.Parameters.Add(new DuckDBParameter { Value = minMaxDop });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -407,7 +425,7 @@ FULL OUTER JOIN baseline_period b
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -537,7 +555,7 @@ ORDER BY collection_time";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -572,7 +590,10 @@ SELECT
     total_physical_reads,
     total_logical_writes,
     delta_spills,
-    CAST(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS BIGINT) AS sample_interval_seconds
+    /* #3540 (v61): the STORED interval where the row has one — including 0, which the grid shows as the
+       Interval (sec) 0 the query_stats history has always shown for an unknowable row — and the LAG over
+       collection_time this read always derived for a pre-v61 row (NULL) that never recorded one. */
+    COALESCE(sample_interval_seconds, CAST(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS BIGINT)) AS sample_interval_seconds
 FROM v_procedure_stats
 WHERE server_id = $1
 AND   database_name = $2
@@ -826,7 +847,7 @@ OPTION(RECOMPILE);',
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -861,22 +882,27 @@ ORDER BY bucket";
                 SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
                 TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
                 TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                /* Ordinal 4 (total_reads) is the LOGICAL-reads aggregate — TotalReads and TotalLogicalReads
+                   are deliberate aliases of it, same as the query-stats and Query Store slicers. Physical
+                   reads ride separately at ordinal 6; this reader shipped without that mapping, so the
+                   physical column was computed and then dropped on the floor (#3556, the #3530 bug's twin). */
                 TotalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
                 TotalWrites = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 TotalLogicalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TotalPhysicalReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
                 Value = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
             });
         }
         return items;
     }
 
-    public async Task<List<ProcedureStatsRow>> GetTopProceduresByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<ProcedureStatsRow>> GetTopProceduresByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetTopProceduresByCpuAsync", "v_procedure_stats top N by CPU");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
         command.CommandText = @"
@@ -916,14 +942,15 @@ AND   collection_time <= $3
 AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
 GROUP BY database_name, schema_name, object_name, object_type
 HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-ORDER BY SUM(delta_elapsed_time) DESC
+ORDER BY SUM(delta_worker_time) DESC
 LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = top });
-        command.Parameters.Add(new DuckDBParameter { Value = utcOffsetMinutes });
+        /* $5: the window start on the server's clock, as in GetTopQueriesByCpuAsync (#4766). */
+        command.Parameters.Add(new DuckDBParameter { Value = (serverClock ?? ServerClock.Utc).OffsetMinutesAt(startTime) });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -1106,57 +1133,171 @@ LEFT JOIN LATERAL (
     }
 
     /// <summary>
-    /// Gets query duration trend — total elapsed time per collection snapshot.
+    /// Gets query duration trend — elapsed ms per second per collection snapshot, the summed
+    /// <c>delta_elapsed_time</c> divided by the collection's interval.
+    /// <para><b>The interval is the one the store HAS (#3653 A11).</b> <c>query_stats</c> has carried
+    /// <c>sample_interval_seconds</c> since its first schema, stamped per row by the shared delta calculator
+    /// from the same two collection instants a LAG over <c>collection_time</c> re-derives — on a steady series
+    /// the two agree to the second, and they differ exactly where they must: a row the calculator could not
+    /// difference (first sighting, counter reset, a gap past the delta policy — in practice a restart) stores
+    /// <c>0</c> beside a <c>0</c> delta, and the LAG this read used to recompute divided that fabricated 0 by
+    /// the real elapsed seconds into a confident <c>0.00 ms/sec</c> at exactly the instant nothing was
+    /// knowable. Read the way <see cref="GetProcedureDurationTrendAsync"/> has read since v61: <c>MAX</c> over
+    /// the collection's rows (a plan the TOP (150) just readmitted stores 0 beside its siblings' real interval
+    /// and contributes 0 to the sums, so MAX is the measured interval and is 0 only when EVERY row was
+    /// unknowable), <c>NULLIF(…, 0)</c> so the restart collection is UNRATED, and the LAG only for a
+    /// pre-v61 collection (NULL) that never recorded one, so history renders exactly as it did.
+    /// <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would be the wrong spelling — it falls back
+    /// to a fabricated interval on precisely the restart row. Darling's twin is
+    /// <c>DurationTrendRouting.BuildRawTrendSql</c>.</para>
+    /// <para><b>An unrated collection is a point with no rate, not a missing point (#3541 A12, #3540 A8).</b>
+    /// The first collection of a pre-v61 stretch has a NULL LAG, a restart collection a NULL interval; either
+    /// way the <c>CASE ... ELSE 0 END</c> this replaced published that unknowable as a measured 0.0, and every
+    /// trend chart and MCP duration series began with a fabricated quiet instant. Contract rule 5 — zero is a
+    /// measurement — so the CASE has no ELSE and the rate columns are NULL for that row (and for the
+    /// two-collections-in-one-second case, whose denominator is 0 and whose rate is equally undefined). The
+    /// row is KEPT rather than filtered: the collection happened, the MCP payload's <c>effective_start</c> is
+    /// truthfully its instant, and a window holding exactly one collection is "one collection, no rate yet"
+    /// rather than an empty series. <see cref="QueryTrendPoint"/> carries the nulls; the MCP tool publishes
+    /// them with the reason and the charts skip them (a chart has nowhere to draw "unknown"). The three
+    /// sibling trends in this file and <c>GetQueryStoreDurationTrendAsync</c> apply the same rule; Darling's
+    /// <c>DarlingTrendReader</c> raw reads and its Query Store rollup builder are the twins.</para>
+    /// <para>#4234: the Performance Trends chart is the only product caller, and it used to get one point per
+    /// collection — a 7-day chart on a 1-minute cadence was thousands of rows. Now gathered into buckets sized
+    /// by <see cref="TrendBuckets.AutoMinutes"/> against <see cref="TrendBudget.Chart"/>, the same shape
+    /// <c>ReadBucketedDurationTrendAsync</c> (<c>LocalDataService.TrendBuckets.cs</c>) already reads for the MCP
+    /// tools, through the shared <see cref="ReadDurationTrendChartAsync"/>. A bucket's rate is its RATED
+    /// collections' summed work over their summed seconds, never the mean of the per-collection rates, and a
+    /// bucket with no rated collection still gets a row with a NULL rate (no <c>HAVING</c>) — the same #3541
+    /// A12 contract above, now applied per bucket instead of per collection. Every point is stamped at its
+    /// bucket's start UNLESS every bucket the call returned held exactly one physical collection, in which case
+    /// each is stamped at that collection's own time — so a window narrow enough to need no merging renders
+    /// exactly as the unbucketed read did.</para>
     /// </summary>
-    public async Task<List<QueryTrendPoint>> GetQueryDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public Task<List<QueryTrendPoint>> GetQueryDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null) =>
+        ReadDurationTrendChartAsync("v_query_stats", serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc);
+
+    /// <summary>
+    /// The shared body of the two bucketed duration-trend chart reads (#4234): <see cref="GetQueryDurationTrendAsync"/>
+    /// and <see cref="GetProcedureDurationTrendAsync"/> differ only in which view they read, via
+    /// <paramref name="relation"/> — one of the two constants those callers pass, never caller text — so the SQL
+    /// text (<see cref="DurationTrendChartSql"/>) and the row-buffering/stamping below are written once.
+    /// </summary>
+    private async Task<List<QueryTrendPoint>> ReadDurationTrendChartAsync(
+        string relation, int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<string>? databaseNames, DateTime? asOfUtc)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var widthParamIndex = 4 + dbValues.Count;
+        var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
 
-        command.CommandText = @"
-WITH raw AS
-(
-    SELECT
-        collection_time,
-        SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-        SUM(delta_execution_count) AS total_executions,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + @"
-    GROUP BY collection_time
-)
-SELECT
-    collection_time,
-    CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds ELSE 0 END AS elapsed_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
-FROM raw
-ORDER BY collection_time";
+        command.CommandText = DurationTrendChartSql(relation, dbClause, widthParamIndex);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<QueryTrendPoint>();
+        var rows = new List<(DateTime BucketStart, double? ElapsedMsPerSecond, double? ExecutionsPerSecond, DateTime FirstCollectionTime, long CollectionCount)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var collectionCount = ToInt64(reader.GetValue(4));
+            if (collectionCount != 1)
+                everyBucketSingleton = false;
+
+            /* NULL stays NULL (#3541 A12, at the bucket level): a bucket whose every collection was unrated
+               (a restart, or the window's first pre-v61 collection with no LAG) is kept rather than dropped. */
+            rows.Add((
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
+                reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
+                reader.GetDateTime(3),
+                collectionCount));
+        }
+
+        var items = new List<QueryTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
             items.Add(new QueryTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
-                ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                Value = row.ElapsedMsPerSecond,
+                ExecutionCount = row.ExecutionsPerSecond.HasValue ? (long)row.ExecutionsPerSecond.Value : null,
+                ExecutionsPerSecond = row.ExecutionsPerSecond
             });
         }
+
         return items;
     }
+
+    /// <summary>
+    /// The narrowest ladder width (#4234) that keeps a single-series chart near <see cref="TrendBudget.Chart"/>'s
+    /// point budget over <paramref name="startTime"/>..<paramref name="endTime"/> — the desktop's own window, so
+    /// <c>seriesCount</c> is always 1, unlike an MCP call that may draw more than one line.
+    /// </summary>
+    private static int AutoChartBucketMinutes(DateTime startTime, DateTime endTime) =>
+        TrendBuckets.AutoMinutes(Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes)), 1, TrendBudget.Chart.AutoPoints);
+
+    /// <summary>
+    /// The SQL shared by the two bucketed duration-trend chart reads (#4234), Darling viewer's
+    /// <c>ViewerDataService.QueryTrends.ReadBucketedDurationTrendAsync</c> in DuckDB's dialect: the per-collection
+    /// <c>raw</c> CTE unchanged since v61 (#3653 A11's three-state stored interval), a <c>rated</c> CTE zeroing out
+    /// an unrated collection's work/executions/seconds rather than its rate directly (so the bucket sums work and
+    /// seconds separately and divides once — summed rates, never averaged ones), then one row per bucket.
+    /// <c>bucket_start</c> is clamped to the window start (<c>GREATEST</c>) so an unaligned window's first,
+    /// partial bucket does not render before it. No <c>HAVING</c>: a bucket with no rated collection still gets a
+    /// row, its rate NULL — the per-collection contract above, applied per bucket. <paramref name="dbClause"/> is
+    /// <see cref="LocalDataService.BuildDbInClause"/>'s own <c>$4..</c> numbering, unchanged by bucketing; the
+    /// width is appended as its OWN trailing parameter at <paramref name="widthParamIndex"/> so that numbering
+    /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
+    /// </summary>
+    internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) => $@"
+WITH raw AS
+(
+    SELECT
+        collection_time,
+        SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
+        SUM(delta_execution_count) AS total_executions,
+        /* The stored interval, three-state (#3653 A11): MAX 0 = every row unknowable (a restart) -> NULL, so
+           the collection is unrated; NULL = pre-v61, the LAG stands in; n = measured. */
+        CASE WHEN MAX(sample_interval_seconds) IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+             ELSE NULLIF(MAX(sample_interval_seconds), 0)
+        END AS interval_seconds
+    FROM {relation}
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3{dbClause}
+    GROUP BY collection_time
+),
+rated AS
+(
+    SELECT
+        collection_time,
+        CASE WHEN interval_seconds > 0 THEN total_elapsed_ms END AS rated_elapsed_ms,
+        CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+    FROM raw
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST(${widthParamIndex} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    /* No ELSE, no HAVING: a bucket whose every collection is unrated sums to NULL over NULL and keeps its row
+       — never a fabricated 0 (#3541 A12 at the bucket level). */
+    SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
+    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY 1
+ORDER BY 1";
 
     /// <summary>
     /// Whether this server has EVER recorded a query-stats sample, ignoring any window.
@@ -1184,105 +1325,125 @@ LIMIT 1";
 
     /// <summary>
     /// Gets procedure duration trend — elapsed time per second per collection snapshot.
+    ///
+    /// <para>#3540 (v61): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
+    /// over the collection's rows, because a plan first seen in an otherwise steady pass (a TOP (150)
+    /// readmission) carries 0 beside its siblings' real interval and contributes 0 to the sums; MAX is 0
+    /// only when EVERY row was unknowable (a restart), and that 0 becomes NULL through <c>NULLIF</c> so the
+    /// rates are NULL — an UNRATED point, kept rather than rendered as 0.00 ms/sec (#3541 A12: see
+    /// <see cref="GetQueryDurationTrendAsync"/> for why the row stays). NULL (a pre-v61 collection that never
+    /// recorded one) falls back to the LAG over collection_time this read always used, so history renders
+    /// exactly as it did. No <c>ELSE 0</c>: the first row of a pre-v61 series carries NULL rates rather than a
+    /// fabricated 0.0.</para>
+    /// <para>#4234: bucketed the same way and for the same reason as <see cref="GetQueryDurationTrendAsync"/> —
+    /// see that method's own #4234 paragraph for the shape, the summed-rate rule and the singleton-window
+    /// stamping. This read supplies <c>v_procedure_stats</c> as <see cref="ReadDurationTrendChartAsync"/>'s
+    /// <c>relation</c>; everything else is shared.</para>
     /// </summary>
-    public async Task<List<QueryTrendPoint>> GetProcedureDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
-
-        command.CommandText = @"
-WITH raw AS
-(
-    SELECT
-        collection_time,
-        SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-        SUM(delta_execution_count) AS total_executions,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
-    FROM v_procedure_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + @"
-    GROUP BY collection_time
-)
-SELECT
-    collection_time,
-    CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds ELSE 0 END AS elapsed_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
-FROM raw
-ORDER BY collection_time";
-
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
-        foreach (var db in dbValues)
-            command.Parameters.Add(new DuckDBParameter { Value = db });
-
-        var items = new List<QueryTrendPoint>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            items.Add(new QueryTrendPoint
-            {
-                CollectionTime = reader.GetDateTime(0),
-                Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
-                ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
-            });
-        }
-        return items;
-    }
+    public Task<List<QueryTrendPoint>> GetProcedureDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null) =>
+        ReadDurationTrendChartAsync("v_procedure_stats", serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc);
 
     /// <summary>
-    /// Gets execution count trend — executions per second per collection snapshot from query_stats.
+    /// Gets execution count trend — executions per second per collection snapshot from query_stats: the
+    /// executions column of <see cref="GetQueryDurationTrendAsync"/> on its own, reading the interval the
+    /// same way (#3653 A11 — the stored <c>sample_interval_seconds</c>, 0 → unrated, LAG only for a pre-v61
+    /// collection). An unrated collection carries a NULL rate, not 0 — see
+    /// <see cref="GetQueryDurationTrendAsync"/> (#3541 A12).
+    /// <para>#4234: bucketed the same way and for the same reason as <see cref="GetQueryDurationTrendAsync"/> —
+    /// see that method's own #4234 paragraph. This read has no shared builder of its own (it is the only one
+    /// of the three that projects a single rate column, executions only), so it buckets in place below rather
+    /// than through <see cref="ReadDurationTrendChartAsync"/>.</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetExecutionCountTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var widthParamIndex = 4 + dbValues.Count;
+        var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
 
-        command.CommandText = @"
-WITH raw AS
-(
-    SELECT
-        collection_time,
-        SUM(delta_execution_count) AS total_executions,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + @"
-    GROUP BY collection_time
-)
-SELECT
-    collection_time,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
-FROM raw
-ORDER BY collection_time";
+        command.CommandText = ExecutionCountTrendChartSql(dbClause, widthParamIndex);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<QueryTrendPoint>();
+        var rows = new List<(DateTime BucketStart, double? ExecutionsPerSecond, DateTime FirstCollectionTime, long CollectionCount)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var collectionCount = ToInt64(reader.GetValue(3));
+            if (collectionCount != 1)
+                everyBucketSingleton = false;
+
+            /* NULL stays NULL (#3541 A12, at the bucket level) — see GetQueryDurationTrendAsync. */
+            rows.Add((
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
+                reader.GetDateTime(2),
+                collectionCount));
+        }
+
+        var items = new List<QueryTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
             items.Add(new QueryTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                Value = row.ExecutionsPerSecond
             });
         }
         return items;
     }
+
+    /// <summary>
+    /// The SQL for the bucketed execution-count trend chart (#4234): the same <c>raw</c>/<c>rated</c>/bucketed
+    /// shape as <see cref="DurationTrendChartSql"/>, projecting only <c>executions_per_second</c> — see that
+    /// method's doc comment for the rules (no ELSE, no HAVING, GREATEST-clamped bucket start, trailing width
+    /// parameter). Reads <c>v_query_stats</c> only; there is no procedure-side execution-count chart.
+    /// </summary>
+    internal static string ExecutionCountTrendChartSql(string dbClause, int widthParamIndex) => $@"
+WITH raw AS
+(
+    SELECT
+        collection_time,
+        SUM(delta_execution_count) AS total_executions,
+        /* The stored interval, three-state (#3653 A11) — see GetQueryDurationTrendAsync. */
+        CASE WHEN MAX(sample_interval_seconds) IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+             ELSE NULLIF(MAX(sample_interval_seconds), 0)
+        END AS interval_seconds
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3{dbClause}
+    GROUP BY collection_time
+),
+rated AS
+(
+    SELECT
+        collection_time,
+        CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+    FROM raw
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST(${widthParamIndex} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    /* No ELSE, no HAVING: an unrated bucket (every collection a restart, or the window's first pre-v61
+       collection) sums to NULL over NULL and keeps its row — never a fabricated 0 (#3541 A12). */
+    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY 1
+ORDER BY 1";
 
     /// <summary>The same probe over <c>v_procedure_stats</c>, the source
     /// <see cref="GetProcedureDurationTrendAsync"/> reads. See <see cref="HasAnyQueryStatAsync"/>.</summary>
@@ -1337,7 +1498,7 @@ ORDER BY collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var metricExpr = GetMetricColumn(metric);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
@@ -1451,11 +1612,18 @@ public class HeatmapResult
     public HeatmapCell[,] CellDetails { get; set; } = new HeatmapCell[0, 0];
 }
 
+/// <summary>
+/// One point of a per-collection rate series. The rates are NULLABLE (#3541 A12): the window's first
+/// collection has no previous one to difference against, so it has no rate — <see cref="HasRate"/> is false
+/// and the three rate members are null, never 0 (a Query Store point that stored its end is rated over its
+/// own length instead, #4765, so only one that stored no end is left unrated this way). The MCP tool publishes
+/// such a point with the reason; the charts skip it. Darling's twin is <c>DarlingTrendReader.QueryDurationTrendPoint</c>.
+/// </summary>
 public class QueryTrendPoint
 {
     public DateTime CollectionTime { get; set; }
-    public double Value { get; set; }
-    public long ExecutionCount { get; set; }
+    public double? Value { get; set; }
+    public long? ExecutionCount { get; set; }
 
     /// <summary>
     /// The SAME quantity as <see cref="ExecutionCount"/> - executions per second - without the truncation.
@@ -1464,7 +1632,24 @@ public class QueryTrendPoint
     /// as an idle server rather than a slow one. Kept alongside rather than replacing it so nothing reading
     /// the long breaks. Darling's twin is <c>QueryDurationTrendPoint.ExecutionsPerSecond</c>.</para>
     /// </summary>
-    public double ExecutionsPerSecond { get; set; }
+    public double? ExecutionsPerSecond { get; set; }
+
+    /// <summary>Whether this point carries a rate at all — false for the window's first differenced
+    /// collection and for one landing in the same second as its predecessor (no denominator). On a bucketed
+    /// point (#3897), false only when every collection in the bucket was one of those.</summary>
+    public bool HasRate => Value.HasValue;
+
+    /// <summary>The bucket's worst single collection's elapsed ms per second (#3897). Null on a point that is not a
+    /// bucket of collections (the desktop reads, the Query Store trend).</summary>
+    public double? PeakElapsedMsPerSecond { get; set; }
+
+    /// <summary>The first collection inside a bucketed point (#3897) — what <c>effective_start</c> reports, since
+    /// the point is stamped at its bucket's start. Null on an unbucketed point, whose own time is its collection.</summary>
+    public DateTime? FirstCollectionTime { get; set; }
+
+    /// <summary>How many of a bucketed point's collections had no knowable rate and were left out of it (#3897).
+    /// Null on an unbucketed point, which is its own single collection — unrated or not, per <see cref="HasRate"/>.</summary>
+    public long? UnratedInBucket { get; set; }
 }
 
 public class QueryStatsRow
@@ -1667,9 +1852,42 @@ public class QueryStatsHistoryRow
     public double TotalClrMs => TotalClrTimeUs / 1000.0;
     public double TotalCpuMs => TotalCpuUs / 1000.0;
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
-    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string CreationTimeLocal => ServerTimeHelper.FormatServerClock(CreationTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    /// <summary>
+    /// The zone the window that shows this row draws its chart in (#4766): its opening tab's picker zone. The window
+    /// sets it on every row it loads, so <see cref="CollectionTimeLocal"/> is worded in that zone and not in the zone
+    /// of whichever server's tab is selected when the row is drawn (a history window stays open after another tab is
+    /// selected). Null on a row no window set, such as the server tab's own grids, which render only while their tab
+    /// is selected: the text is then <see cref="ServerTimeHelper.FormatServerTime(DateTime?, string)"/>'s. Not bound
+    /// in any grid.
+    /// </summary>
+    public Func<TimeZoneInfo>? Zone { get; set; }
+    /// <summary>
+    /// The clock of the server the window that shows this row was opened for (#4766): its opening tab's own clock,
+    /// read each time the row draws, so a collected clock that arrives while the window is open is picked up. The
+    /// window sets it on every row it loads, beside <see cref="Zone"/>. It words <see cref="CreationTimeLocal"/> and
+    /// <see cref="LastExecutionTimeLocal"/>, which are that server's own wall clock: in UTC and Local modes they are
+    /// converted on this clock and not on the clock of whichever server's tab is selected when the row is drawn. Null
+    /// on a row no window set, such as the server tab's own grids, which render only while their tab is selected: the
+    /// text is then <see cref="ServerTimeHelper.FormatServerClock(DateTime?, string)"/>'s, on the selected tab's
+    /// clock. Not bound in any grid.
+    /// </summary>
+    public Func<ServerClock>? Clock { get; set; }
+    /* CreationTimeLocal and LastExecutionTimeLocal below are the SQL server's own wall clock, not an instant, so they
+       stay off Zone: FormatServerClock shows them as they stand in Server mode, and sent through Zone they would be
+       read as UTC and moved by the server's offset. In UTC and Local modes they are converted on Clock. */
+    public string CollectionTimeLocal => Worded(Zone, CollectionTime);
+    public string CreationTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(CreationTime)
+        : ServerTimeHelper.FormatServerClock(CreationTime, Clock());
+    public string LastExecutionTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(LastExecutionTime)
+        : ServerTimeHelper.FormatServerClock(LastExecutionTime, Clock());
+
+    /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
+    private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>
+        naiveUtc is not { } instant ? ""
+        : zone is null ? ServerTimeHelper.FormatServerTime(instant)
+        : DisplayZone.Format(instant, zone(), "yyyy-MM-dd HH:mm:ss");
 }
 
 public class ProcedureStatsHistoryRow
@@ -1721,7 +1939,40 @@ public class ProcedureStatsHistoryRow
     public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
     public double TotalCpuMs => TotalCpuUs / 1000.0;
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
-    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string CachedTimeLocal => ServerTimeHelper.FormatServerClock(CachedTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    /// <summary>
+    /// The zone the window that shows this row draws its chart in (#4766): its opening tab's picker zone. The window
+    /// sets it on every row it loads, so <see cref="CollectionTimeLocal"/> is worded in that zone and not in the zone
+    /// of whichever server's tab is selected when the row is drawn (a history window stays open after another tab is
+    /// selected). Null on a row no window set, such as the server tab's own grids, which render only while their tab
+    /// is selected: the text is then <see cref="ServerTimeHelper.FormatServerTime(DateTime?, string)"/>'s. Not bound
+    /// in any grid.
+    /// </summary>
+    public Func<TimeZoneInfo>? Zone { get; set; }
+    /// <summary>
+    /// The clock of the server the window that shows this row was opened for (#4766): its opening tab's own clock,
+    /// read each time the row draws, so a collected clock that arrives while the window is open is picked up. The
+    /// window sets it on every row it loads, beside <see cref="Zone"/>. It words <see cref="CachedTimeLocal"/> and
+    /// <see cref="LastExecutionTimeLocal"/>, which are that server's own wall clock: in UTC and Local modes they are
+    /// converted on this clock and not on the clock of whichever server's tab is selected when the row is drawn. Null
+    /// on a row no window set, such as the server tab's own grids, which render only while their tab is selected: the
+    /// text is then <see cref="ServerTimeHelper.FormatServerClock(DateTime?, string)"/>'s, on the selected tab's
+    /// clock. Not bound in any grid.
+    /// </summary>
+    public Func<ServerClock>? Clock { get; set; }
+    /* CachedTimeLocal and LastExecutionTimeLocal below are the SQL server's own wall clock, not an instant, so they
+       stay off Zone: FormatServerClock shows them as they stand in Server mode, and sent through Zone they would be
+       read as UTC and moved by the server's offset. In UTC and Local modes they are converted on Clock. */
+    public string CollectionTimeLocal => Worded(Zone, CollectionTime);
+    public string CachedTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(CachedTime)
+        : ServerTimeHelper.FormatServerClock(CachedTime, Clock());
+    public string LastExecutionTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(LastExecutionTime)
+        : ServerTimeHelper.FormatServerClock(LastExecutionTime, Clock());
+
+    /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
+    private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>
+        naiveUtc is not { } instant ? ""
+        : zone is null ? ServerTimeHelper.FormatServerTime(instant)
+        : DisplayZone.Format(instant, zone(), "yyyy-MM-dd HH:mm:ss");
 }

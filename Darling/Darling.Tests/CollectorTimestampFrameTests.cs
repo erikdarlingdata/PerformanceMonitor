@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
@@ -37,6 +38,22 @@ namespace Darling.Tests;
 /// <para>The first cut of this pin asserted a store-wide "all naive timestamps are UTC" rule and would have
 /// forbidden the CPU collector's intentional local clock. Reviewing the CONSUMERS is what corrected it,
 /// which is why each fact here names the read path it protects rather than the function it matches.</para>
+///
+/// <para><b>Since V134 (#3653 item 13) the CPU collector carries BOTH clocks, one per column.</b>
+/// <c>sample_time</c> keeps <c>SYSDATETIME()</c> for the reasons above; <c>sample_time_utc</c> is the same
+/// instant off <c>SYSUTCDATETIME()</c>, written beside it so the readers that window against UTC can stop
+/// deriving the offset. The pin below therefore no longer says "no UTC clock in this file" — it says which
+/// column each clock feeds, which is the only statement that is true of the file now.</para>
+///
+/// <para><b>And since #3778 the WATERMARK is the twin where the store has it.</b> The local column stayed the
+/// dedup key through V134 because a watermark that changed frame mid-series would re-ingest or skip one
+/// offset's worth of samples — but a LOCAL dedup key drops the autumn fall-back hour outright (every sample in
+/// the repeated hour sits at or below the pre-transition maximum), which #3730's live straddle test could not
+/// see because it planted through <c>WritePayload</c>, below the dedup. So the frame now changes ONCE, with the
+/// frame STATED: the host prefers <c>MAX(sample_time_utc)</c> and falls to <c>MAX(sample_time)</c> only while no
+/// row carries the twin, says which through <c>CollectorContext.WatermarkFromUtcColumn</c>, and the dedup
+/// compares each row on the same column. Neither clock function moved for it — the pins above hold — and
+/// <see cref="CpuUtilization_DedupsInTheWatermarksFrame_NotOnTheLocalStampAlone"/> holds the comparison.</para>
 /// </summary>
 public sealed class CollectorTimestampFrameTests
 {
@@ -85,6 +102,61 @@ public sealed class CollectorTimestampFrameTests
             + "ServerTimeHelper.UtcOffsetMinutes. Converting it to UTC breaks Lite's CPU chart on both the "
             + "window and the plotted position, while Darling stays green because the per-batch de-skew "
             + "self-calibrates to zero - a regression visible on one app only.");
+    }
+
+    /// <summary>
+    /// V134 (#3653 item 13, Q7): the UTC twin. The local clock feeds <c>sample_time</c> and ONLY
+    /// <c>sample_time</c>; the UTC clock feeds <c>sample_time_utc</c> and ONLY <c>sample_time_utc</c>; and the
+    /// twin is derived by the identical age arithmetic, not by re-deriving an offset from the local column.
+    /// Stated per column because a file-level "has a UTC clock" would be satisfied by the exact regression the
+    /// sibling pin above forbids — the local column silently converted — and a file-level "has a local clock"
+    /// is satisfied even when the twin was never written. The two assignments are read off the SOURCE with
+    /// comments stripped, because the collector's own reasoning names both functions.
+    /// </summary>
+    [Fact]
+    public void CpuUtilization_WritesTheUtcTwin_OffTheUtcClock_AndOnlyThere()
+    {
+        var sql = QueryTextOf("CpuUtilizationCollector.cs").Replace("\r\n", "\n");
+
+        var local = Regex.Match(sql, @"(?<![\w.@])sample_time\s*=\s*DATEADD\((?:.|\n)*?SYSDATETIME\(\)\)\),");
+        var utc = Regex.Match(sql, @"(?<![\w.@])sample_time_utc\s*=\s*DATEADD\((?:.|\n)*?SYSUTCDATETIME\(\)\)\)");
+
+        Assert.True(local.Success, "sample_time must still be the two-step DATEADD off SYSDATETIME()");
+        Assert.True(utc.Success, "sample_time_utc must be the two-step DATEADD off SYSUTCDATETIME()");
+        Assert.DoesNotContain("SYSUTCDATETIME", local.Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("SYSDATETIME()", utc.Value.Replace("SYSUTCDATETIME()", string.Empty), StringComparison.Ordinal);
+
+        /* The same age arithmetic on both: strip the clock and the column name and the two expressions are
+           identical, so the pair differs by exactly the server's offset and by nothing else. */
+        static string Arithmetic(string assignment) => Regex.Replace(
+            Regex.Replace(assignment, @"^sample_time(_utc)?\s*=\s*", string.Empty), @"SYS(UTC)?DATETIME\(\)", "CLOCK").TrimEnd(',');
+        Assert.Equal(Arithmetic(local.Value), Arithmetic(utc.Value));
+
+        /* One of each clock in the code, so neither column was converted and no minute-quantised DATEDIFF
+           was introduced between them. */
+        Assert.Single(s_localClock.Matches(sql));
+        Assert.Single(s_utcClock.Matches(sql));
+        Assert.DoesNotContain("DATEDIFF", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3778: the ring-buffer dedup compares the row IN THE WATERMARK'S FRAME — the twin under a UTC watermark,
+    /// the local stamp under a local one — and the pre-#3778 shape, the local stamp compared unconditionally,
+    /// is gone. Read off the SOURCE with comments stripped (the collector's own essay names both shapes), the
+    /// way the clock pins above are. The behaviour — the fall-back hour landing, the upgrade day's zero
+    /// duplicates — runs through the real <c>ReadAsync</c> in <c>Lite.Tests/CpuUtilizationCollectorDefinitionTests</c>;
+    /// this is the frame-per-column statement of the same fact, beside the frame-per-column statements above.
+    /// </summary>
+    [Fact]
+    public void CpuUtilization_DedupsInTheWatermarksFrame_NotOnTheLocalStampAlone()
+    {
+        var code = QueryTextOf("CpuUtilizationCollector.cs");
+
+        Assert.Contains("var stampInWatermarkFrame = context.WatermarkFromUtcColumn ? sampleTimeUtc : sampleTime;", code, StringComparison.Ordinal);
+        Assert.Contains("&& stampInWatermarkFrame <= context.Watermark.Value)", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("sampleTime <= context.Watermark.Value", code, StringComparison.Ordinal);
+        Assert.Equal("sample_time_utc", PerformanceMonitor.Collectors.CpuUtilizationCollector.Instance.UtcWatermarkColumn);
+        Assert.Equal("sample_time", PerformanceMonitor.Collectors.CpuUtilizationCollector.Instance.WatermarkColumn);
     }
 
     /// <summary>

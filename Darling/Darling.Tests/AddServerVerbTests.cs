@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -103,7 +104,7 @@ public sealed class AddServerVerbTests
         Assert.Equal(0, exit);
         Assert.Contains(lines, l => l.Contains("[ADDED] sql01", StringComparison.Ordinal));
         Assert.Contains(lines, l => l.Contains("SQL major version 16", StringComparison.Ordinal));
-        Assert.Contains(lines, l => l.Contains("1 added, 0 already registered, 0 failed.", StringComparison.Ordinal));
+        Assert.Contains(lines, l => l.Contains("1 added, 0 already registered, 0 collided, 0 failed.", StringComparison.Ordinal));
         Assert.Contains(lines, l => l.Contains("no restart is needed", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -133,6 +134,76 @@ public sealed class AddServerVerbTests
         Assert.Contains(lines, l => l.Contains("login failed", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #4789: a server refused because its <c>server_id</c> is held by a different server answers
+    /// <c>collides</c>, and the summary carries its own <c>collided</c> counter. The per-server line has always
+    /// shown the tag; the TOTALS line used to leave the counter out, so a batch with one collided server read as
+    /// "1 added, 0 already registered, 0 failed." and the server that was not monitored was nowhere in it.
+    /// </summary>
+    [Fact]
+    public void ACollidedServer_IsTaggedCollides_AndCountedInTheTotalsLine()
+    {
+        var (lines, _) = DarlingCliCommands.FormatAddServerOutcome(
+            """{"requested":2,"added":1,"skipped":0,"collided":1,"failed":0,"results":[{"server":"good","status":"added","detail":"ok"},{"server":"other","status":"collides","detail":"its id is held by good"}]}""");
+
+        Assert.Contains(lines, l => l.Contains("[COLLIDES] other: its id is held by good", StringComparison.Ordinal));
+        Assert.Contains(lines, l => l.Contains("1 added, 0 already registered, 1 collided, 0 failed.", StringComparison.Ordinal));
+    }
+
+    /// <summary>The totals line names all four counters in a fixed order, and a payload with no <c>collided</c>
+    /// key (an older service, or a batch that never collided) reads as zero rather than throwing.</summary>
+    [Fact]
+    public void TheTotalsLine_NamesEveryCounter_AndReadsAMissingCollidedAsZero()
+    {
+        var (withCounter, _) = DarlingCliCommands.FormatAddServerOutcome(
+            """{"added":3,"skipped":2,"collided":4,"failed":5,"results":[]}""");
+        var (withoutCounter, _) = DarlingCliCommands.FormatAddServerOutcome(
+            """{"added":3,"skipped":2,"failed":5,"results":[]}""");
+
+        Assert.Contains(withCounter, l => l.Contains("3 added, 2 already registered, 4 collided, 5 failed.", StringComparison.Ordinal));
+        Assert.Contains(withoutCounter, l => l.Contains("3 added, 2 already registered, 0 collided, 5 failed.", StringComparison.Ordinal));
+    }
+
+    /// <summary>A save that wrote nothing (<c>not_saved</c>) gets its own tag, spelled as words. Without an arm the
+    /// tag was the raw status upper-cased, <c>NOT_SAVED</c>, the only one of the statuses that read as a code.</summary>
+    [Fact]
+    public void ANotSavedServer_IsTaggedNotSaved()
+    {
+        var (lines, _) = DarlingCliCommands.FormatAddServerOutcome(
+            """{"added":0,"skipped":0,"collided":0,"failed":1,"results":[{"server":"x","status":"not_saved","detail":"the save wrote nothing"}]}""");
+
+        Assert.Contains(lines, l => l.Contains("[NOT SAVED] x: the save wrote nothing", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, l => l.Contains("NOT_SAVED", StringComparison.Ordinal));
+    }
+
+    /// <summary>A batch whose only server collided added nothing: it must not report success to a script, whatever
+    /// the totals line says about the collision.</summary>
+    [Fact]
+    public void ACollidedServerAlone_AddedNothing_ExitsNonZero()
+    {
+        var (_, exit) = DarlingCliCommands.FormatAddServerOutcome(
+            """{"added":0,"skipped":0,"collided":1,"failed":0,"results":[{"server":"other","status":"collides","detail":"its id is held by good"}]}""");
+
+        Assert.Equal(1, exit);
+    }
+
+    /// <summary>
+    /// #4789: a collided server was NOT added, so a batch that holds one is not a clean run whatever else landed.
+    /// The exit code keyed off <c>failed</c> and off "nothing landed" alone, so one server added beside one
+    /// collided (or one already registered beside one collided) exited 0 and a deployment script read the run as
+    /// complete, with a server that is not monitored. It exits 1 now, the same as a failed server beside a success.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"requested":2,"added":1,"skipped":0,"collided":1,"failed":0,"results":[{"server":"good","status":"added","detail":"ok"},{"server":"other","status":"collides","detail":"its id is held by good"}]}""")]
+    [InlineData("""{"requested":2,"added":0,"skipped":1,"collided":1,"failed":0,"results":[{"server":"good","status":"duplicate","detail":"already registered"},{"server":"other","status":"collides","detail":"its id is held by good"}]}""")]
+    public void ACollidedServer_BesideOneThatLanded_ExitsNonZero(string json)
+    {
+        var (lines, exit) = DarlingCliCommands.FormatAddServerOutcome(json);
+
+        Assert.Equal(1, exit);
+        Assert.Contains(lines, l => l.Contains("[COLLIDES] other", StringComparison.Ordinal));
+    }
+
     /// <summary>Nothing landed at all — an empty array, or every entry rejected — must not report success to a
     /// script. A verb that changed nothing and exits 0 is the failure mode this policy exists for.</summary>
     [Theory]
@@ -159,10 +230,30 @@ public sealed class AddServerVerbTests
     }
 
     /// <summary>
-    /// A store failure AFTER the request parsed does not arrive as JSON at all: <c>AddServersAsync</c>'s
-    /// catch-all returns <c>McpHelpers.FormatError</c>, which is plain text. That text IS the message the
-    /// operator needs, so it must be surfaced verbatim rather than buried under a "could not parse" wrapper —
-    /// which is what happened before, precisely when the verb is being used as a deployment gate.
+    /// A store failure AFTER the request parsed: <c>AddServersAsync</c>'s catch-all returns
+    /// <c>McpHelpers.FormatError</c>, which since #3653 Q11 is the <c>{status:"error", message}</c> envelope —
+    /// executed here through the REAL helper, so the verb's rendering follows the wire shape rather than a
+    /// literal that could go stale. It lands in the whole-payload branch as <c>[ERROR] Error during
+    /// add_servers: …</c>, exit 1: the sentence the operator needs, with the store's own error code intact,
+    /// and no "could not parse" wrapper.
+    /// </summary>
+    [Fact]
+    public void TheCaughtExceptionEnvelope_RendersItsSentence_WithExitOne()
+    {
+        var (lines, exit) = DarlingCliCommands.FormatAddServerOutcome(
+            McpHelpers.FormatError("add_servers", new InvalidOperationException("57P01: terminating connection due to administrator command")));
+
+        Assert.Equal(1, exit);
+        Assert.Contains(lines, l => l.Contains("[ERROR] Error during add_servers: 57P01", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, l => l.Contains("Could not parse", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, l => l.Contains("\"status\"", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The plain-text arm, kept honest: before #3653 Q11 this was what <c>FormatError</c> produced, and any
+    /// non-JSON text that still reaches the verb must be surfaced verbatim rather than buried under a "could
+    /// not parse" wrapper — which is what happened before, precisely when the verb is being used as a
+    /// deployment gate.
     /// </summary>
     [Fact]
     public void APlainTextStoreError_IsSurfacedVerbatim_NotWrapped()

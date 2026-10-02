@@ -20,6 +20,13 @@ public static class PlanLayoutEngine
     /// </summary>
     public const double NodeHeightMin = 90;
 
+    /// <summary>
+    /// #4512 follow-up: runs on the plan viewer's WPF UI thread (1 MB), the only real caller.
+    /// Measured directly against a depth-999 tree shaped like this walk's own recursion
+    /// (<see cref="SetXPositions"/>/<see cref="SetYPositions"/>): it survives down to roughly
+    /// 100 KB of stack — well over 2x margin below that 1 MB caller — so it needs no dedicated
+    /// thread of its own.
+    /// </summary>
     public static void Layout(PlanStatement statement)
     {
         if (statement.RootNode == null) return;

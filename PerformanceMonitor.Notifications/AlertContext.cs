@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
@@ -27,9 +28,18 @@ public class AlertContext
     /// Forces the rendered severity tier (email badge/color, Teams/Slack accent) regardless of
     /// metric name, for metrics graded at runtime — low-disk fires WARNING normally and CRITICAL
     /// when critically low (#1136). <c>null</c> = use the per-metric <see cref="AlertSeverity"/>
-    /// map. Deliberately not persisted (like <see cref="AttachmentXml"/>): it drives the live
-    /// email/webhook render only, and the alert-history UI does not re-derive severity, so the
-    /// JSON projection (<see cref="AlertContextSerializer"/>) need not carry it.
+    /// map.
+    ///
+    /// <para><b>Persisted since #3539 A8e</b>, as the trailing <c>Severity</c> member of the JSON projection
+    /// (<see cref="AlertContextSerializer"/>), so the alert-history row carries the tier the alert actually
+    /// FIRED at. It was deliberately not persisted before, on the argument that it drove the live
+    /// email/webhook render only and the alert-history UI did not re-derive severity — which was true, and
+    /// was the defect: the history grids styled a row by its metric NAME
+    /// (<c>AlertMetricClassifier.IsCritical</c>), so once Poison Wait became graded (#2711 on
+    /// PostgreSQL, #3539 A4 on SQL Server) a WARNING-graded fire rendered red in every grid, and a
+    /// CRITICAL-graded low-disk fire rendered amber. <c>AlertHistoryRowSeverity</c> (Alerting) is the read side:
+    /// the row's own tier where one was persisted, the by-name classifier for rows that predate the member.
+    /// <see cref="AttachmentXml"/> stays unpersisted for its own reason (no dialog surface, and size).</para>
     /// </summary>
     public AlertSeverityLevel? SeverityOverride { get; set; }
 
@@ -40,6 +50,51 @@ public class AlertContext
     /// (alert type not wired, or no objects resolvable). Persisted in the alert-history context JSON.
     /// </summary>
     public List<AlertIncident>? Incidents { get; set; }
+
+    /// <summary>
+    /// Where this firing's posts went (#3598, design point 3): the alert's family, the route that matched
+    /// it, and each delivered channel with the route that supplied its destination. Set by the deliverer
+    /// from the send result AFTER the channels ran — the fan-out resolves it once per firing, post-cooldown
+    /// — and persisted as the trailing <c>Route</c> member of the JSON projection so the alert-history row
+    /// can answer "which destination matched" when a routing mistake is being reconstructed. Null on a row
+    /// that never reached resolution (throttled, folded, muted, no channel configured) and on every row
+    /// written before the member existed; never rendered to a channel.
+    /// </summary>
+    public AlertRouteDto? Route { get; set; }
+
+    /// <summary>
+    /// The corroboration gate's decision for an analysis finding (#3712): <c>page</c> or <c>digest</c>, with
+    /// the reason naming the corroboration components it read. Set by <c>AnalysisNotificationService</c> on
+    /// every finding it routes — the paged ones too, so "why DID this page" is as answerable as "why didn't
+    /// it" — and persisted as the trailing <c>Routing</c> member of the JSON projection, the way
+    /// <see cref="SeverityOverride"/> is persisted so <c>severity_source</c> can be read off the row. Null
+    /// on every engine alert (the gate does not apply to them) and on every row written before the member
+    /// existed. Never rendered to a channel: a paged finding's card is unchanged, and a digest-routed finding
+    /// reaches no card.
+    /// <para>Distinct from <see cref="Route"/>, which records WHERE the posts went after the fan-out ran;
+    /// this records whether the fan-out was allowed to run at all, one decision upstream of it.</para>
+    /// </summary>
+    public AlertRoutingDto? Routing { get; set; }
+
+    /// <summary>
+    /// The wait type this firing is ABOUT (#4223 Poison Wait notebook), as structured data rather than
+    /// something a reader has to regex out of <see cref="Details"/>'s prose heading or <c>DetailText</c>.
+    /// Set by the Poison Wait fire sites on both engines — the SQL Server evaluator's worst-graded
+    /// <c>WaitType</c>, the PostgreSQL evaluator's <c>Subject</c> (its own <c>type:event</c> display string,
+    /// e.g. <c>"IPC:BtreePage"</c>) — the same value each engine's mute context already keys on
+    /// (<c>AlertMuteContext.WaitType</c>). Null on every other alert and on any row written before this
+    /// member existed.
+    /// </summary>
+    public string? WaitType { get; set; }
+
+    /// <summary>
+    /// The collector this firing is ABOUT (#4223 self-monitor notebook), as structured data rather than
+    /// something a reader has to regex out of <see cref="Details"/>'s prose. Set by the Collector Cost
+    /// Regression fire site (<c>DarlingSelfAlertEvaluator</c>'s <c>regression.CollectorName</c>, the same
+    /// value the row's cooldown key (<c>cost:{serverId}:{collector}</c>) already carries). Null on every
+    /// other alert and on any row written before this member existed.
+    /// </summary>
+    public string? CollectorName { get; set; }
 }
 
 /// <summary>
@@ -178,6 +233,36 @@ public class AlertDetailItem
     public List<(string Label, string Value)> Fields { get; set; } = new();
 
     /// <summary>
+    /// The same content as <see cref="Fields"/>, regrouped by the record it came from (#3644) — populated
+    /// ONLY when the item was flattened from an array of objects (a drill-down's top-N rows: the High CPU
+    /// card's Top Cpu Queries, Queries At Spike, Top Spilling Queries, Parameter Sensitive Queries,
+    /// Regressed Queries, Tempdb Breakdown). Empty for every other item.
+    /// <para><b>Why a second projection of the same pairs, rather than a replacement.</b> The flat pairs are
+    /// correct on every surface that lays them out in ONE column: the persisted <c>context_json</c> and the
+    /// in-app Alert Details grid that reads it, <see cref="AlertDetailText.Flatten"/> (the persisted
+    /// <c>detail_text</c> and the redundancy oracle behind <c>ProseForDelivery</c>), the email table, the
+    /// Teams fact list, PagerDuty's <c>custom_details</c> dictionary, the generic webhook's parts, and the
+    /// incident-roster match in <c>IncidentDeliveryFilter</c>. Every one of those reads <c>#1 Database</c>,
+    /// <c>#1 Query Hash</c>, … <c>#2 Database</c> top to bottom and the record stays together. The one
+    /// surface that does NOT is a Slack section's <c>fields</c> array, which Slack lays out in a two-across
+    /// grid filled left to right in submission order: seven attributes per query means query #1's text
+    /// lands beside query #2's hash, #3's database floats beside #2's SQL, and a multi-line text inflates
+    /// its grid row so the label/value adjacency below it breaks. Read live on a production High CPU page
+    /// (#3644), the card a person reads while production is on fire. Fields are Slack's tool for short,
+    /// genuinely PAIRED scalars — the card's own <c>Current Value / Threshold</c> pair renders fine — and
+    /// the wrong tool for a repeating record.</para>
+    /// <para>So a record-shaped item carries both: <see cref="Fields"/> for the flat surfaces, unchanged to
+    /// the byte, and this list for the renderers that can keep a record together as one visual unit (Slack
+    /// renders each as a bold summary line over the record's text in a code block; email and Teams render
+    /// the same compact list). A renderer that knows this list prefers it and skips the fields; one that
+    /// does not sees exactly what it saw before. Not persisted: it is derivable from the same drill-down
+    /// rows the fields already persist, nothing re-renders a rehydrated context to Slack, and doubling the
+    /// drill-down payload of every analysis row for a reader that renders the fields would buy nothing.
+    /// Producers that build items by hand (the engine alerts, the incident renderer) never populate it.</para>
+    /// </summary>
+    public List<AlertDetailRecord> Records { get; set; } = new();
+
+    /// <summary>
     /// Multi-paragraph prose for this item (advice Investigation / Remediation).
     /// When non-null, renderers emit this as flowing paragraph text rather than
     /// label/value rows.
@@ -203,6 +288,25 @@ public class AlertDetailItem
 }
 
 /// <summary>
+/// One record of a record-shaped detail item (#3644): the row's scalar attributes packed into ONE
+/// summary line, and its long text(s) — the query text, a blocked/blocking SQL pair, a CREATE or ALTER
+/// statement — carried separately so a renderer can set them in a code block under the summary rather
+/// than beside it.
+/// <para><see cref="Ordinal"/> is the row's 1-based position (<c>#1</c>, <c>#2</c>, …), the same number
+/// the flat fields prefix their labels with, so a reader moving between Slack and the email finds the same
+/// row under the same number. <see cref="Summary"/> is the non-empty scalar properties in the record's OWN
+/// order — the collectors write identity first (database, hash, id) and measures after — as
+/// <c>Label: value</c> pairs joined by <c>·</c>, numbers with group separators; it never carries the
+/// ordinal, which each renderer sets in its own idiom. <see cref="Texts"/> is every string property whose
+/// name says it is SQL (<c>query_text</c>, <c>blocked_sql</c>, <c>blocking_sql</c>, <c>victim_sql</c>,
+/// <c>create_statement</c>, <c>alter_statement</c>), labelled the way the flat field is, in property
+/// order; empty texts are not carried. The text is the row's full value as the collector bounded it (500
+/// characters on the query-store drill-downs), NOT the 300-character cut the flat field applies — the
+/// renderer that has a ceiling states its own cut.</para>
+/// </summary>
+public sealed record AlertDetailRecord(int Ordinal, string Summary, List<(string Label, string Text)> Texts);
+
+/// <summary>
 /// Serialization DTO for persisting <see cref="AlertContext"/> as JSON.
 /// <see cref="AlertDetailItem.Fields"/> is a <c>List&lt;(string,string)&gt;</c>
 /// ValueTuple, which System.Text.Json will not round-trip (tuple elements are
@@ -210,8 +314,80 @@ public class AlertDetailItem
 /// persisted context survives the round-trip into the in-app dialog.
 /// <see cref="AlertContext.AttachmentXml"/>/<see cref="AlertContext.AttachmentFileName"/>
 /// are deliberately not persisted (the dialog has no attachment surface).
+/// <para>
+/// <c>Severity</c> (#3539 A8e) is the tier the alert fired at — <see cref="AlertContext.SeverityOverride"/>
+/// — trailing and nullable like <c>Incidents</c>, so a row written before it existed rehydrates to null,
+/// which reads as "this row carries no tier" and sends the grids to the by-name fallback. Serialized as the
+/// enum's NAME rather than its ordinal: the column outlives any build, and a persisted <c>1</c> would change
+/// meaning the day a member is inserted ahead of it, where <c>"Critical"</c> cannot.
+/// </para>
 /// </summary>
-public record AlertContextDto(List<AlertDetailItemDto> Details, List<AlertIncidentDto>? Incidents = null);
+public record AlertContextDto(
+    List<AlertDetailItemDto> Details,
+    List<AlertIncidentDto>? Incidents = null,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] AlertSeverityLevel? Severity = null,
+    AlertRouteDto? Route = null,
+    AlertRoutingDto? Routing = null,
+    /* #4223 Poison Wait: trailing and nullable like Route/Routing, so a row written before this member
+       existed rehydrates to null ("this row carries no wait type") rather than a fabricated value. */
+    string? WaitType = null,
+    /* #4223 self-monitor notebook: trailing and nullable like WaitType, so a row written before this
+       member existed rehydrates to null ("this row carries no collector name") rather than a fabricated
+       value. */
+    string? CollectorName = null);
+
+/// <summary>
+/// The persisted routing DECISION for an analysis finding (#3712): trailing and nullable on
+/// <see cref="AlertContextDto"/> like <c>Route</c>, so a row written before it existed rehydrates to null,
+/// which reads as "this row carries no routing decision" (every engine alert, every pre-#3712 row).
+/// <c>Route</c> is the persisted spelling <see cref="FindingRouting.RouteText"/> produces — <c>page</c> or
+/// <c>digest</c> — a NAME rather than an ordinal for the reason <c>Severity</c> is; <c>Reason</c> is the one
+/// sentence the gate wrote naming the corroboration components it read.
+/// </summary>
+public record AlertRoutingDto(string Route, string Reason);
+
+/// <summary>
+/// The persisted routing provenance of one alert-history row (#3598): trailing and nullable on
+/// <see cref="AlertContextDto"/> like <c>Incidents</c> and <c>Severity</c>, so a row written before it
+/// existed rehydrates to null, which reads as "this row carries no routing record". <c>Family</c> is the
+/// alert's <see cref="AlertFamily"/>; <c>RouteId</c> the most specific route that matched (null = the parent
+/// defaults answered everything); <c>Destinations</c> one entry per channel that RESOLVED to a destination,
+/// each naming the route that supplied it (null = the parent default), the level it came from, spelled as
+/// the <see cref="RouteSource"/> member's NAME for the same reason <c>Severity</c> is: the column outlives
+/// any build and an ordinal would change meaning the day a member is inserted, and (#4750) what the send to
+/// it did.
+/// </summary>
+public record AlertRouteDto(string Family, int? RouteId, List<AlertRouteDestinationDto> Destinations);
+
+/// <summary>
+/// One channel of an <see cref="AlertRouteDto"/> (#3598). <c>Outcome</c> (#4750) is what the send to that
+/// channel did, spelled as one of <see cref="AlertRouteOutcomes"/>'s constants, so an alert that reached one
+/// channel and failed on another says so on the row instead of reading as one delivery. It is trailing and
+/// nullable like <c>AlertContextDto.Route</c>: a row written before it existed rehydrates to null, which reads
+/// as "this row does not say", and so does a row whose fan-out reported no per-channel outcomes. It carries NO
+/// error text — a webhook failure message can name the endpoint URL, which is a secret — so the row's
+/// <c>send_error</c> stays the only place a failure's reason is written.
+/// </summary>
+public record AlertRouteDestinationDto(string Channel, int? RouteId, string Source, string? Outcome = null);
+
+/// <summary>
+/// The spellings of <see cref="AlertRouteDestinationDto.Outcome"/> (#4750). A persisted contract: the
+/// alert-history row's <c>context_json</c> outlives any build, and the MCP history reads hand the text to
+/// callers as-is, so a value is never renamed and a new one is only ever added.
+/// </summary>
+public static class AlertRouteOutcomes
+{
+    /// <summary>The channel's send went out.</summary>
+    public const string Delivered = "delivered";
+
+    /// <summary>The channel's send was attempted and did not succeed. The reason is not stored here.</summary>
+    public const string Failed = "failed";
+
+    /// <summary>The channel resolved to a destination but nothing was sent to it on this firing: a cooldown
+    /// or a fold held the send, the alert was muted, or the fan-out never reached the channel.</summary>
+    public const string NotAttempted = "not attempted";
+}
+
 public record AlertDetailItemDto(string Heading, List<FieldDto> Fields, string? Body, bool IsCodeBlock, RemediationActionDto? Remediation = null);
 public record FieldDto(string Label, string Value);
 
@@ -324,6 +500,11 @@ public record RcsiInactionFiguresDto(
 /// copy-paste command from the DESERIALIZED action, so a flag dropped by this DTO never reaches the
 /// pasted surface at all, and the future auto-force bot reading persisted actions would see false
 /// for every flagged target (review catch on #2140).
+/// <see cref="BestPlanLastSeenUtc"/> (#3953) and <see cref="BestPlanAgeDays"/> (#4736) are appended the same
+/// way and mirrored for the same reason: the MCP findings read reports each target's best plan age from the
+/// DESERIALIZED action, so a member missing here reads back null for every persisted target. A row written
+/// before they existed has neither property and reads back null, the same as a drill-down row that had no
+/// best_plan_last_seen.
 /// </summary>
 public record ForcePlanTargetDto(
     string Database,
@@ -335,7 +516,9 @@ public record ForcePlanTargetDto(
     double BestCpuPerExecUs,
     double RegressionFactor,
     string? ReplicaRole = null,
-    bool ParameterSensitivityCoFired = false);
+    bool ParameterSensitivityCoFired = false,
+    DateTime? BestPlanLastSeenUtc = null,
+    double? BestPlanAgeDays = null);
 
 /// <summary>
 /// JSON mirror of <see cref="DbConfigTarget"/>. <see cref="Setting"/> is persisted
@@ -467,8 +650,175 @@ public static class AlertContextSerializer
                 d.Body,
                 d.IsCodeBlock,
                 ToDto(d.Remediation))),
-            ToDto(context.Incidents));
+            ToDto(context.Incidents),
+            /* #3539 A8e: the tier the alert fired at rides the row. Both SKUs' deliverers fold
+               AlertOutcome.Severity into this property before serializing (#2090), so a graded fire on
+               either engine persists its grade here with no store change on either side. */
+            context.SeverityOverride,
+            /* #3598: where the posts went. Already the persisted shape, so it rides through as-is. */
+            context.Route,
+            /* #3712: whether the fan-out was allowed to run, and why. Already the persisted shape. */
+            context.Routing,
+            /* #4223: the wait type this firing is about, as structured data. Already the persisted shape. */
+            context.WaitType,
+            /* #4223: the collector this firing is about, as structured data. Already the persisted shape. */
+            context.CollectorName);
         return JsonSerializer.Serialize(dto);
+    }
+
+    /// <summary>
+    /// The wait type a persisted alert-history row carries (#4223 Poison Wait notebook), or <c>null</c> when
+    /// it carries none — any non-Poison-Wait alert, a row written before the member existed, or unparseable
+    /// JSON. Reads the one property rather than rehydrating the whole context, for the reason
+    /// <see cref="TryReadRoute"/> gives.
+    /// </summary>
+    public static string? TryReadWaitType(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.WaitType), out var waitType)
+                || waitType.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            return waitType.GetString();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The collector name a persisted alert-history row carries (#4223 self-monitor notebook), or
+    /// <c>null</c> when it carries none — any non-Collector-Cost-Regression alert, a row written before the
+    /// member existed, or unparseable JSON. Reads the one property rather than rehydrating the whole
+    /// context, for the reason <see cref="TryReadRoute"/> gives.
+    /// </summary>
+    public static string? TryReadCollectorName(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.CollectorName), out var collectorName)
+                || collectorName.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            return collectorName.GetString();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The routing decision a persisted alert-history row carries (#3712), or <c>null</c> when it carries none
+    /// — an engine alert, a row written before the member existed, or unparseable JSON. Reads the one property
+    /// rather than rehydrating the whole context, for the reason <see cref="TryReadRoute"/> gives: the MCP
+    /// history read calls this once per row, and the digest reader once per digest-routed row.
+    /// </summary>
+    public static AlertRoutingDto? TryReadRouting(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.Routing), out var routing)
+                || routing.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var dto = routing.Deserialize<AlertRoutingDto>();
+            /* A record with a null Route is a hand-edited or foreign shape; "no decision" is the honest read. */
+            return dto is { Route: not null } ? dto : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The routing record a persisted alert-history row carries (#3598), or <c>null</c> when it carries none
+    /// — written before the member existed, a row that never reached resolution, a resolution row, or
+    /// unparseable JSON. Reads the one property rather than rehydrating the whole context, for the reason
+    /// <see cref="TryReadSeverity"/> gives: the MCP history read calls this once per row.
+    /// </summary>
+    public static AlertRouteDto? TryReadRoute(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.Route), out var route)
+                || route.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            return route.Deserialize<AlertRouteDto>();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The tier a persisted alert-history row FIRED at (#3539 A8e), or <c>null</c> when the row carries none
+    /// — written before the member existed, an alert that fired with no override (so the per-metric map
+    /// decided), a resolution row (persisted with a null context), or unparseable JSON. Reads the one
+    /// property rather than rehydrating the whole context: the grids call this once per row, and a Details
+    /// list with remediation actions is the expensive part of a row it does not need.
+    /// </summary>
+    public static AlertSeverityLevel? TryReadSeverity(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.Severity), out var severity)
+                || severity.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            /* Name match only, exact: the writer emits the enum's name, and Enum.TryParse on its own would
+               also accept a bare digit ("1"), which is the ordinal coupling the string form exists to avoid
+               — so the parsed member must spell itself back to the stored text. */
+            var text = severity.GetString();
+            return Enum.TryParse<AlertSeverityLevel>(text, ignoreCase: false, out var level)
+                && string.Equals(Enum.GetName(level), text, StringComparison.Ordinal)
+                ? level
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -544,6 +894,24 @@ public static class AlertContextSerializer
             if (dto?.Details is null)
                 return false;
 
+            /* #3539 A8e: the tier the alert fired at. A row written before the member existed rehydrates it
+               null, which is the same state a fire with no override left it in. */
+            context.SeverityOverride = dto.Severity;
+
+            /* #3598: the routing record, null on every row written before it existed. */
+            context.Route = dto.Route;
+
+            /* #3712: the corroboration gate's decision, null on engine alerts and pre-#3712 rows. */
+            context.Routing = dto.Routing;
+
+            /* #4223: the wait type this firing is about, null on every non-Poison-Wait alert and every row
+               written before this member existed. */
+            context.WaitType = dto.WaitType;
+
+            /* #4223: the collector this firing is about, null on every non-Collector-Cost-Regression alert
+               and every row written before this member existed. */
+            context.CollectorName = dto.CollectorName;
+
             foreach (var d in dto.Details)
             {
                 var item = new AlertDetailItem
@@ -603,7 +971,9 @@ public static class AlertContextSerializer
                 t.BestCpuPerExecUs,
                 t.RegressionFactor,
                 t.ReplicaRole,
-                t.ParameterSensitivityCoFired));
+                t.ParameterSensitivityCoFired,
+                t.BestPlanLastSeenUtc,
+                t.BestPlanAgeDays));
         }
 
         List<DbConfigTargetDto>? dbConfigTargets = null;
@@ -708,7 +1078,9 @@ public static class AlertContextSerializer
                     t.BestCpuPerExecUs,
                     t.RegressionFactor,
                     t.ReplicaRole,
-                    t.ParameterSensitivityCoFired));
+                    t.ParameterSensitivityCoFired,
+                    t.BestPlanLastSeenUtc,
+                    t.BestPlanAgeDays));
             }
         }
 

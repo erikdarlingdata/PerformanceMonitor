@@ -18,7 +18,7 @@
 
 **Free, open-source monitoring that replaces the tools charging you thousands per server per year.** Specialized collectors, real-time alerts, and a built-in MCP server for AI analysis. Nothing phones home. Your data stays on your server and your machine.
 
-**Supported:** SQL Server 2016–2025 | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite and Darling)
+**Supported:** SQL Server 2016 SP2–2025 (2017 needs CU3 or later) | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite and Darling) | PostgreSQL, including AWS RDS and Aurora (Darling)
 
 ![Fleet overview: nine servers at a glance, one flagged Critical with live blocking and deadlocks](Screenshots/fleet-overview.jpg)
 
@@ -30,17 +30,17 @@ Pick by how you want collection to run — the monitoring brain (collectors, ale
 
 | | **[Lite](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — flagship | **[Darling](Darling/README.md)** — headless | **[Dashboard](deprecated/Dashboard/README.md)** — *deprecated* |
 |---|---|---|---|
-| **How it runs** | Single desktop app monitors remotely, on demand | Windows service collects 24/7 into a central store; detached viewer reads it from any seat | SQL-Server-installed database + Agent collectors, separate viewer app |
+| **How it runs** | Single desktop app monitors remotely, on demand | Service on Windows or Linux collects 24/7 into a central store. The Windows viewer and the web dashboard read it from any seat | SQL-Server-installed database + Agent collectors, separate viewer app |
 | **Installs on your server?** | No | No | Yes (a `PerformanceMonitor` database) |
-| **Stores data** | Local DuckDB + Parquet | Bundled PostgreSQL + TimescaleDB | In the target SQL Server |
-| **Best for** | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting | Always-on monitoring of many servers from one service | *Existing installs only — new deployments should use Lite or Darling* |
-| **Requires** | `VIEW SERVER STATE` ([permissions](#permissions)) | `VIEW SERVER STATE` + a place to run the service | SQL Agent ([Dashboard docs](deprecated/Dashboard/README.md)) |
+| **Stores data** | Local DuckDB + Parquet | PostgreSQL + TimescaleDB (bundled on Windows) | In the target SQL Server |
+| **Best for** | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting | Always-on monitoring of many SQL Server and PostgreSQL servers from one service | *Existing installs only — new deployments should use Lite or Darling* |
+| **Requires** | `VIEW SERVER STATE` ([permissions](#permissions)) | `VIEW SERVER STATE` (SQL Server) or [these grants](Darling/README.md#permissions-on-a-postgresql-target) (PostgreSQL), plus a place to run the service | SQL Agent ([Dashboard docs](deprecated/Dashboard/README.md)) |
 
 > **⚠️ The "Full" Dashboard edition is deprecated.** Existing installs keep working and remain on bug-fix support, but it is no longer the recommended path and — as of v3.3.0 — the Dashboard and its CLI installer are **no longer included in release assets**. The last shipped builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0), and both remain buildable from the repo. New deployments should use **Lite** or **Darling**. Its docs live with the code: **[deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)** (the app, tabs, permissions) and **[deprecated/Installer/README.md](deprecated/Installer/README.md)** (the CLI database installer).
 
 **👉 Not sure? [Start with Lite.](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** One download, nothing installed on your server, data flowing in under 5 minutes.
 
-All editions include real-time alerts (system tray + email + webhooks), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude. All release binaries are digitally signed via [SignPath](https://signpath.io) — no more Windows SmartScreen warnings.
+All editions include real-time alerts (email + webhooks), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude. Lite and Dashboard also show alerts in the system tray. All release binaries are digitally signed via [SignPath](https://signpath.io) — no more Windows SmartScreen warnings.
 
 ---
 
@@ -67,8 +67,6 @@ All editions include real-time alerts (system tray + email + webhooks), charts a
 💡 **Recommendations engine (advise-and-act)** — a dedicated Recommendations tab surfaces prioritized findings from your own monitoring data with the reasoning behind each one, and can apply selected fixes directly. Destructive changes (like enabling Read Committed Snapshot Isolation) are gated behind an informed-consent dialog that spells out both the risk of acting and the risk of doing nothing.
 
 🤖 **Built-in MCP server** with read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
-
-🧰 **Community tools installed automatically** — sp_WhoIsActive, sp_BlitzLock, sp_HealthParser, sp_HumanEventsBlockViewer
 
 🔒 **Your data never leaves** — no telemetry, no cloud dependency, no phoning home. Credentials stored in Windows Credential Manager with OS-level encryption.
 
@@ -189,7 +187,7 @@ All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a differ
 | `servers.json` | `%ProgramData%\PerformanceMonitorLite\config\` (machine-wide) | Server connections, shared across all Windows users on the machine. Passwords stay per-user in Windows Credential Manager. Optional **Utility Database** per server for community procs installed outside master. |
 | `settings.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | Retention, MCP server, startup behavior, alert thresholds, SMTP configuration |
 | `collection_schedule.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | Per-collector enable/disable and frequency |
-| `ignored_wait_types.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | 124 benign wait types excluded by default |
+| `ignored_wait_types.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | 126 benign wait types excluded by default |
 
 When a second Windows user on the same machine launches Lite, they see the shared `servers.json` immediately. SQL Auth and Entra MFA passwords are scoped to each user's own Credential Manager, so they'll be prompted once per server; Windows Auth works without any prompt.
 
@@ -197,13 +195,15 @@ When a second Windows user on the same machine launches Lite, they see the share
 
 ## Quick Start — Darling (headless)
 
-**Darling** is the always-on edition for teams that want 24/7 collection without a desktop app driving it: a Windows service collects from your servers around the clock into a central PostgreSQL store (TimescaleDB is detected and adopted automatically for compression and chunk-based retention), and a detached WPF viewer reads that store from any seat. It runs the same monitoring brain as Lite — collectors, alert engine, and analysis pipeline shared at the library level — with alerts over email and webhooks (Teams, Slack, PagerDuty, and generic HTTP POST) and the same MCP tool surface available on request. An optional built-in **web dashboard** (off by default, its own port 5153) serves the fleet overview, per-server drill-down, the scheduled fleet sweep reports, and alert history to any browser — read-only over the collected data, plus seat-gated config writes (saved views, custom alert rules, and the mute-rule API) — so operators can watch the fleet without installing the viewer.
+**Darling** is the always-on edition for teams that want 24/7 collection without a desktop app driving it: a service on Windows or Linux collects from your SQL Server and PostgreSQL servers around the clock into a central PostgreSQL store (TimescaleDB is detected and adopted automatically for compression and chunk-based retention), and a detached WPF viewer reads that store from any Windows seat. It runs the same monitoring brain as Lite — collectors, alert engine, and analysis pipeline shared at the library level — with alerts over email and webhooks (Teams, Slack, PagerDuty, and generic HTTP POST) and the same MCP tool surface available on request. An optional built-in **web dashboard** (off by default, its own port 5153) serves the fleet overview, per-server drill-down, the scheduled fleet sweep reports, and alert history to any browser — read-only over the collected data, plus seat-gated config writes (saved views, custom alert rules, and the mute-rule API) — so operators can watch the fleet without installing the viewer.
 
 1. Download **`PerformanceMonitorDarling-<version>.zip`** from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest) — the signed service and viewer with the bundled PostgreSQL + TimescaleDB runtime beside the service exe, so a from-zero install needs no database provisioning.
-2. Copy `darling.sample.json` to `darling.json` and add your servers (and optional SMTP / webhook delivery). In managed mode the service unpacks and runs its own PostgreSQL — no external database to set up.
+2. Copy `darling.sample.json` to `darling.json` and add your servers (and optional SMTP / webhook delivery). In managed mode the service unpacks and runs its own PostgreSQL — no external database to set up. For a PostgreSQL server, set `"engine": "postgres"` on its entry (see [PostgreSQL Targets](Darling/README.md#postgresql-targets)).
 3. Run the service (console for a trial, or install it as a Windows service). It seeds the store and begins collecting on the same default cadences and retention horizons as a fresh Lite install.
 4. Start the **Darling Viewer**. It is in the same zip, under `viewer\`, and `install-darling.ps1` leaves a Desktop shortcut. On the service host there is nothing to point at anything: it finds the same `darling.json`, derives the store connection, and opens on the fleet. For a seat on another machine, run `--export-viewer-config` on the service host and copy the folder it writes.
 5. Optionally turn on the two off-by-default surfaces: `--enable-web` serves the browser dashboard on port 5153, `--enable-mcp` serves the MCP endpoint on 5152. Both take effect live, no restart.
+
+These steps are for Windows. On Linux, run the service under Docker Compose with the official TimescaleDB image. You can also run it under systemd with a PostgreSQL server that you already run. The bundled store is Windows-only. See [Run on Linux](Darling/README.md#run-on-linux-docker-compose-or-systemd-1804) in the operator guide.
 
 **Never done this before?** [**docs/uat-onboarding.md**](docs/uat-onboarding.md) is the ordered path from a downloaded zip to all three surfaces — the WPF viewer, the web dashboard, and MCP — with the log line, HTTP response, or screen that proves each step worked, and the handful of things that reliably catch people out.
 
@@ -216,17 +216,18 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Capability | Lite | Darling | Dashboard *(deprecated)* |
 |---|---|---|---|
 | Target server installation | None | None | Required |
-| Runs collection | On-demand desktop app | 24/7 Windows service | SQL Agent on the target |
+| Runs collection | On-demand desktop app | 24/7 service (Windows or Linux) | SQL Agent on the target |
 | Multi-server from one seat | Built-in | Built-in (central store) | Per-server install |
-| Data storage | DuckDB + Parquet (local) | PostgreSQL + TimescaleDB (bundled) | SQL Server (on target) |
+| Data storage | DuckDB + Parquet (local) | PostgreSQL + TimescaleDB (bundled on Windows) | SQL Server (on target) |
 | Azure SQL Database | Supported | Supported | Not supported |
 | Azure SQL MI / AWS RDS | Supported | Supported | Supported |
+| PostgreSQL (self-hosted, AWS RDS, Aurora) | Not supported | Supported | Not supported |
 | Graphical plan viewer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer |
 | Standalone plan viewer | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` |
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
-| Portability | Single executable | Portable service + viewer zip | Server-bound |
-| MCP server (LLM integration) | Built-in (87 tools) | On request (151 tools) | Built into Dashboard (66 tools) |
+| Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
+| MCP server (LLM integration) | Built-in (89 tools) | On request (161 tools) | Built into Dashboard (66 tools) |
 
 ---
 
@@ -250,7 +251,7 @@ The **Lite** app and the **Darling** viewer share the same tab layout (the viewe
 | **FinOps** | Utilization & provisioning analysis, database resource breakdown, storage growth (7d/30d), idle database detection, index analysis via sp_IndexCleanup, per-object table/index size, growth, usage, and locking/contention analysis, application connections, server inventory, cost optimization recommendations, column-level filtering on all grids |
 | **Recommendations** | Prioritized findings drawn from collected metrics, grouped into incidents, each card showing the affected database, the recommendation, the reasoning behind it, and a copyable MCP investigation prompt |
 
-Both feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes, and timezone display options (server time, local time, or UTC). The Darling viewer adds a fleet sidebar and per-server tabs; see [Darling/README.md](Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
+Both feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes with user-adjustable palette colors (see [Themes and colors](Lite/README.md#themes-and-colors)), and timezone display options (server time, local time, or UTC). The Darling viewer adds a fleet sidebar and per-server tabs, and it shows a PostgreSQL target on its own set of tabs. See [Darling/README.md](Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
 
 ---
 
@@ -263,12 +264,12 @@ Every edition includes a real-time alert engine that monitors for performance is
 | Metric | Default Threshold | Description |
 |---|---|---|
 | **Blocking** | 5 seconds | Fires when the longest blocked session exceeds the threshold |
-| **Deadlocks** | 1 | Fires when new deadlocks are detected since the last check |
-| **Poison waits** | 100 ms avg | Fires when any poison wait type exceeds the average-ms-per-wait threshold |
-| **Long-running queries** | 5 minutes | Fires when any query exceeds the elapsed-time threshold |
-| **TempDB space** | 80% | Fires when TempDB usage exceeds the percentage threshold. Measured against tempdb's **growth ceiling** (`SUM(max_size)` over the ROWS files) where there is one, and against the current allocation where the files grow without limit — so the percentage means "distance to the point where tempdb cannot grow further" on every engine |
+| **Deadlocks** | 1 | Fires when the rolling one-hour deadlock count reaches the threshold. Graded: WARNING by default, CRITICAL when the hour's rate reaches the deadlock health band's critical tier (20/hr, the measured bar the fleet card uses) — one deadlock and a storm no longer wear the same colour |
+| **Poison waits** | 600 s accumulated in 10 min (WARNING); 6,000 s (CRITICAL) | Fires when a poison wait type accumulates enough wait inside a rolling ten-minute window to average **one task continuously stuck** for the whole window (WARNING), or ten (CRITICAL) — the same shape and the same bars as the PostgreSQL edition's Poison Wait, judged per wait type. Accumulation, not a per-wait average: one slow wait does not page, and a storm of thousands of short waits does not sleep. Fleet-calibrated — the worst ten-minute bucket measured across a 43-server production fleet over four days sat ~100× under the WARNING bar. Clears once the window's accumulated wait falls back under the bar (up to ten minutes after the last of it), and only on an observed window: a collector that stops delivering holds the alert open rather than announcing a recovery. The older `Poison wait threshold (ms)` setting remains in Settings for compatibility but is no longer consulted |
+| **Long-running queries** | 5 minutes | Fires when any query exceeds the elapsed-time threshold. Sessions matching the **opt-out knob** are not evaluated at all — not counted, not fingerprinted; the opposite of a mute — and the exclusion is applied inside the read, ahead of the result cap, so a permanent background request can never hide a real one. Two lists, both editable and both seeded from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps (`program_name` starting `SQLAgent - TSQL JobStep`, ~460 sessions a week across 11 jobs, medians 35–62 min) — excluded by **program-name prefix**, the seeded default; (2) the `NT AUTHORITY\SYSTEM` and `NT AUTHORITY\NETWORK SERVICE` logins (the permanent multi-day CDC-shaped background) — excluded by **exact login**, the seeded default; (3) the application's admin login — deliberately **not** excluded, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. Matching is case-insensitive with no wildcard grammar. The seeds are defaults: clear a list to disable it (an empty list excludes nothing on that arm). The fired card states how many sessions each list removed |
+| **TempDB space** | 80%, held for 3 samples | Fires (WARNING; there is no CRITICAL tier, because no measured "nearly full" bar exists to grade one on) when TempDB reserved space is at or above the percentage threshold on **3 consecutive collected samples** — about three minutes at the one-minute `tempdb_stats` cadence — and resolves on the first collected sample below it. The count is per collected SAMPLE, not per alert sweep, so a sweep re-reading a row it has already seen does not advance it; a tempdb reading that stops arriving holds the count where it is rather than announcing a recovery. Measured on a 43-server production fleet over 14 days: one server's tempdb crossed the bar 22 times, every excursion 1–4 samples long, so a single sample above the threshold is detected but is not delivered as an incident. Measured against tempdb's **growth ceiling** (`SUM(max_size)` over the ROWS files) where there is one, and against the current allocation where the files grow without limit — so the percentage means "distance to the point where tempdb cannot grow further" on every engine |
 | **Long-running agent jobs** | 3× average | Fires when a job's current duration exceeds a multiple of its historical average |
-| **High CPU** | 80%, held for 3 samples | Fires when total CPU (SQL + other) is at or above the threshold on **3 consecutive collected samples** — about three minutes at the one-minute CPU sample cadence — and resolves after 2 consecutive samples below it. A momentary spike above a steady baseline is detected but is not an incident, so it is not delivered. The count is per SAMPLE, not per alert sweep, so a sweep re-reading a sample it has already seen does not advance it. A CPU reading that stops arriving holds the count where it is rather than announcing a recovery |
+| **High CPU** | 80%, held for 3 samples | Fires when total CPU (SQL + other) is at or above the threshold on **3 consecutive collected samples** — about three minutes at the one-minute CPU sample cadence — and resolves after 2 consecutive samples below it. A momentary spike above a steady baseline is detected but is not an incident, so it is not delivered. The count is per SAMPLE, not per alert sweep, so a sweep re-reading a sample it has already seen does not advance it. A CPU reading that stops arriving holds the count where it is rather than announcing a recovery. Graded WARNING at the threshold and CRITICAL at 95% — the same bar the health band colours the server card red at |
 | **Volume free space** | 10% or 5 GB free | Fires when a monitored volume's free space drops below the percentage or absolute threshold (either check can be disabled). Never fires on Azure SQL Database. |
 | **Failed agent job** | 60-minute lookback | Fires when a SQL Agent job run fails within the lookback window. Skipped on Azure SQL Database. |
 | **Server unreachable** | N/A | Fires when a monitored server goes offline or comes back online |
@@ -276,7 +277,7 @@ Every edition includes a real-time alert engine that monitors for performance is
 
 All thresholds are configurable in Settings.
 
-**Poison wait types** monitored: [`THREADPOOL`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#threadpool) (worker thread exhaustion), [`RESOURCE_SEMAPHORE`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#resource_semaphore) (memory grant pressure), and [`RESOURCE_SEMAPHORE_QUERY_COMPILE`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#resource_semaphore_query_compile) (compilation memory pressure). These waits indicate severe resource starvation and should never occur under normal operation.
+**Poison wait types** monitored: [`THREADPOOL`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#threadpool) (worker thread exhaustion), [`RESOURCE_SEMAPHORE`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#resource_semaphore) (memory grant pressure), and [`RESOURCE_SEMAPHORE_QUERY_COMPILE`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#resource_semaphore_query_compile) (compilation memory pressure). These waits indicate severe resource starvation and should never occur under normal operation — which is what makes an accumulation bar meaningful across all three: any sustained pile-up is abnormal, and the alert asks how much piled up in the window rather than how long any one wait lasted.
 
 ### Notification Channels
 
@@ -317,6 +318,8 @@ Alert emails include:
 - **Alert history** — Lite logs alerts to DuckDB (`config_alert_log`); Darling logs to its Postgres store; both are accessible via MCP
 - **Alert muting** — create rules to suppress specific recurring alerts while still logging them. Rules match on server name, metric type, database, query text, wait type, or job name (AND logic across fields). Access via Settings → Manage Mute Rules, or right-click an alert in the Alert History tab. The context menu offers **Mute This Alert** (pre-fills server + metric) and **Mute Similar Alerts** (pre-fills metric only, matching across all servers). Muted alerts appear grayed out and are still recorded for auditability. Rules support optional expiration (1h, 24h, 7 days, or permanent).
 - **Alert details** — right-click any alert in the Alert History tab and choose **View Details** for core fields (time, server, metric, value, threshold, notification type, status) plus context-sensitive details that vary by metric.
+- **A slow store no longer blinds a check** (#3848, Darling) — the alert pass reads its evidence out of the Postgres store under a deliberately short 10-second per-read deadline, because a long read holds a fleet-sweep permit and delays collection for every server queued behind it. On a busy store that deadline is crossed by the store's own write bands — compression, aggregate materialization, checkpoint fsync tails — and every such read used to skip its condition for one 30-second cycle. Each read is now retried **once, two seconds later**, on a command-timeout and nothing else: never on an error the store returned (which would answer the same way twice), and never during shutdown. `get_collection_health`'s `alert_read_health` block reports `retried_reads` beside `server_read_failures`, so the write bands' cost stays a visible count instead of a blind alert — retries rising while failures stay at zero is a store under write pressure whose alerting is intact; both rising means a second attempt twelve seconds later still found the band on, which points at the store's write schedule rather than the reader.
+- **Confidence chooses the channel** (#3712) — a scheduled-analysis finding earns a delivery by *corroboration*, never by severity alone: two or more facts in its story chain, a matched co-fire check on its root fact, or one of the two by-construction stories. A lone uncorroborated fact at or above the notify floor is recorded (Alert History status **Digest**, with the reason on the row and on `get_alert_history` as `routing_reason`) and shown in Recommendations with a *Not paged* marker, but it is not e-mailed, posted or toasted. It pages the moment it gains corroboration, as a new firing. Settings → Alerts → *Only notify on corroborated findings* (default on; `analysis_uncorroborated_route` in the settings file) restores delivery of every notify-worthy finding when unchecked. Darling delivers the same singles once a day as the Analysis Singles Digest.
 
 ---
 
@@ -362,11 +365,12 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 87 tools; **Darling** exposes 151 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 89 tools; **Darling** exposes 161 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|
 | Discovery | `list_servers` |
+| Tool guides | `get_tool_guide` (the long-form reading guide of a tool whose description ends "Reading guide: get_tool_guide.", and cross-tool topics; both editions) |
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules` |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |

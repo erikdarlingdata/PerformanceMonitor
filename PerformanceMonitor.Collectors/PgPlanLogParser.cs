@@ -58,11 +58,78 @@ public static class PgPlanLogParser
        default on a managed parameter group spells '%t:%r:%u@%d:[%p]:' and puts its own ':' there, so
        adding the %Q this parser requires gives '%t:%r:%u@%d:[%p]:%Q ' and the line reads `]:<id> LOG:`.
 
+       ANCHORED to the start of a genuine log line, and the timestamp is REQUIRED, not decorative (#4008).
+       The pre-fix pattern looked for '[digits] digits LOG:  duration: ... plan:' ANYWHERE in the tail, so
+       a statement's own author could plant that text inside their SQL - the STATEMENT: companion PostgreSQL
+       echoes back after a syntax error reads it back verbatim, tab-indented continuation lines and all, and
+       the forger picks the query id and duration that lands on somebody else's history. Requiring a real
+       '\d{4}-\d\d-\d\d ...' timestamp at '^' (RegexOptions.Multiline) closes that: forged text is never the
+       first character of a raw physical line, because every real line starts with a log_line_prefix and
+       every continuation starts with a tab, and .NET's Multiline '^' only matches right after '\n' or at
+       the very start of the buffer.
+
+       The managed family's gap before the pid bracket is '[^\[\n]*', NOT the lazy '[^\n]*?' the assembler
+       uses for the analogous gap elsewhere. That distinction is load-bearing: with a lazy dot-star, a line
+       carrying a REAL bracket followed later by a FORGED one (the STATEMENT echo again, now under a
+       colon-prefixed target) fails to match at the real bracket - '[ :]digit LOG:' does not follow it - and
+       backtracking then EXPANDS the lazy gap past the real bracket to reach the forged one, which does
+       satisfy the rest of the pattern. Excluding '[' from the gap's character class makes the first
+       bracket the only one reachable: the class cannot consume '[' at all, so there is nothing to
+       backtrack into that would ever reach a later one. Proven by re-adding the lazy form and watching
+       PgPlanLogParserTests.AForgedHeaderBehindARealColonPrefixedBracket_StillYieldsNoPlan fail.
+
        PgPlanCaptureCollector holds this pattern's counterpart for the pg_read_file route, as SQL and
-       narrower: that one requires the space, which PostgreSQL's own default renders. */
+       narrower: self-hosted's own SQL regex only ever needed the space family (PostgreSQL's own default),
+       so it gained the same timestamp anchor without the colon alternative rather than a capability neither
+       transport asked for. */
     private static readonly Regex s_planBlock = new(
-        @"\[\d+\][ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
-        RegexOptions.Compiled);
+        @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
+        + @"(?:[^ \[\n]+ [^\[\n]*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
+        + @"[ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
+        RegexOptions.Compiled | RegexOptions.Multiline);
+
+    /* Every log_line_prefix escape (%-something), used to find the FIRST one after %p — the escape that
+       actually renders the token this parser's (-?\d+) group captured (#4501). */
+    private static readonly Regex s_anyEscapeToken = new("%.", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Whether the all-digit token <see cref="s_planBlock"/> captures right after the bracketed pid is a
+    /// real <c>%Q</c> query id, decided from the target's own <paramref name="logLinePrefix"/> (#4501).
+    ///
+    /// <para><b>The bug this closes.</b> The captured digits are the text <c>log_line_prefix</c> renders in
+    /// that position, whatever escape put it there. Under the v17 managed default
+    /// <c>'%m [%p] %a '</c> that escape is <c>%a</c> — <c>application_name</c> — and an ALL-DIGIT
+    /// application name (a connection pooler that names sessions by worker number, for one) reads as a
+    /// plausible query id and joins the plan to whatever statement happens to own that id in
+    /// <c>pg_statement_stats</c>, which is wrong attribution rather than an obviously-bad one.</para>
+    ///
+    /// <para>True only when the escape immediately after <c>%p</c> — skipping any literal separator text,
+    /// the same way it renders on the wire — is <c>%Q</c> itself. False for every other escape in that
+    /// position, including the three client-controlled fields <see cref="PgLogEntryAssembler.ForgeryCheckFor"/>
+    /// already treats as forgeable (<c>%a</c>/<c>%u</c>/<c>%d</c>), and for a prefix with no <c>%p</c> at
+    /// all (nothing here can reason about a position that does not exist). A null prefix (not collected)
+    /// returns true, keeping this parser's pre-#4501 behaviour: read the token as the query id
+    /// unconditionally.</para>
+    /// </summary>
+    internal static bool PrefixCarriesQueryIdAfterPid(string? logLinePrefix)
+    {
+        if (logLinePrefix is null)
+        {
+            return true;
+        }
+
+        var pidIndex = logLinePrefix.IndexOf("%p", StringComparison.Ordinal);
+
+        if (pidIndex < 0)
+        {
+            return false;
+        }
+
+        var afterPid = logLinePrefix[(pidIndex + 2)..];
+        var nextEscape = s_anyEscapeToken.Match(afterPid);
+
+        return nextEscape.Success && string.Equals(nextEscape.Value, "%Q", StringComparison.Ordinal);
+    }
 
     /* Condition fields, where a bare number is a VALUE rather than part of a name. Enumerated rather than
        inferred: wrong in the safe direction leaves a number in a filter, wrong the other way rewrites an
@@ -74,11 +141,17 @@ public static class PgPlanLogParser
         "Sort Key", "Presorted Key", "Hash Key", "Conflict Filter", "Repeatable Seed",
     };
 
-    private static readonly Regex s_quotedLiteral = new("'(?:[^']|'')*'", RegexOptions.Compiled);
+    /* INTERNAL rather than private, and that is the sharing mechanism (#3601): PgLogTextRedactor applies
+       these same two instances to the statement the log-event pipeline fingerprints (#3944 left its prose
+       unmasked). The redaction MUST NOT
+       be duplicated across the plan route and the log-event route any more than across the two plan
+       transports — a second spelling of the literal pattern is the one that eventually disagrees, and the
+       cost of that disagreement is a customer's data. */
+    internal static readonly Regex s_quotedLiteral = new("'(?:[^']|'')*'", RegexOptions.Compiled);
 
     /* Bare numbers NOT glued to an identifier character, so 'transactionitems1' survives and '(id > 100)'
        does not. */
-    private static readonly Regex s_bareNumber = new(
+    internal static readonly Regex s_bareNumber = new(
         @"(?<![A-Za-z0-9_])\d+(?:\.\d+)?(?![A-Za-z0-9_])", RegexOptions.Compiled);
 
     /// <summary>
@@ -96,8 +169,16 @@ public static class PgPlanLogParser
     /// deferred. <see cref="PgDeadlockLogParser"/> carries the arithmetic and the transport split; the
     /// short version is that the RDS log API keeps a resume marker and does not have this failure, while
     /// the <c>pg_read_file</c> tail has no marker and does.</para>
+    ///
+    /// <para><paramref name="logLinePrefix"/> (#4501) is the target's own collected <c>log_line_prefix</c>:
+    /// the all-digit token this parser's block regex captures right after the pid is trusted as the real
+    /// <c>%Q</c> query id only when <see cref="PrefixCarriesQueryIdAfterPid"/> says that escape is what
+    /// actually renders there. A prefix that puts a client-controlled field there instead (<c>%a</c> under
+    /// the v17 managed default, or <c>%u</c>/<c>%d</c>) attaches NO query id — an all-digit application
+    /// name is not this statement's identity — and a null prefix (not collected) keeps this parser's
+    /// pre-#4501 behaviour of reading the token unconditionally.</para>
     /// </summary>
-    public static List<ParsedPlan> Extract(string? logBody)
+    public static List<ParsedPlan> Extract(string? logBody, string? logLinePrefix = null)
     {
         var plans = new List<ParsedPlan>();
 
@@ -106,9 +187,11 @@ public static class PgPlanLogParser
             return plans;
         }
 
+        var trustQueryId = PrefixCarriesQueryIdAfterPid(logLinePrefix);
+
         foreach (Match match in s_planBlock.Matches(logBody))
         {
-            if (!long.TryParse(match.Groups[1].Value, out var queryId)
+            if (!long.TryParse(match.Groups[1].Value, out var capturedQueryId)
                 || !double.TryParse(match.Groups[2].Value,
                        System.Globalization.NumberStyles.Float,
                        System.Globalization.CultureInfo.InvariantCulture,
@@ -116,6 +199,8 @@ public static class PgPlanLogParser
             {
                 continue;
             }
+
+            var queryId = trustQueryId ? capturedQueryId : 0;
 
             var parsed = FromBlock(queryId, durationMs, match.Groups[3].Value.Replace("\t", string.Empty));
 

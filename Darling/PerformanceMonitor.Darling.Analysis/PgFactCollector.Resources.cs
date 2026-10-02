@@ -11,22 +11,32 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
 public sealed partial class PgFactCollector
 {
+    /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor). The ordered LIMIT 1 already stops at
+       the newest chunk here, but the bound still spares the planner every retained chunk, keeps Lite's twin
+       out of its parquet archive, and makes a memory collector dead for a day read as no fact rather than a
+       stale one. */
     public const string MemoryStatsSql = @"
 SELECT total_physical_memory_mb, buffer_pool_mb, target_server_memory_mb
 FROM memory_stats
 WHERE server_id = $1
-AND   collection_time <= $2
+AND   collection_time >= $2
+AND   collection_time <= $3
 ORDER BY collection_time DESC
 LIMIT 1";
 
     /// <summary>
-    /// Collects memory stats: total physical RAM, buffer pool size, target memory.
-    /// These facts enable edition-aware memory recommendations in the config audit.
+    /// Collects memory stats: total physical RAM, buffer pool size, target memory — the newest sample
+    /// within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's end (#3896).
+    /// These facts enable RESOURCE-based memory recommendations in the config audit: max server memory is
+    /// sized against the server's physical RAM (on an Azure SQL Database the collector stores the database's own memory limit in
+    /// that column, not the host's RAM), and no check in that audit branches on the edition (which the payload reports for
+    /// context only).
     /// </summary>
     private async Task CollectMemoryFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -36,6 +46,7 @@ LIMIT 1";
 
             using var cmd = new NpgsqlCommand(MemoryStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(MemoryStatsCollector.Instance.Name)));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -61,13 +72,20 @@ LIMIT 1";
         }
     }
 
+    /// <summary>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
+    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
+    /// <c>collection_time</c> — <c>collection_id</c> is the per-process monotonic counter every row already
+    /// carries, so it orders two same-instant rows the same way on every read instead of a bare
+    /// <c>LIMIT 1</c> returning either one depending on physical row order, which would otherwise make the
+    /// RUNNABLE_TASKS fact (and the THREADPOOL amplifier reading its warning flag) flip between two answers
+    /// across analysis passes with no change in the server.</summary>
     public const string RunnableTaskStatsSql = @"
 SELECT total_runnable_tasks_count, runnable_tasks_warning
 FROM cpu_scheduler_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY collection_time DESC
+ORDER BY collection_time DESC, collection_id DESC
 LIMIT 1";
 
     /// <summary>
@@ -187,13 +205,16 @@ AND   collection_time <= $3";
         }
     }
 
+    /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor); unbounded, the window function
+       numbered every clerk row the server has retained to keep ten. */
     public const string MemoryClerkSql = @"
 WITH latest AS (
     SELECT clerk_type, memory_mb,
            ROW_NUMBER() OVER (PARTITION BY clerk_type ORDER BY collection_time DESC) AS rn
     FROM memory_clerks
     WHERE server_id = $1
-    AND   collection_time <= $2
+    AND   collection_time >= $2
+    AND   collection_time <= $3
 )
 SELECT clerk_type, memory_mb
 FROM latest WHERE rn = 1 AND memory_mb > 0
@@ -201,7 +222,9 @@ ORDER BY memory_mb DESC
 LIMIT 10";
 
     /// <summary>
-    /// Collects top memory clerks by size. Context for understanding where memory is allocated.
+    /// Collects top memory clerks by size, each clerk's newest sample within
+    /// <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's end (#3896). Context for
+    /// understanding where memory is allocated.
     /// </summary>
     private async Task CollectMemoryClerkFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -211,6 +234,7 @@ LIMIT 10";
 
             using var cmd = new NpgsqlCommand(MemoryClerkSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(MemoryClerksCollector.Instance.Name)));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -331,22 +355,30 @@ AND   collection_time <= $3";
         }
     }
 
+    /* #3527: delta_cntr_value spans one COLLECTION INTERVAL, not one second — at a 60s cadence the raw
+       delta is 60x the true rate. The honest rate divides by the row's MEASURED sample_interval_seconds
+       (#2234); interval <= 0 marks an unknowable delta (first sighting, counter reset, gap past the
+       policy), so those rows are filtered rather than emitted as 0 — rn = 1 lands on the newest row a
+       rate can honestly be derived from. */
     public const string PerfmonSql = @"
 WITH latest AS (
-    SELECT counter_name, cntr_value, delta_cntr_value,
+    SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds,
            ROW_NUMBER() OVER (PARTITION BY counter_name ORDER BY collection_time DESC) AS rn
     FROM perfmon_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   counter_name IN ('Batch Requests/sec', 'SQL Compilations/sec', 'SQL Re-Compilations/sec')
+    AND   sample_interval_seconds > 0
 )
-SELECT counter_name, cntr_value, delta_cntr_value
+SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
 FROM latest WHERE rn = 1";
 
     /// <summary>
     /// Collects key perfmon throughput counters: Batch Requests/sec, compilations, recompilations.
     /// Unscored context that distinguishes a busy server from a sick one (used by the AI surfaces).
+    /// Fact values are per-second rates: the per-interval delta divided by the row's measured
+    /// sample_interval_seconds (#3527); the raw delta and the divisor ride the metadata.
     /// </summary>
     private async Task CollectPerfmonFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -365,6 +397,7 @@ FROM latest WHERE rn = 1";
                 var counterName = reader.GetString(0);
                 var cntrValue = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
                 var deltaValue = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
+                var intervalSeconds = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
 
                 var (factKey, source) = counterName switch
                 {
@@ -376,8 +409,11 @@ FROM latest WHERE rn = 1";
 
                 if (factKey == null) continue;
 
-                // All remaining counters are per-second rates — use the delta.
-                var value = (double)deltaValue;
+                /* The delta spans one collection interval — divide by the measured interval for the
+                   per-second rate (#3527). The SQL already filters interval <= 0 (unknowable delta);
+                   this guard keeps a raw or zero value from ever escaping if that filter regresses. */
+                if (intervalSeconds <= 0) continue;
+                var value = deltaValue / (double)intervalSeconds;
 
                 facts.Add(new Fact
                 {
@@ -388,7 +424,8 @@ FROM latest WHERE rn = 1";
                     Metadata = new Dictionary<string, double>
                     {
                         ["cntr_value"] = cntrValue,
-                        ["delta_cntr_value"] = deltaValue
+                        ["delta_cntr_value"] = deltaValue,
+                        ["sample_interval_seconds"] = intervalSeconds
                     }
                 });
             }
@@ -408,7 +445,8 @@ WITH ranked AS (
            DENSE_RANK() OVER (ORDER BY collection_time DESC) AS rnk
     FROM plan_cache_stats
     WHERE server_id = $1
-    AND   collection_time <= $2
+    AND   collection_time >= $2
+    AND   collection_time <= $3
 )
 SELECT
     COALESCE(SUM(total_plans), 0) AS total_plans,
@@ -422,7 +460,9 @@ WHERE rnk = 1";
     /// Collects the plan-cache single-use bloat signal from the LATEST plan_cache_stats snapshot. Mirrors
     /// the Dashboard's report.plan_cache_bloat (install/47_create_reporting_views.sql:1456-1496): SUM the
     /// plan/size counts over the newest collection_time, derive single_use_percent. Point-in-time read
-    /// (no lower bound, just &lt;= TimeRangeEnd) like CollectMemoryFactsAsync; DENSE_RANK() selects every
+    /// like CollectMemoryFactsAsync: the newest snapshot within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see>
+    /// of the window's end (#3896 — the lookback start binds as $2; it was <c>&lt;= TimeRangeEnd</c> alone,
+    /// planned over every retained chunk); DENSE_RANK() selects every
     /// row of the newest collection (QUALIFY is DuckDB-only and banned in the shared PG dialect). The
     /// FactScorer applies the &gt; 50/30/20% tiers AND the single_use_size_mb &gt;= 100 noise guard.
     /// Ported byte-identically from Lite's DuckDbFactCollector.CollectPlanCacheFactsAsync.
@@ -435,6 +475,7 @@ WHERE rnk = 1";
 
             using var cmd = new NpgsqlCommand(PlanCacheStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(PlanCacheStatsCollector.Instance.Name)));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

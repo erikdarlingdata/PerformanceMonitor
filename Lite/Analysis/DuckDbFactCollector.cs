@@ -19,9 +19,16 @@ public partial class DuckDbFactCollector : IFactCollector
 {
     private readonly DuckDbInitializer _duckDb;
 
-    public DuckDbFactCollector(DuckDbInitializer duckDb)
+    /// <summary>
+    /// The cadence each collector runs at on a server, for the latest-value lookbacks (#3896) — see
+    /// <see cref="LatestValueBounds"/>. Null answers every collector with its shipped default.
+    /// </summary>
+    private readonly Func<int, string, int?>? _collectorFrequencyMinutes;
+
+    public DuckDbFactCollector(DuckDbInitializer duckDb, Func<int, string, int?>? collectorFrequencyMinutes = null)
     {
         _duckDb = duckDb;
+        _collectorFrequencyMinutes = collectorFrequencyMinutes;
     }
 
     /// <summary>
@@ -63,20 +70,47 @@ public partial class DuckDbFactCollector : IFactCollector
     /// <see cref="AppLogger.Debug"/> would have been the wrong home for a quieter arm regardless: it
     /// is compiled out of Release builds, and a level nobody can turn on is indistinguishable from
     /// the empty catch this replaces.</para>
+    ///
+    /// <para>#3691: the failure is also RECORDED on the context, beside the log line, so the pass and the
+    /// tool payloads learn what the log knew — a pass whose families failed used to score an empty fact
+    /// list and render as the <c>empty</c> all-clear. The outcome is <c>cancelled</c> for an
+    /// <see cref="OperationCanceledException"/> that was not the pass's own abandonment (the only kind the
+    /// <c>when</c> filter lets through), <c>error</c> for everything else — the two outcomes Lite can
+    /// actually see, per the two bullets above; a timeout arm here would record a shape that cannot
+    /// arrive. The log level is unchanged.</para>
     /// </summary>
     private static void ReportCollectionFailure(
         Exception ex,
         AnalysisContext context,
         [CallerMemberName] string collectMethod = "")
     {
+        context.RecordCollectionFailure(
+            CollectionFailure.FamilyOf(collectMethod),
+            collectMethod,
+            ex is OperationCanceledException ? CollectionFailureOutcome.Cancelled : CollectionFailureOutcome.Error,
+            ex);
+
+        /* #4316 round 1 B1: ex is now also the third argument, not just interpolated into the message, so
+           the log entry carries the full exception (stack and inner-exception chain), not just its message —
+           the same full-error-in-the-log guarantee CollectionFailure.Describe's note on the context points at. */
         AppLogger.Error("DuckDbFactCollector",
             $"{collectMethod} failed for {context.ServerName} (server {context.ServerId}) and " +
-            $"contributes no facts this pass: {ex.Message}");
+            $"contributes no facts this pass: {ex.Message}", ex);
     }
+
+    /// <summary>
+    /// The number of family reads this collector runs, derived from the type (#3691) — the
+    /// <c>families_total</c> a collection caveat is stated against. Reflection once per process, not per pass.
+    /// </summary>
+    private static readonly int s_familyCount = CollectionCaveats.CountFamilies(typeof(DuckDbFactCollector));
 
     public async Task<List<Fact>> CollectFactsAsync(AnalysisContext context)
     {
         var facts = new List<Fact>();
+
+        /* #3691: the denominator for the collection caveat, stamped before any family runs so a pass that
+           failed at its first read still states "1 of 32" rather than "1 of 0". */
+        context.CollectionFamilyCount = s_familyCount;
 
         /* #2412: one cancellation checkpoint per collector, not one for the phase. This is the
            longest stage of an analysis pass — thirty-one collectors, each opening the store and
@@ -90,6 +124,16 @@ public partial class DuckDbFactCollector : IFactCollector
             context.CancellationToken.ThrowIfCancellationRequested();
             await collect(context, facts);
         }
+
+        /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
+           it. Nothing else may run ahead of it — a wait fact emitted before the stamp would have no
+           denominator, and the only "safe" fallback (the nominal window) is the defect being fixed. */
+        await RunCollectorAsync(CollectObservedCoverageAsync);
+
+        /* #3896: every latest-value read below binds its collector's lower bound, resolved once from the
+           cadence that collector actually runs at. Emits no fact, so it cannot disturb the stamp above. */
+        context.CancellationToken.ThrowIfCancellationRequested();
+        await LatestValueBounds.EnsureAsync(_duckDb, _collectorFrequencyMinutes, context);
 
         await RunCollectorAsync(CollectWaitStatsFactsAsync);
         FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
@@ -125,6 +169,27 @@ public partial class DuckDbFactCollector : IFactCollector
         await RunCollectorAsync(CollectDiskSpaceFactsAsync);
         await RunCollectorAsync(CollectPlanAdvisoryFactsAsync);
 
+        return facts;
+    }
+
+    /// <summary>
+    /// audit_config's own collection (#4192, Darling parity): exactly the config, hardware, memory and
+    /// database-size families — CONFIG_CTFP/MAXDOP/MAX_MEMORY_MB/MAX_WORKER_THREADS, SERVER_EDITION,
+    /// SERVER_HARDWARE, MEMORY_TOTAL_PHYSICAL_MB, DATABASE_TOTAL_SIZE_MB — none of the other families
+    /// <see cref="CollectFactsAsync"/> runs, and no anomaly detector or scorer after it. No coverage witness
+    /// runs here either: every fact below is a latest-snapshot read, which is why audit_config already
+    /// discards WindowCoverage. <see cref="LatestValueBounds.EnsureAsync"/> still runs, so the two
+    /// latest-value reads bind the same per-collector cadence bound the full pass gives them.
+    /// </summary>
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(AnalysisContext context)
+    {
+        var facts = new List<Fact>();
+        await LatestValueBounds.EnsureAsync(_duckDb, _collectorFrequencyMinutes, context);
+        await CollectServerConfigFactsAsync(context, facts);
+        await CollectServerMetadataFactsAsync(context, facts);
+        await CollectServerPropertiesFactsAsync(context, facts);
+        await CollectMemoryFactsAsync(context, facts);
+        await CollectDatabaseSizeFactAsync(context, facts);
         return facts;
     }
 

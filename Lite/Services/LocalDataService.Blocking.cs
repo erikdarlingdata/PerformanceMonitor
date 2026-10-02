@@ -13,8 +13,10 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 using static PerformanceMonitor.Common.DeadlockGraphProcessParser;
 
 namespace PerformanceMonitorLite.Services;
@@ -70,33 +72,61 @@ GROUP BY collection_time";
             reader.IsDBNull(2) ? 0 : reader.GetInt32(2));
     }
 
+    /// <summary>The Deadlocks grid's row cap — the default <paramref name="limit"/> of
+    /// <see cref="GetRecentDeadlocksAsync"/>, so every grid caller reads exactly what it always read.</summary>
+    public const int DeadlockGridCap = 50;
+
     /// <summary>
-    /// Gets recent deadlock events for a server.
+    /// Gets recent deadlock events for a server, newest first, capped at <paramref name="limit"/>.
+    ///
+    /// <para>The cap is a PARAMETER with the grid's value as its default (#3541 A3). It was <c>LIMIT 50</c>
+    /// under an MCP tool that advertised <c>limit</c> and applied it with <c>Take(limit)</c>, so a caller
+    /// asking for 100 deadlocks silently got 50 and a payload that called them <c>total_deadlocks</c>. The
+    /// MCP tools now pass <c>limit + 1</c> and read the extra row as the truncation signal; the grids pass
+    /// nothing and keep their 50.</para>
+    ///
+    /// <para><paramref name="graphOnly"/> restricts the read to rows that CARRY a graph, in SQL, so
+    /// <c>get_deadlock_detail</c>'s <c>limit</c> counts graphs rather than rows it would have to discard —
+    /// filtering for XML in C# after a capped fetch was the shape of the defect, where a run of graph-less rows
+    /// at the newest end read as "no XML in the window" while older graphs sat behind the cap.</para>
     /// </summary>
-    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, int limit = DeadlockGridCap, bool graphOnly = false, bool windowOnCollectionTime = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
+        var graphClause = graphOnly
+            ? @"
+AND   deadlock_graph_xml IS NOT NULL
+AND   deadlock_graph_xml <> ''"
+            : string.Empty;
+
+        /* The grid answers "what deadlocked in this window", so it windows on deadlock_time. The alert engine
+           passes windowOnCollectionTime: its read is a delivery cursor, and on the event time a deadlock collected
+           late (seconds, or hours after an outage) would fall out of the window before it ever alerted. */
+        var windowCol = windowOnCollectionTime ? "collection_time" : "deadlock_time";
         command.CommandText = @"
 SELECT
     collection_time,
     deadlock_time,
     victim_process_id,
     victim_sql_text,
-    deadlock_graph_xml
-FROM v_deadlocks
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
+    deadlock_graph_xml,
+    database_name
+FROM " + StoredEventCopies.Deadlocks(
+            windowOnCollectionTime
+                ? "server_id = $1 AND collection_time <= $3" + graphClause
+                : "server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3" + graphClause,
+            windowOnCollectionTime ? "$2" : null) + @" AS dl
 ORDER BY deadlock_time DESC
-LIMIT 50";
+LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = limit });
 
         var items = new List<DeadlockRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -108,7 +138,8 @@ LIMIT 50";
                 DeadlockTime = reader.IsDBNull(1) ? null : reader.GetDateTime(1),
                 VictimProcessId = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 VictimSqlText = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                DeadlockGraphXml = reader.IsDBNull(4) ? "" : reader.GetString(4)
+                DeadlockGraphXml = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                DatabaseName = reader.IsDBNull(5) ? null : reader.GetString(5)
             });
         }
 
@@ -125,7 +156,7 @@ LIMIT 50";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -179,7 +210,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -202,15 +233,16 @@ SELECT
     transaction_isolation_level,
     dop,
     parallel_worker_count,
-    query_plan,
-    live_query_plan,
+    query_plan IS NOT NULL AS has_query_plan,
+    live_query_plan IS NOT NULL AS has_live_query_plan,
     collection_time,
     login_name,
     host_name,
     program_name,
     open_transaction_count,
     percent_complete,
-    query_hash
+    query_hash,
+    request_id
 FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -248,64 +280,328 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
                 TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
                 Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
                 ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
-                QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
-                LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
+                HasQueryPlan = reader.IsDBNull(18) ? false : reader.GetBoolean(18),
+                HasLiveQueryPlan = reader.IsDBNull(19) ? false : reader.GetBoolean(19),
                 CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
                 LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
                 HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
                 ProgramName = reader.IsDBNull(23) ? "" : reader.GetString(23),
                 OpenTransactionCount = reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
                 PercentComplete = reader.IsDBNull(25) ? 0m : Convert.ToDecimal(reader.GetValue(25)),
-                QueryHash = reader.IsDBNull(26) ? "" : reader.GetString(26)
+                QueryHash = reader.IsDBNull(26) ? "" : reader.GetString(26),
+                RequestId = reader.IsDBNull(27) ? 0 : reader.GetInt32(27)
             });
         }
 
         return items;
     }
 
+    /// <summary>Selects <c>query_plan</c> on <c>false</c>, <c>live_query_plan</c> on <c>true</c> — SQL can't
+    /// parameterize a column name, so <see cref="GetSnapshotPlanTextAsync"/> picks the text at call time.</summary>
+    private static string SnapshotPlanColumn(bool live) => live ? "live_query_plan" : "query_plan";
+
+    /// <summary>
+    /// On-demand fetch of ONE snapshot's plan XML, by its capture key (#4239). The bulk reads
+    /// (<see cref="GetLatestQuerySnapshotsAsync"/>, <see cref="GetQuerySnapshotsByWaitTypeAsync"/>,
+    /// <see cref="GetAllQuerySnapshotsInRangeAsync"/>) stopped selecting this payload for every row in the
+    /// window — on a busy server it was megabytes of plan XML for grid rows nobody clicks. The plan buttons
+    /// call this instead, scoped to the one row the user picked.
+    ///
+    /// <para>Reads <c>v_query_snapshots</c> — the SAME archive-aware view the three bulk reads use — not the
+    /// bare <c>query_snapshots</c> table. A snapshot old enough to have been archived to parquet is still
+    /// shown by those reads (and its plan is still in the parquet copy), so a fetcher scoped to the live
+    /// table alone would silently regress every archived row to "no plan available".</para>
+    ///
+    /// <para><c>(server_id, collection_time, session_id, request_id)</c> is unique by construction — the SQL
+    /// Server collector query is provably unique per (session_id, request_id) per collection tick (the only
+    /// join that could fan out is wrapped in an aggregate with no GROUP BY, so it always collapses to one
+    /// row: see QuerySnapshotsCollector.cs). It is NOT enforced by a constraint — query_snapshots is
+    /// bulk-appended with no PK, same as its Postgres counterpart — so LIMIT 1 is a defensive guard against a
+    /// freak duplicate, not a real expectation. <c>request_id</c> reads back NULL for rows collected before
+    /// schema v34 added the column (DuckDbInitializer ~1066) or archived before that migration, via parquet's
+    /// union-by-name; every reader above already defaults a null request_id to 0, so the match does too.</para>
+    ///
+    /// <para>The codebase's usual tie-break idiom for "no PK, need one deterministic row"
+    /// (<c>QueryStoreSliceRepairService</c>'s <c>ORDER BY ... , rowid DESC</c>) does not reach here:
+    /// <c>v_query_snapshots</c> is a UNION ALL of a live table and <c>read_parquet()</c> (query_snapshots
+    /// has no dedup key in <c>ArchiveViewDedupKeys</c>, so it is a plain union with no QUALIFY, as <c>v_deadlocks</c> is too; a deadlock's copies are dropped per read, not in the view), and DuckDB does
+    /// not propagate the <c>rowid</c> pseudocolumn through a UNION or a <c>SELECT *</c> view. Unlike
+    /// <c>config_alert_log</c>, this view carries no 'live'/'archive' <c>source</c> literal to break a tie on
+    /// either — there is nothing left to order by beyond the WHERE match itself.</para>
+    ///
+    /// <para><c>AND {column} IS NOT NULL</c> (#4297) is that missing tie-break for the ONE thing that
+    /// matters: on a freak duplicate sharing this key, <c>LIMIT 1</c> alone can land on the row whose plan is
+    /// NULL while a sibling matching row carries the real one — silently reporting "no plan available" for a
+    /// row that has one. The guard drops the NULL-plan candidate first, so <c>LIMIT 1</c> only ever breaks a
+    /// tie among plan-bearing rows (the same captured plan either way). Mirrors Darling's
+    /// <c>QuerySnapshotEstimatedPlanSql</c> / <c>QuerySnapshotLivePlanSql</c>
+    /// (<c>ViewerDataService.QuerySnapshots.cs</c>), which guards this same read the same way.</para>
+    /// </summary>
+    public async Task<string?> GetSnapshotPlanTextAsync(int serverId, DateTime collectionTime, int sessionId, int requestId, bool live)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var column = SnapshotPlanColumn(live);
+
+        command.CommandText = $@"
+SELECT {column}
+FROM v_query_snapshots
+WHERE server_id = $1
+AND   collection_time = $2
+AND   session_id = $3
+AND   COALESCE(request_id, 0) = $4
+AND   {column} IS NOT NULL
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+        command.Parameters.Add(new DuckDBParameter { Value = sessionId });
+        command.Parameters.Add(new DuckDBParameter { Value = requestId });
+
+        var result = await command.ExecuteScalarAsync();
+        return result is null or DBNull ? null : (string)result;
+    }
+
+    /// <summary>Estimated plan for a grid row: the in-row <see cref="QuerySnapshotRow.QueryPlan"/> when a
+    /// caller (the Live Snapshot handler) already populated it, else a store fetch gated on
+    /// <see cref="QuerySnapshotRow.HasQueryPlan"/> so a row that never had a plan never reaches the store.</summary>
+    public Task<string?> ResolveSnapshotEstimatedPlanAsync(int serverId, QuerySnapshotRow row)
+    {
+        if (row.QueryPlan != null)
+            return Task.FromResult<string?>(row.QueryPlan);
+        if (!row.HasQueryPlan)
+            return Task.FromResult<string?>(null);
+        return GetSnapshotPlanTextAsync(serverId, row.CollectionTime, row.SessionId, row.RequestId, live: false);
+    }
+
+    /// <summary>The actual/live-captured plan counterpart of <see cref="ResolveSnapshotEstimatedPlanAsync"/>.</summary>
+    public Task<string?> ResolveSnapshotLivePlanAsync(int serverId, QuerySnapshotRow row)
+    {
+        if (row.LiveQueryPlan != null)
+            return Task.FromResult<string?>(row.LiveQueryPlan);
+        if (!row.HasLiveQueryPlan)
+            return Task.FromResult<string?>(null);
+        return GetSnapshotPlanTextAsync(serverId, row.CollectionTime, row.SessionId, row.RequestId, live: true);
+    }
+
+    /// <summary>
+    /// The get_active_queries MCP read (#3541 A13): the newest <paramref name="cap"/> snapshot rows over the
+    /// window that pass the caller's filters, plus the FILTERED population's size from the same statement.
+    /// A sibling of <see cref="GetLatestQuerySnapshotsAsync"/> rather than a change to it: that read is the
+    /// grids' whole-window snapshot (unfiltered, unbounded — the Active Queries grid wants every row and
+    /// filters in the UI), and the two questions are different enough that one signature serving both would
+    /// carry a page cap the grid must remember to disable.
+    ///
+    /// <para><b>Every filter is part of the query.</b> The tool used to read the whole window, filter
+    /// <c>database_name</c> and <c>blocking_only</c> in C#, take <c>limit</c>, and publish the PRE-filter row
+    /// count as <c>total_snapshots</c> beside the page — a total of a different population from the rows, and a
+    /// page that could be empty while the window held matches. Here the filters are predicates, the population
+    /// count is <c>COUNT(*) OVER ()</c> on the filtered rows above the cap (Darling's #3613 idiom), and the cap
+    /// is the caller's, fetched at <c>limit + 1</c> so truncation is observed rather than inferred.</para>
+    ///
+    /// <para><b>Head blockers are never stripped.</b> The WAITFOR trim exists to drop idle monitoring shells,
+    /// but the classic head blocker IS a session sitting in <c>WAITFOR</c> with an open transaction, and it was
+    /// dropped while its victims' <c>blocking_session_id</c> pointed at a session no longer on the page. A row
+    /// is kept whatever its text when a row in the SAME capture names it as its blocker — same capture, not
+    /// same window, because session ids are reused and the old C# arm matched across the whole window. The two
+    /// flags tell a victim's story when its blocker is absent: <c>blocker_in_capture</c> false is the idle
+    /// open-transaction blocker sys.dm_exec_requests never lists; <c>blocker_in_population</c> false is a
+    /// blocker the caller's own database filter excluded.</para>
+    ///
+    /// <para>The predicates are composed as SQL text from two booleans (a database name is still bound), the
+    /// <see cref="BuildDbInClause"/> way, because DuckDB cannot infer a type for a bare <c>$N IS NULL</c>
+    /// parameter the way PostgreSQL's <c>$N::text</c> cast lets Darling's twin do it.</para>
+    /// </summary>
+    public async Task<(List<QuerySnapshotRow> Rows, long PopulationCount)> GetActiveQueriesPageAsync(
+        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, DateTime? asOfUtc = null)
+    {
+        using var _q = TimeQuery("GetActiveQueriesPageAsync", "v_query_snapshots filtered page (MCP)");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var dbClause = BuildDbInClause(
+            string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues);
+        var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
+
+        command.CommandText = @"
+WITH window_rows AS (
+    SELECT
+        session_id,
+        database_name,
+        elapsed_time_formatted,
+        query_text,
+        status,
+        blocking_session_id,
+        wait_type,
+        wait_time_ms,
+        wait_resource,
+        cpu_time_ms,
+        total_elapsed_time_ms,
+        reads,
+        writes,
+        logical_reads,
+        granted_query_memory_gb,
+        transaction_isolation_level,
+        dop,
+        parallel_worker_count,
+        collection_time,
+        login_name,
+        host_name,
+        program_name,
+        open_transaction_count,
+        percent_complete,
+        query_hash
+    FROM v_query_snapshots
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+),
+heads AS (
+    /* (capture, session) pairs some victim in the SAME capture points at. */
+    SELECT DISTINCT collection_time, blocking_session_id AS session_id
+    FROM window_rows
+    WHERE blocking_session_id > 0
+),
+population AS (
+    SELECT
+        w.*,
+        (h.session_id IS NOT NULL) AS is_head_blocker,
+        EXISTS (
+            SELECT 1
+            FROM window_rows b
+            WHERE b.collection_time = w.collection_time
+            AND   b.session_id = w.blocking_session_id
+        ) AS blocker_in_capture
+    FROM window_rows w
+    LEFT JOIN heads h
+      ON  h.collection_time = w.collection_time
+      AND h.session_id = w.session_id
+    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + @"
+)
+SELECT
+    p.session_id,
+    p.database_name,
+    p.elapsed_time_formatted,
+    p.query_text,
+    p.status,
+    p.blocking_session_id,
+    p.wait_type,
+    p.wait_time_ms,
+    p.wait_resource,
+    p.cpu_time_ms,
+    p.total_elapsed_time_ms,
+    p.reads,
+    p.writes,
+    p.logical_reads,
+    p.granted_query_memory_gb,
+    p.transaction_isolation_level,
+    p.dop,
+    p.parallel_worker_count,
+    p.collection_time,
+    p.login_name,
+    p.host_name,
+    p.program_name,
+    p.open_transaction_count,
+    p.percent_complete,
+    p.query_hash,
+    p.is_head_blocker,
+    p.blocker_in_capture,
+    EXISTS (
+        SELECT 1
+        FROM population q
+        WHERE q.collection_time = p.collection_time
+        AND   q.session_id = p.blocking_session_id
+    ) AS blocker_in_population,
+    COUNT(*) OVER () AS population_count
+FROM population p
+ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
+LIMIT $4";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = cap });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+
+        var items = new List<QuerySnapshotRow>();
+        long populationCount = 0;
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new QuerySnapshotRow
+            {
+                SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                Status = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                BlockingSessionId = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                WaitType = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                WaitTimeMs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                WaitResource = reader.IsDBNull(8) ? "" : reader.GetString(8),
+                CpuTimeMs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                TotalElapsedTimeMs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                Reads = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+                Writes = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
+                LogicalReads = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
+                GrantedQueryMemoryGb = reader.IsDBNull(14) ? 0 : ToDouble(reader.GetValue(14)),
+                TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
+                Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
+                ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
+                CollectionTime = reader.IsDBNull(18) ? DateTime.MinValue : reader.GetDateTime(18),
+                LoginName = reader.IsDBNull(19) ? "" : reader.GetString(19),
+                HostName = reader.IsDBNull(20) ? "" : reader.GetString(20),
+                ProgramName = reader.IsDBNull(21) ? "" : reader.GetString(21),
+                OpenTransactionCount = reader.IsDBNull(22) ? 0 : reader.GetInt32(22),
+                PercentComplete = reader.IsDBNull(23) ? 0m : Convert.ToDecimal(reader.GetValue(23)),
+                QueryHash = reader.IsDBNull(24) ? "" : reader.GetString(24),
+                IsHeadBlocker = !reader.IsDBNull(25) && reader.GetBoolean(25),
+                BlockerInCapture = !reader.IsDBNull(26) && reader.GetBoolean(26),
+                BlockerInPopulation = !reader.IsDBNull(27) && reader.GetBoolean(27),
+            });
+            populationCount = Convert.ToInt64(reader.GetValue(28));
+        }
+
+        return (items, populationCount);
+    }
+
     /// <summary>
     /// Gets lightweight blocking + deadlock counts and latest event time for alert badge updates.
     /// Much cheaper than fetching full rows with XML — just COUNT(*) and MAX(time).
     /// </summary>
-    /// <param name="utcOffsetMinutes">
-    /// The UTC offset of <paramref name="serverId"/> itself, not of whichever server tab the desktop has
-    /// selected. This read is the one on the badge path, which runs on every tab's own timer whether or
-    /// not that tab is visible, so the server it names and the server the desktop is showing are
-    /// routinely different ones.
-    ///
-    /// <para>Required, and required to be the SAME offset the caller used to convert
-    /// <paramref name="fromDate"/>/<paramref name="toDate"/> out of the display mode. Those two
-    /// conversions cancel in <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> and only the one here
-    /// applies in <c>ServerTime</c>; sourcing them from different servers leaves a residue in every
-    /// mode. <c>ServerTab.RefreshAlertCountsAsync</c> derives both from the tab's own
-    /// <c>UtcOffsetMinutes</c>.</para>
-    /// </param>
-    public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, int utcOffsetMinutes)
+    /// <remarks>
+    /// <paramref name="fromDate"/>/<paramref name="toDate"/> are the tab's custom range as naive-UTC instants
+    /// (#4766), so this read needs no clock. It is the one on the badge path, which runs on every tab's own timer
+    /// whether or not that tab is visible, so the server it names and the server the desktop is showing are
+    /// routinely different ones; it once had to be handed the clock of the right one, and a clock from the wrong
+    /// one left the window an offset off in every display mode.
+    /// <para>A DISPLAY read (the server tab's badge), not an alert-engine read: it windows on the event time, as
+    /// the grids do, and the alert engine never calls it.</para>
+    /// </remarks>
+    public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, utcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         /* blocking_count prefers the blocked-process-report; falls back to the always-on DMV snapshot when
            BPR captured nothing (AWS RDS). latest_event_time includes DMV blocking recency too. */
         command.CommandText = @"
 SELECT
-    COALESCE(NULLIF((SELECT COUNT(*) FROM v_blocked_process_reports
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3), 0),
+    COALESCE(NULLIF((SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev), 0),
      (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS blocking_count,
-    (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS deadlock_count,
+    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3) AS deadlock_count,
     (SELECT MAX(t) FROM (
-        SELECT MAX(event_time) AS t FROM v_blocked_process_reports
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        SELECT MAX(event_time) AS t FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev
         UNION ALL
         SELECT MAX(event_time) AS t FROM v_dmv_blocking_snapshots
         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
         UNION ALL
-        SELECT MAX(deadlock_time) AS t FROM v_deadlocks
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        SELECT MAX(deadlock_time) AS t FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
     )) AS latest_event_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -324,15 +620,42 @@ SELECT
     }
 
     /// <summary>
-    /// Gets recent blocked process reports from the XE-based collector.
+    /// Gets recent blocked process reports from the XE-based collector plus the always-on DMV fallback,
+    /// newest first, merged and re-capped at <paramref name="limit"/>.
+    ///
+    /// <para>The cap is a PARAMETER with the grid's value as its default (#3541 A3): it was <c>LIMIT 200</c> on
+    /// both arms and in the merge, under an MCP tool that advertised <c>limit</c> and took that many off the
+    /// top. The MCP tools pass <c>limit + 1</c> and read the extra row as truncation; the grids pass nothing.
+    /// The two arms are fetched so a merged result larger than the cap stays OBSERVABLE: the XE arm fetches
+    /// the cap, the DMV arm fetches the cap PLUS the XE rows in hand, because the merge drops one DMV row per
+    /// (pair, minute) an XE row already covers — fetched at the bare cap, a surplus made of XE-covered rows
+    /// would vanish in the merge and a full page would read as complete. Darling's
+    /// <c>DarlingBlockingReader</c> does the same, for the same reason.</para>
+    ///
+    /// <para><paramref name="xmlOnly"/> restricts the read to XE rows that CARRY a report, in SQL, and skips the
+    /// DMV arm entirely (a DMV snapshot never has one) — the population <c>get_blocked_process_xml</c> pages
+    /// over, so its <c>limit</c> counts reports rather than rows it would have to discard.</para>
     /// </summary>
-    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportMerge.DefaultCap, bool xmlOnly = false, bool windowOnCollectionTime = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        /* $4 is the row cap, so the optional database list starts at $5. */
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        var xmlClause = xmlOnly
+            ? @"
+AND   blocked_process_report_xml IS NOT NULL
+AND   blocked_process_report_xml <> ''"
+            : string.Empty;
+
+        /* The XE arm windows on event_time; the DMV arm stays on collection_time because
+           dmv_blocking_snapshots.event_time IS its collection time. The alert engine opts out (see GetRecentDeadlocksAsync),
+           and only that collection_time window needs the look-back collectedFrom adds. */
+        var xeRows = windowOnCollectionTime
+            ? StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3" + xmlClause + dbClause, collectedFrom: "$2")
+            : StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + xmlClause + dbClause);
 
         command.CommandText = @"
 SELECT
@@ -373,16 +696,14 @@ SELECT
     blocking_priority,
     contentious_object,
     monitor_loop
-FROM v_blocked_process_reports
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3" + dbClause + @"
+FROM " + xeRows + @" AS ev
 ORDER BY event_time DESC
-LIMIT 200";
+LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = limit });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -436,23 +757,26 @@ LIMIT 200";
 
         // Always-on DMV blocking snapshot: surface its rows in the grid too, so the block-chain viewer is
         // reachable when the blocked-process-report XE captured nothing (AWS RDS). Same connection/lock.
-        await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames);
+        // Skipped under xmlOnly: a DMV snapshot never carries a report, so it has nothing to add to that page.
+        if (!xmlOnly)
+            await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit);
 
         return items;
     }
 
     /// <summary>
     /// Fetches always-on DMV blocking-snapshot rows for the blocked-process grid and merges them into the
-    /// BPR list — BPR preferred (dedup by blocked/blocker SPID within a minute), re-capped to 200 newest
-    /// first. Runs on the caller's connection/lock (the read lock is non-recursive, so a second connection
-    /// can't be opened). v_dmv_blocking_snapshots is created by DuckDbInitializer, so it always exists.
+    /// BPR list — BPR preferred (dedup by blocked/blocker SPID within a minute), re-capped to the newest
+    /// <paramref name="cap"/>. Runs on the caller's connection/lock (the read lock is non-recursive, so a
+    /// second connection can't be opened). v_dmv_blocking_snapshots is created by DuckDbInitializer, so it
+    /// always exists. The DMV fetch is <paramref name="cap"/> plus the XE rows already in
+    /// <paramref name="items"/> — see <see cref="GetRecentBlockedProcessReportsAsync"/> for why.
     /// </summary>
     private static async Task AppendDmvBlockedProcessGridRowsAsync(
-        Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames = null)
+        Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames, int cap)
     {
-        const int gridCap = 200;
         var dmvItems = new List<BlockedProcessReportRow>();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
         using (var command = createCommand())
         {
             command.CommandText = @"
@@ -467,10 +791,11 @@ SELECT
 FROM v_dmv_blocking_snapshots
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"
 ORDER BY event_time DESC
-LIMIT 200";
+LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = startTime });
             command.Parameters.Add(new DuckDBParameter { Value = endTime });
+            command.Parameters.Add(new DuckDBParameter { Value = cap + items.Count });
             foreach (var db in dbValues)
                 command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -510,7 +835,7 @@ LIMIT 200";
 
         /* Dedup + re-cap moved verbatim to the shared BlockedProcessReportMerge (Phase-5 slice B)
            so the Darling Postgres adapter reproduces EXACTLY these XE-preferred fallback semantics. */
-        BlockedProcessReportMerge.AppendDmvFallbackRows(items, dmvItems, gridCap);
+        BlockedProcessReportMerge.AppendDmvFallbackRows(items, dmvItems, cap);
     }
 
     /// <summary>
@@ -534,9 +859,7 @@ SELECT
     {PerformanceMonitorLite.Analysis.BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {PerformanceMonitorLite.Analysis.BlockingPairRowQuery.TrailingIdentityColumns}
-FROM v_blocked_process_reports
-WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
-{PerformanceMonitorLite.Analysis.BlockingPairRowQuery.SpidFilter}
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + PerformanceMonitorLite.Analysis.BlockingPairRowQuery.SpidFilter)} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -570,7 +893,7 @@ LIMIT 5000";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* BPR buckets, falling back to the always-on DMV snapshot only when BPR has no buckets in the
@@ -578,15 +901,14 @@ LIMIT 5000";
         command.CommandText = @"
 WITH bpr AS (
     SELECT
-        date_trunc('hour', collection_time) AS bucket,
+        date_trunc('hour', event_time) AS bucket,
         COUNT(*) AS event_count,
         COALESCE(SUM(wait_time_ms), 0) / 1000.0 AS total_wait_sec,
         COUNT(DISTINCT blocking_spid) AS distinct_blockers,
         COUNT(DISTINCT blocked_spid) AS distinct_blocked,
         COUNT(DISTINCT database_name) AS distinct_databases
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"
-    GROUP BY date_trunc('hour', collection_time)
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
+    GROUP BY date_trunc('hour', event_time)
 ),
 dmv AS (
     SELECT
@@ -640,17 +962,15 @@ ORDER BY bucket";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
-    COUNT(*) AS deadlock_count
-FROM v_deadlocks
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-GROUP BY date_trunc('hour', collection_time)
+    date_trunc('hour', deadlock_time) AS bucket,
+    " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+FROM v_deadlocks AS dl
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+GROUP BY date_trunc('hour', deadlock_time)
 ORDER BY bucket";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -683,7 +1003,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* Use blocked_process_reports from XE session - more reliable than point-in-time snapshots
@@ -693,8 +1013,7 @@ ORDER BY bucket";
         command.CommandText = @"
 WITH bpr AS (
     SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (
@@ -735,7 +1054,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -744,11 +1063,9 @@ SELECT
 FROM (
     SELECT
         DATE_TRUNC('minute', deadlock_time) AS bucket,
-        COUNT(*) AS deadlock_count
-    FROM v_deadlocks
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
+        " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+    FROM v_deadlocks AS dl
+    WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
     GROUP BY DATE_TRUNC('minute', deadlock_time)
 ) sub
 ORDER BY bucket";
@@ -836,7 +1153,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -890,57 +1207,105 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
-    /// Returns per-second rates grouped by wait type.
-    ///
-    /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
-    /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
-    /// are SERVER-LOCAL and converted back to UTC inside GetTimeRange — handing them an instant already in
-    /// UTC would shift the window by the monitored server's offset. collection_time is stored in UTC, so
-    /// this read windows on the UTC bounds.</para>
+    /// The bucketed statement text (#4349, matching #4234/#4340's shape), pulled out of
+    /// <see cref="GetLockWaitTrendAsync"/> so its shape is checkable without a live DuckDB.
     /// </summary>
-    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-
-        command.CommandText = @"
+    internal static readonly string LockWaitTrendSql = $@"
 WITH raw AS
 (
     SELECT
         collection_time,
         wait_type,
         delta_wait_time_ms,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)))) AS interval_seconds
+        /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+           and the reader drops the row rather than reading 0.00. NULL (a pre-v60 row) falls back to the LAG. */
+        CASE WHEN sample_interval_seconds IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time))))
+             ELSE NULLIF(sample_interval_seconds, 0)
+        END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
     AND   wait_type LIKE 'LCK%'
     AND   collection_time >= $2
     AND   collection_time <= $3
+),
+rated AS
+(
+    SELECT
+        collection_time,
+        wait_type,
+        CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN delta_wait_time_ms END AS rated_wait_ms,
+        CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN interval_seconds END AS rated_seconds
+    FROM raw
 )
 SELECT
-    collection_time,
     wait_type,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
-FROM raw
-WHERE delta_wait_time_ms >= 0
-ORDER BY collection_time, wait_type";
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    SUM(rated_wait_ms) / SUM(rated_seconds) AS wait_time_ms_per_second,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY wait_type, 2
+HAVING COUNT(rated_seconds) > 0
+ORDER BY wait_type, 2";
+
+    /// <summary>
+    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
+    /// Returns per-second rates grouped by wait type.
+    ///
+    /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
+    /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
+    /// are a custom range's UTC bounds (#4766) and the caller here has one instant, the end of an hours-back
+    /// window: the anchor states that end once and the window's length comes from hoursBack. collection_time
+    /// is stored in UTC, so this read windows on the UTC bounds.</para>
+    /// <para>#4349: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (wait type), matching
+    /// #4234/#4340's shape — <c>seriesCount</c> is always 1 into <see cref="TrendBuckets.AutoMinutes"/>. When
+    /// every bucket the call returns holds exactly one physical collection, every point is stamped at its own
+    /// raw collection time instead of the <c>time_bucket</c> grid line.</para>
+    /// </summary>
+    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = LockWaitTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<LockWaitTrendPoint>();
+        var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, double Rate)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            if (Convert.ToInt64(reader.GetValue(4)) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(3),
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))));
+        }
+
+        var items = new List<LockWaitTrendPoint>();
+        foreach (var row in rows)
+        {
             items.Add(new LockWaitTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0 : reader.GetDouble(2)
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                WaitType = row.WaitType,
+                WaitTimeMsPerSecond = row.Rate
             });
         }
         return items;
@@ -977,6 +1342,10 @@ public class DeadlockRow : DeadlockAlertRow
 {
     public DateTime CollectionTime { get; set; }
     public DateTime? DeadlockTime { get; set; }
+
+    /// <summary>The database the deadlock was captured for. On an Azure SQL Database <c>master</c> target
+    /// this is the user database whose deadlock it is.</summary>
+    public string? DatabaseName { get; set; }
 }
 
 /// <summary>
@@ -1094,8 +1463,33 @@ public class QuerySnapshotRow
     public int OpenTransactionCount { get; set; }
     public decimal PercentComplete { get; set; }
     public string QueryHash { get; set; } = "";
-    public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
-    public bool HasLiveQueryPlan => !string.IsNullOrEmpty(LiveQueryPlan);
+
+    /// <summary>Some row in the SAME capture names this session as its blocker (#3541 A13) — the reason a
+    /// WAITFOR row can be on the MCP page. Set by <see cref="LocalDataService.GetActiveQueriesPageAsync"/> only.</summary>
+    public bool IsHeadBlocker { get; set; }
+
+    /// <summary>For a victim: its blocker had a row in the same capture at all. False is the idle
+    /// open-transaction head blocker sys.dm_exec_requests never lists. MCP read only.</summary>
+    public bool BlockerInCapture { get; set; }
+
+    /// <summary>For a victim: its blocker also passes the caller's filters, so it is in the population the
+    /// page is drawn from (it may still be past the page — the tool checks that). MCP read only.</summary>
+    public bool BlockerInPopulation { get; set; }
+
+    /// <summary>
+    /// Whether a plan exists for this capture (#4239). Independent of <see cref="QueryPlan"/>: the three
+    /// snapshot reads (<see cref="LocalDataService.GetLatestQuerySnapshotsAsync"/>,
+    /// <see cref="LocalDataService.GetQuerySnapshotsByWaitTypeAsync"/>,
+    /// <see cref="LocalDataService.GetAllQuerySnapshotsInRangeAsync"/>) set this from
+    /// <c>query_plan IS NOT NULL</c> without selecting the payload, leaving <see cref="QueryPlan"/> null on
+    /// the row; the plan buttons fetch it on click via <see cref="LocalDataService.ResolveSnapshotEstimatedPlanAsync"/>.
+    /// The one path that still builds a row with the payload already in hand — <c>ServerTab.xaml.cs</c>'s
+    /// Live Snapshot handler, whose rows are never in the store — sets this explicitly alongside
+    /// <see cref="QueryPlan"/> instead of relying on a read.
+    /// </summary>
+    public bool HasQueryPlan { get; set; }
+    /// <summary>See <see cref="HasQueryPlan"/> — the same independence, for <see cref="LiveQueryPlan"/>.</summary>
+    public bool HasLiveQueryPlan { get; set; }
     public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);
 
     // Sessions this session is blocking at the same collection_time (SQL-derived in the

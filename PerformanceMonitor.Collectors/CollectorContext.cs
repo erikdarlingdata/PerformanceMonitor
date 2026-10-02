@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -58,6 +59,38 @@ public sealed class CollectorContext
     /// mid-cycle mutations).
     /// </summary>
     public DateTime? Watermark { get; set; }
+
+    /// <summary>
+    /// How far back an event collector (blocked process reports, long query completions, system_health
+    /// events) reads when <see cref="Watermark"/> is null: on its first run, and on a run whose watermark read
+    /// failed. Such a run can store again an event the store already holds, so Lite's event reads look this
+    /// far back before a window's start to find the first copy (<c>StoredEventCopies</c>). The collectors and
+    /// that read share this one value, so the read always looks back at least as far as a collector does.
+    /// </summary>
+    public static readonly TimeSpan EventFallbackWindow = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Which of the definition's two watermark columns <see cref="Watermark"/> was read from (#3778): true
+    /// when the host resolved it from <c>UtcWatermarkColumn</c> (the store held at least one row with the UTC
+    /// twin, so the value is a UTC instant), false when it came from <c>WatermarkColumn</c> — which for the one
+    /// definition that declares both means a LOCAL wall-clock stamp off pre-rung rows, and for every other
+    /// definition means what it always meant, because they declare no UTC twin and the host never sets this.
+    /// False whenever <see cref="Watermark"/> is null.
+    ///
+    /// <para>The point of carrying the frame rather than the value alone: a definition that dedups client-side
+    /// compares each row's stamp against the watermark, and a comparison across frames is exactly the lie the
+    /// V134 rung retired. With the frame stated, <c>CpuUtilizationCollector.ReadAsync</c> compares the row's
+    /// UTC twin against a UTC watermark and its local stamp against a local one — so the first post-upgrade
+    /// run (no UTC value stored yet) dedups local-to-local exactly as it did before, and every later run dedups
+    /// UTC-to-UTC, which is the comparison that survives the autumn fall-back hour.</para>
+    ///
+    /// <para>Init-only, unlike <see cref="Watermark"/>, and that asymmetry is a stated boundary: the per-database
+    /// and per-item refreshes that mutate <see cref="Watermark"/> mid-cycle read the declared column alone and
+    /// would leave this flag stale if a definition ever declared a UTC twin together with a
+    /// <c>PerDatabaseWatermarkColumn</c>. None does, and <c>CpuUtilizationCollectorDefinitionTests</c> pins
+    /// that; the day one does, those refreshes have to carry the pair and this becomes settable with them.</para>
+    /// </summary>
+    public bool WatermarkFromUtcColumn { get; init; }
 
     /// <summary>
     /// The database the host's Azure per-database loop is currently reading, set per iteration
@@ -117,6 +150,40 @@ public sealed class CollectorContext
     public Dictionary<string, string> PendingState { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// State a definition stages for the ITEM it is reading right now (one database of a per-database run,
+    /// or the single item of a server-scoped one), keyed exactly like <see cref="PendingState"/>.
+    ///
+    /// <para><b>The rule: state a definition stages here is saved only if this item's rows were written.</b>
+    /// The host lands it into <see cref="PendingState"/> from the item's completion point, after the item's
+    /// read AND write both succeeded, and drops it when the item's read, a later result set or the write
+    /// throws. A definition that records how far it has read (a cursor, a ring-buffer position) must stage
+    /// it here, never in <see cref="PendingState"/> directly: the per-database loops tolerate one item's
+    /// failure and save <see cref="PendingState"/> as long as a sibling succeeded, so a value written
+    /// straight there would advance past rows no one stored and the next run would never read them again.</para>
+    ///
+    /// <para>The host clears it before each item's read, so one item's staged state cannot leak into a
+    /// sibling's landing. Landing and dropping go through <see cref="LandStagedItemState"/> and
+    /// <see cref="DropStagedItemState"/>.</para>
+    /// </summary>
+    public Dictionary<string, string> StagedItemState { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Moves everything staged for the current item into <see cref="PendingState"/>. Host-only: call
+    /// it once the item's read and write have both succeeded.</summary>
+    public void LandStagedItemState()
+    {
+        foreach (var (key, value) in StagedItemState)
+        {
+            PendingState[key] = value;
+        }
+
+        StagedItemState.Clear();
+    }
+
+    /// <summary>Discards everything staged for the current item. Host-only: call it before an item's read,
+    /// and whenever the item's read or write did not complete.</summary>
+    public void DropStagedItemState() => StagedItemState.Clear();
+
+    /// <summary>
     /// The labelled COUNTS this definition measured on the target during the round trip it had already
     /// made, rendered onto this run's <c>collection_log.error_message</c> by whichever host is running it
     /// (#3161). Empty for every collector that measures nothing, which leaves the column NULL exactly as
@@ -156,6 +223,8 @@ public sealed class CollectorContext
     /// so it cannot reach a release either. The renderer counts rejects instead of throwing, for a list some
     /// caller assembled by hand.</para>
     /// </summary>
+    /// <para>Counts are non-negative by convention: nothing emits a negative, and the health read's detector
+    /// (<c>CollectorHealthClassifier.HasMeasurements</c>) does not accept a leading <c>-</c>.</para>
     /// <exception cref="ArgumentException">The label is not a legal count name.</exception>
     public void Measure(string label, long value)
     {
@@ -218,6 +287,82 @@ public sealed class CollectorContext
     /// install/09_collect_query_store.sql).
     /// </summary>
     public bool CapturePlanXml { get; init; }
+
+    /// <summary>
+    /// Whether this target has granted <c>pg_read_binary_file</c> (#4046 part 1c), resolved by the host
+    /// through <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// the three collectors that read <see cref="PgServerLogTail"/>'s tail. False (the default, and what
+    /// every host that never sets this leaves it at) keeps today's <see cref="PgServerLogTail.TailCteSql"/>
+    /// route; true switches <c>BuildQuery</c> to <see cref="PgServerLogTail.TailCteBinarySql"/>. Settable
+    /// rather than init-only because the host resolves it on the connection it is about to hand the
+    /// definition, the same shape as <see cref="CurrentDatabaseName"/> and <see cref="Watermark"/>.
+    /// </summary>
+    public bool PgReadBinaryFileGranted { get; set; }
+
+    /// <summary>
+    /// How many bytes the text log tails move their read start forward (#4735), 0 for an ordinary read. A read with
+    /// no saved position starts <see cref="PgServerLogTail.TailBytes"/> before the end of the file, and PostgreSQL
+    /// refuses a <c>pg_read_file</c> slice whose first byte is inside a multi-byte character (22021). The host
+    /// repeats the read with 1, then 2, then 3 here, and <see cref="PgServerLogTail.WithResume"/> binds it.
+    /// </summary>
+    public int PgLogReadShiftBytes { get; set; }
+
+    /// <summary>
+    /// Whether this target's <c>log_destination</c> includes <c>csvlog</c> (#4053 part a1b), resolved by the
+    /// host through <see cref="PgLogFormatCapability.IsCsvlogEnabledAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// <c>pg_log_events</c> alone — the deadlock and plan-capture collectors never read this. False (the
+    /// default) keeps today's stderr route via <see cref="PgServerLogTail.TailCteSql"/>; true switches
+    /// <c>PgLogEventsCollector.BuildQuery</c> to the csvlog pair built on <see cref="PgServerLogTail.TailCsvCteSql"/>.
+    /// Settable rather than init-only for the same reason <see cref="PgReadBinaryFileGranted"/> is: the host
+    /// resolves it on the connection it is about to hand the definition.
+    /// </summary>
+    public bool PgLogUsesCsvlog { get; set; }
+
+    /// <summary>
+    /// Whether this target's <c>log_destination</c> includes <c>jsonlog</c> (#4053 part a2), resolved by the
+    /// host through <see cref="PgLogFormatCapability.IsJsonlogEnabledAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// <c>pg_log_events</c> alone — the deadlock and plan-capture collectors never read this. False (the
+    /// default) leaves <see cref="PgLogUsesCsvlog"/> to decide between the csvlog and stderr routes; true
+    /// switches <c>PgLogEventsCollector.BuildQuery</c> to the jsonlog pair built on
+    /// <see cref="PgServerLogTail.TailJsonCteSql"/>/<see cref="PgServerLogTail.TailJsonCteBinarySql"/>, ahead of
+    /// both siblings — jsonlog wins when more than one is configured, for the reason
+    /// <see cref="PgLogFormatCapability"/>'s own remarks give. Settable rather than init-only for the same
+    /// reason <see cref="PgReadBinaryFileGranted"/> is: the host resolves it on the connection it is about to
+    /// hand the definition.
+    /// </summary>
+    public bool PgLogUsesJsonlog { get; set; }
+
+    /// <summary>
+    /// The <see cref="Encoding"/> to decode the binary route's bytes with (#4062) — the connected database's own
+    /// <c>server_encoding</c>, mapped by <see cref="PgServerEncoding.TryGet"/>. Set alongside
+    /// <see cref="PgReadBinaryFileGranted"/> in <c>DarlingCollectorRunner.ResolvePgReadBinaryFileGrantAsync</c>.
+    /// Null whenever <see cref="PgReadBinaryFileGranted"/> is false: a caller must never read the bytea as text
+    /// without checking the grant first, and a null encoding here is one more way that mistake fails loudly
+    /// instead of silently defaulting to UTF-8.
+    /// </summary>
+    public Encoding? PgLogEncoding { get; set; }
+
+    /// <summary>
+    /// Whether this target has granted read access to <c>pg_file_settings</c> (#4251), resolved by the host
+    /// through <see cref="PgFileSettingsCapability.IsReadableAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// <see cref="PgServerConfigCollector"/> alone. False (the default) keeps today's query, which computes
+    /// <c>pending_restart</c> from <c>pg_settings</c> alone — the value that reads false from a connection
+    /// opened after a reload, because that column is backend-local. True switches
+    /// <c>PgServerConfigCollector.BuildQuery</c> to the query that also folds in
+    /// <c>pg_file_settings</c>, which is read from the file and does not have that blind spot. Settable
+    /// rather than init-only for the same reason <see cref="PgReadBinaryFileGranted"/> is: the host resolves
+    /// it on the connection it is about to hand the definition.
+    /// </summary>
+    public bool PgFileSettingsReadable { get; set; }
+
+    /// <summary>
+    /// The store's log-hash key (#4004): the secret the <c>pg_log_events</c> collector keys its two stored identities
+    /// with, <c>raw_line_hash</c> and <c>statement_fingerprint</c>. The host loads it once at start from outside the
+    /// store and hands the same instance to every run. Null means the host has none (Lite never collects PostgreSQL
+    /// logs; a Darling service whose key file could not be used refuses): the collector then refuses to run before it
+    /// touches the target, rather than hashing without a key.
+    /// </summary>
+    public PgLogHashKey? LogHashKey { get; init; }
 
     /// <summary>
     /// When true, the query_store payload leaves <c>query_sql_text</c> NULL and the host is responsible
@@ -694,6 +839,15 @@ public sealed class CollectorContext
     /// and without this the row is indistinguishable from a write that never faulted at all.</para>
     /// </summary>
     public int StoreWriteReattempts { get; set; }
+
+    /// <summary>
+    /// How many of this cycle's Query Store batches stored their raw rows but missed Darling's latest-snapshot
+    /// interval table and were queued for replay (#3953). Set by the Darling host only; Lite has no such table and
+    /// leaves it at zero. Read once per cycle, after the writes, to compose the collection_log note, for
+    /// <see cref="StoreWriteReattempts"/>'s reason: the cycle writes a SUCCESS row, and without the count the miss
+    /// would be invisible there.
+    /// </summary>
+    public int QueryStoreIntervalMisses { get; set; }
 }
 
 /// <summary>

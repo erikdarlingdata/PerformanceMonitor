@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -27,21 +28,58 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_CreatesRolesIdempotently_LoginNoSuperuser()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
-        /* DO-guarded CREATE ROLE (no IF NOT EXISTS on CREATE ROLE) + a password re-assert every start. */
+        /* DO-guarded CREATE ROLE (no IF NOT EXISTS on CREATE ROLE) + a password re-assert (the default, every
+           role), each carrying the role's SCRAM-SHA-256 verifier rather than the password (#3910). */
         Assert.Contains("FROM pg_roles WHERE rolname = 'admin'", sql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_roles WHERE rolname = 'viewer'", sql, StringComparison.Ordinal);
-        Assert.Contains("CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD 'AdminPassword01';", sql, StringComparison.Ordinal);
-        Assert.Contains("CREATE ROLE viewer LOGIN NOSUPERUSER PASSWORD 'ViewerPassword02';", sql, StringComparison.Ordinal);
-        Assert.Contains("ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD 'AdminPassword01';", sql, StringComparison.Ordinal);
-        Assert.Contains("ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD 'ViewerPassword02';", sql, StringComparison.Ordinal);
+        Assert.Contains($"CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Admin}';", sql, StringComparison.Ordinal);
+        Assert.Contains($"CREATE ROLE viewer LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Viewer}';", sql, StringComparison.Ordinal);
+        /* #3914 review F5, a deliberate change to this pin: the re-assert switches off every attribute that widens a
+           role, not SUPERUSER alone, so an ADOPTED role (already marked) cannot keep CREATEROLE, CREATEDB,
+           REPLICATION or BYPASSRLS that someone gave it since. The CREATE lines need nothing: those are CREATE ROLE's
+           defaults. */
+        Assert.Contains($"ALTER ROLE admin  LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS PASSWORD '{ProvisioningTestSecrets.Admin}';", sql, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE viewer LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS PASSWORD '{ProvisioningTestSecrets.Viewer}';", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3914 review F5: every role membership in which admin, viewer or mcp is the MEMBER is revoked, every start —
+    /// a pg_read_all_data would undo the secret-column carve, and membership in the owner is all of the owner's
+    /// rights. Measured on the bundled PostgreSQL 18: a superuser's plain <c>REVOKE role FROM member</c> removes only
+    /// a grant recorded as the bootstrap superuser's and leaves another grantor's with a WARNING, and RESTRICT fails
+    /// on a membership the member used to grant onward — so the statement names the recorded grantor and cascades.
+    /// Revoking ALL of them is right only because the batch grants none, which is pinned here too: every GRANT in it
+    /// is a privilege ON something.
+    /// </summary>
+    [Fact]
+    public void BuildProvisioningSql_RevokesEveryMembershipOfTheThreeRoles_AndGrantsNone()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+
+        var section = sql[sql.IndexOf("-- 11. Role memberships (#3914)", StringComparison.Ordinal)..];
+        Assert.Contains("FROM pg_catalog.pg_auth_members AS a", section, StringComparison.Ordinal);
+        Assert.Contains("JOIN pg_catalog.pg_roles AS m ON m.oid = a.member", section, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor", section, StringComparison.Ordinal);
+        Assert.Contains("WHERE m.rolname IN ('admin', 'viewer', 'mcp')", section, StringComparison.Ordinal);
+        Assert.Contains("EXECUTE format('REVOKE %I FROM %I', membership.granted, membership.member)", section, StringComparison.Ordinal);
+        Assert.Contains("format(' GRANTED BY %I', membership.grantor)", section, StringComparison.Ordinal);
+        Assert.Contains("|| ' CASCADE';", section, StringComparison.Ordinal);
+
+        /* It comes after every grant, so nothing later in the batch can hand a membership back. */
+        Assert.DoesNotContain("GRANT ", section[section.IndexOf("DO $do$", StringComparison.Ordinal)..], StringComparison.Ordinal);
+
+        /* And the batch grants no membership: each GRANT statement names what it is ON. */
+        var statements = System.Text.RegularExpressions.Regex.Matches(sql, @"(?m)^\s*GRANT\s[^;]*;");
+        Assert.NotEmpty(statements);
+        Assert.All(statements, statement => Assert.Matches(@"\sON\s", statement.Value));
     }
 
     [Fact]
     public void BuildProvisioningSql_StampsMarker_AndFailsLoudOnUnmarkedCollision()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         Assert.Equal("darling-managed", DarlingManagedRoles.RoleMarker);
 
@@ -60,7 +98,7 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_GrantsReadBothSchemas_WritesConfigForAdminOnly()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         Assert.Contains("GRANT USAGE ON SCHEMA collect, config TO admin, viewer;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer;", sql, StringComparison.Ordinal);
@@ -78,7 +116,7 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_GrantsViewerTheNarrowCustomViewsWrite_WithoutWideningTheSchemaGrant()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         /* #1563: the first viewer write — an EXPLICIT single-table grant on config.custom_views (the web
            dashboard's user-authored view store; editing is loopback-gated server-side). The viewer write set
@@ -111,7 +149,7 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_DefaultPrivileges_AutoGrantNewTables()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         /* New collector tables (created bare into collect via search_path) auto-inherit SELECT. */
         Assert.Contains("ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA collect", sql, StringComparison.Ordinal);
@@ -126,7 +164,7 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_CarvesViewerSecretColumns_FailClosed()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         /* The blanket config SELECT to viewer is still present (covers the non-secret config tables), but
            the three credential-bearing tables are then carved to column-level for viewer. */
@@ -173,9 +211,13 @@ public sealed class DarlingManagedRolesTests
                 "smtp_encrypted_password", "smtp_username", "teams_url", "slack_url",
                 "generic_url", "generic_headers", "pagerduty_routing_key",
             },
+            /* V131 (#3598): the sparse routes table mirrors the parent's destination columns under the same
+               names, so the four webhook-class destinations are the same bearer secrets they are one table
+               up; smtp_recipients and the GENERATED configured_channels presence column are not. */
+            ["config_notification_routes"] = new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" },
         };
 
-        /* Exactly the three known secret-bearing tables, with the expected secret columns. */
+        /* Exactly the four known secret-bearing tables, with the expected secret columns. */
         Assert.Equal(
             expectedSecrets.Keys.OrderBy(k => k, StringComparer.Ordinal),
             DarlingManagedRoles.ViewerRestrictedConfigTables.Select(a => a.Table).OrderBy(k => k, StringComparer.Ordinal));
@@ -211,7 +253,7 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_HardensPublic_ButKeepsAdminViewerConnect()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         Assert.Contains("REVOKE CREATE ON SCHEMA public FROM PUBLIC;", sql, StringComparison.Ordinal);
         Assert.Contains("REVOKE ALL ON DATABASE darling FROM PUBLIC;", sql, StringComparison.Ordinal);
@@ -222,15 +264,15 @@ public sealed class DarlingManagedRolesTests
     }
 
     [Fact]
-    public void BuildProvisioningSql_McpRole_CreatedAndGrantedReadPlusTwoInserts_NoAdp()
+    public void BuildProvisioningSql_McpRole_CreatedAndGrantedReadPlusTwoInserts_NoWriteAdp()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         /* The mcp role is created + stamped + re-asserted, guarded exactly like admin/viewer. */
         Assert.Contains("FROM pg_roles WHERE rolname = 'mcp'", sql, StringComparison.Ordinal);
-        Assert.Contains("CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD 'McpPassword03';", sql, StringComparison.Ordinal);
+        Assert.Contains($"CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Mcp}';", sql, StringComparison.Ordinal);
         Assert.Contains("COMMENT ON ROLE mcp IS 'darling-managed';", sql, StringComparison.Ordinal);
-        Assert.Contains("ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD 'McpPassword03';", sql, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE mcp    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS PASSWORD '{ProvisioningTestSecrets.Mcp}';", sql, StringComparison.Ordinal);
         Assert.Contains("RAISE EXCEPTION 'Role \"mcp\" already exists and was not created by Darling", sql, StringComparison.Ordinal);
 
         /* viewer's read surface, granted as SEPARATE 'TO mcp' statements — NOT appended to the pinned
@@ -254,9 +296,15 @@ public sealed class DarlingManagedRolesTests
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO mcp", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA collect TO mcp", sql, StringComparison.Ordinal);
 
-        /* NO ALTER DEFAULT PRIVILEGES names mcp — ADP has no per-table form, so an ADP INSERT would broaden
-           mcp to ALL of collect. The narrow grants are explicit single-table statements. */
-        Assert.DoesNotContain("ON TABLES TO mcp", sql, StringComparison.Ordinal);
+        /* No default WRITE names mcp — ADP has no per-table form, so an ADP INSERT would broaden mcp to ALL of
+           collect; the narrow grants are explicit single-table statements. The ONE default mcp does get (#3914)
+           is SELECT on collect: the continuous aggregates are created after this batch in the same start, and
+           without it every one was unreadable to the MCP tools until the next restart. Collect holds no secrets;
+           config gets no mcp default, because its secret columns are carved table by table. */
+        Assert.Single(Regex.Matches(sql, "ON TABLES TO mcp"));
+        Assert.Single(Regex.Matches(sql, @"ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA collect\s+GRANT SELECT ON TABLES TO mcp;"));
+        Assert.DoesNotMatch(@"IN SCHEMA config\s+GRANT [A-Z, ]+ ON TABLES TO mcp", sql);
+        Assert.DoesNotMatch(@"(?:INSERT|UPDATE|DELETE)[A-Z, ]* ON TABLES TO mcp", sql);
         Assert.DoesNotContain("ON SEQUENCES TO mcp", sql, StringComparison.Ordinal);
         foreach (var adpLine in sql.Split('\n').Where(l => l.Contains("ALTER DEFAULT PRIVILEGES", StringComparison.Ordinal)))
         {
@@ -267,7 +315,7 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_McpRole_GrantsCustomViewsWrite_LikeViewer()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         /* #1599: the mcp role gets the SAME single-table write on config.custom_views the viewer role has, so the
            MCP custom-view tools can create/update/delete views. An EXPLICIT single-table statement (its own
@@ -294,7 +342,7 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_McpRole_GrantsAlertTuningWrites_NarrowlyWithBeaconColumns()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         /* The MCP alert-tuning write tools: full CRUD on the mute rules, and UPDATE-only on the SINGLETON
            alert-settings row (never INSERT/DELETE — the row is a fixed singleton the service seeds). */
@@ -320,7 +368,7 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_McpRole_GrantsMonitoredServersWrite_Narrowly()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         /* The MCP server-onboarding write tools (add_servers / remove_server): full CRUD on the single
            config_monitored_servers table — an EXPLICIT single-table statement, its own 'TO mcp' line. */
@@ -343,7 +391,7 @@ public sealed class DarlingManagedRolesTests
     [Fact]
     public void BuildProvisioningSql_McpRole_CarvesSecretColumns_LikeViewer()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         /* The mcp role gets the SAME fail-closed secret-column carve as viewer (reusing
            BuildViewerColumnAclSql(config, "mcp")), so a network-reachable token can never read the
@@ -367,41 +415,108 @@ public sealed class DarlingManagedRolesTests
         }
     }
 
+    /// <summary>
+    /// #3910: the batch refuses anything that is not a SCRAM-SHA-256 verifier, a plain password first of all.
+    /// The batch is recorded wherever statement text is (an ERROR's STATEMENT line in the store's own log,
+    /// which the store-log sweep keeps and the viewer role reads), so the builder is where "never the password"
+    /// is enforced rather than hoped for. A shape that could close the literal is refused with the rest.
+    /// </summary>
     [Theory]
+    [InlineData("AdminPassword01")]
     [InlineData("with space")]
-    [InlineData("semi;colon")]
     [InlineData("quote'here")]
-    [InlineData("dash-dash")]
     [InlineData("")]
-    public void BuildProvisioningSql_RejectsNonAlphanumericPassword(string badPassword)
+    [InlineData("md5aaaabbbbccccddddeeeeffff00001111")]
+    [InlineData("SCRAM-SHA-256$4096:c2FsdA==$c3RvcmVk'--:c2VydmVy")]
+    [InlineData("SCRAM-SHA-256$4096:c2FsdA==$c3RvcmVk")]
+    public void BuildProvisioningSql_RefusesAnythingButAScramVerifier(string bad)
     {
-        /* Passwords are interpolated into DDL literals; the alnum guard fails closed if the
-           generator's alphabet is ever widened without switching to quote_literal. Guards all THREE
-           role passwords (admin/viewer/mcp). */
-        Assert.Throws<ArgumentException>(() => DarlingManagedRoles.BuildProvisioningSql(badPassword, "ViewerPassword02", "McpPassword03"));
-        Assert.Throws<ArgumentException>(() => DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", badPassword, "McpPassword03"));
-        Assert.Throws<ArgumentException>(() => DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", badPassword));
+        Assert.Throws<ArgumentException>(() => DarlingManagedRoles.BuildProvisioningSql(bad, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp));
+        Assert.Throws<ArgumentException>(() => DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, bad, ProvisioningTestSecrets.Mcp));
+        Assert.Throws<ArgumentException>(() => DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, bad));
     }
 
+    /// <summary>The real path's shape: verifiers of three generated passwords go in, and no password comes out
+    /// anywhere in the batch.</summary>
     [Fact]
-    public void BuildProvisioningSql_AcceptsGeneratedPasswords()
+    public void BuildProvisioningSql_CarriesVerifiersOfTheGeneratedPasswords_AndNeverThePasswords()
     {
-        /* The real generated passwords (32-char alnum) pass the guard and inject cleanly. */
         var admin = DarlingManagedPostgres.GeneratePassword();
         var viewer = DarlingManagedPostgres.GeneratePassword();
         var mcp = DarlingManagedPostgres.GeneratePassword();
 
-        var sql = DarlingManagedRoles.BuildProvisioningSql(admin, viewer, mcp);
+        var sql = DarlingManagedRoles.BuildProvisioningSql(
+            ScramSha256Verifier.Create(admin), ScramSha256Verifier.Create(viewer), ScramSha256Verifier.Create(mcp));
 
-        Assert.Contains($"PASSWORD '{admin}'", sql, StringComparison.Ordinal);
-        Assert.Contains($"PASSWORD '{viewer}'", sql, StringComparison.Ordinal);
-        Assert.Contains($"PASSWORD '{mcp}'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(admin, sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(viewer, sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(mcp, sql, StringComparison.Ordinal);
+        Assert.Equal(6, System.Text.RegularExpressions.Regex.Matches(sql, @"PASSWORD 'SCRAM-SHA-256\$4096:").Count);
+    }
+
+    /// <summary>
+    /// #3910's steady state: a role whose stored verifier already accepts its credential file re-asserts its
+    /// attributes and NOT its password, so a converged start sends no PASSWORD clause at all. The CREATE branch
+    /// keeps its verifier either way, for a role that does not exist yet.
+    /// </summary>
+    [Fact]
+    public void BuildProvisioningSql_ReassertsThePasswordOnlyForTheRolesItIsTold()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 60, PasswordReassert.Viewer);
+
+        Assert.Contains("ALTER ROLE admin  LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS;", sql, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE viewer LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS PASSWORD '{ProvisioningTestSecrets.Viewer}';", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS;", sql, StringComparison.Ordinal);
+        Assert.Contains($"CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Admin}';", sql, StringComparison.Ordinal);
+        Assert.Contains($"CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Mcp}';", sql, StringComparison.Ordinal);
+
+        /* No PASSWORD clause anywhere after the CREATE branch: the #3914 attribute list moved the clause off the end
+           of "LOGIN NOSUPERUSER", so the check is on the clause itself rather than on what used to precede it. */
+        var none = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 60, PasswordReassert.None);
+        Assert.DoesNotContain(" PASSWORD '", none[none.IndexOf("-- 1b.", StringComparison.Ordinal)..], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Which roles need their password re-asserted (#3910): a missing role, a stored MD5 hash (an older store),
+    /// a verifier of a different password (a regenerated credential file) and a refused read all re-assert; a
+    /// stored verifier that accepts the file's password does not.
+    /// </summary>
+    [Fact]
+    public void PlanPasswordReassert_ReassertsOnlyWhatTheStoreDoesNotAlreadyAccept()
+    {
+        var stored = new System.Collections.Generic.Dictionary<string, string?>
+        {
+            ["admin"] = ProvisioningTestSecrets.Admin,
+            ["viewer"] = ScramSha256Verifier.Create("SomeOtherPassword"),
+            ["mcp"] = "md5aaaabbbbccccddddeeeeffff00001111",
+        };
+
+        Assert.Equal(
+            PasswordReassert.Viewer | PasswordReassert.Mcp,
+            DarlingManagedRoles.PlanPasswordReassert(stored, ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword));
+
+        Assert.Equal(
+            PasswordReassert.All,
+            DarlingManagedRoles.PlanPasswordReassert(new System.Collections.Generic.Dictionary<string, string?>(), "a", "b", "c"));
+
+        var converged = new System.Collections.Generic.Dictionary<string, string?>
+        {
+            ["admin"] = ProvisioningTestSecrets.Admin,
+            ["viewer"] = ScramSha256Verifier.Create(ProvisioningTestSecrets.ViewerPassword),
+            ["mcp"] = ProvisioningTestSecrets.Mcp,
+            ["viewer_unrelated"] = null,
+        };
+        Assert.Equal(
+            PasswordReassert.None,
+            DarlingManagedRoles.PlanPasswordReassert(converged, ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword));
     }
 
     [Fact]
     public void BuildProvisioningSql_CreatesResolveDefinerFunction_ScopedAndGrantedToViewerAndMcp()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         /* #3334: the SECURITY DEFINER resolve-on-delete write function, so viewer/mcp can record the recovery
            row config_alert_log otherwise refuses them WITHOUT a blanket INSERT grant that would let them forge
@@ -434,5 +549,56 @@ public sealed class DarlingManagedRolesTests
 
         /* The shared builder emits the same CREATE + REVOKE the gated live proof test creates the function from. */
         Assert.Contains(DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config"), sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3899: the two read identities log a statement past the slow-statement line, a third of their 60 s default
+    /// ceiling (#4442) CAPPED at 5000 ms, WITHOUT its bind parameters (mcp also writes the alert settings, whose
+    /// values include secrets), and the config writer (admin) is not among them. The BYO script sets the same
+    /// line on its one read identity, so the two paths agree at the default, and it turns utility tracking off
+    /// for its own session BEFORE its first password-bearing statement, so its own role DDL never reaches
+    /// pg_stat_statements.
+    /// </summary>
+    [Fact]
+    public void Provisioning_LogsSlowStatementsOnTheReadRolesOnly_WithoutParameters()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 60);
+
+        Assert.Equal(5000, DarlingManagedRoles.SlowStatementThresholdMs(60));
+        Assert.Equal(5000, DarlingManagedRoles.SlowStatementThresholdMs(15));
+        Assert.Equal(1666, DarlingManagedRoles.SlowStatementThresholdMs(5));
+        Assert.Equal(5000, DarlingManagedRoles.SlowStatementThresholdMs(600));
+        Assert.Contains("ALTER ROLE viewer SET log_min_duration_statement = '5000ms';", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE viewer SET log_parameter_max_length = 0;", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    SET log_parameter_max_length = 0;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ROLE admin  SET log_min_duration_statement", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ROLE admin SET log_min_duration_statement", sql, StringComparison.Ordinal);
+
+        var byo = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql");
+        Assert.Contains("ALTER ROLE viewer SET log_min_duration_statement = '5000ms';", byo, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE viewer SET log_parameter_max_length = 0;", byo, StringComparison.Ordinal);
+
+        var utilityOff = byo.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
+        Assert.True(utilityOff >= 0, "provision-roles.sql no longer turns utility tracking off for its own session");
+        Assert.True(utilityOff < byo.IndexOf("CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal),
+            "provision-roles.sql sends a password before it turns utility tracking off");
+        Assert.True(utilityOff < byo.IndexOf("ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal),
+            "provision-roles.sql sends a password before it turns utility tracking off");
+
+        /* #3914: the script creates mcp too, so its password statements and its slow-statement lines are held to
+           the same order and the same settings. */
+        var mcpCreate = byo.IndexOf("CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal);
+        var mcpAlter = byo.IndexOf("ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal);
+        Assert.True(mcpCreate > utilityOff && mcpAlter > utilityOff,
+            "provision-roles.sql sends the mcp password before it turns utility tracking off");
+        Assert.Contains("ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';", byo, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    SET log_parameter_max_length = 0;", byo, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    SET statement_timeout = '60s';", byo, StringComparison.Ordinal);
+
+        /* The BYO remedy for the preload names the multi-literal ALTER SYSTEM form, never the one-literal list
+           that stores a single library name (#3904's review). */
+        Assert.Contains("ALTER SYSTEM SET shared_preload_libraries = 'timescaledb', 'pg_stat_statements';", byo, StringComparison.Ordinal);
+        Assert.DoesNotContain("'timescaledb,pg_stat_statements'", byo, StringComparison.Ordinal);
     }
 }

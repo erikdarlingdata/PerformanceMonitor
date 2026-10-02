@@ -35,6 +35,7 @@ using PerformanceMonitor.Common;
 /* Type alias (not a namespace import) so PerformanceMonitor.Alerting's CpuAlertMode enum can never
    collide with Models.CpuAlertMode used below. */
 using AlertContextBuilders = PerformanceMonitor.Alerting.AlertContextBuilders;
+using PoisonWaitEvaluator = PerformanceMonitor.Alerting.PoisonWaitEvaluator;
 
 namespace PerformanceMonitorDashboard
 {
@@ -472,9 +473,19 @@ namespace PerformanceMonitorDashboard
                     cpuText, $"{prefs.CpuThresholdPercent}%", true, "tray");
             }
 
-            /* Poison wait alerts */
+            /* Poison wait alerts.
+               #3653 (#3593's class): graded on wait ACCUMULATED over the window the reader sums
+               (PoisonWaitEvaluator.WindowMinutes, ten minutes, sampled once per alert pass), against the bars the
+               shared engine calibrated on 43 SQL Server primaries — Warning at one task continuously stuck for the
+               whole window (600 s of wait in 10 min), Critical at ten. The retired shape judged ONE collector row's
+               avg-ms-per-wait against the PoisonWaitThresholdMs preference: a single 600 ms wait paged, and a THREADPOOL storm
+               of short waits never moved the average. The knob is still persisted and shown (disabled) in Settings so
+               saved preferences round-trip; nothing reads it here any more. Rows arrive worst-first from the reader
+               (ORDER BY the window sum), so the head of the filtered list is the type to mute and headline on. */
+            var poisonWindowSeconds = PoisonWaitEvaluator.WindowMinutes * 60;
+            var poisonThresholdText = $"{PoisonWaitEvaluator.WarningAvgWaiters * poisonWindowSeconds:N0}s accumulated over {PoisonWaitEvaluator.WindowMinutes}m";
             var triggeredWaits = prefs.NotifyOnPoisonWaits
-                ? health.PoisonWaits.FindAll(w => w.AvgMsPerWait >= prefs.PoisonWaitThresholdMs)
+                ? health.PoisonWaits.FindAll(w => PoisonWaitEvaluator.Grade(w.DeltaMs) is not null)
                 : new List<PoisonWaitDelta>();
 
             if (triggeredWaits.Count > 0)
@@ -483,9 +494,9 @@ namespace PerformanceMonitorDashboard
                 if (!_lastPoisonWaitAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     var worst = triggeredWaits[0];
-                    var allWaitNames = string.Join(", ", triggeredWaits.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)"));
+                    var allWaitNames = string.Join(", ", triggeredWaits.ConvertAll(w => $"{w.WaitType} ({w.DeltaMs / 1000:N0}s in {PoisonWaitEvaluator.WindowMinutes}m)"));
 
-                    /* Poison wait mute check uses the worst (highest avg ms/wait) triggered wait type.
+                    /* Poison wait mute check uses the worst (most accumulated wait) triggered wait type.
                        Limitation: if a user mutes a specific wait type that isn't the worst, the alert
                        still fires. Conversely, muting the worst type suppresses the entire alert even
                        if other unmuted poison waits are present. */
@@ -499,7 +510,7 @@ namespace PerformanceMonitorDashboard
                     {
                         _notificationService?.ShowSnoozableNotification(
                             "Poison Wait",
-                            $"{serverName}: {worst.WaitType} avg {worst.AvgMsPerWait:F0}ms/wait",
+                            $"{serverName}: {worst.WaitType} {worst.DeltaMs / 1000:N0}s of wait in {PoisonWaitEvaluator.WindowMinutes}m",
                             NotificationType.Error,
                             serverName,
                             "Poison Wait",
@@ -508,7 +519,7 @@ namespace PerformanceMonitorDashboard
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Poison Wait",
                         allWaitNames,
-                        $"{prefs.PoisonWaitThresholdMs}ms avg", !isMuted, isMuted ? "muted" : "tray", muted: isMuted, detailText: detailText);
+                        poisonThresholdText, !isMuted, isMuted ? "muted" : "tray", muted: isMuted, detailText: detailText);
 
                     if (!isMuted)
                     {
@@ -516,18 +527,23 @@ namespace PerformanceMonitorDashboard
                             "Poison Wait",
                             serverName,
                             allWaitNames,
-                            $"{prefs.PoisonWaitThresholdMs}ms avg",
+                            poisonThresholdText,
                             serverId,
                             poisonContext);
                     }
                 }
             }
-            else if (_activePoisonWaitAlert.TryRemove(serverId, out var wasPoisonWait) && wasPoisonWait)
+            else if (health.PoisonWaits.Count > 0 && _activePoisonWaitAlert.TryRemove(serverId, out var wasPoisonWait) && wasPoisonWait)
             {
+                /* The clear needs an OBSERVATION: at least one poison-type row in the window and none over the bar.
+                   An EMPTY read holds the flag where it is — no wait_stats rows for any poison type in ten minutes is
+                   the collector not delivering (THREADPOOL has lifetime wait on any server up long enough to fire
+                   this, so its row lands every cycle), not the server going quiet. The retired shape announced
+                   "Cleared" on that same silence. */
                 _notificationService?.ShowStyledNotification("Poison Waits Cleared",
-                    $"{serverName}: Poison wait avg below threshold", ToastSeverity.Success);
+                    $"{serverName}: Poison wait accumulated below threshold over the last {PoisonWaitEvaluator.WindowMinutes}m", ToastSeverity.Success);
                 _emailAlertService.RecordAlert(serverId, serverName, "Poison Waits Cleared",
-                    "0", $"{prefs.PoisonWaitThresholdMs}ms avg", true, "tray");
+                    "0", poisonThresholdText, true, "tray");
             }
 
             /* Long-running query alerts */

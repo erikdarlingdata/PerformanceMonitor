@@ -61,7 +61,7 @@ namespace Darling.Tests;
 /// <c>.github/darling-paths-filter.yml</c>, which names <c>Darling/**</c>, the shared libraries Darling
 /// compiles against, and the gate's own inputs — so no entry added to the build job's filter can stand up
 /// its throwaway cluster. <c>CrossAppGuardCiGateTests</c> does see the
-/// two <c>Lite.Tests</c> keys below — #3067 widened its anchor past the app directory, since
+/// three <c>Lite.Tests</c> keys below — #3067 widened its anchor past the app directory, since
 /// <c>Lite.Tests</c> is a sibling of <c>Lite</c> rather than a directory inside it — and exempts them on
 /// this same reasoning, under the same bound.</para>
 /// </summary>
@@ -80,7 +80,7 @@ public sealed class CommentFilterAdoptionTests
     /// <see cref="AnalysisPassTokenThreadingTests"/> gives: the way a wildcard grows is that nobody has to
     /// name a new entry.
     ///
-    /// <para>Four kinds live here and they are not the same kind. Five <b>collect</b> a doc-comment run,
+    /// <para>Four kinds live here and they are not the same kind. Seven <b>collect</b> a doc-comment run,
     /// where the prefix is what defines the run. One reads a <b>stated, measured</b> bound off a named file.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
@@ -135,6 +135,17 @@ public sealed class CommentFilterAdoptionTests
             + "before any figure is compared - a truncated walk fails there instead of silently pinning half "
             + "a comment.",
 
+        ["Lite.Tests/FactScorerTests.cs"] =
+            "COLLECTS a doc run. GetWaitThresholds_EveryEntryCarriesItsMeasurementLineage (#3538 A5) gathers the "
+            + "contiguous // run above each entry of FactScorer.GetWaitThresholds and asks it for a percentile, "
+            + "a max, 'measured' or 'unmeasured' - the lineage lives ONLY in those comments, so asking for the "
+            + "walker would leave nothing to read. Stated bound: the collector recognises // lines and entry "
+            + "lines and skips everything else, so lineage written in a /* */ block whose continuation lines "
+            + "carry no prefix is invisible to it and the entry reads as UNDOCUMENTED - a spurious red, the "
+            + "loud direction. Entries are matched by a quoted-key regex, so a block-comment continuation line "
+            + "that happened to spell one would register as a phantom entry needing lineage of its own, "
+            + "which is again loud; nothing in the table today is a block comment.",
+
         ["Lite.Tests/LiteSidebarDotRendersTheCardStatusTests.cs"] =
             "STATED BOUND, and asking for the walker would BREAK it. Its doc comment records the measurement: "
             + "ServerConnection.cs carries exactly one block comment, the licence header, so dropping "
@@ -150,6 +161,18 @@ public sealed class CommentFilterAdoptionTests
             + "The window it cuts (the outer SELECT through FROM differenced) holds no comment today, so the "
             + "/* and * arms are inert; a comment added there whose continuation line contains ' AS ' would "
             + "over-count the select list and fail the 19 pin loudly.",
+
+        ["Darling.Tests/PgTargetMeasuredLineageTests.cs"] =
+            "COLLECTS a doc run. CommentBlockAbove walks upward from a named constant through the contiguous "
+            + "/// lines and /* */ block above it and collapses them, so that the #3691 lineage citation (date and "
+            + "population) can be matched across the wrapping of the prose it lives in - the lineage exists ONLY "
+            + "in those comments, so asking for the walker would leave nothing to read. Stated bound: the walk "
+            + "recognises /// lines and block-comment lines (entered at a trailing */, left at the line carrying "
+            + "/*) and STOPS at a blank line or any other line, so a comment separated from its constant by a "
+            + "line of code, or a // line, is invisible to it and the constant reads as UNCITED - a spurious red, "
+            + "the loud direction. A sibling public const between the comment and the constant (a pair declared "
+            + "under one comment) is skipped only while nothing has been collected yet; the arranged-input test "
+            + "in the class pins both edges.",
     };
 
     /// <summary>

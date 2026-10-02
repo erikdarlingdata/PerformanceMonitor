@@ -66,7 +66,9 @@ public class RdsCpuIngestorTests
 
         /* The distinction, stated as the inequality the runner branches on: a read that found nothing is a
            DIFFERENT value from a source that was never asked, so no rendering can conflate them again by
-           looking only at the count. */
+           looking only at the count. Since V136 (#3691) this same not-reached row-less answer is also the
+           host-memory series' "no row" arm for a stock target: the six memory columns live on this row, and a
+           host with no Performance Insights has no row for them to live on. */
         Assert.NotEqual(RdsIngestOutcome.Read(0), outcome);
     }
 

@@ -120,6 +120,7 @@ public class PgDatabaseStatsCollectorDefinitionTests
     [InlineData("d.deadlocks")]
     [InlineData("d.xact_commit")]
     [InlineData("d.xact_rollback")]
+    [InlineData("d.numbackends")]       // V133 (#3691): the one level in the row, the saturation numerator
     public void SelectsEveryCounterTheFourQuestionsNeed(string column)
     {
         Assert.Contains(column, PgDatabaseStatsCollector.Instance.BuildQuery(MakeContext()).Text, StringComparison.Ordinal);
@@ -174,18 +175,26 @@ public class PgDatabaseStatsCollectorDefinitionTests
     {
         var columns = PgDatabaseStatsCollector.Instance.PayloadColumns;
 
-        Assert.Equal(9, columns.Count);
+        Assert.Equal(10, columns.Count);
         Assert.Equal(
             new[]
             {
                 "database_name", "xact_commit", "xact_rollback", "blks_read", "blks_hit",
-                "temp_files", "temp_bytes", "deadlocks", "stats_reset",
+                "temp_files", "temp_bytes", "deadlocks", "stats_reset", "numbackends",
             },
             columns.Select(c => c.Name).ToArray());
 
         Assert.Equal(CollectorColumnType.Varchar, columns[0].Type);
         Assert.Equal(CollectorColumnType.BigInt, columns[5].Type);      // temp_files
         Assert.Equal(CollectorColumnType.Timestamp, columns[8].Type);   // stats_reset
+        /* V133 (#3691): numbackends is LAST and an Integer — appended because an upgraded store's ALTER can
+           only append and the writer is positional; Integer because it is a per-database connection count,
+           not a 64-bit cumulative counter. The query selects it last too, so the reader ordinal (9) agrees. */
+        Assert.Equal(CollectorColumnType.Integer, columns[9].Type);     // numbackends
+        Assert.Equal("numbackends", columns[^1].Name);
+        var select = PgDatabaseStatsCollector.Instance.BuildQuery(MakeContext()).Text;
+        Assert.True(select.IndexOf("AS numbackends", StringComparison.Ordinal) > select.IndexOf("AS stats_reset", StringComparison.Ordinal),
+            "numbackends must be selected after stats_reset so the positional reader and the appended column agree");
     }
 
     /// <summary>
@@ -203,12 +212,14 @@ public class PgDatabaseStatsCollectorDefinitionTests
                 214L, 9_663_676_416L,                       // temp_files, temp_bytes
                 3L,                                         // deadlocks
                 new DateTime(2026, 5, 18, 7, 4, 22, DateTimeKind.Unspecified),
+                37,                                         // numbackends (V133): an int, a level
             });
 
         var rows = await PgDatabaseStatsCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
 
         var row = Assert.Single(rows);
         Assert.Equal("appdb", row.DatabaseName);
+        Assert.Equal(37, row.Numbackends);
         Assert.Equal(214L, row.TempFiles);
         Assert.Equal(9_663_676_416L, row.TempBytes);
         Assert.Equal(3L, row.Deadlocks);
@@ -233,6 +244,7 @@ public class PgDatabaseStatsCollectorDefinitionTests
                 0L, 0L,
                 0L,
                 DBNull.Value,
+                DBNull.Value,
             });
 
         var rows = await PgDatabaseStatsCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
@@ -240,6 +252,10 @@ public class PgDatabaseStatsCollectorDefinitionTests
         var row = Assert.Single(rows);
         Assert.Null(row.DatabaseName);
         Assert.Equal(1_004_991L, row.BlksHit);
+
+        /* A NULL numbackends arrives as null, not 0 (V133): the shared-relations row has no backends of its
+           own and the engine reports it that way; a reader that coerced it would count zero connections. */
+        Assert.Null(row.Numbackends);
 
         /* NULL stats_reset is the ordinary state of a server nobody has ever reset, and it means exactly
            "never reset" — not "unknown", and certainly not zero. */
@@ -269,7 +285,7 @@ public class PgDatabaseStatsCollectorDefinitionTests
         var deltas = new RecordingCollectorDeltaCalculator();
 
         PgDatabaseStatsCollector.Instance.WritePayload(
-            new PgDatabaseStatsCollector.Row("appdb", 1, 0, 2, 3, 0, 0, 0, null),
+            new PgDatabaseStatsCollector.Row("appdb", 1, 0, 2, 3, 0, 0, 0, null, 12),
             new RecordingCollectorRowWriter(),
             MakeContext(deltas: deltas));
 
@@ -287,7 +303,7 @@ public class PgDatabaseStatsCollectorDefinitionTests
         var reset = new DateTime(2026, 5, 18, 7, 4, 22);
 
         PgDatabaseStatsCollector.Instance.WritePayload(
-            new PgDatabaseStatsCollector.Row(null, 10, 1, 20, 30, 4, 5_000, 2, reset),
+            new PgDatabaseStatsCollector.Row(null, 10, 1, 20, 30, 4, 5_000, 2, reset, 41),
             writer,
             MakeContext());
 
@@ -298,6 +314,25 @@ public class PgDatabaseStatsCollectorDefinitionTests
         Assert.Equal(5_000L, writer.Values[6]); // temp_bytes
         Assert.Equal(2L, writer.Values[7]);     // deadlocks
         Assert.Equal(reset, writer.Values[8]);
+        Assert.Equal(41, writer.Values[9]);     // numbackends (V133), LAST
+    }
+
+    /// <summary>
+    /// A pre-V133 shape or a row the engine reported without a backend count writes NULL, never 0, in the
+    /// tenth slot: zero connections is a measurement and "not sampled" is not (V133, #3691).
+    /// </summary>
+    [Fact]
+    public void WritesANullNumbackendsAsNull()
+    {
+        var writer = new RecordingCollectorRowWriter();
+
+        PgDatabaseStatsCollector.Instance.WritePayload(
+            new PgDatabaseStatsCollector.Row("appdb", 1, 0, 2, 3, 0, 0, 0, null, null),
+            writer,
+            MakeContext());
+
+        Assert.Equal(10, writer.Values.Count);
+        Assert.Null(writer.Values[9]);
     }
 
     [Fact]

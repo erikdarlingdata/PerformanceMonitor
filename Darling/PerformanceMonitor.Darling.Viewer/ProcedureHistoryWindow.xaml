@@ -94,8 +94,8 @@
                   ContextMenu="{StaticResource DataGridContextMenu}">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Collection Time" Binding="{Binding CollectionTimeLocal}" SortMemberPath="CollectionTime" SortDirection="Descending" Width="130"/>
-                <DataGridTextColumn Header="Last Execution" Binding="{Binding LastExecutionTimeLocal}" Width="130"/>
-                <DataGridTextColumn Header="Cached Time" Binding="{Binding CachedTimeLocal}" Width="130"/>
+                <DataGridTextColumn Header="Last Execution" Binding="{Binding LastExecutionTimeLocal}" Width="130" SortMemberPath="LastExecutionTime"/>
+                <DataGridTextColumn Header="Cached Time" Binding="{Binding CachedTimeLocal}" Width="130" SortMemberPath="CachedTime"/>
                 <DataGridTemplateColumn Header="Plan" Width="Auto" MinWidth="80">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>

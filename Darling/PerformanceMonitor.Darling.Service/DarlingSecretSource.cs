@@ -57,11 +57,13 @@ public static class DarlingSecretSource
                 throw new InvalidOperationException($"{settingName}: 'env:' reference names no environment variable.");
             }
 
+            /* Whitespace-only is as empty as empty (#3914): the file branch below trims its contents, and a caller
+               that treats a blank result as "not set" must never receive one from a variable that IS set. */
             var resolved = Environment.GetEnvironmentVariable(name);
-            if (string.IsNullOrEmpty(resolved))
+            if (string.IsNullOrWhiteSpace(resolved))
             {
                 throw new InvalidOperationException(
-                    $"{settingName}: environment variable '{name}' is not set (or empty) — the referenced secret cannot resolve.");
+                    $"{settingName}: environment variable '{name}' is not set (or empty or blank) — the referenced secret cannot resolve.");
             }
 
             return resolved;

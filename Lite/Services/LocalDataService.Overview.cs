@@ -8,10 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Media;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -20,25 +24,43 @@ public partial class LocalDataService
     /// <summary>
     /// Gets a summary of server health for the overview dashboard.
     /// </summary>
-    public async Task<ServerSummaryItem?> GetServerSummaryAsync(int serverId, string displayName)
+    /// <param name="registeredAtUtc">When the server was added (<see cref="Models.ServerConnection.RegisteredAtUtc"/>),
+    /// or null when the caller has none. Required rather than defaulted (#3967): it is what tells a server whose
+    /// history has aged out of the archive from one that has never collected, and a caller that kept the old
+    /// call would compile and band the first as the second.</param>
+    public async Task<ServerSummaryItem?> GetServerSummaryAsync(int serverId, string displayName, DateTime? registeredAtUtc)
     {
         using var connection = await OpenConnectionAsync();
 
         double? cpuPercent = null;
         double? otherProcessCpuPercent = null;
         DateTime? cpuSampleTime = null;
+        DateTime? cpuSampleTimeUtc = null;
+        DateTime? cpuCollectionTime = null;
         double? memoryMb = null;
+        DateTime? memoryCollectionTime = null;
         int blockingCount = 0;
         int deadlockCount = 0;
         DateTime? lastCollection = null;
 
         /* Latest CPU — read both SQL Server CPU and other-process CPU so the UI can surface
-           total non-idle CPU alongside the SQL-only number. */
-        using (var cmd = connection.CreateCommand())
+           total non-idle CPU alongside the SQL-only number.
+
+           #3744: both stamps. sample_time is the monitored server's LOCAL wall clock (the chart's frame and
+           this ordering's key); sample_time_utc is the same instant in UTC on every row written since v63
+           (#3730) and NULL before. The alert gate's identity is the twin where the row has one, resolved at
+           the snapshot (MainWindow.AlertEngine) exactly as Darling resolves its own read. The ORDER BY stays
+           on the local stamp on purpose: every row has it, and ordering on the twin or a COALESCE of the two
+           would compare a pre-rung local stamp against a post-rung UTC one and, east of UTC, sort a stale
+           pre-rung row as newest for one offset's worth of hours after the upgrade.
+
+           #3895: hot table first, then the archive view — see NewestFirstRelations. */
+        foreach (var relation in NewestFirstRelations("cpu_utilization_stats"))
         {
+            using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
-SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time
-FROM v_cpu_utilization_stats
+SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, collection_time, sample_time_utc
+FROM " + relation + @"
 WHERE server_id = $1
 ORDER BY sample_time DESC
 LIMIT 1";
@@ -54,15 +76,26 @@ LIMIT 1";
                    this one is the CPU persistence gate's observation identity and must stay the instant of
                    the CPU reading these percentages came from. */
                 cpuSampleTime = lastCollection;
+                /* #3541 A10: the store's UTC clock for the same row — the stamp get_server_summary publishes
+                   as cpu_captured_at. sample_time above is the monitored server's local wall clock and the
+                   gate's identity; collection_time is the instant the monitor stored it, comparable with every
+                   other captured_at on the MCP surface. */
+                cpuCollectionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+                /* #3744: the UTC twin, NULL on a pre-v63 row. Kept beside the local stamp rather than folded
+                   into it so the summary says which clock each value is in; the alert snapshot does the
+                   folding (twin ?? local) where the gate's identity is built. */
+                cpuSampleTimeUtc = reader.IsDBNull(4) ? null : reader.GetDateTime(4);
+                break;
             }
         }
 
-        /* Latest SQL Memory */
-        using (var cmd = connection.CreateCommand())
+        /* Latest SQL Memory — hot table first (#3895). */
+        foreach (var relation in NewestFirstRelations("memory_stats"))
         {
+            using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
-SELECT total_server_memory_mb
-FROM v_memory_stats
+SELECT total_server_memory_mb, collection_time
+FROM " + relation + @"
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -71,8 +104,15 @@ LIMIT 1";
             if (await reader.ReadAsync())
             {
                 memoryMb = reader.IsDBNull(0) ? null : ToDouble(reader.GetValue(0));
+                memoryCollectionTime = reader.GetDateTime(1);
+                break;
             }
         }
+
+        /* An Azure SQL Database master registration also covers databases monitored as their own targets: their
+           blocking and deadlocks show on their own cards, so master's card skips them (the list analysis uses).
+           A null or empty list leaves today's SQL untouched. */
+        var separate = AnalysisService.ResolveSeparatelyMonitoredDatabases(serverId);
 
         /* Blocking count in last hour - uses XE blocked process reports */
         using (var cmd = connection.CreateCommand())
@@ -80,40 +120,53 @@ LIMIT 1";
             /* Prefer the blocked-process-report; fall back to the always-on DMV snapshot (AWS RDS). */
             cmd.CommandText = @"
 SELECT COALESCE(NULLIF(
-    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2), 0),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2))";
+    (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3)) + @" AS ev), 0),
+    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3) + @"))";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
+            SeparatelyMonitoredScope.AddParameters(cmd, separate);
             var result = await cmd.ExecuteScalarAsync();
             blockingCount = result != null ? Convert.ToInt32(result) : 0;
         }
 
         /* Deadlock count in last hour */
-        using (var cmd = connection.CreateCommand())
+        if (separate is { Count: > 0 })
         {
-            cmd.CommandText = @"
-SELECT COUNT(*)
-FROM v_deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2";
-            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
-            var result = await cmd.ExecuteScalarAsync();
-            deadlockCount = result != null ? Convert.ToInt32(result) : 0;
+            /* One row per stored identity, minus deadlocks wholly inside the separately monitored databases. */
+            var now = DateTime.UtcNow;
+            deadlockCount = (int)await SeparatelyMonitoredScope.CountDeadlocksAsync(
+                connection, serverId, now.AddHours(-1), now.AddDays(1), inclusiveEnd: true, separate, System.Threading.CancellationToken.None);
+        }
+        else
+        {
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = @"
+SELECT " + StoredEventCopies.DeadlockDistinctCount + @"
+FROM v_deadlocks AS dl
+WHERE server_id = $1 AND deadlock_time >= $2";
+                cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
+                var result = await cmd.ExecuteScalarAsync();
+                deadlockCount = result != null ? Convert.ToInt32(result) : 0;
+            }
         }
 
-        /* Last collection time from collection_log */
-        using (var cmd = connection.CreateCommand())
+        /* Last collection time from collection_log — hot table first (#3895). A miss on both leaves the CPU
+           stamp above in place, exactly as the single view read did. */
+        foreach (var relation in NewestFirstRelations("collection_log"))
         {
+            using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT MAX(collection_time)
-FROM v_collection_log
+FROM " + relation + @"
 WHERE server_id = $1";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();
             if (result != null && result != DBNull.Value)
             {
                 lastCollection = Convert.ToDateTime(result);
+                break;
             }
         }
 
@@ -124,7 +177,10 @@ WHERE server_id = $1";
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherProcessCpuPercent,
             CpuSampleTime = cpuSampleTime,
+            CpuSampleTimeUtc = cpuSampleTimeUtc,
+            CpuCollectionTime = cpuCollectionTime,
             MemoryMb = memoryMb,
+            MemoryCollectionTime = memoryCollectionTime,
             BlockingCount = blockingCount,
             DeadlockCount = deadlockCount,
             LastCollectionTime = lastCollection
@@ -134,10 +190,26 @@ WHERE server_id = $1";
            place a ServerSummaryItem is built: the two MCP reads call this method too, and a band only the
            Overview applied would be a fact that depended on which caller asked. The clock is handed in
            rather than read inside the band, so the classification stays a pure function of
-           (last collection, now) — the shape the viewer's ApplyFreshness already has. */
-        summary.ApplyCollectionFreshness(DateTime.UtcNow);
+           (last collection, now) — the shape the viewer's ApplyFreshness already has. The registration rides
+           in with the caller for #3967, so every caller's card bands a dark-past-retention server alike. */
+        summary.ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc);
         return summary;
     }
+
+    /// <summary>
+    /// Where a newest-row read looks, in order (#3895): the hot table, then the <c>v_</c> view that unions it
+    /// with every archived parquet file. The Lite twin of Darling's per-server <c>LIMIT 1</c> fleet probes.
+    ///
+    /// <para><b>Why the hot table can answer alone.</b> <c>ArchiveService</c> moves only rows OLDER than its
+    /// cutoff out of the hot table, so whenever the hot table holds a row for a server, that server's newest
+    /// row is among the hot rows and the archive cannot outrank it. The view read it replaced scanned every
+    /// archived month on every Overview refresh for a value the hot table already held: on a store holding
+    /// June-to-September archives it cost 5-28 ms per read against about 1 ms hot, three reads per server.
+    /// The view stays the fallback, so a server with nothing hot — one that stopped reporting before the last
+    /// archive cycle, or any server just after the emergency reset — still reads its newest archived row,
+    /// exactly as before.</para>
+    /// </summary>
+    private static string[] NewestFirstRelations(string table) => new[] { table, "v_" + table };
 }
 
 /// <summary>One tag pill on an Overview card (#2020 2b-i): the tag name plus the brushes to render it,
@@ -259,6 +331,40 @@ public class ServerSummaryItem
     public string DisplayName { get; set; } = "";
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
+
+    /// <summary>
+    /// True when this card is <paramref name="server"/>'s card. The card was loaded under the server's storage
+    /// server id (<see cref="RemoteCollectorService.GetServerId"/>), and that id is what identifies the server.
+    /// The host name does not: several monitored databases on one Azure SQL Database server share one
+    /// <see cref="ServerName"/> and differ only in database, so a name match picks the first of them for every card.
+    /// </summary>
+    internal bool IsCardFor(ServerConnection server) =>
+        ServerId == RemoteCollectorService.GetServerId(server);
+
+    /// <summary>The server in <paramref name="servers"/> this card belongs to, or null. What a double-click on the
+    /// card opens.</summary>
+    internal ServerConnection? FindServer(IEnumerable<ServerConnection> servers) =>
+        servers.FirstOrDefault(IsCardFor);
+
+    /// <summary>
+    /// Sets the silenced bell on every card that belongs to <paramref name="server"/> and on no other. Returns true
+    /// when at least one card actually changed, so a quiet poll does not rebind the Overview.
+    /// </summary>
+    internal static bool StampSilenced(IEnumerable<ServerSummaryItem> cards, ServerConnection server, bool silenced)
+    {
+        var changed = false;
+        foreach (var card in cards)
+        {
+            if (card.IsCardFor(server) && card.IsSilenced != silenced)
+            {
+                card.IsSilenced = silenced;
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
     public bool? IsOnline { get; set; }
 
     /// <summary>True when a whole-server alert silence is active for this server (#2031) — drives the card's
@@ -278,12 +384,32 @@ public class ServerSummaryItem
     public double? OtherProcessCpuPercent { get; set; }
 
     /// <summary>
-    /// The <c>sample_time</c> of the CPU reading <see cref="CpuPercent"/> came from (#3282) — the shared
-    /// engine's persistence-gate observation identity, NOT display data. Distinct from
+    /// The <c>sample_time</c> of the CPU reading <see cref="CpuPercent"/> came from (#3282) — the monitored
+    /// server's LOCAL wall clock, and the shared engine's persistence-gate observation identity on a row that
+    /// has no <see cref="CpuSampleTimeUtc"/> (#3744). NOT display data. Distinct from
     /// <see cref="LastCollectionTime"/>, which is the newest collection of anything and is what the
     /// freshness band is computed from.
     /// </summary>
     public DateTime? CpuSampleTime { get; set; }
+
+    /// <summary>
+    /// The same sample's instant in UTC — the row's <c>sample_time_utc</c> twin (Lite v63, #3730), null on a
+    /// row written before that rung. Where present it is the gate's observation identity in place of
+    /// <see cref="CpuSampleTime"/> (#3744); <c>MainWindow.AlertEngine</c> folds the pair as <c>twin ?? local</c>
+    /// when it builds the snapshot, the same rule Darling's <c>ReadLatestCpuAsync</c> applies, so both SKUs hand
+    /// the shared gate the same identity for the same row. Two properties rather than one pre-folded value so
+    /// this summary never holds a timestamp without saying which clock it is in.
+    /// </summary>
+    public DateTime? CpuSampleTimeUtc { get; set; }
+
+    /// <summary>The store's <c>collection_time</c> for the CPU row <see cref="CpuPercent"/> came from (#3541
+    /// A10) — the stamp get_server_summary publishes as <c>cpu_captured_at</c>. UTC, comparable with every other
+    /// captured_at; <see cref="CpuSampleTime"/> is the monitored server's local clock and the gate's identity.</summary>
+    public DateTime? CpuCollectionTime { get; set; }
+
+    /// <summary>The store's <c>collection_time</c> for the memory row <see cref="MemoryMb"/> came from (#3541
+    /// A10) — get_server_summary's <c>memory_captured_at</c>.</summary>
+    public DateTime? MemoryCollectionTime { get; set; }
     /// <summary>Total non-idle CPU on the host = sql_server + other_process. Tracks closer to OS user+system counters.</summary>
     public double? TotalCpuPercent =>
         CpuPercent.HasValue ? CpuPercent.Value + (OtherProcessCpuPercent ?? 0) : null;
@@ -328,13 +454,19 @@ public class ServerSummaryItem
 
     /// <summary>
     /// Stamp <see cref="CollectionFreshness"/> from this card's own <see cref="LastCollectionTime"/>. Pure
-    /// over (last collection, now): both instants are UTC (the DuckDB store is naive UTC and
+    /// over (last collection, registration, now): the instants are UTC (the DuckDB store is naive UTC and
     /// <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction inside the classifier
     /// is a true elapsed time regardless of Kind. Stamped rather than computed on read so the band cannot
     /// change between the row's brush binding and the tooltip that explains it.
+    ///
+    /// <para>#3967: the newest-collection read has no window, but the archive's retention bounds what it can
+    /// see (<see cref="RetentionService.OldestRetainedInstant"/>), so a server whose whole history has aged out
+    /// comes back null. Added before that instant, it bands Offline; added after it, or with no registration,
+    /// it keeps the ladder's never-collected reading. The same rule the Darling viewer and fleet card apply.</para>
     /// </summary>
-    public void ApplyCollectionFreshness(DateTime nowUtc) =>
-        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(LastCollectionTime, nowUtc);
+    public void ApplyCollectionFreshness(DateTime nowUtc, DateTime? registeredAtUtc) =>
+        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(
+            LastCollectionTime, registeredAtUtc, RetentionService.OldestRetainedInstant(nowUtc), nowUtc);
 
     /// <summary>
     /// The Last Collect row. Names its band in words when the collection is not current, because a colour
@@ -346,7 +478,10 @@ public class ServerSummaryItem
     {
         get
         {
-            if (!LastCollectionTime.HasValue) return "Never";
+            /* #3967: with nothing to show, "Never" only for a server that has never collected. One banded
+               Offline with nothing to show collected once, and none of it is still archived. */
+            if (!LastCollectionTime.HasValue)
+                return CollectionFreshness == ServerFreshness.Offline ? "None retained (stopped)" : "Never";
 
             var stamp = ServerTimeHelper.FormatServerTime(LastCollectionTime, "HH:mm:ss");
             return CollectionFreshness switch

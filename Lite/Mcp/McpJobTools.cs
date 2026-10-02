@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -9,7 +10,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpJobTools
 {
-    [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, matching the collection_time on this payload (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so start_time and current_duration_seconds agree.")]
+    [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, matching the captured_at on this payload (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so start_time and current_duration_seconds agree. LATEST IS A TIME: this reads the newest running-jobs snapshot, not a window, and captured_at is the instant it was collected - a job listed here was running AT that stamp, and current_duration_seconds is how long it had been running AT that stamp, not now.")]
     public static async Task<string> GetRunningJobs(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -21,12 +22,13 @@ public sealed class McpJobTools
         try
         {
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
             var rows = await dataService.GetRunningJobsAsync(resolved.ServerId);
             if (rows.Count == 0)
@@ -45,11 +47,7 @@ public sealed class McpJobTools
                        and the collector's own recorded PERMISSIONS outcome answers first. */
                     ?? await McpRuntimePrecondition.GatedOffStatusAsync(
                         dataService, resolved.ServerId, resolved.ServerName, "running_jobs",
-                        "For this collector the gate is: this is an AWS RDS instance, where the Agent job "
-                        + "tables are not reachable to a monitoring login at all and no grant changes that. "
-                        + "Since #2559 msdb access is NOT a gate — a login without it now attempts and is "
-                        + "reported as a permission denial, so the grant takes effect on the next cycle "
-                        + "rather than the next reconnect.")
+                        CollectorRuntimePrecondition.RunningJobsPossibleCauses)
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or collector has not run yet).");
             }
 
@@ -58,7 +56,7 @@ public sealed class McpJobTools
                 job_name = r.JobName,
                 job_id = r.JobId,
                 job_enabled = r.JobEnabled,
-                start_time = r.StartTime.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                start_time = serverClock.ToUtc(r.StartTime).ToString("o"),
                 current_duration_seconds = r.CurrentDurationSeconds,
                 current_duration_formatted = r.CurrentDurationFormatted,
                 avg_duration_seconds = r.AvgDurationSeconds,
@@ -73,7 +71,9 @@ public sealed class McpJobTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                collection_time = rows[0].CollectionTime.ToString("o"),
+                /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp - see
+                   McpServerInfoTools.GetServerProperties for why it is a cut-over and not an alias. */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 running_job_count = rows.Count,
                 long_running_count = rows.Count(r => r.IsRunningLong),
                 jobs = result

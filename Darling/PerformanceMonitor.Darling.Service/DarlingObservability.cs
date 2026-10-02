@@ -596,13 +596,16 @@ ON CONFLICT (server_id) DO UPDATE SET
 
     /// <summary>
     /// Upserts the per-server analysis-state marker (V19) after an analysis pass: <c>insufficient_data =
-    /// true</c> plus the engine's message when the pass hit the 24h data-span gate, or <c>false</c> + null
-    /// when a real pass completed on enough data. The engine ALREADY makes this determination
-    /// (<c>DarlingAnalysisService.InsufficientDataMessage</c>); this persists it so the Viewer's
-    /// Recommendations tab — which never calls the engine — shows "still collecting" instead of a false
-    /// all-clear on a young deployment's zero-finding read. One row per server, upserted on
-    /// <c>server_id</c>. Failure-isolated (Debug + no-op) like the other observability writes — an
-    /// analysis-state write must never break the collection loop.
+    /// true</c> plus the engine's message when the pass hit the 24h data-span gate; <c>false</c> plus the
+    /// engine's message when the pass cleared the gate but the analysis window itself collected zero facts
+    /// (#3524/#3551 — false-with-a-message is written ONLY for that window-empty shape, which is how the
+    /// viewer tells it from a clean pass without a schema change); or <c>false</c> + null when a real pass
+    /// completed on measured facts. The engine ALREADY makes these determinations
+    /// (<c>DarlingAnalysisService.InsufficientDataMessage</c> / <c>WindowEmptyMessage</c>); this persists
+    /// them so the Viewer's Recommendations tab — which never calls the engine — shows "still collecting"
+    /// or "collection appears broken" instead of a false all-clear on a zero-finding read. One row per
+    /// server, upserted on <c>server_id</c>. Failure-isolated (Debug + no-op) like the other observability
+    /// writes — an analysis-state write must never break the collection loop.
     /// </summary>
     public static async Task WriteAnalysisStateAsync(
         NpgsqlDataSource postgres,

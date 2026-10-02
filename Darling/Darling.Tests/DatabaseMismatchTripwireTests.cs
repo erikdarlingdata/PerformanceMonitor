@@ -7,8 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -92,8 +97,15 @@ public sealed class DatabaseMismatchTripwireTests
     }
 
     /// <summary>
-    /// Both probes ASK for it, and appended so every existing positional read keeps its ordinal — the readers
-    /// index by number, so inserting a column mid-list silently shifts five other fields onto the wrong values.
+    /// Both probes ASK for it, and at the ORDINAL its reader indexes by — the readers index by number, so a
+    /// column inserted ahead of it silently shifts five other fields onto the wrong values.
+    ///
+    /// <para>The ordinal is derived on both sides and the two are compared: the select list is parsed into
+    /// aliases, and the number the reader passes to <c>IsDBNull</c> is read out of that method's own body.
+    /// Neither number is written down here. This used to be <c>EndsWith("connected_database")</c> — "last in
+    /// the list" as a proxy for "at its ordinal" — which forbade ever APPENDING a column, a move that cannot
+    /// shift anything, while a later column inserted BEFORE it and a reader updated to match would have
+    /// satisfied the proxy and broken nothing this test could see. #3830 appended one.</para>
     /// </summary>
     [Fact]
     public void BothEngineProbesAskWhichDatabaseTheyLandedIn()
@@ -101,13 +113,124 @@ public sealed class DatabaseMismatchTripwireTests
         Assert.Contains("DB_NAME() AS connected_database", DarlingServerConnector.DetectionQueryText, StringComparison.Ordinal);
         Assert.Contains("current_database() AS connected_database", DarlingServerConnector.PostgresDetectionQueryText, StringComparison.Ordinal);
 
-        /* Last in each list. */
-        Assert.EndsWith("connected_database", DarlingServerConnector.DetectionQueryText.TrimEnd(), StringComparison.Ordinal);
-        Assert.EndsWith("connected_database", DarlingServerConnector.PostgresDetectionQueryText.TrimEnd(), StringComparison.Ordinal);
+        var connector = ReadConnectorSource();
+
+        Assert.Equal(
+            ConnectedDatabaseOrdinalIn(connector, "public static async Task<ServerRuntime> ConnectAsync("),
+            SelectListAliases(DarlingServerConnector.DetectionQueryText).IndexOf("connected_database"));
+
+        Assert.Equal(
+            ConnectedDatabaseOrdinalIn(connector, "private static async Task<ServerRuntime> ConnectPostgresAsync("),
+            SelectListAliases(DarlingServerConnector.PostgresDetectionQueryText).IndexOf("connected_database"));
 
         /* No DMV: the SQL Server probe deliberately avoids sys.dm_os_sys_info because an Azure SQL DB
            monitoring login often lacks VIEW DATABASE STATE (#1535), and DB_NAME() keeps that property. */
         Assert.DoesNotContain("sys.dm_os_sys_info", DarlingServerConnector.DetectionQueryText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The control for the parse above, on an arranged input: a comma inside a function call is not a column
+    /// separator, and a comma inside a comment is not one either. Both queries carry both shapes
+    /// (<c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c>; the <c>--</c> note above the #3830 scalar), so a
+    /// splitter that got either wrong would report a plausible ordinal for the wrong column and the assertion
+    /// above would compare two numbers that are both meaningless.
+    /// </summary>
+    [Fact]
+    public void TheSelectListParseCountsColumnsAndNotCommas()
+    {
+        var aliases = SelectListAliases(@"
+SELECT
+    DATEDIFF(MINUTE, a(), b()) AS first_column,
+    /* a block comment, with a comma */
+    2 AS second_column,
+    -- a line comment, with a comma
+    (SELECT x FROM y WHERE z = 'q') AS third_column");
+
+        Assert.Equal(new[] { "first_column", "second_column", "third_column" }, aliases);
+    }
+
+    /// <summary>
+    /// Every top-level comma-separated item of a SELECT list, as its trailing alias. Comments are removed
+    /// first (both spellings — the T-SQL probe uses block comments, the PostgreSQL one line comments), and
+    /// commas inside parentheses and string literals do not separate.
+    /// </summary>
+    private static List<string> SelectListAliases(string sql)
+    {
+        var stripped = Regex.Replace(sql, @"/\*.*?\*/", " ", RegexOptions.Singleline);
+        stripped = Regex.Replace(stripped, @"--[^\r\n]*", " ");
+
+        var select = stripped.IndexOf("SELECT", StringComparison.Ordinal);
+        Assert.True(select >= 0, "the probe query has no SELECT — this parse is reading the wrong string");
+        var list = stripped[(select + "SELECT".Length)..];
+
+        var aliases = new List<string>();
+        var item = new StringBuilder();
+        var depth = 0;
+        var inString = false;
+
+        foreach (var c in list)
+        {
+            if (c == '\'')
+            {
+                inString = !inString;
+            }
+            else if (!inString && c == '(')
+            {
+                depth++;
+            }
+            else if (!inString && c == ')')
+            {
+                depth--;
+            }
+            else if (!inString && depth == 0 && c == ',')
+            {
+                aliases.Add(TrailingAlias(item.ToString()));
+                item.Clear();
+                continue;
+            }
+
+            item.Append(c);
+        }
+
+        aliases.Add(TrailingAlias(item.ToString()));
+        return aliases;
+    }
+
+    private static string TrailingAlias(string item)
+    {
+        var words = item.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        Assert.NotEmpty(words);
+        return words[^1];
+    }
+
+    /// <summary>
+    /// The ordinal the named connect method passes to <c>IsDBNull</c> when it reads
+    /// <c>connectedDatabase</c> — its own, taken from that method's body rather than from the first match in
+    /// the file, because both methods carry the same expression with different numbers.
+    /// </summary>
+    private static int ConnectedDatabaseOrdinalIn(string connector, string methodAnchor)
+    {
+        var start = connector.IndexOf(methodAnchor, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"'{methodAnchor}' was not found in DarlingServerConnector.cs — re-anchor this pin");
+
+        var match = Regex.Match(
+            connector[start..], @"connectedDatabase = reader\.IsDBNull\((?<ordinal>\d+)\)");
+
+        Assert.True(match.Success, $"no connectedDatabase read found after '{methodAnchor}'");
+        return int.Parse(match.Groups["ordinal"].Value, CultureInfo.InvariantCulture);
+    }
+
+    private static string ReadConnectorSource([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingServerConnector.cs");
+        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return File.ReadAllText(Path.Combine(dir!, relative));
     }
 
     /// <summary>

@@ -122,7 +122,8 @@ public sealed class AgDatabaseReplicaStatesCollector : CollectorDefinitionBase<A
         DateTime? LastRedoneTime,
         DateTime? LastReceivedTime,
         double? EstRedoCompletionTimeMin,
-        double? EstSendDrainTimeMin);
+        double? EstSendDrainTimeMin,
+        string? GroupId);
 
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -148,7 +149,8 @@ SELECT
     last_redone_time = hdrs.last_redone_time,
     last_received_time = hdrs.last_received_time,
     est_redo_completion_time_min = CONVERT(float, (hdrs.redo_queue_size * 1.0 / NULLIF(hdrs.redo_rate, 0)) / 60.0),
-    est_send_drain_time_min = CONVERT(float, (hdrs.log_send_queue_size * 1.0 / NULLIF(hdrs.log_send_rate, 0)) / 60.0)
+    est_send_drain_time_min = CONVERT(float, (hdrs.log_send_queue_size * 1.0 / NULLIF(hdrs.log_send_rate, 0)) / 60.0),
+    group_id = CONVERT(nvarchar(36), ag.group_id)
 FROM sys.dm_hadr_database_replica_states AS hdrs
 JOIN sys.availability_replicas AS ar
   ON  hdrs.replica_id = ar.replica_id
@@ -206,6 +208,9 @@ OPTION(RECOMPILE);";
         new CollectorColumn("last_received_time", CollectorColumnType.Timestamp),
         new CollectorColumn("est_redo_completion_time_min", CollectorColumnType.Double),
         new CollectorColumn("est_send_drain_time_min", CollectorColumnType.Double),
+        /* Appended LAST (#4475's group-count fallback rung), same shape and reasoning as the replica-grain
+           twin in AgReplicaStatesCollector: sys.availability_groups.group_id, stored as text. */
+        new CollectorColumn("group_id", CollectorColumnType.Varchar),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -235,7 +240,8 @@ OPTION(RECOMPILE);";
                 LastRedoneTime: reader.IsDBNull(17) ? null : reader.GetDateTime(17),
                 LastReceivedTime: reader.IsDBNull(18) ? null : reader.GetDateTime(18),
                 EstRedoCompletionTimeMin: reader.IsDBNull(19) ? null : reader.GetDouble(19),
-                EstSendDrainTimeMin: reader.IsDBNull(20) ? null : reader.GetDouble(20)));
+                EstSendDrainTimeMin: reader.IsDBNull(20) ? null : reader.GetDouble(20),
+                GroupId: reader.IsDBNull(21) ? null : reader.GetString(21)));
         }
 
         return rows;
@@ -264,6 +270,7 @@ OPTION(RECOMPILE);";
             .Value(row.LastRedoneTime)            /* last_redone_time TIMESTAMP */
             .Value(row.LastReceivedTime)          /* last_received_time TIMESTAMP */
             .Value(row.EstRedoCompletionTimeMin)  /* est_redo_completion_time_min DOUBLE (min) */
-            .Value(row.EstSendDrainTimeMin);      /* est_send_drain_time_min DOUBLE (min) */
+            .Value(row.EstSendDrainTimeMin)       /* est_send_drain_time_min DOUBLE (min) */
+            .Value(row.GroupId);                  /* group_id VARCHAR (uuid text, #4475) */
     }
 }

@@ -398,7 +398,13 @@ public sealed class RetentionHoldRatioKnobRungTests
 
         /* To the end of ClearRetentionHoldAsync, which is the next member and the other half of the
            subject — the resolution message is where the threshold is stated back to the operator. */
-        const string end = "/// Edge-applies the fleet-level compression-job self-heal machine";
+        /* #4299 inserted the Raw Purge Over Horizon evaluator right after ClearRetentionHoldAsync, ahead of
+           the #3816 self-heal machine this anchor used to name — that check reads the SAME two seams
+           (it judges raw relations on the same warn/critical pair), so anchoring on the self-heal machine
+           swept its reads into this slice too and doubled every _retentionHoldWarnRatio()/
+           _retentionHoldCriticalRatio() count. The isolating entry point's own doc comment is the marker
+           right after ClearRetentionHoldAsync ends, so anchor there instead. */
+        const string end = "/// The isolating entry point for the #4299 Raw Purge Over Horizon check";
         var to = source.IndexOf(end, from, StringComparison.Ordinal);
         Assert.True(to > from, "the end of ClearRetentionHoldAsync was not found, so this pin would read the rest of the file");
 
@@ -407,7 +413,12 @@ public sealed class RetentionHoldRatioKnobRungTests
         /* The slice has to be the two methods, not a fragment: an off-by-one on either bound silently
            shrinks it and every DoesNotContain above starts passing for the wrong reason. */
         Assert.Contains("_activeRetentionHold[key] = true;", body, StringComparison.Ordinal);
-        Assert.Contains("Retention Hold Cleared", body, StringComparison.Ordinal);
+        /* #3833 promoted the resolution title from an inline literal to RetentionHoldClearedMetric so the
+           triage endpoint's ResolutionAliases can share the spelling; the marker that proves this slice
+           reaches the resolution emit is therefore the constant's REFERENCE at that call site. The rung's
+           no-constants rule is about the threshold ratios, not the metric's identity — a name is not a
+           seam a store row can retune. */
+        Assert.Contains("RetentionHoldClearedMetric,", body, StringComparison.Ordinal);
         Assert.True(body.Length > 2000, $"the sliced body is only {body.Length} chars, which cannot be these two methods");
 
         return body;

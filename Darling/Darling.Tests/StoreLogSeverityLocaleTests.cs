@@ -303,6 +303,14 @@ public class StoreLogSeverityLocaleTests
             return 16L * 1024 * 1024 * 1024;
         }
 
+        /* #3899: the v13 block restates the effective shared_preload_libraries list it is handed; v1's value is
+           the one a real heal hands it on a fresh cluster. Keyed on the name, so a different string parameter
+           still fails loudly here rather than being fed a value that means nothing to it. */
+        if (parameter.ParameterType == typeof(string) && parameter.Name == "effectivePreloadList")
+        {
+            return "timescaledb";
+        }
+
         Assert.Fail(
             $"{factory.Name} takes a {parameter.ParameterType.Name} parameter '{parameter.Name}' this scan cannot "
             + "supply, so its block would go unscanned. Extend the placeholders rather than excluding the block.");

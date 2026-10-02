@@ -45,6 +45,11 @@ namespace Darling.Tests;
 /// list — so a column added to either side without the other now fails an UNGATED test on every build,
 /// database or not.</para>
 ///
+/// <para>#3914 widened it twice. The script now creates the <c>mcp</c> role too, so every carve assertion runs for
+/// both read roles. And the script's single-table WRITE grants, default privileges and role settings are held to
+/// <see cref="DarlingManagedRoles.BuildProvisioningSql"/>'s own output, because those drifted the same way:
+/// the script's <c>viewer</c> never got the <c>custom_alert_rules</c> write the managed one has.</para>
+///
 /// <para>The guard is itself guarded: <see cref="ParsedViewerAcl_Comparison_FailsOnAnInjectedDrift"/> runs the
 /// identical comparison against a mutated copy of the file and asserts it reports the difference, so a parser
 /// that silently matched nothing (a reformatted GRANT, a renamed file) can never pass as "no drift".</para>
@@ -71,10 +76,17 @@ public sealed class ProvisionRolesAclDriftTests
     private const string McpRole = DarlingManagedPostgres.McpRoleName;
     private const string ConfigSchema = PgSchemaGenerator.ConfigSchema;
 
-    [Fact]
-    public void ProvisionRolesSql_ViewerColumnGrants_MatchTheCSharpAclExactly()
+    /// <summary>
+    /// Both read roles' carves, the same way (#3914): the script now creates <c>mcp</c> for the MCP server, and a
+    /// network token-holder reading one secret column the C# list withholds is the failure this guards, exactly as
+    /// it is for <c>viewer</c>.
+    /// </summary>
+    [Theory]
+    [InlineData(ViewerRole)]
+    [InlineData(McpRole)]
+    public void ProvisionRolesSql_ColumnGrants_MatchTheCSharpAclExactly(string role)
     {
-        var granted = ParseColumnGrants(StripComments(ReadProvisionRolesSql()), ViewerRole);
+        var granted = ParseColumnGrants(StripComments(ReadProvisionRolesSql()), role);
 
         /* Every secret-bearing config table the C# carves must be carved in the shipped script too — no
            missing table (its secret columns would stay readable through the blanket schema grant) and no
@@ -99,19 +111,23 @@ public sealed class ProvisionRolesAclDriftTests
         }
     }
 
-    [Fact]
-    public void ProvisionRolesSql_EveryCarvedTable_HasThePairedRevoke()
+    [Theory]
+    [InlineData(ViewerRole)]
+    [InlineData(McpRole)]
+    public void ProvisionRolesSql_EveryCarvedTable_HasThePairedRevoke(string role)
     {
         var sql = StripComments(ReadProvisionRolesSql());
 
         /* The carve is blanket-grant, then REVOKE, then GRANT-columns. Without the REVOKE the blanket schema
            grant still stands and the column GRANT is a no-op ADDITION — the script would LOOK carved while
-           viewer read every secret column. That makes the statement ORDER load-bearing, so pin it. */
-        var blanketGrantAt = sql.IndexOf($"GRANT SELECT ON ALL TABLES IN SCHEMA {ConfigSchema}", StringComparison.Ordinal);
-        Assert.True(blanketGrantAt >= 0, "provision-roles.sql must still grant the blanket config SELECT the carve narrows.");
+           the role read every secret column. That makes the statement ORDER load-bearing, so pin it, per role:
+           mcp's blanket grant is its own statement (#3914), so its carve has to follow THAT one. */
+        var blanketGrant = new Regex($@"GRANT SELECT ON ALL TABLES IN SCHEMA {ConfigSchema}\s+TO [a-z_, ]*\b{role}\b[a-z_, ]*;").Match(sql);
+        Assert.True(blanketGrant.Success, $"provision-roles.sql must still grant {role} the blanket config SELECT the carve narrows.");
+        var blanketGrantAt = blanketGrant.Index;
 
         var revoked = TableRevoke.Matches(sql)
-            .Where(m => string.Equals(m.Groups["role"].Value, ViewerRole, StringComparison.Ordinal))
+            .Where(m => string.Equals(m.Groups["role"].Value, role, StringComparison.Ordinal))
             .Select(m => m.Groups["table"].Value)
             .ToHashSet(StringComparer.Ordinal);
 
@@ -121,12 +137,12 @@ public sealed class ProvisionRolesAclDriftTests
 
             /* The REVOKE must come AFTER the blanket grant (else it revokes nothing) and BEFORE the column
                GRANT (else it strips the very carve it was meant to enable). */
-            var revokeAt = sql.IndexOf($"REVOKE SELECT ON {ConfigSchema}.{acl.Table} FROM {ViewerRole};", StringComparison.Ordinal);
-            var grantAt = sql.IndexOf($"ON {ConfigSchema}.{acl.Table} TO {ViewerRole};", StringComparison.Ordinal);
-            Assert.True(revokeAt > blanketGrantAt && grantAt > revokeAt,
-                $"provision-roles.sql must REVOKE viewer's table-wide SELECT on {acl.Table} after the blanket config grant and before re-granting the non-secret columns.");
+            var revokeAt = sql.IndexOf($"REVOKE SELECT ON {ConfigSchema}.{acl.Table} FROM {role};", StringComparison.Ordinal);
+            var grantAt = new Regex($@"GRANT SELECT \([^)]*\)\s+ON {ConfigSchema}\.{acl.Table} TO {role};").Match(sql);
+            Assert.True(revokeAt > blanketGrantAt && grantAt.Success && grantAt.Index > revokeAt,
+                $"provision-roles.sql must REVOKE {role}'s table-wide SELECT on {acl.Table} after the blanket config grant and before re-granting the non-secret columns.");
 
-            /* The carve is viewer-only: admin writes these tables and keeps its table-wide SELECT. */
+            /* The carve is for the read roles only: admin writes these tables and keeps its table-wide SELECT. */
             Assert.DoesNotContain($"REVOKE SELECT ON {ConfigSchema}.{acl.Table} FROM {AdminRole}", sql, StringComparison.Ordinal);
         }
     }
@@ -149,24 +165,69 @@ public sealed class ProvisionRolesAclDriftTests
     }
 
     [Fact]
-    public void ProvisionRolesSql_ProvisionsAdminAndViewerOnly_NeverTheMcpRole()
+    public void ProvisionRolesSql_ProvisionsTheMcpRole_AndOnlyTheReadRolesAreCarved()
     {
         var sql = StripComments(ReadProvisionRolesSql());
 
-        /* Managed mode applies the SAME carve to a third role, mcp (BuildViewerColumnAclSql(config, "mcp")),
-           and the shipped script deliberately does NOT mirror that: the network MCP endpoint is
-           managed-mode-only, so a BYO operator's own PostgreSQL governs any MCP exposure it wants (see the
-           DarlingManagedRoles summary and the BYO section of Darling/README.md). Pin the asymmetry as
-           DELIBERATE, so a future reader closing "drift" does not add a half-provisioned mcp role: the only
-           correct fix if BYO ever gains one is to add its roles AND its carve together. */
-        Assert.DoesNotMatch(new Regex($@"\b{McpRole}\b", RegexOptions.IgnoreCase), sql);
+        /* #3914 reversed the old asymmetry on purpose. The script used to leave mcp out because the MCP server on
+           a bring-your-own store connected as the owner anyway; postgres.mcpConnectionString now points it at a
+           role of the operator's, so the script creates mcp — and, as this test's predecessor demanded of any BYO
+           mcp role, with its carve in the same change (the Theory above holds the carve to the C# list). */
+        Assert.Contains("CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';", sql, StringComparison.Ordinal);
+        Assert.Contains("COMMENT ON ROLE mcp IS 'darling-managed';", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';", sql, StringComparison.Ordinal);
+        Assert.Contains("RAISE EXCEPTION 'Role \"mcp\" already exists and was not created by Darling", sql, StringComparison.Ordinal);
 
-        /* Correspondingly, every column-level grant in the script names the viewer role. */
+        /* Every column-level SELECT grant names one of the two read roles, never admin, never several at once. */
+        var carved = ColumnGrant.Matches(sql).Select(m => m.Groups["role"].Value).ToHashSet(StringComparer.Ordinal);
+        Assert.Equal(new[] { McpRole, ViewerRole }, carved.OrderBy(r => r, StringComparer.Ordinal));
         foreach (Match match in ColumnGrant.Matches(sql))
         {
-            Assert.Equal(ViewerRole, match.Groups["role"].Value);
             Assert.Equal(ConfigSchema, match.Groups["schema"].Value);
         }
+    }
+
+    /// <summary>
+    /// The shipped script grants <c>viewer</c> and <c>mcp</c> exactly what managed provisioning grants them
+    /// (#3914) — every single-table write, every default privilege and every role setting, compared as sets
+    /// against <see cref="DarlingManagedRoles.BuildProvisioningSql"/>'s own output. The script was a hand mirror
+    /// with nothing holding its writes to the managed batch, and it drifted: its <c>viewer</c> never got the
+    /// <c>custom_alert_rules</c> write #3285 gave the managed one, so pointing the web dashboard at it would have
+    /// 42501'd every rule edit. The one deliberate difference is the #3334 resolve function, which only the
+    /// managed-only custom-alert evaluator needs; its <c>GRANT EXECUTE ON FUNCTION</c> names no table, so the
+    /// parse below never sees it.
+    /// </summary>
+    [Fact]
+    public void ProvisionRolesSql_GrantsTheReadRolesExactlyWhatManagedProvisioningDoes()
+    {
+        var script = StripComments(ReadProvisionRolesSql());
+        var managed = StripManagedComments(DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15));
+
+        foreach (var (what, parse) in new (string, Func<string, HashSet<string>>)[]
+        {
+            ("single-table grants", ReadRoleTableGrants),
+            ("default privileges", DefaultPrivileges),
+            ("role settings", RoleSettings),
+        })
+        {
+            var fromScript = parse(script);
+            var fromManaged = parse(managed);
+
+            /* The parses must have SEEN something, or two empty sets compare equal. */
+            Assert.NotEmpty(fromManaged);
+
+            Assert.True(
+                fromScript.SetEquals(fromManaged),
+                $"provision-roles.sql's {what} for the read roles differ from managed provisioning's. " +
+                $"Only in managed: [{string.Join("; ", fromManaged.Except(fromScript).OrderBy(x => x, StringComparer.Ordinal))}]. " +
+                $"Only in the script: [{string.Join("; ", fromScript.Except(fromManaged).OrderBy(x => x, StringComparer.Ordinal))}].");
+        }
+
+        /* Guard the guard: the custom_alert_rules gap this test was written for is detected. */
+        var drifted = script.Replace("GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO viewer;", "", StringComparison.Ordinal);
+        Assert.NotEqual(script, drifted);
+        Assert.False(ReadRoleTableGrants(drifted).SetEquals(ReadRoleTableGrants(managed)));
     }
 
     [Fact]
@@ -174,29 +235,33 @@ public sealed class ProvisionRolesAclDriftTests
     {
         /* Guard the guard. A drift test that cannot fail is worthless, and the ways this one could silently
            stop working (a reformatted GRANT, a renamed/moved file, a regex that matches nothing) all look
-           identical to "no drift". Mutate the real file's text three ways and assert the SAME comparison the
-           tests above run reports each one. */
+           identical to "no drift". Mutate the real file's text three ways per read role and assert the SAME
+           comparison the tests above run reports each one. */
         var real = StripComments(ReadProvisionRolesSql());
         var acl = DarlingManagedRoles.ViewerRestrictedConfigTables[0];
         var droppedColumn = acl.NonSecretColumns[^1];
 
-        Assert.True(MatchesCSharpAcl(real), "The unmutated provision-roles.sql must match the C# ACL.");
+        foreach (var role in new[] { ViewerRole, McpRole })
+        {
+            Assert.True(MatchesCSharpAcl(real, role), $"The unmutated provision-roles.sql must match the C# ACL for {role}.");
 
-        /* 1. The #1639 shape: the C# list gains a column the .sql never got. */
-        Assert.False(
-            MatchesCSharpAcl(MutateGrantColumns(real, acl.Table,
-                columns => columns.Where(c => !string.Equals(c, droppedColumn, StringComparison.Ordinal)))),
-            $"Removing {acl.Table}.{droppedColumn} from the .sql must be detected as drift.");
+            /* 1. The #1639 shape: the C# list gains a column the .sql never got. */
+            Assert.False(
+                MatchesCSharpAcl(MutateGrantColumns(real, acl.Table, role,
+                    columns => columns.Where(c => !string.Equals(c, droppedColumn, StringComparison.Ordinal))), role),
+                $"Removing {acl.Table}.{droppedColumn} from {role}'s grant in the .sql must be detected as drift.");
 
-        /* 2. The reverse: the .sql grants a column the C# list does not classify as non-secret. */
-        Assert.False(
-            MatchesCSharpAcl(MutateGrantColumns(real, acl.Table, columns => columns.Append("not_a_real_column"))),
-            "A column granted in the .sql but absent from the C# list must be detected as drift.");
+            /* 2. The reverse: the .sql grants a column the C# list does not classify as non-secret. */
+            Assert.False(
+                MatchesCSharpAcl(MutateGrantColumns(real, acl.Table, role, columns => columns.Append("not_a_real_column")), role),
+                $"A column granted to {role} in the .sql but absent from the C# list must be detected as drift.");
 
-        /* 3. A whole carve deleted (the table falls back to the blanket schema grant — secrets exposed). */
-        Assert.False(MatchesCSharpAcl(ColumnGrant.Replace(real, m =>
-                string.Equals(m.Groups["table"].Value, acl.Table, StringComparison.Ordinal) ? string.Empty : m.Value)),
-            $"Deleting the {acl.Table} column grant entirely must be detected as drift.");
+            /* 3. A whole carve deleted (the table falls back to the blanket schema grant — secrets exposed). */
+            Assert.False(MatchesCSharpAcl(ColumnGrant.Replace(real, m =>
+                    string.Equals(m.Groups["table"].Value, acl.Table, StringComparison.Ordinal)
+                    && string.Equals(m.Groups["role"].Value, role, StringComparison.Ordinal) ? string.Empty : m.Value), role),
+                $"Deleting {role}'s {acl.Table} column grant entirely must be detected as drift.");
+        }
     }
 
     /* ─────────────────────────── parsing helpers ─────────────────────────── */
@@ -224,6 +289,16 @@ public sealed class ProvisionRolesAclDriftTests
     {
         Assert.DoesNotContain("/*", sql, StringComparison.Ordinal);
 
+        return StripLineComments(sql);
+    }
+
+    /// <summary>The managed batch opens with a block comment, so it is stripped of those first, then of line
+    /// comments the same quote-aware way as the script.</summary>
+    private static string StripManagedComments(string sql) =>
+        StripLineComments(Regex.Replace(sql, @"/\*.*?\*/", " ", RegexOptions.Singleline));
+
+    private static string StripLineComments(string sql)
+    {
         var kept = new List<string>();
         foreach (var line in sql.Split('\n'))
         {
@@ -269,12 +344,53 @@ public sealed class ProvisionRolesAclDriftTests
             .ToList();
 
     /// <summary>
-    /// The one comparison the real assertions and the meta-test share: does this .sql text's viewer carve
-    /// match <see cref="DarlingManagedRoles.ViewerRestrictedConfigTables"/> table-for-table, column-for-column?
+    /// A single-table grant: <c>GRANT &lt;privileges, maybe with a column list&gt; ON schema.table TO roles;</c>.
+    /// A schema-wide, database or function grant names no <c>schema.table</c> and so never matches.
     /// </summary>
-    private static bool MatchesCSharpAcl(string sql)
+    private static readonly Regex TableGrant = new(
+        @"GRANT\s+(?<spec>[^;]*?)\s+ON\s+(?<schema>[a-z_]+)\.(?<table>[a-z_]+)\s+TO\s+(?<roles>[a-z_]+(?:\s*,\s*[a-z_]+)*)\s*;",
+        RegexOptions.Compiled);
+
+    /// <summary><c>ALTER DEFAULT PRIVILEGES FOR ROLE &lt;owner&gt; IN SCHEMA s GRANT … ON TABLES|SEQUENCES TO roles;</c></summary>
+    private static readonly Regex DefaultPrivilege = new(
+        @"ALTER\s+DEFAULT\s+PRIVILEGES\s+FOR\s+ROLE\s+\S+\s+IN\s+SCHEMA\s+(?<schema>[a-z_]+)\s+GRANT\s+(?<privileges>[A-Z, ]+?)\s+ON\s+(?<kind>TABLES|SEQUENCES)\s+TO\s+(?<roles>[a-z_]+(?:\s*,\s*[a-z_]+)*)\s*;",
+        RegexOptions.Compiled);
+
+    /// <summary><c>ALTER ROLE r SET setting = …</c> — the name only, since managed renders the timeout from a
+    /// knob and the script writes the shipped default.</summary>
+    private static readonly Regex RoleSetting = new(
+        @"ALTER\s+ROLE\s+(?<role>[a-z_]+)\s+SET\s+(?<setting>[a-z_]+)\s*=",
+        RegexOptions.Compiled);
+
+    /// <summary>The read roles' single-table grants, one entry per role, the column-level SELECT carve excluded
+    /// (its own tests compare it column by column).</summary>
+    private static HashSet<string> ReadRoleTableGrants(string sql) =>
+        TableGrant.Matches(sql)
+            .Where(m => !m.Groups["spec"].Value.TrimStart().StartsWith("SELECT", StringComparison.Ordinal))
+            .SelectMany(m => SplitColumns(m.Groups["roles"].Value)
+                .Where(role => role is ViewerRole or McpRole)
+                .Select(role => $"{Regex.Replace(m.Groups["spec"].Value.Trim(), @"\s+", " ")} ON {m.Groups["schema"].Value}.{m.Groups["table"].Value} TO {role}"))
+            .ToHashSet(StringComparer.Ordinal);
+
+    private static HashSet<string> DefaultPrivileges(string sql) =>
+        DefaultPrivilege.Matches(sql)
+            .SelectMany(m => SplitColumns(m.Groups["roles"].Value)
+                .Select(role => $"{m.Groups["schema"].Value}: {m.Groups["privileges"].Value.Trim()} ON {m.Groups["kind"].Value} TO {role}"))
+            .ToHashSet(StringComparer.Ordinal);
+
+    private static HashSet<string> RoleSettings(string sql) =>
+        RoleSetting.Matches(sql)
+            .Select(m => $"{m.Groups["role"].Value}.{m.Groups["setting"].Value}")
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The one comparison the real assertions and the meta-test share: does this .sql text's carve for
+    /// <paramref name="role"/> match <see cref="DarlingManagedRoles.ViewerRestrictedConfigTables"/>
+    /// table-for-table, column-for-column?
+    /// </summary>
+    private static bool MatchesCSharpAcl(string sql, string role)
     {
-        var granted = ParseColumnGrants(sql, ViewerRole);
+        var granted = ParseColumnGrants(sql, role);
         if (granted.Count != DarlingManagedRoles.ViewerRestrictedConfigTables.Count)
         {
             return false;
@@ -297,10 +413,11 @@ public sealed class ProvisionRolesAclDriftTests
     /// the exact shape of the #1639 drift; adding one is its mirror image.
     /// </summary>
     private static string MutateGrantColumns(
-        string sql, string table, Func<IEnumerable<string>, IEnumerable<string>> mutate) =>
+        string sql, string table, string role, Func<IEnumerable<string>, IEnumerable<string>> mutate) =>
         ColumnGrant.Replace(sql, m =>
         {
-            if (!string.Equals(m.Groups["table"].Value, table, StringComparison.Ordinal))
+            if (!string.Equals(m.Groups["table"].Value, table, StringComparison.Ordinal)
+                || !string.Equals(m.Groups["role"].Value, role, StringComparison.Ordinal))
             {
                 return m.Value;
             }

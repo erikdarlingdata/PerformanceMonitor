@@ -77,8 +77,9 @@ public sealed class DarlingCurrentWaitsTrendTests
             Assert.DoesNotContain("EVER", clearText, StringComparison.Ordinal);
 
             /* ── both series, in one payload ── */
-            await SeedWaitAsync(connection, ct, MinutesAgo(10), "LCK_M_X", 500, blockingSessionId: 99, database: "AppDb");
-            await SeedWaitAsync(connection, ct, MinutesAgo(10), "PAGEIOLATCH_SH", 250, blockingSessionId: 0, database: "AppDb");
+            var t10 = MinutesAgo(10);
+            await SeedWaitAsync(connection, ct, t10, "LCK_M_X", 500, blockingSessionId: 99, database: "AppDb");
+            await SeedWaitAsync(connection, ct, t10, "PAGEIOLATCH_SH", 250, blockingSessionId: 0, database: "AppDb");
 
             var hit = await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 4, null);
             var root = JsonDocument.Parse(hit).RootElement;

@@ -36,7 +36,7 @@ public sealed class FileIoStatsCollector : CollectorDefinitionBase<FileIoStatsCo
         string FileName,
         string FileType,
         string PhysicalName,
-        decimal SizeMb,
+        decimal? SizeMb,
         long NumOfReads,
         long NumOfWrites,
         long ReadBytes,
@@ -48,6 +48,31 @@ public sealed class FileIoStatsCollector : CollectorDefinitionBase<FileIoStatsCo
         int DatabaseId,
         int FileId);
 
+    /// <summary>
+    /// What every surface that shows a File I/O size says in place of a number when the row has none: the log
+    /// file of an Azure SQL Database Hyperscale database (the log lives in the log service, so the file carries
+    /// no size the database holds). Both apps' <c>get_file_io_stats</c> payloads and the web table use this text.
+    /// The words belong to <see cref="PerformanceMonitor.Common.HyperscaleLogSize.Display"/>, which Database Sizes
+    /// shows for the same file, so the two surfaces cannot drift apart.
+    /// </summary>
+    public const string NoSizeLabel = PerformanceMonitor.Common.HyperscaleLogSize.Display;
+
+    /* Azure SQL Database takes the file's size from sys.database_files, not from sys.dm_io_virtual_file_stats.
+       On a Hyperscale database size_on_disk_bytes reads about 0.1 MB for the data file and for the log file,
+       while sys.database_files.size (the current size in 8-KB pages) is correct for the data file. Database
+       Sizes already reads it with this same arithmetic. On a General Purpose database the two agree.
+
+       COALESCE keeps the DMV's number for a file the join does not match. Without it that file would read
+       NULL, ReadAsync keeps a NULL size as NULL, and every reader would show NoSizeLabel ("n/a (log service)")
+       for a file that is not in the log service. The size facts would skip it too (size_mb > 0).
+
+       The exception is the LOG file of a Hyperscale database: it lives in the log service, so neither
+       number is storage the database holds. That row carries NO size (NULL, written as NULL), and the
+       readers say NoSizeLabel for it. DATABASEPROPERTYEX's 'Edition' names the tier; its sql_variant is
+       converted to nvarchar(64), the property's documented type, before the comparison. The size facts
+       skip the NULL row (size_mb > 0), so no total includes it.
+
+       The on-prem / Managed Instance query below is unchanged. */
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -56,7 +81,13 @@ SELECT
     file_name = df.name,
     file_type = df.type_desc,
     physical_name = df.physical_name,
-    size_mb = CONVERT(decimal(18,2), vfs.size_on_disk_bytes / 1048576.0),
+    size_mb =
+        CASE
+            WHEN df.type = 1 /*LOG*/
+            AND  CONVERT(nvarchar(64), DATABASEPROPERTYEX(DB_NAME(), N'Edition')) = N'Hyperscale'
+            THEN CONVERT(decimal(18,2), NULL)
+            ELSE CONVERT(decimal(18,2), COALESCE(df.size * 8.0 / 1024.0, vfs.size_on_disk_bytes / 1048576.0))
+        END,
     num_of_reads = vfs.num_of_reads,
     num_of_writes = vfs.num_of_writes,
     read_bytes = vfs.num_of_bytes_read,
@@ -151,6 +182,9 @@ OPTION(RECOMPILE);";
         new CollectorColumn("delta_stall_write_ms", CollectorColumnType.BigInt),
         new CollectorColumn("delta_stall_queued_read_ms", CollectorColumnType.BigInt),
         new CollectorColumn("delta_stall_queued_write_ms", CollectorColumnType.BigInt),
+        /* Appended (Darling V127 / Lite v60, #3540): the measured seconds the row's deltas accrued over, or
+           0 when no delta was knowable. At the END because both stores' writers are positional. */
+        new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -164,7 +198,7 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(1) ? "Unknown" : reader.GetString(1),
                 reader.IsDBNull(2) ? "Unknown" : reader.GetString(2),
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
-                reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
+                reader.IsDBNull(4) ? null : reader.GetDecimal(4),
                 reader.IsDBNull(5) ? 0L : reader.GetInt64(5),
                 reader.IsDBNull(6) ? 0L : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0L : reader.GetInt64(7),
@@ -184,14 +218,25 @@ OPTION(RECOMPILE);";
     {
         /* "{database}|{file}" delta key and the eight group names are the parity contract. */
         var deltaKey = $"{row.DatabaseName}|{row.FileName}";
-        var deltaReads = context.Deltas.CalculateDelta(context.ServerId, "file_io_reads", deltaKey, row.NumOfReads, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWrites = context.Deltas.CalculateDelta(context.ServerId, "file_io_writes", deltaKey, row.NumOfWrites, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaReadBytes = context.Deltas.CalculateDelta(context.ServerId, "file_io_read_bytes", deltaKey, row.ReadBytes, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWriteBytes = context.Deltas.CalculateDelta(context.ServerId, "file_io_write_bytes", deltaKey, row.WriteBytes, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaStallReadMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_read", deltaKey, row.IoStallReadMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaStallWriteMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_write", deltaKey, row.IoStallWriteMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaStallQueuedReadMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_queued_read", deltaKey, row.IoStallQueuedReadMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaStallQueuedWriteMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_queued_write", deltaKey, row.IoStallQueuedWriteMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_reads", deltaKey, row.NumOfReads, out var readsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWrites = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_writes", deltaKey, row.NumOfWrites, out var writesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaReadBytes = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_read_bytes", deltaKey, row.ReadBytes, out var readBytesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWriteBytes = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_write_bytes", deltaKey, row.WriteBytes, out var writeBytesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallReadMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_stall_read", deltaKey, row.IoStallReadMs, out var stallReadInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallWriteMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_stall_write", deltaKey, row.IoStallWriteMs, out var stallWriteInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallQueuedReadMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_stall_queued_read", deltaKey, row.IoStallQueuedReadMs, out var stallQueuedReadInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallQueuedWriteMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_stall_queued_write", deltaKey, row.IoStallQueuedWriteMs, out var stallQueuedWriteInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        /* The interval is stored beside the deltas (#3540), the minimum over the row's eight groups, so the
+           stored (0, 0) pair means "no delta in this row is knowable" and a latency reader can tell a
+           restart's fabricated (0 stall, 0 reads) from a file that genuinely did nothing — the former used
+           to render as a confident "0.00 ms" mid-restart. See WaitStatsCollector.WritePayload for the full
+           argument; the eight groups share the key and collection time, and dm_io_virtual_file_stats resets
+           every counter of a file together (restore, detach/attach, instance restart), so the minimum only
+           ever differs from any one group's interval when seeding restored some groups and not others. */
+        var sampleIntervalSeconds = Math.Min(
+            Math.Min(Math.Min(readsInterval, writesInterval), Math.Min(readBytesInterval, writeBytesInterval)),
+            Math.Min(Math.Min(stallReadInterval, stallWriteInterval), Math.Min(stallQueuedReadInterval, stallQueuedWriteInterval)));
 
         writer
             .Value(row.DatabaseName)
@@ -214,6 +259,7 @@ OPTION(RECOMPILE);";
             .Value(deltaStallReadMs)
             .Value(deltaStallWriteMs)
             .Value(deltaStallQueuedReadMs)
-            .Value(deltaStallQueuedWriteMs);
+            .Value(deltaStallQueuedWriteMs)
+            .Value(sampleIntervalSeconds);   /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 }

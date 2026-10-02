@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Common;
@@ -358,6 +359,14 @@ public sealed class DarlingCollectorRunner
     private readonly Func<bool> _collectSchemaChanges;
     private readonly Func<bool> _compressPlanContent;
 
+    /* #3953: the latest-snapshot-per-interval table's writer. One per runner, because it carries the per-server
+       "coverage ensured" and "gap checked at" state that must outlive a cycle. */
+    private readonly QueryStoreIntervalLatest _queryStoreIntervalLatest;
+    private readonly QueryStoreIntervalWide _queryStoreIntervalWide;
+
+    /* #4659: told before and after every Query Store batch write (see CopyBatchOnceAsync). Null = no reader is caching. */
+    private readonly QueryStoreWriteFence? _queryStoreWriteFence;
+
     /* Feeds CollectorContext.TextByteBudgetOverride on every cycle (#2164) — the query_store collector's
        per-database text budget in MB (config_service.query_store_text_budget_mb, V59). Provider-read for
        the same reason as the two above: a store reload takes effect on the NEXT cycle without rebuilding
@@ -402,6 +411,28 @@ public sealed class DarlingCollectorRunner
     private readonly ConcurrentDictionary<int, DateTime> _azureMasterInaccessibleSince = new();
 
     /// <summary>
+    /// In-memory server-scoped watermark cache (#4197 part b): a hit here skips the store's watermark
+    /// reads entirely for a (server, collector) that has one cached. Only definitions that declare a
+    /// per-row watermark accessor (<see cref="ICollectorDefinition{TRow}.WatermarkValueAccessor"/> /
+    /// <see cref="ICollectorDefinition{TRow}.NumericWatermarkValueAccessor"/>) participate — a null
+    /// accessor means "don't cache this collector", so <c>pg_cpu_utilization</c> (a second writer,
+    /// <c>Targets/RdsCpuIngestor.cs</c>, can move its watermark without this runner's knowledge) always
+    /// reads fresh, exactly as before. See <c>ServerWatermarkCache</c>'s own remarks for seed/advance/
+    /// invalidate. Lives here rather than on a per-cycle type because the runner itself is constructed
+    /// once per service process (mirrors <see cref="_azureMasterInaccessibleSince"/>), so the cache
+    /// outlives every cycle it needs to.
+    /// </summary>
+    private readonly ServerWatermarkCache _watermarkCache = new();
+
+    /// <summary>
+    /// Exact per-(server, database) Query Store watermark cache for the enumerated per-item path. The
+    /// runner is constructed once per service process and the backfill holds this same runner, so the
+    /// cache outlives every cycle and sees every writer. See <see cref="DatabaseWatermarkCache"/> for the
+    /// hit rule and the single-writer assumption.
+    /// </summary>
+    private readonly DatabaseWatermarkCache _databaseWatermarkCache = new();
+
+    /// <summary>
     /// When a server's live query_store collection last failed a per-database item — the backfill
     /// worker's yield-to-live signal (#2111), read through <see cref="LastQueryStoreItemFailureUtc"/>
     /// and judged by <see cref="QueryStoreBackfillState.ShouldYieldToLive"/>. Stamped only for
@@ -409,6 +440,38 @@ public sealed class DarlingCollectorRunner
     /// service restart forgetting the stamps just means one backfill slice races one live cycle once.
     /// </summary>
     private readonly ConcurrentDictionary<int, DateTime> _lastQueryStoreItemFailureUtc = new();
+
+    /// <summary>#4660: when the orphaned per-database state prune last succeeded, per server.</summary>
+    private readonly ConcurrentDictionary<int, DateTime> _lastOrphanStatePruneUtc = new();
+
+    /* When each server's failed log_timezone read last logged at Warning (#4051 round-2 review, L-2). See
+       LogTimezoneReadFailureLevel. In memory on purpose: a restart that warns once more is the right answer. */
+    private readonly ConcurrentDictionary<int, DateTime> _logTimezoneReadWarnedUtc = new();
+
+    /* #4053 part c1: the same throttle as _logTimezoneReadWarnedUtc, for TryReadPgLogUsesCsvlogAsync's own
+       probe — its own dictionary because a target can fail one read and not the other (they run on separate
+       throwaway connections), and LogTimezoneReadFailureLevel already takes the dictionary as a parameter
+       for exactly this reuse (see LogTimezoneReadFailureLevelTests). */
+    private readonly ConcurrentDictionary<int, DateTime> _pgLogUsesCsvlogReadWarnedUtc = new();
+
+    /* #4053 review round 1 (item 5): the last good pgLogUsesCsvlog verdict this runner has seen for a
+       server, kept so a probe failure can return IT rather than false. False is not a neutral fallback
+       here the way it is for a target this route has never successfully read: on a target the route was
+       already reading csvlog for, a transient connection or probe failure flipping the verdict to false
+       would make the ingestor read the STDERR file instead, from that file's own (stale or absent) marker,
+       and re-emit rows the csvlog route already stored under different text — the very duplication
+       CommitResume's discipline exists to avoid. Runner-local and in-memory for the same reason every other
+       per-server cache on this type is: a restart simply re-probes from nothing, which is the existing
+       first-contact behaviour, not a regression. */
+    private readonly ConcurrentDictionary<int, bool> _lastPgLogUsesCsvlogVerdict = new();
+
+    /* #4735: the (target, log-tail collector) pairs whose last cycle used every read start and was refused at each.
+       A start inside a character is cured by one of the later starts. A byte that is invalid in the database
+       encoding, anywhere in the 4 MB window, is refused at all four and would be again on every cycle, so while a
+       pair is here its cycle makes one read at shift 0 and no retries. Only a read that succeeds removes it. Keyed
+       as the binary-file grant is (ReadBinaryFileCacheKey), plus the collector. In memory on purpose, like the
+       caches around it: a restart pays one four-read cycle and sets it again, the safe direction. */
+    private readonly ConcurrentDictionary<(string Target, string Collector), byte> _pgLogRefusedAtEveryShift = new();
 
     /// <summary>The #2111 yield-to-live read side: null when the server has never failed a live
     /// query_store item this process lifetime.</summary>
@@ -631,9 +694,10 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _queryStoreWriteFence = queryStoreWriteFence;
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
         _logger = logger;
         _capturePlans = capturePlans ?? (() => true);
@@ -644,16 +708,29 @@ public sealed class DarlingCollectorRunner
            false = 'none': plain text into query_plan_xml so direct-SQL consumers read it bare.
            The worker passes () => config.PlanXmlCompression == "gzip"; tests pass a constant. */
         _compressPlanContent = compressPlanContent ?? (() => true);
+        _queryStoreIntervalLatest = new QueryStoreIntervalLatest(logger);
+        _queryStoreIntervalWide = new QueryStoreIntervalWide(logger);
         /* Null provider = 1 = capture a plan on every cycle, i.e. the pre-#2862 behaviour. */
         _procedureStatsPlanCycleInterval = procedureStatsPlanCycleInterval ?? (() => 1);
         /* Null provider = no scope for any collector = every database the server enumerates, which is
            what Lite's twin and every pre-#3477 test constructs. */
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
+        /* #4004: the store's log-hash key, loaded once by the worker at start and shared by every run that hashes log
+           text (pg_log_events on both transports). Null = none could be used: those runs refuse, with the reason. */
+        _logHashKey = logHashKey;
     }
 
-    /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
-       in-memory by design (#2538), and a fresh instance every cycle would silently re-read the same tail
-       forever while looking like it was making progress. */
+    private readonly PgLogHashKey? _logHashKey;
+
+    /// <summary>The store's log-hash key this runner was given (#4004), null when the service could not load one. The
+    /// hourly deadlock re-mask reads it here (#4012's review), the one instance every log-hashing run shares.</summary>
+    internal PgLogHashKey? LogHashKey => _logHashKey;
+
+    /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and held in
+       memory (#2538), and a fresh instance every cycle would silently re-read the same tail forever while looking
+       like it was making progress. Each ingestor also saves its position to collect.collector_state after the rows
+       it covers are stored, and restores it before a server's first read (#4708, RdsResumeStore), so a restart
+       resumes instead of re-reading only the newest file's last lines. */
     private RdsPlanIngestor? _rdsPlans;
 
     /* A SEPARATE ingestor from _rdsPlans, deliberately: RdsLogSource's resume marker is consumed per
@@ -662,11 +739,139 @@ public sealed class DarlingCollectorRunner
        read "the same bounded tail of the same file" - matching the pg_read_file route, where the two
        collectors' SQL queries already read that tail independently rather than sharing a cursor. */
     private RdsDeadlockIngestor? _rdsDeadlocks;
+    private RdsLogEventIngestor? _rdsLogEvents;
 
     /* Own ingestor for the same "one instance per transport" reason as the two above — see
        RdsCpuIngestor's own doc comment for why it does NOT need the marker-survival treatment
        _rdsPlans/_rdsDeadlocks get: its resume watermark lives in the store, not in this field. */
     private RdsCpuIngestor? _rdsCpu;
+
+    /// <summary>
+    /// #4708: where an RDS log ingestor keeps its positions across a restart - <c>collect.collector_state</c>, under
+    /// the collector <paramref name="collectorName"/> and the keys the self-hosted tail already declares
+    /// (<see cref="PgServerLogTail.ResumeStateKeys"/>), through this runner's own state helpers.
+    /// </summary>
+    internal RdsResumeStore RdsResumeStoreFor(string collectorName)
+        => new(collectorName, GetCollectorStateAsync, SaveCollectorStateAsync);
+
+    /// <summary>
+    /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
+    /// when the run's definition recorded <see cref="PgServerLogTail.ForeignZoneLinesMeasurement"/> (#4046), so the
+    /// row that carries the count also says what it counts and names the issue; otherwise <paramref name="result"/>
+    /// unchanged. Host note, not the composed <see cref="CollectorRunResult.Note"/>, which would lose the count.
+    /// </summary>
+    internal static CollectorRunResult WithForeignZoneLinesNote(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.Measurements.Any(m =>
+                string.Equals(m.Label, PgServerLogTail.ForeignZoneLinesMeasurement, StringComparison.Ordinal) && m.Value > 0)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgServerLogTail.ForeignZoneLinesNote) }
+            : result;
+    }
+
+    /// <summary>The sentence beside <see cref="PgServerLogTail.ResumeFileMissingMeasurement"/> on the RDS route (#4708):
+    /// the self-hosted sentence names <c>log_directory</c> and a 4 MB read, neither of which exists there.</summary>
+    internal const string RdsLogResumeLostNote =
+        "The RDS log file this collector had read up to is no longer listed, so this read fell back to the newest "
+        + "file's last 10,000 lines and whatever the old file received after the previous read was not collected (#4708)";
+
+    /// <summary>The sentence beside <see cref="PgServerLogTail.FilesSkippedByRotationMeasurement"/> on the RDS route (#4708).</summary>
+    internal const string RdsLogFilesSkippedNote =
+        "More than one RDS log rotation happened between two reads: this read finished the file the previous read stopped "
+        + "in and read the newest one, and log_files_skipped_by_rotation counts the files between them that no read "
+        + "opened (#4708)";
+
+    /// <summary>
+    /// <paramref name="result"/> with the resume notes of the stderr log tail merged into its host note for each
+    /// resume measurement the run recorded above zero (#4699); otherwise unchanged. <paramref name="managedRoute"/> is
+    /// true for an Aurora or RDS target, whose log comes through the AWS API: the two measurements it records get their
+    /// own sentences (#4708) instead of the self-hosted ones, which describe a log directory and a 4 MB window.
+    /// </summary>
+    internal static CollectorRunResult WithLogResumeNotes(CollectorRunResult result, bool managedRoute = false)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        var hostNote = result.HostNote;
+
+        foreach (var (label, note) in new[]
+        {
+            (PgServerLogTail.ResumeFileMissingMeasurement, managedRoute ? RdsLogResumeLostNote : PgServerLogTail.LogResumeLostNote),
+            (PgServerLogTail.ResumeFileRecycledMeasurement, PgServerLogTail.LogResumeLostNote),
+            (PgServerLogTail.FilesSkippedByRotationMeasurement, managedRoute ? RdsLogFilesSkippedNote : PgServerLogTail.LogFilesSkippedNote),
+            (PgServerLogTail.BytesSkippedMeasurement, PgServerLogTail.LogBytesSkippedNote),
+            (PgServerLogTail.MatchesLimitedMeasurement, PgServerLogTail.LogMatchesLimitedNote),
+        })
+        {
+            if (result.Measurements.Any(m => string.Equals(m.Label, label, StringComparison.Ordinal) && m.Value > 0))
+            {
+                hostNote = EnumeratedCollectorDriver.MergeNotes(hostNote, note);
+            }
+        }
+
+        return ReferenceEquals(hostNote, result.HostNote) ? result : result with { HostNote = hostNote };
+    }
+
+    /// <summary>
+    /// <paramref name="result"/> with <see cref="PgPlanCaptureCollector.ForgedCaptureNote"/> merged into its host
+    /// note when the run's definition recorded <see cref="PgPlanCaptureCollector.ForgedCaptureMeasurement"/>
+    /// (#4058 L1), following the exact pattern <see cref="WithForeignZoneLinesNote"/> sets above; otherwise
+    /// <paramref name="result"/> unchanged.
+    /// </summary>
+    internal static CollectorRunResult WithForgedCaptureNote(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.Measurements.Any(m =>
+                string.Equals(m.Label, PgPlanCaptureCollector.ForgedCaptureMeasurement, StringComparison.Ordinal) && m.Value > 0)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgPlanCaptureCollector.ForgedCaptureNote) }
+            : result;
+    }
+
+    /// <summary>
+    /// <paramref name="result"/> with <see cref="PgDeadlocksCollector.RaiseShapedDeadlocksSkippedNote"/> merged
+    /// into its host note when the run's definition recorded
+    /// <see cref="PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement"/> (#4058 item 1), following the
+    /// exact pattern <see cref="WithForgedCaptureNote"/> sets above; otherwise <paramref name="result"/> unchanged.
+    /// </summary>
+    internal static CollectorRunResult WithRaiseShapedDeadlocksSkippedNote(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.Measurements.Any(m =>
+                string.Equals(m.Label, PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement, StringComparison.Ordinal) && m.Value > 0)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgDeadlocksCollector.RaiseShapedDeadlocksSkippedNote) }
+            : result;
+    }
+
+    /// <summary>
+    /// <paramref name="result"/> with <see cref="PgReadBinaryFileAdvisory.Sentence"/> merged into its host
+    /// note when <paramref name="server"/> is still on the text route AND has not been noted inside
+    /// <see cref="PgReadBinaryFileAdvisory.NoteInterval"/> (#4046); otherwise <paramref name="result"/>
+    /// unchanged. The caller (<c>DarlingWorker.RunOneAsync</c>) gates this to <c>pg_log_events</c> only, so a
+    /// target gets one note a day rather than whichever of the three log-tail collectors happens to run and
+    /// win the gate. Reads <see cref="PgReadBinaryFileCapability"/>'s cache rather than probing again — the
+    /// server-scoped path already resolved it for this exact target this cycle, for every collector that
+    /// reads <see cref="PgServerLogTail"/>. A managed target was never entered into that cache at all (it reaches
+    /// its log through the RDS API, never through <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/>), so
+    /// <c>TryGetCachedVerdict</c> answers false for it and this never fires there. It answers false for a
+    /// database that is neither UTF8 nor SQL_ASCII too, where the grant would change nothing (#4051 review L4).
+    /// It takes the <see cref="ServerRuntime"/> rather than a key, like the other two cache helpers, so all three
+    /// key the cache the same way (#4051 round-2 review).
+    /// </summary>
+    internal static CollectorRunResult WithReadBinaryFileAdvisoryNote(CollectorRunResult result, ServerRuntime server)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        ArgumentNullException.ThrowIfNull(server);
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+
+        return PgReadBinaryFileCapability.TryGetCachedVerdict(targetKey, out var granted)
+            && !granted
+            && PgReadBinaryFileAdvisory.ShouldNote(targetKey)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgReadBinaryFileAdvisory.Sentence) }
+            : result;
+    }
 
     /// <summary>
     /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
@@ -679,21 +884,29 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsPlansAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsPlans ??= new RdsPlanIngestor(_postgres, logger: _logger);
+        _rdsPlans ??= new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name));
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        /* #4053 part c3: the same target-configuration read IngestRdsDeadlocksAsync and IngestRdsLogEventsAsync
+           make, for the same reason — this ingestor reaches the log through the AWS API, not SQL, so it
+           carries no target connection of its own to probe with. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
 
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsPlans.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        var measurements = MeasurementsFor(server, foreignZoneLines: 0, outcome.CsvRecordsDiscarded,
+            outcome.ForgedCaptures, filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
         /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
            filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
            different from every other target's. */
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsPlanLogNotReachedNote, RdsPlanLogEmptyNote));
     }
 
@@ -707,19 +920,281 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsDeadlocksAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsDeadlocks ??= new RdsDeadlockIngestor(_postgres, logger: _logger);
+        _rdsDeadlocks ??= new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name));
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        /* #4046 part 1b: read on the target's own connection each cycle, since a sighup setting takes
+           effect with no reconnect and #3604-style connect-time caching would miss that. */
+        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+
+        /* #4053 part c2: the same target-configuration read IngestRdsLogEventsAsync makes, for the same
+           reason — this ingestor reaches the log through the AWS API, not SQL, so it carries no target
+           connection of its own to probe with. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
 
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        var measurements = MeasurementsFor(
+            server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded, raiseShapedSkipped: outcome.RaiseShapedSkipped,
+            filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
+    }
+
+    /// <summary>
+    /// #4046 part 1b: the managed route's own read of <c>log_timezone</c>, over a throwaway connection to
+    /// the target — the RDS ingestors reach the log through the AWS API, not SQL, so they carry no target
+    /// connection of their own. False (today's refusal on a foreign-zone line) when the setting cannot be
+    /// read, matching the self-hosted route's NULL-column fallback in <see cref="PgServerLogTail.LogTimezoneIsUtc"/>.
+    /// </summary>
+    private async Task<bool> TryReadLogTimezoneIsUtcAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            var isUtc = await ReadLogTimezoneIsUtcAsync(connection, cancellationToken);
+
+            /* A read that works again resets the throttle below, so the next failure warns at once. */
+            _logTimezoneReadWarnedUtc.TryRemove(server.ServerId, out _);
+            return isUtc;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Warning, not Debug: a read that fails every cycle turns part 1b off for this target, and at Debug
+               that went unseen while every call failed (#4051 review H1). At most once an hour per server,
+               though, with Debug in between (#4051 round-2 review, L-2). */
+            _logger?.Log(LogTimezoneReadFailureLevel(_logTimezoneReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
+                "Could not read log_timezone for '{Server}' (#4046 part 1b) — a foreign-zone "
+                + "line this cycle is refused as before.", server.Config.DisplayName);
+            return false;
+        }
+    }
+
+    /// <summary>How long a server's failed <c>log_timezone</c> reads stay at Debug after one logs at Warning.</summary>
+    internal static readonly TimeSpan LogTimezoneReadWarningInterval = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// #4051 round-2 review, L-2: the level for a failed <c>log_timezone</c> read on <paramref name="serverId"/>.
+    /// Warning for the first failure, and again once <see cref="LogTimezoneReadWarningInterval"/> has passed since
+    /// the last Warning. Debug in between. A read that fails every cycle stays visible, without a stack trace on
+    /// every cycle (576 a day per managed target). The Warning is recorded on the same call that returns it.
+    /// </summary>
+    internal static LogLevel LogTimezoneReadFailureLevel(
+        ConcurrentDictionary<int, DateTime> warnedUtc, int serverId, DateTime nowUtc)
+    {
+        ArgumentNullException.ThrowIfNull(warnedUtc);
+
+        /* #4732: a stamp ahead of the clock (it stepped back since the Warning) is replaced by this reading. */
+        if (LastFiredStamp.TryGet(warnedUtc, serverId, nowUtc, out var last) && nowUtc - last < LogTimezoneReadWarningInterval)
+        {
+            return LogLevel.Debug;
+        }
+
+        warnedUtc[serverId] = nowUtc;
+        return LogLevel.Warning;
+    }
+
+    /// <summary>
+    /// #4046 part 1b: the managed route's <c>log_timezone</c> read as a whole statement.
+    /// <see cref="PgServerLogTail.LogTimezoneSql"/> is an expression the self-hosted readers select beside the
+    /// tail, so on its own it needs the SELECT. Without it every call failed with 42601 and part 1b never took
+    /// effect on an RDS or Aurora target (#4051 review H1).
+    /// </summary>
+    internal const string LogTimezoneReadSql = "SELECT " + PgServerLogTail.LogTimezoneSql;
+
+    /// <summary>
+    /// Whether the target's <c>log_timezone</c> renders UTC, read on <paramref name="connection"/>, which must
+    /// already be open. Its own method so a live test can run the exact statement the managed route sends.
+    /// </summary>
+    internal static async Task<bool> ReadLogTimezoneIsUtcAsync(DbConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        using var command = connection.CreateCommand();
+        command.CommandTimeout = 10;
+        command.CommandText = LogTimezoneReadSql;
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is string setting && PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
+    }
+
+    /// <summary>#4046 part 1b: the managed route's foreign-zone count, on a throwaway context so the RDS ingest
+    /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
+    /// self-hosted collectors.</summary>
+    private IReadOnlyList<CollectorMeasurement> MeasurementsFor(
+        ServerRuntime server, int foreignZoneLines, int csvRecordsDiscarded = 0, int forgedCaptures = 0,
+        int raiseShapedSkipped = 0, int filesSkipped = 0, bool resumeFileMissing = false)
+    {
+        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0 && forgedCaptures <= 0 && raiseShapedSkipped <= 0
+            && filesSkipped <= 0 && !resumeFileMissing)
+        {
+            return CollectorContext.NoMeasurements;
+        }
+
+        var context = new CollectorContext
+        {
+            ServerId = server.ServerId,
+            ServerName = server.StorageName,
+            CollectionTime = DateTime.UtcNow,
+            Deltas = _deltas,
+        };
+        PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+
+        /* #4053 part c1: the csvlog route's own discard count, same measurement label the self-hosted
+           PgLogEventsCollector.ReadAsync records for its own csvlog route (CsvRecordsDiscardedMeasurement),
+           reported only when > 0, following that method's exact pattern. */
+        if (csvRecordsDiscarded > 0)
+        {
+            context.Measure(PgLogEventsCollector.CsvRecordsDiscardedMeasurement, csvRecordsDiscarded);
+        }
+
+        /* #4053 part c3: the RDS plan ingestor's own forged-capture count, same measurement label the
+           self-hosted PgPlanCaptureCollector.ReadCsvAsync/ReadAsync record for their own forged skips
+           (ForgedCaptureMeasurement), reported only when > 0. DarlingWorker's WithForgedCaptureNote reads
+           this label off any collector's measurements, so this alone is what attaches the sentence to the
+           managed route's row. */
+        if (forgedCaptures > 0)
+        {
+            context.Measure(PgPlanCaptureCollector.ForgedCaptureMeasurement, forgedCaptures);
+        }
+
+        /* #4058 item 1: the RDS deadlock ingestor's own RAISE-shaped skip count, same measurement label the
+           self-hosted PgDeadlocksCollector.ReadCsvRow records for its own csvlog route
+           (RaiseShapedDeadlocksSkippedMeasurement), reported only when > 0. */
+        if (raiseShapedSkipped > 0)
+        {
+            context.Measure(PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement, raiseShapedSkipped);
+        }
+
+        MeasureRdsLogResume(context, filesSkipped, resumeFileMissing);
+
+        return context.Measurements;
+    }
+
+    /// <summary>
+    /// #4708: the managed route's log-resume disclosures, under the labels the self-hosted tail records for the same
+    /// two facts (<see cref="PgServerLogTail.FilesSkippedByRotationMeasurement"/> and
+    /// <see cref="PgServerLogTail.ResumeFileMissingMeasurement"/>), each only when it happened.
+    /// </summary>
+    internal static void MeasureRdsLogResume(CollectorContext context, int filesSkipped, bool resumeFileMissing)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (filesSkipped > 0)
+        {
+            context.Measure(PgServerLogTail.FilesSkippedByRotationMeasurement, filesSkipped);
+        }
+
+        if (resumeFileMissing)
+        {
+            context.Measure(PgServerLogTail.ResumeFileMissingMeasurement, 1);
+        }
+    }
+
+    /// <summary>
+    /// Classified log events for Aurora and RDS Postgres, read from the RDS log API (#3601) — the managed
+    /// half of the log-event pipeline, dispatched where <c>pg_log_events</c>' <c>pg_read_file</c> route
+    /// cannot run. Same shape, same outcome vocabulary and same note pair as
+    /// <see cref="IngestRdsDeadlocksAsync"/>; the classifier it feeds is the one the self-hosted collector
+    /// feeds, so the two transports store identical rows for identical text.
+    /// </summary>
+    public async Task<CollectorRunResult> IngestRdsLogEventsAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
+    {
+        /* #4004: no key, no hashing - the same refusal the pg_read_file route's BuildQuery makes. */
+        var logHashKey = _logHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
+        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name));
+
+        var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        /* #4046 part 1b: see IngestRdsDeadlocksAsync's TryReadLogTimezoneIsUtcAsync call for why this reads
+           the target fresh each cycle rather than caching it at connect. */
+        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+
+        /* #4053 part c1: the same target-configuration read the self-hosted pg_read_file route makes through
+           ResolvePgReadBinaryFileGrantAsync, on the managed route's own throwaway connection for the same reason
+           TryReadLogTimezoneIsUtcAsync above needs one — this ingestor reaches the log through the AWS API, not
+           SQL, so it carries no target connection of its own to probe with. Cached the same hour by
+           PgLogFormatCapability itself, keyed the same way as the binary-file grant (ReadBinaryFileCacheKey), so
+           this is a cache hit on every cycle but the first and the one after a switch. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
+
+        var started = Stopwatch.GetTimestamp();
+
+        var outcome = await _rdsLogEvents.IngestAsync(
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded,
+            filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
+            RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));
+    }
+
+    /// <summary>
+    /// #4053 part c1: whether this target's <c>log_destination</c> includes <c>csvlog</c>, read the same way
+    /// <see cref="TryReadLogTimezoneIsUtcAsync"/> reads <c>log_timezone</c> — over a throwaway connection, since
+    /// the RDS ingestors carry none of their own.
+    ///
+    /// <para>#4053 review round 1 (item 5): on a probe failure, this returns the LAST GOOD verdict this
+    /// runner saw for the server (<see cref="_lastPgLogUsesCsvlogVerdict"/>), not a hardcoded false. False
+    /// used to be the fallback unconditionally, which is right for a target this runner has never read
+    /// successfully — today's stderr route, unchanged — but wrong for one it already knows is on csvlog:
+    /// flipping that verdict on a transient connection blip would make the ingestor read the stderr file
+    /// from ITS OWN marker and re-store rows the csvlog route already committed under different text. The
+    /// throttled Warning-then-Debug logging (#4051 round-2 review, L-2) is unchanged: a target whose probe
+    /// fails every cycle still logs once loudly and then quietly, on its own <see cref="_pgLogUsesCsvlogReadWarnedUtc"/>
+    /// throttle.</para>
+    /// </summary>
+    private async Task<bool> TryReadPgLogUsesCsvlogAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            var usesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(
+                connection, ReadBinaryFileCacheKey(server), cancellationToken);
+
+            /* A read that works again resets the throttle below, so the next failure warns at once. */
+            _pgLogUsesCsvlogReadWarnedUtc.TryRemove(server.ServerId, out _);
+
+            /* #4053 review round 1 (item 5): recorded on every SUCCESSFUL probe, so the catch below always
+               has this cycle's predecessor to fall back to — not just the last time the probe happened to
+               fail. */
+            _lastPgLogUsesCsvlogVerdict[server.ServerId] = usesCsvlog;
+            return usesCsvlog;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Log(LogTimezoneReadFailureLevel(_pgLogUsesCsvlogReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
+                "Could not read log_destination for '{Server}' (#4053 part c1) — every RDS csvlog-aware "
+                + "route reads the {Fallback} file this cycle, its last known-good verdict.", server.Config.DisplayName,
+                _lastPgLogUsesCsvlogVerdict.TryGetValue(server.ServerId, out var lastGood) && lastGood ? "csv" : "stderr");
+
+            /* #4053 review round 1 (item 5): the last good verdict this runner saw for this server, not a
+               hardcoded false. A connection or probe failure flipping a known-csvlog target to false would
+               make the ingestor read the stderr file from ITS marker instead, re-storing rows the csvlog
+               route already committed under different text. A target this runner has never successfully
+               probed has no last-good verdict to fall back to, so false (today's stderr route, unchanged) is
+               still the answer for first contact — the one case this dictionary cannot help with, because
+               there is nothing yet to remember. */
+            if (_lastPgLogUsesCsvlogVerdict.TryGetValue(server.ServerId, out var fallback))
+            {
+                return fallback;
+            }
+            return false;
+        }
     }
 
     /// <summary>
@@ -779,6 +1254,14 @@ public sealed class DarlingCollectorRunner
     /// <summary>The deadlock log was never opened: this host is not an RDS or Aurora endpoint.</summary>
     internal const string RdsDeadlockLogNotReachedNote =
         "this target's host is not an RDS or Aurora endpoint, so no RDS log was requested and no deadlock "
+        + "capture was attempted - this cycle did not look";
+
+    /// <summary>The log was read and no line in it classified to a family (#3601).</summary>
+    internal const string RdsLogEventsEmptyNote = "no new classifiable log events in the RDS log window";
+
+    /// <summary>The log was never opened: this host is not an RDS or Aurora endpoint.</summary>
+    internal const string RdsLogEventsNotReachedNote =
+        "this target's host is not an RDS or Aurora endpoint, so no RDS log was requested and no log-event "
         + "capture was attempted - this cycle did not look";
 
     /// <summary>Performance Insights answered and had no new CPU sample.</summary>
@@ -877,12 +1360,576 @@ public sealed class DarlingCollectorRunner
             phases.ConnectMs, phases.OpenMs, phases.DrainMs, phases.OtherMs);
     }
 
+    /// <summary>
+    /// The three collectors that open <see cref="PgServerLogTail.TailCteSql"/> (#4046 part 1c) — the set
+    /// eligible for the <see cref="PgReadBinaryFileCapability"/> check and the binary route, and the same
+    /// set <c>ReadsServerLogWithPgReadFile</c> in <c>DarlingWorker</c> names for the fault message, kept as
+    /// its own copy here rather than shared across the two classes' current visibility boundary.
+    /// </summary>
+    private static bool ReadsPgServerLogTail(string collectorName) =>
+        collectorName is "pg_log_events" or "pg_deadlocks" or "pg_plan_capture";
+
+    /// <summary>
+    /// #4046 part 1c: sets <see cref="CollectorContext.PgReadBinaryFileGranted"/> for a PostgreSQL log-tail
+    /// collector from <see cref="PgReadBinaryFileCapability"/> (its own hourly cache), and leaves every other
+    /// collector on the default text route with no round trip. Its own method so the gate is testable; the
+    /// server-scoped path that calls it needs a live target.
+    /// </summary>
+    internal static async ValueTask ResolvePgReadBinaryFileGrantAsync(
+        CollectorContext context,
+        string collectorName,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        if (server.Target.Engine == CollectorTargetEngine.PostgreSql && ReadsPgServerLogTail(collectorName))
+        {
+            var targetKey = ReadBinaryFileCacheKey(server);
+            context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
+                targetConnection, targetKey, cancellationToken);
+
+            /* #4062: the binary route decodes in the connected database's own server_encoding, never a
+               default, so PgLogEncoding is only ever set alongside a true grant — see the property's own
+               remarks on CollectorContext. */
+            context.PgLogEncoding = context.PgReadBinaryFileGranted
+                && PgReadBinaryFileCapability.TryGetCachedEncoding(targetKey, out var encoding)
+                    ? encoding
+                    : null;
+        }
+
+        /* #4053 parts a1b, b1 and b2: the collectors in RoutedCollectors read the csvlog tail once this is on (each
+           collector's own change is in its collector file). Checked on the same
+           connection, before BuildQuery decides which tail this collector opens with, the same shape as the
+           grant check just above. RoutedCollectors (#4053 review L1 round 2) is the single source for this
+           set, shared with the invalidation arms in DarlingWorker, so the probe and the drop can never
+           disagree about which collectors this cache answers for. */
+        if (server.Target.Engine == CollectorTargetEngine.PostgreSql
+            && PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
+        {
+            /* #4053 part a2: one probe answers both flags (PgLogFormatCapability's own cache), so asking
+               for jsonlog right after csvlog on a cache miss still costs one round trip, not two. */
+            context.PgLogUsesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(
+                targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
+            context.PgLogUsesJsonlog = await PgLogFormatCapability.IsJsonlogEnabledAsync(
+                targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// #4251: sets <see cref="CollectorContext.PgFileSettingsReadable"/> for <c>pg_server_config</c> from
+    /// <see cref="PgFileSettingsCapability"/> (its own hourly cache), and leaves every other collector
+    /// untouched — pg_file_settings only matters to this one read. Its own method, the
+    /// <see cref="ResolvePgReadBinaryFileGrantAsync"/> shape, so the gate is testable without a live target.
+    /// Logs ONCE per target at Information when the view turns out to be unreadable
+    /// (<see cref="PgFileSettingsCapability.ShouldLogUnreadable"/>) rather than on every cycle the fallback
+    /// query runs — the collector itself keeps collecting <c>pg_settings</c> either way, so this is
+    /// informational, never a fault.
+    ///
+    /// <para><b>#4251 round-1 review, H1(a).</b> Both <see cref="CollectorContext.PgFileSettingsReadable"/>
+    /// and the log line are gated on the SAME probe's Windows fact, not merely on the grant. By PostgreSQL's
+    /// process model the stale <c>pending_restart</c> this capability exists to fix only happens on Windows:
+    /// on Unix the postmaster itself applies the reload and every backend it forks inherits the flag, so
+    /// <c>pg_settings</c> alone is already correct there, granting these two objects fixes nothing, and the
+    /// collector keeps today's plain query and stays silent — asking an operator to widen the role for no
+    /// gain would be the wrong trade on every non-Windows target, which is most of them (Linux, RDS, Aurora,
+    /// Azure, Cloud SQL).</para>
+    /// </summary>
+    internal static async ValueTask ResolvePgFileSettingsReadableAsync(
+        CollectorContext context,
+        string collectorName,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        if (server.Target.Engine != CollectorTargetEngine.PostgreSql || collectorName != "pg_server_config")
+        {
+            return;
+        }
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+        var readable = await PgFileSettingsCapability.IsReadableAsync(targetConnection, targetKey, cancellationToken);
+        PgFileSettingsCapability.TryGetCachedVerdict(targetKey, out _, out var isWindowsTarget);
+
+        /* Windows-gated (H1(a) above): on a non-Windows target this stays false even when the grants ARE
+           present, so PgServerConfigCollector.BuildQuery always keeps the plain query there — the enhanced
+           one buys nothing when pending_restart is already correct without it. */
+        context.PgFileSettingsReadable = readable && isWindowsTarget;
+
+        if (isWindowsTarget && !readable && PgFileSettingsCapability.ShouldLogUnreadable(targetKey))
+        {
+            logger?.LogInformation(
+                "[{Server}] pg_file_settings is not readable by the monitoring role (#4251), so pending_restart "
+                + "is computed from pg_settings alone, which can read false on this Windows target for a "
+                + "setting that changed and reloaded but is still pending a restart: a connection opened after "
+                + "pg_reload_conf() reads pending_restart = false, and this collector opens a new connection "
+                + "every cycle. Two grants fix it: GRANT SELECT ON pg_file_settings and GRANT EXECUTE ON "
+                + "FUNCTION pg_show_all_file_settings() to the monitoring role. Both are superuser-only by "
+                + "default for a reason: they show every line of every configuration file, including lines "
+                + "that are not the running value (a superseded or misspelled primary_conninfo with its "
+                + "password, for example) and each file's path — grant them only if that exposure is "
+                + "acceptable for this role.",
+                server.Config.DisplayName);
+        }
+    }
+
+    /// <summary>
+    /// The one place <see cref="PgReadBinaryFileCapability"/>'s cache key comes from (#4051 round-2 review). The
+    /// helper that fills the cache, the one that reads it for the advisory note, and the one that drops a stale
+    /// verdict all take the <see cref="ServerRuntime"/> and key through here. None of them can drift to a
+    /// different key and leave an invalidation that never hits.
+    /// </summary>
+    internal static string ReadBinaryFileCacheKey(ServerRuntime server) => server.StorageName;
+
+    /// <summary>
+    /// #4046 part 1c (#4051 review L1): drops <paramref name="targetKey"/>'s cached
+    /// <see cref="PgReadBinaryFileCapability"/> verdict when a log-tail collector's fault says it is stale, so the
+    /// next cycle re-checks instead of waiting out the hour.
+    /// <list type="bullet">
+    /// <item>A 22021 is the text route meeting a planted byte, and its message tells the operator to grant
+    /// pg_read_binary_file. A grant made in answer should take effect on the next cycle.</item>
+    /// <item>A 42501 while the verdict says granted means the grant was revoked, or the login changed, since the
+    /// check. Every binary-route read would fail until the hour ran out.</item>
+    /// </list>
+    /// A 42501 on the text route leaves the verdict alone, so a target that never granted pg_read_file is not
+    /// re-probed every cycle. A 22021 on a database whose encoding the binary route does not serve leaves it
+    /// alone too, since no grant changes that answer. A proven write to the STORE leaves it alone (#4051 round-2
+    /// review), because that fault says nothing about the target's log. The checks run cheapest first and
+    /// allocate nothing for a fault that is not a <see cref="PostgresException"/>, because the general handler
+    /// that calls this is also the OutOfMemoryException landing pad.
+    /// </summary>
+    internal static void ForgetStaleReadBinaryFileVerdict(string collectorName, Exception ex, ServerRuntime server)
+    {
+        if (ex is not PostgresException pg
+            || !ReadsPgServerLogTail(collectorName)
+            || CollectorFaultCopyPhase.IsProvenStoreWrite(ex))
+        {
+            return;
+        }
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+
+        if ((pg.SqlState == "22021" && !PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(targetKey))
+            || (pg.SqlState == "42501" && PgReadBinaryFileCapability.TryGetCachedVerdict(targetKey, out var granted) && granted))
+        {
+            PgReadBinaryFileCapability.Invalidate(targetKey);
+        }
+    }
+
+    /// <summary>
+    /// #4251 round-1 review, M1: drops a stale "readable" pg_file_settings verdict when pg_server_config's
+    /// file-settings query is refused (42501: the grant was revoked, or the login changed, since the check),
+    /// so the next cycle re-probes and falls back to the pg_settings-only query instead of failing until the
+    /// hour runs out — without this, every pg_server_config cycle lost the WHOLE pg_settings snapshot for up
+    /// to <see cref="PgFileSettingsCapability.CacheTtl"/>, the one outcome <see cref="PgServerConfigCollector"/>
+    /// must never have.
+    /// </summary>
+    internal static void ForgetStaleFileSettingsVerdict(string collectorName, Exception ex, ServerRuntime server)
+    {
+        if (ex is not PostgresException { SqlState: "42501" }
+            || collectorName != "pg_server_config"
+            || CollectorFaultCopyPhase.IsProvenStoreWrite(ex))
+        {
+            return;
+        }
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+        if (PgFileSettingsCapability.TryGetCachedVerdict(targetKey, out var readable, out _) && readable)
+        {
+            PgFileSettingsCapability.Invalidate(targetKey);
+        }
+    }
+
     public async Task<CollectorRunResult> RunAsync<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerRuntime server,
         CancellationToken cancellationToken)
     {
-        var collectionTime = DateTime.UtcNow;
+        try
+        {
+            return await RunWithSplitCharacterRetryAsync(definition, server, cancellationToken);
+        }
+        catch
+        {
+            /* #4197 part b: ANY fault in the run — collection, dedup, write, or cancel — drops this
+               (server, collector)'s cached watermark, so the next call re-seeds from the store rather than
+               risk advancing past rows that never committed (a watermark ahead of committed data SKIPS
+               events, the one failure direction this cache must never take; falling behind only re-collects
+               duplicates, the safe direction). Unconditional — dropping an entry that was never cached is a
+               no-op on ServerWatermarkCache.Invalidate, so no eligibility check is needed here. */
+            _watermarkCache.Invalidate(server.ServerId, definition.Name);
+
+            /* Rows for earlier items may have committed and the faulting item's may or may not have, so
+               no cached per-database Query Store watermark can be trusted. */
+            if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+            {
+                _databaseWatermarkCache.InvalidateServer(server.ServerId);
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// #4197 part b: the watermark cache hit/miss/seed block, extracted out of <see cref="RunCoreAsync"/>
+    /// so a live-Postgres-only test can exercise the cache-hit/miss/seed/read-count behaviour without a
+    /// live SQL Server target (RunCoreAsync collects from one before it ever reaches this point). Pure
+    /// move — the SQL strings and the eligibility/seed/read logic are byte-identical to what RunCoreAsync
+    /// inlined before this refactor.
+    ///
+    /// <para><b>The #2797 gate is called IN HERE</b>, not passed in as a precomputed bool: this is the body
+    /// that actually reaches <see cref="GetLastCollectedTimeAsync"/>/<see cref="GetLastCollectedTimeWithFrameAsync"/>,
+    /// so <see cref="ServerWatermarkDispatchGateTests"/>' invariant — every body that performs the
+    /// server-scoped read also calls the gate — holds with a single call site rather than a caller/callee
+    /// split that the IL walk would otherwise have to bridge by name. <paramref name="dispatchProbe"/> is the
+    /// probe context <see cref="RunCoreAsync"/> already builds for the SAME question; the discarded flag
+    /// comes back in the tuple because <c>RunCoreAsync</c> still needs it for <c>hasCollectedBefore</c>.</para>
+    /// </summary>
+    internal async Task<(DateTime? Watermark, bool WatermarkFromUtcColumn, long? NumericWatermark, long ServerWatermarkMs, bool WatermarkCacheEligible, bool ServerWatermarkDiscarded)> ResolveServerWatermarkAsync<TRow>(
+        ServerRuntime server,
+        ICollectorDefinition<TRow> definition,
+        CollectorContext dispatchProbe,
+        DateTime? serverReadFloor,
+        CancellationToken cancellationToken)
+    {
+        var serverWatermarkDiscarded = ServerWatermarkIsDiscarded(definition, dispatchProbe);
+
+        var watermarkCacheEligible = definition.WatermarkColumn is not null
+            && !serverWatermarkDiscarded
+            && definition.WatermarkValueAccessor is not null;
+        var cachedWatermark = watermarkCacheEligible
+            ? _watermarkCache.TryGet(server.ServerId, definition.Name)
+            : null;
+
+        var serverWatermarkWatch = Stopwatch.StartNew();
+        long serverWatermarkMs;
+        DateTime? watermark;
+        var watermarkFromUtcColumn = false;
+        if (cachedWatermark is { } hit)
+        {
+            /* Cache hit: use the cached value and issue NO store read for either watermark. */
+            watermark = hit.Value;
+            watermarkFromUtcColumn = hit.FromUtcColumn;
+            serverWatermarkMs = 0;
+        }
+        else
+        {
+            try
+            {
+                if (definition.WatermarkColumn is null || serverWatermarkDiscarded)
+                {
+                    watermark = null;
+                }
+                else if (definition.UtcWatermarkColumn is null)
+                {
+                    watermark = await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
+                }
+                else
+                {
+                    /* #3778: a definition with a UTC twin beside its watermark column (cpu_utilization's
+                       sample_time_utc beside the server-LOCAL sample_time) gets the pair read in one round trip
+                       and the FRAME of what came back, so its dedup compares like with like: the twin where the
+                       store has one, the local stamp until the first post-upgrade run has stored one. Its own
+                       method rather than a parameter on the read above, so every other definition's watermark
+                       SQL is the byte-identical string it was (TimeHonestyRungTests pins both strings). */
+                    (watermark, watermarkFromUtcColumn) = await GetLastCollectedTimeWithFrameAsync(
+                        server.ServerId, definition.TargetTable, definition.WatermarkColumn, definition.UtcWatermarkColumn,
+                        cancellationToken, serverReadFloor);
+                }
+            }
+            finally
+            {
+                serverWatermarkMs = serverWatermarkWatch.ElapsedMilliseconds;
+            }
+        }
+
+        /* Numeric (bigint) watermark = the newest already-collected value of the definition's monotonic
+           identity column (job_history's instance_id), read from Postgres — the bigint twin of the timestamp
+           watermark above. Null for every collector that declares no numeric watermark (the common case),
+           so no extra query runs for them. Skipped on a cache hit for the same reason the timestamp read
+           above is. */
+        long? numericWatermark;
+        if (cachedWatermark is { } numericHit)
+        {
+            numericWatermark = numericHit.NumericValue;
+        }
+        else
+        {
+            numericWatermark = definition.NumericWatermarkColumn is null
+                ? null
+                : await GetLastCollectedInstanceIdAsync(server.ServerId, definition.TargetTable, definition.NumericWatermarkColumn, cancellationToken);
+
+            /* Seed the cache from this miss so every call after this one for this (server, collector)
+               skips both store reads. Only when the definition is eligible (a live accessor and not on
+               a fan-out path) — an ineligible definition's watermark is never written to the cache, so a
+               later collector-name reuse under a different accessor policy can't read a stale entry. */
+            if (watermarkCacheEligible)
+            {
+                _watermarkCache.Seed(server.ServerId, definition.Name, watermark, watermarkFromUtcColumn, numericWatermark);
+            }
+        }
+
+        return (watermark, watermarkFromUtcColumn, numericWatermark, serverWatermarkMs, watermarkCacheEligible, serverWatermarkDiscarded);
+    }
+
+    /// <summary>
+    /// #4487: the post-write regressed-vs-honest branch, extracted out of the plain (non-fan-out) write
+    /// path in <see cref="RunCoreAsync"/> for the same live-test reason as <see cref="ResolveServerWatermarkAsync"/>
+    /// and <see cref="AdvanceServerWatermark"/> above. Pure move: a batch that carries an identity
+    /// regression (job_history's guarded filter collapsed to its bounded-window arm because the target's
+    /// own MAX(instance_id) fell below the store's watermark — an identity reseed, an msdb restore, or a
+    /// failover to a replica with a lower identity; the rows alone can't say which) must not be MAXed
+    /// against the stale cached value the way an ordinary batch is: Advance keeps the GREATER of the two,
+    /// which is still the OLD epoch's higher number, and every cycle after would keep taking the regressed
+    /// arm even though the store itself has already self-healed. Invalidate instead, so the next run
+    /// re-seeds from the store — which by then holds this run's new-epoch rows and returns the new,
+    /// honest max.
+    /// </summary>
+    internal void CommitServerWatermark<TRow>(
+        ServerRuntime server,
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        bool watermarkFromUtcColumn,
+        IReadOnlyList<CollectorMeasurement> measurements)
+    {
+        var regressed = measurements.Any(m => m.Label == JobHistoryCollector.IdentityRegressionsMeasurement && m.Value > 0);
+        if (regressed)
+        {
+            _watermarkCache.Invalidate(server.ServerId, definition.Name);
+        }
+        else
+        {
+            AdvanceServerWatermark(server, definition, rows, watermarkFromUtcColumn);
+        }
+    }
+
+    /// <summary>
+    /// #4197 part b: the post-write cache-advance block, extracted out of the plain (non-fan-out) write
+    /// path in <see cref="RunCoreAsync"/> for the same live-test reason as <see cref="ResolveServerWatermarkAsync"/>
+    /// above. Pure move.
+    /// </summary>
+    internal void AdvanceServerWatermark<TRow>(
+        ServerRuntime server,
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        bool watermarkFromUtcColumn)
+    {
+        if (definition.WatermarkValueAccessor is not { } accessor)
+        {
+            return;
+        }
+
+        DateTime? batchMax = null;
+        foreach (var row in rows)
+        {
+            var value = accessor(row);
+            if (value is { } v && (batchMax is null || v > batchMax.Value))
+            {
+                batchMax = v;
+            }
+        }
+
+        /* #4197: PostgreSQL's `timestamp` truncates to microsecond resolution (10 .NET ticks) on write —
+           the same resolution CollectionTimeClock stores. A row's in-memory value can carry finer ticks
+           than what the store actually persisted, so the cache must floor to what a fresh read would
+           return, or the equivalence pin (cached vs. a fresh GetLastCollectedTimeAsync) drifts by those
+           sub-microsecond ticks. */
+        if (batchMax is { } batchMaxValue)
+        {
+            batchMax = new DateTime(batchMaxValue.Ticks - (batchMaxValue.Ticks % TimeSpan.TicksPerMicrosecond), batchMaxValue.Kind);
+        }
+
+        long? batchMaxNumeric = null;
+        if (definition.NumericWatermarkValueAccessor is { } numericAccessor)
+        {
+            foreach (var row in rows)
+            {
+                var value = numericAccessor(row);
+                if (value is { } v && (batchMaxNumeric is null || v > batchMaxNumeric.Value))
+                {
+                    batchMaxNumeric = v;
+                }
+            }
+        }
+
+        _watermarkCache.Advance(server.ServerId, definition.Name, batchMax, watermarkFromUtcColumn, batchMaxNumeric);
+    }
+
+    /// <summary>
+    /// The per-database Query Store watermark: the cache when it can prove the bounded store read's answer,
+    /// otherwise that read (reseeding the cache when the read succeeded). The read also returns the witness
+    /// row's <c>collection_time</c> (#4749), so a database whose newest row is recent but which has had no
+    /// batch since the seed keeps hitting the cache until that row leaves the floor.
+    /// </summary>
+    internal async Task<DateTime?> ResolveQueryStoreDatabaseWatermarkAsync(
+        ServerRuntime server, string table, string column, string dbColumn, string database,
+        DateTime readFloor, DateTime collectionTime, CancellationToken ct)
+    {
+        if (_databaseWatermarkCache.TryGet(server.ServerId, database, readFloor, collectionTime, out var cached))
+        {
+            return cached;
+        }
+
+        var token = _databaseWatermarkCache.TokenFor(server.ServerId, database);
+        var (value, witness, ok) = await ReadLastCollectedTimeAndWitnessForDatabaseAsync(
+            server.ServerId, table, column, dbColumn, database, readFloor, ct);
+        if (ok)
+        {
+            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, token, witness);
+        }
+
+        return value;
+    }
+
+    /// <summary>What a Query Store item's batch contributes to the cache, computed at read time.</summary>
+    internal static StagedDatabaseWatermark StageQueryStoreDatabaseWatermark<TRow>(
+        List<TRow> batch, string database, DateTime collectionTime)
+    {
+        if (batch is not List<QueryStoreCollector.Row> rows)
+        {
+            return new StagedDatabaseWatermark(null, true, collectionTime);
+        }
+
+        DateTime? max = null;
+        var foreign = false;
+        foreach (var r in rows)
+        {
+            if (!string.Equals(r.DatabaseName, database, StringComparison.Ordinal))
+            {
+                foreign = true;
+                continue;
+            }
+
+            if (r.LastExecutionTime is DateTime v && (max is null || v > max))
+            {
+                max = v;
+            }
+        }
+
+        return new StagedDatabaseWatermark(max, foreign, collectionTime);
+    }
+
+    /// <summary>A failed item may or may not have committed rows: drop its staged contribution and its cache entry.</summary>
+    internal void DiscardQueryStoreDatabaseWatermark(
+        ServerRuntime server, string database, Dictionary<string, StagedDatabaseWatermark> staged)
+    {
+        staged.Remove(database);
+        _databaseWatermarkCache.Invalidate(server.ServerId, database);
+    }
+
+    /// <summary>Lands a staged contribution. Called only after the item's COPY transaction committed.</summary>
+    internal void CommitQueryStoreDatabaseWatermark(ServerRuntime server, string database, StagedDatabaseWatermark staged)
+    {
+        if (staged.Foreign)
+        {
+            _databaseWatermarkCache.Invalidate(server.ServerId, database);
+            return;
+        }
+
+        _databaseWatermarkCache.Advance(server.ServerId, database, staged.BatchMax, staged.CollectionTime);
+    }
+
+    /// <summary>
+    /// #4735 item 1: a text read of the log tail that starts inside a multi-byte character is refused by PostgreSQL
+    /// (22021) before this process sees a byte, and it says the same about a real bad byte. The read is repeated in
+    /// the same cycle with its start moved forward by 1, then 2, then 3 bytes, which reaches a character boundary
+    /// when the start was the cause. The attempts write no ERROR row: only the last refusal leaves this method,
+    /// and the general handler records that one as it always did. Recognised by SQLSTATE, on the text route of
+    /// the three log-tail collectors, and never for a proven write to the store.
+    ///
+    /// <para><b>Once per cycle while an invalid byte stays in the window.</b> The retries cure a start inside a
+    /// character. A byte that is invalid in the database encoding, anywhere in the 4 MB window, is refused at all
+    /// four starts, on every cycle, so a cycle that used every start and was refused at each is remembered
+    /// (<c>_pgLogRefusedAtEveryShift</c>). Until a read succeeds, that server's collector makes one read at shift 0 and
+    /// no retries, the cost it had before the retries existed. A read that starts inside a character still gets
+    /// its retries the first time it happens, because nothing is remembered until every start has been refused.</para>
+    /// </summary>
+    private Task<CollectorRunResult> RunWithSplitCharacterRetryAsync<TRow>(
+        ICollectorDefinition<TRow> definition,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+        => RunWithSplitCharacterRetryAsync(
+            definition.Name,
+            server,
+            (shift, token) => RunCoreAsync(definition, server, shift, token),
+            cancellationToken);
+
+    /// <summary>
+    /// The retry loop itself, over a read that takes its start shift, so a test can drive it with a read that
+    /// counts its calls instead of one that needs a target (#4735).
+    /// </summary>
+    internal async Task<CollectorRunResult> RunWithSplitCharacterRetryAsync(
+        string collectorName,
+        ServerRuntime server,
+        Func<int, CancellationToken, Task<CollectorRunResult>> runCore,
+        CancellationToken cancellationToken)
+    {
+        var readsLogTail = ReadsPgServerLogTail(collectorName);
+        var refusedKey = (ReadBinaryFileCacheKey(server), collectorName);
+
+        /* Read once, before the first attempt: this cycle's own refusals set the memory for the NEXT cycle. */
+        var refusedAtEveryShiftLastCycle = readsLogTail && _pgLogRefusedAtEveryShift.ContainsKey(refusedKey);
+
+        for (var shift = 0; ; shift++)
+        {
+            try
+            {
+                var result = await runCore(shift, cancellationToken);
+
+                if (readsLogTail)
+                {
+                    _pgLogRefusedAtEveryShift.TryRemove(refusedKey, out _);
+                }
+
+                return result;
+            }
+            catch (PostgresException pg) when (readsLogTail
+                && !refusedAtEveryShiftLastCycle
+                && !CollectorFaultCopyPhase.IsProvenStoreWrite(pg)
+                && PgServerLogTail.ShouldRetryFromLaterStart(pg.SqlState, shift, PgReadBinaryFileGranted(server)))
+            {
+                _logger?.LogDebug(
+                    "{Collector} on '{Server}': PostgreSQL refused the log slice as not valid in the database encoding; "
+                    + "retrying with the read start moved forward {Shift} byte(s) (#4735)",
+                    collectorName, server.Config.DisplayName, shift + 1);
+            }
+            catch (PostgresException pg) when (readsLogTail
+                && !CollectorFaultCopyPhase.IsProvenStoreWrite(pg)
+                && PgServerLogTail.IsEncodingRefusal(pg.SqlState, PgReadBinaryFileGranted(server)))
+            {
+                /* Refused and not retried above: either every start was just refused, or the last cycle's memory
+                   held this cycle to its one read. An invalid byte is in the window, and the refusal goes on to the
+                   general handler as it always did. */
+                if (_pgLogRefusedAtEveryShift.TryAdd(refusedKey, 0))
+                {
+                    _logger?.LogDebug(
+                        "{Collector} on '{Server}': PostgreSQL refused the log slice at every read start, so a byte that is "
+                        + "not valid in the database encoding is in the window; later cycles make one read until a read "
+                        + "succeeds (#4735)",
+                        collectorName, server.Config.DisplayName);
+                }
+
+                throw;
+            }
+        }
+    }
+
+    /// <summary>Whether the cached verdict says the binary route (pg_read_binary_file) is granted, which reads bytea and carries no encoding check.</summary>
+    private static bool PgReadBinaryFileGranted(ServerRuntime server) =>
+        PgReadBinaryFileCapability.TryGetCachedVerdict(ReadBinaryFileCacheKey(server), out var granted) && granted;
+
+    private async Task<CollectorRunResult> RunCoreAsync<TRow>(
+        ICollectorDefinition<TRow> definition,
+        ServerRuntime server,
+        int pgLogReadShiftBytes,
+        CancellationToken cancellationToken)
+    {
+        /* #3936: nudged forward (by, in practice, a handful of ticks) rather than a bare DateTime.UtcNow
+           when it would collide with this SAME (server, collector) pair's last stamp — see
+           CollectionTimeClock's own remarks for the run-overlap and clock-resolution cases that used to
+           store two different snapshots under one collection_time, making "the newest reading" ambiguous
+           for every reader downstream. */
+        var collectionTime = CollectionTimeClock.NextStrictlyAfter(server.ServerId, definition.Name, DateTime.UtcNow);
 
         /* Some collectors don't exist on some targets (e.g. ring buffers on Azure SQL DB) —
            skip the cycle entirely, matching Lite. CollectorCatalog.AppliesTo composes the
@@ -945,35 +1992,21 @@ public sealed class DarlingCollectorRunner
                builders actually read", not "everything that changes the probe's answer". */
             DatabaseScope = databaseScope,
         };
-        var serverWatermarkDiscarded = ServerWatermarkIsDiscarded(definition, dispatchProbe);
-
         /* #2851: timed because this is a STORE round trip that the server-scoped path's sql: stopwatch does
            not cover — it runs before that stopwatch starts. #2796 measured a sibling store read at 50s cold
            on a bounded-only-by-luck predicate, so "the watermark read is free" is an assumption worth
            holding a number against rather than believing. finally, not a trailing assignment (#2816): a
            throwing read must still report how long it ran. Zero when the definition declares no watermark
            column, or when #2797's gate skipped the read, which is honest either way — no read happened. */
-        var serverWatermarkWatch = Stopwatch.StartNew();
-        long serverWatermarkMs;
-        DateTime? watermark;
-        try
-        {
-            watermark = definition.WatermarkColumn is null || serverWatermarkDiscarded
-                ? null
-                : await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
-        }
-        finally
-        {
-            serverWatermarkMs = serverWatermarkWatch.ElapsedMilliseconds;
-        }
-
-        /* Numeric (bigint) watermark = the newest already-collected value of the definition's monotonic
-           identity column (job_history's instance_id), read from Postgres — the bigint twin of the timestamp
-           watermark above. Null for every collector that declares no numeric watermark (the common case),
-           so no extra query runs for them. */
-        long? numericWatermark = definition.NumericWatermarkColumn is null
-            ? null
-            : await GetLastCollectedInstanceIdAsync(server.ServerId, definition.TargetTable, definition.NumericWatermarkColumn, cancellationToken);
+        /* #4197 part b: the cache hit/miss/seed block, extracted verbatim into its own method (step 1 of
+           the measure lane's brief) so a live-Postgres-only test can call it directly — RunCoreAsync itself
+           needs a live SQL Server target to reach this point, which the live-PG rig this lane runs on
+           cannot provide. Behaviour and SQL strings are unchanged; this is a pure move. The #2797 gate call
+           now lives INSIDE the seam (ServerWatermarkDispatchGateTests' invariant needs the gate in the same
+           body as the read it guards), so RunCoreAsync passes the probe context and gets the discarded flag
+           back rather than computing it here and passing a bool in. */
+        var (watermark, watermarkFromUtcColumn, numericWatermark, serverWatermarkMs, watermarkCacheEligible, serverWatermarkDiscarded) =
+            await ResolveServerWatermarkAsync(server, definition, dispatchProbe, serverReadFloor, cancellationToken);
 
         /* Only when the watermark came back null: tell a TRUE first run from a store merely emptied by
            retention, so default_trace_events uses a bounded window instead of re-scanning all .trc history
@@ -1009,7 +2042,7 @@ public sealed class DarlingCollectorRunner
         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
             && DatabaseStateCollector.Instance.AppliesTo(server.Target))
         {
-            await PruneOrphanedQueryStoreDatabaseStateAsync(server.ServerId, cancellationToken);
+            await PruneOrphanedQueryStoreDatabaseStateIfDueAsync(server.ServerId, cancellationToken);
         }
         else if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                  && server.Target.IsAzureSqlDb)
@@ -1066,8 +2099,10 @@ public sealed class DarlingCollectorRunner
             ServerName = server.StorageName,
             CollectionTime = collectionTime,
             Deltas = _deltas,
+            LogHashKey = _logHashKey,
             Target = server.Target,
             Watermark = watermark,
+            WatermarkFromUtcColumn = watermarkFromUtcColumn,
             NumericWatermark = numericWatermark,
             HasCollectedBefore = hasCollectedBefore,
             State = collectorState ?? CollectorContext.NoState,
@@ -1084,6 +2119,8 @@ public sealed class DarlingCollectorRunner
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
                operator asked for by name and which stores nothing, so it always renders. */
             CapturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId),
+            /* #4735 item 1: 0 on the first attempt; RunWithSplitCharacterRetryAsync raises it after a 22021. */
+            PgLogReadShiftBytes = pgLogReadShiftBytes,
             /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
                per query_id into collect.query_store_text (FetchAndStoreQueryTextAsync, below) and resolved
                back by the readers, all six of which now prefer that table and fall back to the fact row's
@@ -1124,11 +2161,12 @@ public sealed class DarlingCollectorRunner
            NULL on ~98 percent of collection_log rows. */
         var fanout = new FanoutCostAccumulator();
 
-        /* The per-database FETCH split, summed (#2860). Only the enumerated branch feeds it — the plan and
-           text fetches run inside its per-item read and nowhere else — so a collector that never fetches
-           never calls Observe and the accumulator stays empty, which is how these ten columns end up NULL on
-           ~98 percent of collection_log rows. Declared beside the fan-out accumulator because it is the same
-           kind of thing: a cross-item rollup the run's single row could not otherwise carry. */
+        /* The per-database FETCH split, summed (#2860). Fed by the two branches that fetch - the enumerated
+           branch, inside its per-item read, and the Azure per-database loop for query_store - so a collector
+           that never fetches never calls Observe and the accumulator stays empty, which is how these ten
+           columns end up NULL on ~98 percent of collection_log rows. Declared beside the fan-out accumulator
+           because it is the same kind of thing: a cross-item rollup the run's single row could not otherwise
+           carry. */
         var fetchPhases = new FetchPhaseCostAccumulator();
 
         /* The collection_log note for this run (#1837) — null on every ordinary path. Only the enumeration
@@ -1144,7 +2182,7 @@ public sealed class DarlingCollectorRunner
            "Keyword not supported: 'host'". Worse, an ArgumentException is neither SqlException nor
            PostgresException, so it missed BOTH classification arms in DarlingWorker and recorded a raw
            ERROR every sweep forever — including for all three Tier 0 outage predictors. */
-        var targetProvider = TargetProviders.For(server.Target);
+        var targetProvider = TargetProviderOverrideForTests?.Invoke(server.Target) ?? TargetProviders.For(server.Target);
 
         if (definition.RunsPerDatabase(context.Target))
         {
@@ -1175,7 +2213,9 @@ public sealed class DarlingCollectorRunner
                turn a permissions problem into a silent one-database collection. */
             var databases = server.Target.Engine == CollectorTargetEngine.PostgreSql
                 ? await GetPostgresDatabaseListAsync(server, databaseScope, cancellationToken)
-                : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
+                : AzureDatabaseListOverrideForTests is { } listOverride
+                    ? await listOverride(server, cancellationToken)
+                    : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
 
             var attempted = 0;
             var failed = 0;
@@ -1212,6 +2252,11 @@ public sealed class DarlingCollectorRunner
                    after its read and flush succeed — per iteration, so a fault cannot leak a stamp
                    into a sibling database's landing. */
                 string? stagedOpenIntervalStamp = null;
+
+                /* The definition's own per-item staged state (CollectorContext.StagedItemState), cleared per
+                   iteration for the same reason: a fault must not leak this database's staged cursor into a
+                   sibling's landing. It lands below, after this database's flush, and nowhere else. */
+                context.DropStagedItemState();
 
                 /* #2896: the DECLARATION is hoisted, the START is not. The catch arms below print this
                    database's split and a split needs its parent, so the stopwatch has to be in scope
@@ -1254,6 +2299,12 @@ public sealed class DarlingCollectorRunner
                     context.PerDatabaseDrainMs = 0;
                     context.PerDatabasePhasesMeasured = false;
 
+                    /* The plan and text fetch readings, on the same rule: query_store's fetches run on this
+                       branch too now, and this loop reuses ONE context across every database, so a database
+                       that skips or faults its fetch would otherwise add the previous database's figures to
+                       the run's fetch sums as its own. */
+                    ClearFetchPhaseStamps(context);
+
                     var dbPlan = plan;
                     if (dbPlan is null)
                     {
@@ -1281,6 +2332,8 @@ public sealed class DarlingCollectorRunner
                         var azureReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                             ? WatermarkPolicy.ReadFloor(collectionTime)
                             : null;
+                        /* This path is excluded from the per-database cache; the invalidate is only defensive. */
+                        _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
                             definition.PerDatabaseWatermarkColumn!, databaseName, dbToken, azureReadFloor);
@@ -1392,7 +2445,11 @@ public sealed class DarlingCollectorRunner
                         context.PerDatabasePhasesMeasured = true;
                     }
 
-                    using (var dbConnection = openedConnection)
+                    /* Held to the end of the iteration rather than closed with the read: query_store's plan and
+                       text fetches below run on this database's own connection, after its command and reader
+                       are disposed. Every other collector on this branch simply holds an idle connection for
+                       the flush, which is milliseconds. */
+                    using var dbConnection = openedConnection;
                     using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
                     {
                         /* #2855: the open, same contract as the other two paths — ExecuteReaderAsync returns
@@ -1462,22 +2519,70 @@ public sealed class DarlingCollectorRunner
                     var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     sqlMs += dbSqlMs;
 
+                    /* query_store's plan XML and statement text, for THIS database, on its own connection. The
+                       payload always carries a NULL plan and (FetchQueryTextSeparately) no text, so these two
+                       fetches are the only way either reaches the store - and this loop, which Azure SQL
+                       Database takes because QueryStoreCollector.RunsPerDatabase is IsAzureSqlDb, read and
+                       flushed without ever calling them: every Azure row was stored with neither.
+
+                       databaseName, never the registration's initial catalog: the by-ids queries run
+                       [db].sys.sp_executesql, which Azure accepts only for the connection's current database,
+                       and dbConnection is connected to exactly this one.
+
+                       BEFORE the flush, as on the enumerated path, and the order matters beyond symmetry: the
+                       fetch repairs the shared store connection it borrows before it touches it, so the flush
+                       that follows never meets a connection a previous database's budget expiry broke. After
+                       the flush that repair would come one database too late. dbToken, so the wall-clock
+                       budget bounds the fetch as it bounds the read; an expiry lands in the budget arm below
+                       and the database is re-read next cycle, exactly as on the enumerated path.
+
+                       Outside dbSqlMs on purpose (the #2896 pins): the read's connect/open/drain/other split
+                       keeps meaning what it meant, and the fetch is reported on its own lines and in the run's
+                       fetch sums. Its time is folded into sqlMs and the fan-out figure below, because the
+                       enumerated path counts it inside the item's SQL slice and a database that is expensive
+                       only because of its fetches should still read as expensive. */
+                    long dbFetchMs = 0;
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        await FetchQueryStorePlansAndTextAsync(
+                            dbConnection, pgConnection, server, databaseName, definition.Name, context, perDbTimeout, batch, dbToken);
+
+                        dbFetchMs = context.PerItemPlanFetchMs + context.PerItemTextFetchMs;
+                        sqlMs += dbFetchMs;
+                    }
+
                     /* Flush this database before reading the next — peak memory is one database's rows. */
                     long dbStorageMs = 0;
                     if (batch.Count > 0)
                     {
                         var storageSlice = Stopwatch.StartNew();
+                        PerDatabaseWriteFaultForTests?.Invoke(databaseName);
                         rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
                         dbStorageMs = storageSlice.ElapsedMilliseconds;
                         storageMs += dbStorageMs;
                     }
+
+                    /* The read AND the flush both succeeded: only now may the state the definition staged for
+                       this database (a telemetry cursor, the shred gate's execution count) be saved. A failed
+                       write throws past this line into the per-database catch, which skips the database while
+                       a sibling's success still saves PendingState - so state landed any earlier would advance
+                       past rows that were never stored. */
+                    context.LandStagedItemState();
 
                     /* #2472: this database's slice, counted even when its batch was empty — an empty batch
                        still paid for its read, and that read is in the blended total the rollup is a ratio
                        against. Observed here rather than beside the log line below for the same reason the
                        completion hook fires after the flush: both slices are only known once the write is
                        done. */
-                    fanout.Observe(databaseName, dbSqlMs + dbStorageMs);
+                    fanout.Observe(databaseName, dbSqlMs + dbFetchMs + dbStorageMs);
+
+                    /* And this database's fetch readings into the run's fetch sums (#2860), for every completed
+                       database and not gated on rows, for the reason the enumerated hook states: a quiet
+                       database can still pay real fetch time draining ids deferred from an earlier pass. Here,
+                       past the flush, because the enumerated hook fires only for items whose read and flush
+                       both landed and the sums should mean the same thing on both branches. The readings are
+                       still this database's own: they clear at the top of the next iteration, not here. */
+                    fetchPhases.Observe(context);
 
                     /* #2855: this branch's per-database phase line — the line it did not emit at all. Read
                        after the flush, like the other two paths, so pg: is this database's own figure.
@@ -1527,6 +2632,10 @@ public sealed class DarlingCollectorRunner
                             dbPhases.ConnectMs, dbPhases.OpenMs, dbPhases.DrainMs, dbPhases.OtherMs,
                             batch.Count, dbStorageMs);
                     }
+
+                    /* The fetch sub-splits, on their own lines after the phase line they are not part of, and
+                       only for a fetch that ran (query_store; nothing else sets the readings). */
+                    LogFetchPhaseSplits(server, definition.Name, databaseName, context);
 
                     /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the
@@ -1772,6 +2881,10 @@ public sealed class DarlingCollectorRunner
                    whole run survives. Keyed per item, so one database's decision cannot land on another. */
                 var stagedOpenIntervalStamps = new Dictionary<string, string>(StringComparer.Ordinal);
 
+                /* Query Store per-database watermark contributions: staged at read, landed ONLY from
+                   onItemComplete, i.e. after the item's COPY transaction committed. */
+                var stagedDatabaseWatermarks = new Dictionary<string, StagedDatabaseWatermark>(StringComparer.Ordinal);
+
                 var driverResult = await EnumeratedCollectorDriver.RunAsync<TRow>(
                     items,
                     /* Per-database watermark refresh + the catch-up clamp, computed INSIDE the loop —
@@ -1812,9 +2925,13 @@ public sealed class DarlingCollectorRunner
                             var readFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                                 ? WatermarkPolicy.ReadFloor(collectionTime)
                                 : null;
-                            var raw = await GetLastCollectedTimeForDatabaseAsync(
-                                server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
-                                definition.PerDatabaseWatermarkColumn!, item, ct, readFloor);
+                            var raw = readFloor is DateTime cacheFloor
+                                ? await ResolveQueryStoreDatabaseWatermarkAsync(
+                                    server, definition.TargetTable, definition.WatermarkColumn!,
+                                    definition.PerDatabaseWatermarkColumn!, item, cacheFloor, collectionTime, ct)
+                                : await GetLastCollectedTimeForDatabaseAsync(
+                                    server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
+                                    definition.PerDatabaseWatermarkColumn!, item, ct, readFloor);
                             var clamped = WatermarkPolicy.ClampCatchup(raw, collectionTime);
                             if (raw.HasValue && clamped != raw)
                             {
@@ -1903,6 +3020,7 @@ public sealed class DarlingCollectorRunner
                     readItem: async (item, ct) =>
                     {
                         var batch = new List<TRow>();
+                        context.DropStagedItemState();
                         using var itemCommand = CreateCollectorCommand(targetProvider, definition.BuildPerItemQuery(item, context), targetConnection, itemTimeout);
                         /* #2164: time the OPEN separately from the drain. ExecuteReaderAsync returns only
                            when the first rowset is available, so for query_store's staged batch this is the
@@ -1915,24 +3033,7 @@ public sealed class DarlingCollectorRunner
                            phase is NOT cleared here: it ran already, for THIS item, and clearing it would
                            hand its milliseconds to drain. The fetch phases clear on the same rule. */
                         context.PerItemOpenMs = 0;
-                        context.PerItemPlanFetchMs = 0;
-                        context.PerItemTextFetchMs = 0;
-                        /* #2811: the sub-phases clear on the SAME rule as their parents, and for the same
-                           reason — an item whose fetch faults before setting them must not print the previous
-                           database's split as its own. A stale sub-split is worse than a stale total, because
-                           it looks precise. */
-                        context.PerItemPlanProbeMs = 0;
-                        context.PerItemPlanTargetMs = 0;
-                        context.PerItemPlanWriteMs = 0;
-                        context.PerItemPlanChunks = 0;
-                        context.PerItemPlanIdsAttempted = 0;
-                        context.PerItemPlanProbeIds = 0;
-                        context.PerItemTextProbeMs = 0;
-                        context.PerItemTextTargetMs = 0;
-                        context.PerItemTextWriteMs = 0;
-                        context.PerItemTextChunks = 0;
-                        context.PerItemTextIdsAttempted = 0;
-                        context.PerItemTextProbeIds = 0;
+                        ClearFetchPhaseStamps(context);
                         context.PerItemPhasesMeasured = false;
                         /* #2854: stamped from finally, and the reader is hoisted out of the try only so the
                            `using` below keeps its original disposal scope. A trailing assignment here was
@@ -1957,62 +3058,15 @@ public sealed class DarlingCollectorRunner
                         }
                         using var itemReader = openedReader;
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
-                        /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
-                           query on purpose — it ships in plan_id order, so a budget cut truncates a SUFFIX,
-                           which is the only reason the watermark can advance from a cut pass at all. */
-                        /* `is SqlConnection` rather than a bare cast, and it does two jobs (merge resolution
-                           against #2213's provider seam): the connection here is a provider-neutral
-                           DbConnection now, and this fetch is Query-Store-only, so the pattern narrows the
-                           type the signature needs AND gates the engine in one expression that cannot drift
-                           from either. The enumerated path serves PostgreSQL targets since #2213; query_store
-                           declares TargetEngine = SqlServer so it never reaches here for one, but relying on
-                           the catalog for that would be an invariant held somewhere else. */
-                        if (context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection)
-                        {
-                            /* #2312 investigation: timed so the log split can say whether the invariant
-                               per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
-                               blended sql: could not distinguish them. */
-                            /* #2854: stamped from finally. This one is the PARENT of the sub-split #2816
-                               already fixed, which makes a bare stamp here worse than the defect it fixed:
-                               probe/target/write stamp from their own handlers and report real values, so a
-                               throwing fetch printed plan_fetch:0ms above non-zero children. PlanFetchOtherMs
-                               then clamps a negative residual to zero and the line reads as precise while
-                               being arithmetically impossible. */
-                            var planFetchWatch = Stopwatch.StartNew();
-                            try
-                            {
-                                await FetchAndStorePlansAsync(planFetchConnection, pgConnection,
-                                    server, item, definition.Name, context, itemTimeout, ExtractPlanReferences(batch), ct);
-                            }
-                            finally
-                            {
-                                context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
-                            }
-                        }
+                        /* #2210 / #2150: this database's plan-XML and statement-text fetches, right after its
+                           runtime-stats read. One method, because the Azure SQL Database per-database loop runs the
+                           same two for each database it reads; the why and the shape are on the method. */
+                        await FetchQueryStorePlansAndTextAsync(
+                            targetConnection, pgConnection, server, item, definition.Name, context, itemTimeout, batch, ct);
 
-                        /* #2150: and this database's statement-text fetch, for the same reason and with the
-                           same shape — the payload no longer carries query_sql_text, because selecting it
-                           inside the shipping TOP/ORDER BY made a Top-N Sort materialize nvarchar(max) text
-                           for the whole qualifying set (measured 4.67s vs 0.45s time-to-first-row). Ships in
-                           query_id order so a budget cut is a suffix, which is what lets the watermark
-                           advance from a cut pass.
-
-                           Gated on the same flag the payload branches on, so the two can never disagree
-                           about who owns the text: if the column is nulled, this runs. */
-                        if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
-                            /* #2312 investigation: same split as the plan fetch above. */
-                            /* #2854: stamped from finally, same parent/child inconsistency as the plan fetch. */
-                            var textFetchWatch = Stopwatch.StartNew();
-                            try
-                            {
-                                await FetchAndStoreQueryTextAsync(textFetchConnection, pgConnection,
-                                    server, item, definition.Name, context, itemTimeout, ExtractTextReferences(batch), ct);
-                            }
-                            finally
-                            {
-                                context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
-                            }
+                            stagedDatabaseWatermarks[item] = StageQueryStoreDatabaseWatermark(batch, item, collectionTime);
                         }
 
                         return batch;
@@ -2041,6 +3095,11 @@ public sealed class DarlingCollectorRunner
                         {
                             OnQueryStoreItemSucceeded(server.ServerId, item);
 
+                            if (stagedDatabaseWatermarks.Remove(item, out var stagedWatermark))
+                            {
+                                CommitQueryStoreDatabaseWatermark(server, item, stagedWatermark);
+                            }
+
                             /* #2312: NOW the open-interval stamp may land — this hook only fires after
                                the item's read and flush both succeeded. Remove, not read: a stamp left
                                staged (read faulted) must not leak into a later run's landing. */
@@ -2049,6 +3108,10 @@ public sealed class DarlingCollectorRunner
                                 context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] = landedStamp;
                             }
                         }
+
+                        /* Enumerated items stage no definition state today; landed here so the rule holds for
+                           any that start to: this hook fires only after the item's read and flush succeeded. */
+                        context.LandStagedItemState();
 
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, which hid a single busy database's 50s burst
@@ -2085,28 +3148,9 @@ public sealed class DarlingCollectorRunner
                                         context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
                                         context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs);
 
-                                    /* #2811: the sub-split rides its OWN line rather than nesting inside the
-                                       one above, because that line is parsed by tooling outside this repo and
-                                       "don't break the parser" outranks "one line to grep". Emitted only when
-                                       the corresponding fetch actually ran, so a text-only pass prints one
-                                       line and a fetchless collector prints none. */
-                                    if (context.PerItemPlanFetchMs > 0)
-                                    {
-                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
-                                            server.Config.DisplayName, definition.Name, item, context.PerItemPlanFetchMs,
-                                            context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
-                                            context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted,
-                                            context.PerItemPlanProbeIds);
-                                    }
-
-                                    if (context.PerItemTextFetchMs > 0)
-                                    {
-                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
-                                            server.Config.DisplayName, definition.Name, item, context.PerItemTextFetchMs,
-                                            context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
-                                            context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted,
-                                            context.PerItemTextProbeIds);
-                                    }
+                                    /* #2811: the sub-splits ride their OWN lines, emitted by the method the Azure per-database
+                                       loop shares - see LogFetchPhaseSplits for why they are not folded into the line above. */
+                                    LogFetchPhaseSplits(server, definition.Name, item, context);
                                 }
                                 else
                                 {
@@ -2141,6 +3185,7 @@ public sealed class DarlingCollectorRunner
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             OnQueryStoreItemFailed(server.ServerId, item);
+                            DiscardQueryStoreDatabaseWatermark(server, item, stagedDatabaseWatermarks);
                         }
 
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
@@ -2153,6 +3198,36 @@ public sealed class DarlingCollectorRunner
                        declare a budget and two of them also enumerate, so plan_correction arrives here
                        non-null too. */
                     perItemBudget: definition.PerItemWallClockBudget);
+
+                /* #3754: the enumerated fan-out's failure account, treated exactly as the Azure per-database
+                   loop above treats its own (#2623) - and for the first time. Until this the driver handed
+                   each per-item exception to onItemError, that closure logged one WARNING per database,
+                   and nothing else happened: a collector whose every item threw returned Rows = 0 and this
+                   method returned SUCCESS with zero rows. On Azure SQL DB database_scoped_config did that on
+                   every monitored database every sweep - the [db].sys.sp_executesql idiom is rejected there -
+                   and get_collection_health reported it HEALTHY with errors: 0 and a sentence saying it had
+                   read and found nothing, while the service log carried the real failure on every cycle.
+
+                   Same two outcomes as the sibling loop, from the driver's shared numbers rather than a
+                   second hand-rolled count: SOME items lost composes the partial note (the names, the
+                   count, the first error) onto the SUCCESS row, merged with whatever probe-failure note the
+                   enumeration already left; EVERY item lost rethrows the first failure so RunOneAsync
+                   classifies the run from the real exception (PERMISSIONS on a denial number, ERROR
+                   otherwise) - a note on a row about to carry an error message would only compete with it,
+                   which is why PartialFailureNote composes null in that case. The database name rides ON the
+                   exception (#2997) so the fault handler upstream can name the database it means rather
+                   than the runtime's connected one, which for an enumerated collector is never the one that
+                   failed. rowsWritten and the slices are assigned only on the surviving path: a run that
+                   read nothing has no rows to report and RunOneAsync's fault arm reports its own wall clock. */
+                collectionNote = EnumeratedCollectorDriver.MergeNotes(collectionNote, driverResult.PartialFailureNote);
+
+                if (driverResult.AllItemsFailed)
+                {
+                    _logger?.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
+                        definition.Name, driverResult.Attempted, server.Config.DisplayName);
+                    CollectorFaultDatabase.Stamp(driverResult.FirstError, driverResult.FailedItems?[0]);
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(driverResult.FirstError!).Throw();
+                }
 
                 rowsWritten = driverResult.Rows;
                 sqlMs += driverResult.SqlMs;
@@ -2170,6 +3245,19 @@ public sealed class DarlingCollectorRunner
                    query_stats) could occupy a monitored server for minutes — the exact profile we must never
                    present. Null budget = itemToken IS cancellationToken and this block is byte-for-byte what
                    it was. */
+                /* #4046 part 1c: resolved on the connection that is about to run the query, BEFORE
+                   BuildQuery decides which of the two tail routes to send — a target's grant can arrive
+                   with no reconnect, so this is checked (through its own hourly cache) independently of
+                   how long the connection has been open, rather than folded into the connect-time facts on
+                   CollectorTargetInfo that live for the connection's whole life. */
+                await ResolvePgReadBinaryFileGrantAsync(
+                    context, definition.Name, targetConnection, server, cancellationToken);
+                /* #4251: same shape, same connection, right beside the grant check above — pg_server_config
+                   is the other server-scoped PostgreSQL collector that must decide which of two query texts
+                   to send before BuildQuery runs. */
+                await ResolvePgFileSettingsReadableAsync(
+                    context, definition.Name, targetConnection, server, _logger, cancellationToken);
+
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
@@ -2386,6 +3474,22 @@ public sealed class DarlingCollectorRunner
                 await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
                 rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
                 storageMs += storageSlice.ElapsedMilliseconds;
+
+                /* The single item's write returned: land what the definition staged for it. A throw above
+                   never reaches here, and a cycle that throws saves no state at all. */
+                context.LandStagedItemState();
+
+                /* #4197 part b: advance the cache only AFTER WriteBatchAsync's COPY has returned — this
+                   plain (non-fan-out) path's write is the batch commit itself, so "after the write
+                   returns" IS "after commit" here, never before it. A run that wrote zero rows takes
+                   neither branch below and leaves the cache exactly as the seed/hit above left it,
+                   matching the definition's own "no row-derived watermark from an empty batch" rule
+                   (#1962) instead of inventing one. Only eligible definitions (a live WatermarkValueAccessor,
+                   not a fan-out path) advance — see watermarkCacheEligible above. */
+                if (watermarkCacheEligible && rowsWritten > 0)
+                {
+                    CommitServerWatermark(server, definition, rows, watermarkFromUtcColumn, context.Measurements);
+                }
             }
         }
 
@@ -2442,6 +3546,8 @@ public sealed class DarlingCollectorRunner
            exactly the note it carried before. */
         collectionNote = EnumeratedCollectorDriver.MergeNotes(
             collectionNote, StoreWriteReattemptNote(context.StoreWriteReattempts));
+        collectionNote = EnumeratedCollectorDriver.MergeNotes(
+            collectionNote, QueryStoreIntervalMissNote(context.QueryStoreIntervalMisses));
 
         return new CollectorRunResult(
             rowsWritten, sqlMs, storageMs, context.Measurements, collectionNote, fanout.Result,
@@ -2552,6 +3658,39 @@ public sealed class DarlingCollectorRunner
             return 0;
         }
 
+        /* #4487: job_history's failback lookback can honestly re-read up to FailbackLookbackDays of an
+           epoch this server already stored — the numeric watermark alone cannot see that, because it
+           re-reads a HIGHER epoch's own rows, not the current low epoch's. Read the batch's own natural
+           keys back from the store ONCE, here, before the #3099 retry loop below, and filter `rows` once:
+           a start-phase re-attempt below reuses this already-filtered list rather than re-reading, which
+           is what keeps this read outside #3099's retry semantics entirely. Every other collector's
+           definition does not implement the contract, so this is a null check and nothing else for them. */
+        if (definition is INaturalKeyDedupedCollector<TRow> dedupe)
+        {
+            rows = await DropAlreadyStoredJobHistoryRowsAsync(
+                pgConnection, definition, dedupe, rows, server, cancellationToken);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
+        /* A deadlock both of an Azure master registration's reads return is stored once: read the batch's
+           own identities (time and full graph text) back from the store ONCE, here, before the #3099 retry
+           loop below, and keep only the rows it does not already hold. A start-phase re-attempt reuses this
+           filtered list. Every other collector's definition skips this null check. */
+        if (definition is IStoredIdentityDedupedCollector<TRow> identityDedupe)
+        {
+            rows = await DropAlreadyStoredIdentityRowsAsync(
+                pgConnection, identityDedupe, rows, server, cancellationToken);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
         /* #3099: ONE re-attempt, gated on the COPY's START phase, and lossless because `rows` is still
            the parameter this method was handed. The gate is what makes it lossless rather than merely
            cheap: a start-phase fault sent no row, so a COPY ... FROM STDIN cannot have committed and the
@@ -2613,6 +3752,168 @@ public sealed class DarlingCollectorRunner
         await RecordOversizedPlanSightingsAsync(definition, rows, server, collectionTime, cancellationToken);
 
         return outcome.RowsWritten;
+    }
+
+    /// <summary>
+    /// The keyed pre-insert dedupe (#4487): reads the batch's own natural keys back from
+    /// <c>collect.job_history</c> (the only table this runs against — <c>definition.TargetTable</c> is
+    /// job_history's, since only <see cref="JobHistoryCollector"/> implements
+    /// <see cref="INaturalKeyDedupedCollector{TRow}"/>) and drops any row this server already stored under
+    /// either the current epoch or a returning one, before the COPY.
+    ///
+    /// <para><b>The read.</b> A keyed join against store rung V150's
+    /// <c>idx_job_history_server_run (server_id, run_datetime DESC, instance_id DESC)</c> — confirmed with
+    /// EXPLAIN in the PR's cost check — bounded on <c>collection_time &gt;= batch's MIN(run_datetime) - 1
+    /// day</c> for chunk exclusion. That bound is on <c>collection_time</c> (the hypertable's partitioning
+    /// column, UTC) using <c>run_datetime</c> (the TARGET's own local wall clock) as its anchor: the two
+    /// clocks are within ±14h of each other (the widest real UTC offset), and a row cannot be collected
+    /// before the run it describes started, so one full day of slack on top of that is safe margin in
+    /// either direction without needing to reason about the exact offset.</para>
+    ///
+    /// <para><b>Once per batch, not once per retry.</b> Called from <see cref="WriteBatchAsync{TRow}"/>
+    /// BEFORE the #3099 retry loop begins, so a start-phase re-attempt reuses the already-filtered list —
+    /// re-reading on retry would be wasted work at best, and at worst could re-admit a row a slower first
+    /// attempt had already committed between the two reads.</para>
+    /// </summary>
+    private async Task<List<TRow>> DropAlreadyStoredJobHistoryRowsAsync<TRow>(
+        NpgsqlConnection pgConnection,
+        ICollectorDefinition<TRow> definition,
+        INaturalKeyDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        var runDateTimes = new DateTime[rows.Count];
+        var instanceIds = new long[rows.Count];
+        var jobIds = new string[rows.Count];
+        var stepIds = new int[rows.Count];
+        var minRunDateTime = DateTime.MaxValue;
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var key = dedupe.GetNaturalKey(rows[i]);
+            instanceIds[i] = key.InstanceId;
+            jobIds[i] = key.JobId;
+            stepIds[i] = key.StepId;
+            runDateTimes[i] = DateTime.SpecifyKind(key.RunDateTime, DateTimeKind.Unspecified);
+
+            if (key.RunDateTime < minRunDateTime)
+            {
+                minRunDateTime = key.RunDateTime;
+            }
+        }
+
+        var collectionTimeFloor = DateTime.SpecifyKind(minRunDateTime.AddDays(-1), DateTimeKind.Unspecified);
+
+        var storedKeys = new HashSet<(long InstanceId, string JobId, int StepId, DateTime RunDateTime)>();
+
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                $"SELECT jh.instance_id, jh.job_id, jh.step_id, jh.run_datetime " +
+                $"FROM {definition.TargetTable} AS jh " +
+                "JOIN unnest($2::timestamp[], $3::bigint[], $4::text[], $5::integer[]) " +
+                "AS k(run_datetime, instance_id, job_id, step_id) " +
+                "ON jh.run_datetime = k.run_datetime AND jh.instance_id = k.instance_id " +
+                "AND jh.job_id = k.job_id AND jh.step_id = k.step_id " +
+                "WHERE jh.server_id = $1 AND jh.collection_time >= $6",
+                pgConnection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(server.ServerId);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = runDateTimes });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = instanceIds });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = jobIds });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = stepIds });
+            command.Parameters.AddWithValue(collectionTimeFloor);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                storedKeys.Add((
+                    reader.GetInt64(0),
+                    reader.GetString(1),
+                    reader.GetInt32(2),
+                    JobHistoryCollector.ToMicroseconds(reader.GetDateTime(3))));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed dedupe read must never turn into a silent duplicate write: fail the batch rather
+               than store rows this server might already hold. The #3099 retry above still applies to
+               whatever failure the store write itself produces; this read is not part of that retry. */
+            _logger?.LogWarning(
+                "job_history pre-insert dedupe read failed for server {ServerId} — failing this batch " +
+                "rather than risk storing duplicate rows: {Message}",
+                server.ServerId, ex.Message);
+            throw;
+        }
+
+        return dedupe.DropAlreadyStored(rows, storedKeys);
+    }
+
+    /// <summary>
+    /// The stored graphs of one server at a set of event times, bounded on <c>collection_time</c> (the
+    /// hypertable's partitioning column) for chunk exclusion. A null graph is never an identity.
+    /// </summary>
+    internal const string StoredDeadlockIdentitySql =
+        "SELECT deadlock_time, deadlock_graph_xml FROM deadlocks " +
+        "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> '' " +
+        "AND deadlock_time = ANY($2::timestamp[]) AND collection_time >= $3";
+
+    /// <summary>
+    /// The exact-identity pre-insert dedupe: reads the stored graphs of this server at the batch's own
+    /// identity times (one query) and drops any row whose microsecond time and full graph text a stored row
+    /// already carries, before the COPY. The <c>collection_time</c> floor is the earliest batch event time
+    /// minus one day: a deadlock cannot be collected before it happened, and the day absorbs the gap
+    /// between the target's clock and the store's. Called from <see cref="WriteBatchAsync{TRow}"/> BEFORE
+    /// the #3099 retry loop, so a start-phase re-attempt reuses the filtered list. A failed read fails the
+    /// batch rather than risk a duplicate.
+    /// </summary>
+    private async Task<List<TRow>> DropAlreadyStoredIdentityRowsAsync<TRow>(
+        NpgsqlConnection pgConnection,
+        IStoredIdentityDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        var times = rows.Select(dedupe.GetIdentity)
+            .Where(identity => identity is not null)
+            .Select(identity => DateTime.SpecifyKind(identity!.Value.Time, DateTimeKind.Unspecified))
+            .Distinct()
+            .ToArray();
+
+        if (times.Length == 0)
+        {
+            return rows;
+        }
+
+        var collectionTimeFloor = DateTime.SpecifyKind(times.Min().AddDays(-1), DateTimeKind.Unspecified);
+        var stored = new HashSet<(DateTime Time, string Graph)>();
+
+        try
+        {
+            await using var command = new NpgsqlCommand(StoredDeadlockIdentitySql, pgConnection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(server.ServerId);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = times });
+            command.Parameters.AddWithValue(collectionTimeFloor);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                stored.Add((JobHistoryCollector.ToMicroseconds(reader.GetDateTime(0)), reader.GetString(1)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Deadlock pre-insert dedupe read failed for server {ServerId} — failing this batch " +
+                "rather than risk storing a duplicate: {Message}",
+                server.ServerId, ex.Message);
+            throw;
+        }
+
+        return dedupe.DropAlreadyStored(rows, stored);
     }
 
     /// <summary>
@@ -2703,6 +4004,25 @@ public sealed class DarlingCollectorRunner
             : string.Format(CultureInfo.InvariantCulture, s_storeWriteReattemptNote, reattempts);
 
     /// <summary>
+    /// The collection_log note for a cycle whose Query Store batches stored their raw rows but missed the interval
+    /// table (#3953), in <see cref="StoreWriteReattemptNoteFormat"/>'s shape. Raw was not lost; the batches are queued
+    /// for replay, and the note is what keeps a failing apply visible on a cycle that otherwise reads as a success.
+    /// </summary>
+    internal const string QueryStoreIntervalMissNoteFormat =
+        "{0} Query Store batch(es) this cycle stored their raw rows but missed the interval table (#3953); they are " +
+        "queued for replay, and PLAN_REGRESSION reads raw for this server until they apply";
+
+    /// <summary><see cref="QueryStoreIntervalMissNoteFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_queryStoreIntervalMissNote =
+        CompositeFormat.Parse(QueryStoreIntervalMissNoteFormat);
+
+    /// <summary>The note for this cycle's interval-table misses, or null when there were none.</summary>
+    internal static string? QueryStoreIntervalMissNote(int misses) =>
+        misses <= 0
+            ? null
+            : string.Format(CultureInfo.InvariantCulture, s_queryStoreIntervalMissNote, misses);
+
+    /// <summary>
     /// One attempt at the batch on a store connection of its own, borrowed for the attempt and returned
     /// when it ends (#3099). Both the re-attempt and a first attempt whose shared connection is already
     /// broken route through here, so "a fresh connection" is one named method with one body rather than two
@@ -2764,128 +4084,215 @@ public sealed class DarlingCollectorRunner
             writer.UseDimensions(diversionPlan, dimensions);
         }
 
-        /* Only the diverting collectors need a transaction; everything else keeps the pre-#1767
-           single-COPY commit and pays nothing. */
-        await using var transaction = diversionPlan.Count > 0
-            ? await pgConnection.BeginTransactionAsync(cancellationToken)
+        /* #3953: a Query Store batch also maintains the latest-snapshot-per-interval table, in the COPY's own
+           transaction behind a savepoint (QueryStoreIntervalLatest). Its two wider reads, the coverage row's
+           creation and the hourly gap check, run HERE, before the transaction, so nothing inside it reads raw
+           except by this batch's collection_time. Neither can block the COPY: a fault just records the batch
+           for replay. */
+        var queryStoreDatabases = definition is QueryStoreCollector
+            ? DistinctQueryStoreDatabases(rows)
             : null;
+        var queryStorePrepared = queryStoreDatabases is not null
+            && await _queryStoreIntervalLatest.PrepareServerAsync(
+                pgConnection, server.ServerId, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
 
-        /* Naive-UTC storage — see PgCollectorRowWriter. */
-        var storedCollectionTime = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
+        /* #3953 (V145): the wide interval table's own prepare, independent of V143's above — its own coverage row
+           and its own hourly gap check, on its own claim. A fault here only skips THIS table's apply. */
+        var queryStoreWidePrepared = queryStoreDatabases is not null
+            && await _queryStoreIntervalWide.PrepareServerAsync(
+                pgConnection, server.ServerId, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
 
-        /* The start phase's deadline. It is separate from the importer's because it has to be: the
-           importer does not exist until Begin returns, and the await that returns it runs under the
-           connection's CommandTimeout, which Npgsql exposes read-only. StoreCopyStartDeadline carries the
-           value, the stop-versus-deadline discrimination and the fault shape; the two lines it costs here
-           are the token below and the arm that translates a breach. */
-        using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
+        /* #4659: a Query Store batch tells the store-write fence it is about to change query_store_stats BEFORE
+           its transaction opens, and that it is done in a finally AFTER the commit (or after a rollback, a throw,
+           or a cancel). This is the one place every Query Store row is written, so the live fan-out (one
+           transaction per database under one collection_time), overlapped runs, the re-attempt on a fresh
+           connection and the backfill are all covered here and nowhere else. */
+        var fencedServerId = queryStoreDatabases is not null ? server.ServerId : (int?)null;
+        if (fencedServerId is { } beginServerId)
+        {
+            _queryStoreWriteFence?.BeginWrite(beginServerId);
+        }
 
-        /* #3095: which COPY phase a fault came out of, stamped onto the exception by the arm below so a
-           handler upstream can tell a start-phase failure from a data-phase one. Both render as
-           "Exception while reading from stream", so nothing about the exception itself carries this.
-
-           Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
-           mean strictly "the importer never came back", because that is the state whose two properties a
-           consumer relies on — no row started, so a COPY ... FROM STDIN cannot have committed, and no
-           delta baseline moved, since CollectorDeltaCalculator advances inside WritePayload below. A
-           fault anywhere past this line forfeits both, so it must read as Data even where it happens to
-           have sent nothing. The unsafe mislabel is the one that would report Start for a fault that had
-           already sent rows; this ordering makes that unreachable rather than unlikely.
-
-           The dimension flush and commit after the block are deliberately left unstamped: they are not the
-           COPY, and Unknown is the honest answer for them. */
-        var copyPhase = StoreCopyPhase.Start;
-
+        var fenceSucceeded = false;
         try
         {
-            using (var importer = await pgConnection.BeginBinaryImportAsync(
-                PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
+            /* Only the diverting collectors and Query Store (#3953) need a transaction; everything else keeps the
+               pre-#1767 single-COPY commit and pays nothing. */
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null
+                ? await pgConnection.BeginTransactionAsync(cancellationToken)
+                : null;
+
+            /* Naive-UTC storage — see PgCollectorRowWriter. */
+            var storedCollectionTime = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
+
+            /* The start phase's deadline. It is separate from the importer's because it has to be: the
+               importer does not exist until Begin returns, and the await that returns it runs under the
+               connection's CommandTimeout, which Npgsql exposes read-only. StoreCopyStartDeadline carries the
+               value, the stop-versus-deadline discrimination and the fault shape; the two lines it costs here
+               are the token below and the arm that translates a breach. */
+            using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
+
+            /* #3095: which COPY phase a fault came out of, stamped onto the exception by the arm below so a
+               handler upstream can tell a start-phase failure from a data-phase one. Both render as
+               "Exception while reading from stream", so nothing about the exception itself carries this.
+
+               Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
+               mean strictly "the importer never came back", because that is the state whose two properties a
+               consumer relies on — no row started, so a COPY ... FROM STDIN cannot have committed, and no
+               delta baseline moved, since CollectorDeltaCalculator advances inside WritePayload below. A
+               fault anywhere past this line forfeits both, so it must read as Data even where it happens to
+               have sent nothing. The unsafe mislabel is the one that would report Start for a fault that had
+               already sent rows; this ordering makes that unreachable rather than unlikely.
+
+               The dimension flush and commit after the block are deliberately left unstamped: they are not the
+               COPY, and Unknown is the honest answer for them. */
+            var copyPhase = StoreCopyPhase.Start;
+
+            try
             {
-                copyPhase = StoreCopyPhase.Data;
-
-                /* #2874: the COPY's own deadline — and a DIFFERENT property from every other site in this
-                   regime. NpgsqlBinaryImporter.Timeout is a TimeSpan on the importer, not the int seconds of
-                   NpgsqlCommand.CommandTimeout, and there is neither an NpgsqlCommand nor a CreateCommand here,
-                   so no regex written for either command shape can see this site. Left unset it is initialised
-                   from the connection's CommandTimeout, so this write — PgCollectorRowWriter.CopyCommandFor over
-                   every collector, every server, every cycle — inherited the same undocumented 30 s default as
-                   the rest of the regime while being invisible to every pin that closed them.
-
-                   It takes the SAME constant because it is the same regime: no enclosing budget, one sweep permit
-                   and one borrowed store connection held for the duration, retried on the collector's own cadence.
-
-                   It reaches ONE of the COPY's two phases, and that is a property of the API rather than a
-                   choice. Measured against Npgsql 10.0.3: this bounds StartRowAsync / Write / CompleteAsync,
-                   and nothing above them — the importer does not exist until Begin has returned. The await
-                   that returns it is bounded by startDeadline above, which is why the two lines are separate
-                   and why both take the same constant. */
-                importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
-
-                writer.Importer = importer;
-
-                foreach (var row in rows)
+                using (var importer = await pgConnection.BeginBinaryImportAsync(
+                    PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
                 {
-                    await importer.StartRowAsync(cancellationToken);
+                    copyPhase = StoreCopyPhase.Data;
 
-                    if (definition.IncludesCollectionId)
+                    /* #2874: the COPY's own deadline — and a DIFFERENT property from every other site in this
+                       regime. NpgsqlBinaryImporter.Timeout is a TimeSpan on the importer, not the int seconds of
+                       NpgsqlCommand.CommandTimeout, and there is neither an NpgsqlCommand nor a CreateCommand here,
+                       so no regex written for either command shape can see this site. Left unset it is initialised
+                       from the connection's CommandTimeout, so this write — PgCollectorRowWriter.CopyCommandFor over
+                       every collector, every server, every cycle — inherited the same undocumented 30 s default as
+                       the rest of the regime while being invisible to every pin that closed them.
+
+                       It takes the SAME constant because it is the same regime: no enclosing budget, one sweep permit
+                       and one borrowed store connection held for the duration, retried on the collector's own cadence.
+
+                       It reaches ONE of the COPY's two phases, and that is a property of the API rather than a
+                       choice. Measured against Npgsql 10.0.3: this bounds StartRowAsync / Write / CompleteAsync,
+                       and nothing above them — the importer does not exist until Begin has returned. The await
+                       that returns it is bounded by startDeadline above, which is why the two lines are separate
+                       and why both take the same constant. */
+                    importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
+
+                    writer.Importer = importer;
+
+                    foreach (var row in rows)
                     {
-                        writer.Value(CollectionIdGenerator.Next());
+                        await importer.StartRowAsync(cancellationToken);
+
+                        if (definition.IncludesCollectionId)
+                        {
+                            writer.Value(CollectionIdGenerator.Next());
+                        }
+
+                        writer.Value(storedCollectionTime)
+                              .Value(server.ServerId)
+                              .Value(server.StorageName);
+
+                        writer.BeginPayload();
+                        definition.WritePayload(row, writer, context);
+                        writer.EndPayload(definition.PayloadColumns.Count);
+                        rowsWritten++;
                     }
 
-                    writer.Value(storedCollectionTime)
-                          .Value(server.ServerId)
-                          .Value(server.StorageName);
+                    await importer.CompleteAsync(cancellationToken);
+                }
+            }
+            /* The start phase's deadline, re-raised as the shape a client-side deadline has here. Npgsql
+               cancels Begin with an OperationCanceledException, and on this path that word is reserved for the
+               service stopping — the arm below excludes it from the phase stamp, and StoreWriteReattempt
+               refuses to re-attempt through one. Left in that shape a breach would be bounded and invisible.
 
-                    writer.BeginPayload();
-                    definition.WritePayload(row, writer, context);
-                    writer.EndPayload(definition.PayloadColumns.Count);
-                    rowsWritten++;
+               The phase term in the filter is what makes this arm unable to lie, and it is not redundant with
+               Breached(). A throw from a catch arm leaves the whole try, so this fault is stamped HERE rather
+               than by the arm below — and Start is what the re-attempt gate acts on. Requiring copyPhase to
+               still hold its initial value makes the arm unreachable once the row loop has begun, whatever
+               Npgsql chooses to throw from inside it, so a data-phase fault cannot be relabelled as the
+               recoverable one. The stamp still reads the variable rather than naming a phase. */
+            catch (OperationCanceledException cancellation)
+                when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
+            {
+                var breach = StoreCopyStartDeadline.Breach(cancellation);
+                CollectorFaultCopyPhase.Stamp(breach, copyPhase);
+                throw breach;
+            }
+            /* Stamped, then rethrown bare: the fault keeps its own type, message and stack, so every
+               classification arm upstream — PostgresTargetProvider.Classify, the reconnect decision in
+               DarlingWorker's general handler, and any predicate walking the inner chain for a transport
+               fault — sees exactly what it sees today. The phase rides alongside as an independent axis.
+
+               OperationCanceledException is excluded because a stopping token is not a COPY phase: it says the
+               service is shutting down, not which protocol exchange was in flight, and a consumer must not be
+               able to read a shutdown as a recoverable start-phase stall. */
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                CollectorFaultCopyPhase.Stamp(ex, copyPhase);
+                throw;
+            }
+
+            if (transaction is not null)
+            {
+                if (diversionPlan.Count > 0)
+                {
+                    await PayloadDimensionWriter.FlushAsync(
+                        pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
+                        compressPlanContent: _compressPlanContent());
                 }
 
-                await importer.CompleteAsync(cancellationToken);
+                /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not
+                   the COPY's and is never re-attempted. The apply cannot fail the batch: it rolls back to its own
+                   savepoint and records the batch for replay, so raw commits either way. */
+                if (queryStoreDatabases is not null)
+                {
+                    var applied = await _queryStoreIntervalLatest.ApplyBatchAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime, queryStoreDatabases,
+                        skipApply: !queryStorePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                    if (applied == QueryStoreIntervalLatest.ApplyResult.RecordedAsPending)
+                    {
+                        context.QueryStoreIntervalMisses++;
+                    }
+
+                    /* #3953 (V145): the wide table's apply, under its OWN savepoint (QueryStoreIntervalWide.SavepointName),
+                       beside V143's above. A fault here rolls back only to that savepoint: V143's apply just above,
+                       already released from its own savepoint, is untouched, and raw still commits either way. */
+                    await _queryStoreIntervalWide.ApplyBatchAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime, queryStoreDatabases,
+                        skipApply: !queryStoreWidePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
             }
-        }
-        /* The start phase's deadline, re-raised as the shape a client-side deadline has here. Npgsql
-           cancels Begin with an OperationCanceledException, and on this path that word is reserved for the
-           service stopping — the arm below excludes it from the phase stamp, and StoreWriteReattempt
-           refuses to re-attempt through one. Left in that shape a breach would be bounded and invisible.
 
-           The phase term in the filter is what makes this arm unable to lie, and it is not redundant with
-           Breached(). A throw from a catch arm leaves the whole try, so this fault is stamped HERE rather
-           than by the arm below — and Start is what the re-attempt gate acts on. Requiring copyPhase to
-           still hold its initial value makes the arm unreachable once the row loop has begun, whatever
-           Npgsql chooses to throw from inside it, so a data-phase fault cannot be relabelled as the
-           recoverable one. The stamp still reads the variable rather than naming a phase. */
-        catch (OperationCanceledException cancellation)
-            when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
-        {
-            var breach = StoreCopyStartDeadline.Breach(cancellation);
-            CollectorFaultCopyPhase.Stamp(breach, copyPhase);
-            throw breach;
+            /* Last statement: reaching it means the commit was acknowledged. Any exit before it leaves the write's
+               outcome unknown, and the fence poisons the server. */
+            fenceSucceeded = true;
         }
-        /* Stamped, then rethrown bare: the fault keeps its own type, message and stack, so every
-           classification arm upstream — PostgresTargetProvider.Classify, the reconnect decision in
-           DarlingWorker's general handler, and any predicate walking the inner chain for a transport
-           fault — sees exactly what it sees today. The phase rides alongside as an independent axis.
-
-           OperationCanceledException is excluded because a stopping token is not a COPY phase: it says the
-           service is shutting down, not which protocol exchange was in flight, and a consumer must not be
-           able to read a shutdown as a recoverable start-phase stall. */
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        finally
         {
-            CollectorFaultCopyPhase.Stamp(ex, copyPhase);
-            throw;
-        }
-
-        if (transaction is not null)
-        {
-            await PayloadDimensionWriter.FlushAsync(
-                pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
-                compressPlanContent: _compressPlanContent());
-            await transaction.CommitAsync(cancellationToken);
+            if (fencedServerId is { } endServerId)
+            {
+                _queryStoreWriteFence?.EndWrite(endServerId, fenceSucceeded);
+            }
         }
 
         return rowsWritten;
+    }
+
+    /// <summary>
+    /// The distinct databases of a Query Store batch (#3953): normally exactly one, because the enumerated and Azure
+    /// paths write one batch per database per cycle. Null for any other collector's rows.
+    /// </summary>
+    private static List<string>? DistinctQueryStoreDatabases<TRow>(List<TRow> rows)
+    {
+        var names = new List<string>();
+        foreach (var row in rows)
+        {
+            if (row is QueryStoreCollector.Row queryStoreRow && !names.Contains(queryStoreRow.DatabaseName))
+            {
+                names.Add(queryStoreRow.DatabaseName);
+            }
+        }
+
+        return names;
     }
 
     /// <summary>
@@ -2919,6 +4326,7 @@ public sealed class DarlingCollectorRunner
             ServerName = server.StorageName,
             CollectionTime = DateTime.UtcNow,
             Deltas = _deltas,
+            LogHashKey = _logHashKey,
             Target = server.Target,
             Watermark = null,
             NumericWatermark = null,
@@ -2961,6 +4369,59 @@ public sealed class DarlingCollectorRunner
         bounded
             ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
             : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+
+    /// <summary>
+    /// The server-scoped watermark SQL for a definition that declares a UTC twin beside its watermark column
+    /// (#3778): BOTH maxima in one statement, the twin first, so the caller can prefer the twin and fall to
+    /// the declared column without a second round trip — and so that the two values come from ONE scan of
+    /// the same rows, which is what makes "the twin is NULL, so use the local stamp" a statement about the
+    /// store rather than about a race between two reads. Same <c>server_id</c> predicate and the same
+    /// optional <c>collection_time</c> bound as <see cref="BuildServerWatermarkSql"/>; exposed for the same
+    /// reason, so a pin can assert the SHIPPED string.
+    /// </summary>
+    internal static string BuildServerWatermarkPairSql(string tableName, string columnName, string utcColumnName, bool bounded) =>
+        bounded
+            ? $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
+            : $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+
+    /// <summary>
+    /// The per-database watermark SQL (#1535/#2344), exposed for the same reason as its server-scoped
+    /// siblings: a pin asserts the SHIPPED string. <paramref name="bounded"/> adds the same
+    /// <c>collection_time</c> partitioning-column predicate, parameterized last ($3) after server and
+    /// database.
+    /// </summary>
+    internal static string BuildServerWatermarkForDatabaseSql(string tableName, string columnName, string databaseColumnName, bool bounded) =>
+        bounded
+            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3"
+            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2";
+
+    /// <summary>
+    /// The per-database watermark SQL for the Query Store cache's seed read (#4749): the bounded value, plus its
+    /// witness, which is the newest <c>collection_time</c> among the rows AT that value inside the bound. Same
+    /// predicates as <see cref="BuildServerWatermarkForDatabaseSql"/> (bounded, <c>collection_time</c> last as
+    /// $3), repeated in the inner query in the shape <see cref="BuildServerWatermarkInstanceIdSql"/> already
+    /// uses to pick the newest batch. The unaliased <c>MAX(</c>column<c>)</c> stays in the text: the tests that
+    /// count watermark reads match on it. Exposed for the same reason as its siblings, so a pin asserts the
+    /// SHIPPED string.
+    /// </summary>
+    internal static string BuildServerWatermarkWithWitnessForDatabaseSql(string tableName, string columnName, string databaseColumnName) =>
+        $"SELECT MAX({columnName}), MAX(collection_time) FROM {tableName} "
+        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3 "
+        + $"AND {columnName} = (SELECT MAX({columnName}) FROM {tableName} "
+        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3)";
+
+    /// <summary>
+    /// The numeric (bigint identity) watermark SQL behind <see cref="GetLastCollectedInstanceIdAsync"/>
+    /// (job_history's <c>instance_id</c>), exposed for the same reason as the timestamp builders above. Bounds
+    /// on <c>collection_time</c> — job_history's partitioning column — never on <paramref name="columnName"/>
+    /// itself, which does not partition the table and so cannot prune a chunk (#4197).
+    /// </summary>
+    internal static string BuildServerWatermarkInstanceIdSql(string tableName, string columnName, bool bounded) =>
+        bounded
+            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2 "
+              + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1 AND collection_time > $2)"
+            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
+              + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1)";
 
     /// <summary>
     /// True when this cycle will OVERWRITE the server-scoped watermark before any query is built, so
@@ -3033,23 +4494,48 @@ public sealed class DarlingCollectorRunner
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var sql = BuildServerWatermarkSql(tableName, columnName, collectedSince is not null);
+
+            /* #4197: an explicit collectedSince (query_store's clamped floor, per WatermarkPolicy.ReadFloor)
+               stays exactly what #2344/#2795 shipped — one bounded read, and a null result falls through to
+               the caller's own clamp rather than a second round trip. Every OTHER caller passes null, which
+               used to mean "read every chunk in retention, every cycle" — the ring-buffer cost #4197
+               measures. It now means WatermarkPolicy.RecentWatermarkWindow's probe-then-confirm: bound on
+               the SAME partitioning column first (chunk exclusion prunes everything older), and only on a
+               miss fall back to the true unbounded MAX below. The value is identical either way — see
+               RecentWatermarkWindow's remarks for why a hit can never differ from the unbounded answer. */
+            var autoWindow = collectedSince is null;
+            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+            var sql = BuildServerWatermarkSql(tableName, columnName, bounded: true);
             using var command = new NpgsqlCommand(sql, connection);
             /* Explicit rather than Npgsql's 30 s default: that default was never a decision anyone made
                here, and it silently governed a read whose measured cost exceeded it. */
             command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
-            if (collectedSince is DateTime floor)
-            {
-                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
-                   timestamptz and Postgres would convert it into the session zone on the way in. */
-                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
-            }
+            /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+               timestamptz and Postgres would convert it into the session zone on the way in. */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
 
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is DateTime dt)
             {
                 return dt;
+            }
+
+            if (autoWindow)
+            {
+                /* The probe found no row in the window — a gap wider than RecentWatermarkWindow, or a
+                   genuinely empty table. Either way only the true unbounded MAX answers correctly; a null
+                   here would read as first-run, which is not scoped to the window the way it is for
+                   query_store's clamped callers. */
+                using var fallback = new NpgsqlCommand(BuildServerWatermarkSql(tableName, columnName, bounded: false), connection);
+                fallback.CommandTimeout = CommandTimeoutSeconds;
+                fallback.Parameters.AddWithValue(serverId);
+                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+                if (fallbackResult is DateTime fallbackDt)
+                {
+                    return fallbackDt;
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3069,6 +4555,107 @@ public sealed class DarlingCollectorRunner
                 serverId, tableName, columnName, ex.Message);
         }
         return null;
+    }
+
+    /// <summary>
+    /// The watermark read for a definition that declares a UTC twin beside its watermark column (#3778):
+    /// <c>MAX(utcColumnName)</c> and <c>MAX(columnName)</c> in one round trip, returning the twin's value with
+    /// <c>FromUtcColumn = true</c> when the store holds at least one row carrying it, else the declared column's
+    /// value with <c>false</c>, else <c>(null, false)</c> — the first-run fallback, exactly as
+    /// <see cref="GetLastCollectedTimeAsync"/> signals it. The caller puts the pair on
+    /// <see cref="CollectorContext.Watermark"/> and <see cref="CollectorContext.WatermarkFromUtcColumn"/>, and
+    /// the definition's dedup compares each row IN THAT FRAME. Only <c>cpu_utilization</c> declares a twin
+    /// today; every other definition still goes through <see cref="GetLastCollectedTimeAsync"/> and its
+    /// unchanged SQL.
+    ///
+    /// <para><b>Why the twin wins whenever it exists, without comparing the two maxima.</b> The twin is NULL on
+    /// every row written before Darling V134 and non-null on every row the collector has written since, so
+    /// "the newest row with a twin" and "the newest row" are the same row once any post-rung row exists —
+    /// collection is append-only in time. Comparing <c>MAX(sample_time_utc)</c> against <c>MAX(sample_time)</c>
+    /// to decide would itself be the cross-frame comparison this read exists to avoid.</para>
+    ///
+    /// <para>Same bound, same deadline, same failure contract as the sibling: <paramref name="collectedSince"/>
+    /// predicates on the partitioning column (null for the CPU collector, whose watermark is never clamped;
+    /// <c>ServerWatermarkReadFloorTests</c> requires every reader in this family to accept it), the command
+    /// deadline is explicit rather than Npgsql's default, and a failed read logs and returns the first-run
+    /// pair rather than throwing — saying so, because a silent null here is a duplicate hour per server per
+    /// cycle for as long as it lasts, not merely a re-collected window.</para>
+    /// </summary>
+    public async Task<(DateTime? Value, bool FromUtcColumn)> GetLastCollectedTimeWithFrameAsync(
+        int serverId, string tableName, string columnName, string utcColumnName, CancellationToken cancellationToken,
+        DateTime? collectedSince = null)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+            /* #4197: same probe-then-confirm as the sibling above — see its remarks. collectedSince
+               non-null (query_store's clamped floor) is unchanged; null now means "bound to
+               RecentWatermarkWindow, fall back to the true unbounded pair only on a miss" instead of
+               "always unbounded". */
+            var autoWindow = collectedSince is null;
+            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+            var sql = BuildServerWatermarkPairSql(tableName, columnName, utcColumnName, bounded: true);
+            using (var command = new NpgsqlCommand(sql, connection))
+            {
+                command.CommandTimeout = CommandTimeoutSeconds;
+                command.Parameters.AddWithValue(serverId);
+                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+                   timestamptz and Postgres would convert it into the session zone on the way in. */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+
+                using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    if (!reader.IsDBNull(0))
+                    {
+                        return (reader.GetDateTime(0), true);
+                    }
+
+                    if (!reader.IsDBNull(1))
+                    {
+                        return (reader.GetDateTime(1), false);
+                    }
+                }
+            }
+
+            if (autoWindow)
+            {
+                /* Neither column had a row in the window — fall back to the true unbounded pair, the
+                   sibling's exact reasoning: this is not query_store's clamped path, so a miss here is not
+                   necessarily a first run. */
+                using var fallback = new NpgsqlCommand(
+                    BuildServerWatermarkPairSql(tableName, columnName, utcColumnName, bounded: false), connection);
+                fallback.CommandTimeout = CommandTimeoutSeconds;
+                fallback.Parameters.AddWithValue(serverId);
+                using var fallbackReader = await fallback.ExecuteReaderAsync(cancellationToken);
+                if (await fallbackReader.ReadAsync(cancellationToken))
+                {
+                    if (!fallbackReader.IsDBNull(0))
+                    {
+                        return (fallbackReader.GetDateTime(0), true);
+                    }
+
+                    if (!fallbackReader.IsDBNull(1))
+                    {
+                        return (fallbackReader.GetDateTime(1), false);
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The sibling's contract, and the sibling's reason for logging rather than swallowing: a null here
+               reads as a first run, and for this collector a first run re-collects the ring buffer's whole
+               retained history under stamps the store already holds. */
+            _logger?.LogWarning(
+                "Watermark read failed for server {ServerId} on {Table}.{Column}/{UtcColumn} — falling back to the "
+                + "collector's default window, which re-collects data already stored: {Message}",
+                serverId, tableName, columnName, utcColumnName, ex.Message);
+        }
+
+        return (null, false);
     }
 
     /// <summary>
@@ -3272,6 +4859,149 @@ public sealed class DarlingCollectorRunner
                 server.Config.DisplayName, databaseName);
 
             return false;
+        }
+    }
+
+    /// <summary>
+    /// One Query Store database's two deferred fetches, run right after that database's runtime-statistics read
+    /// and on the connection that read it: the plan XML first (#2210), then the statement text (#2150). Shared by
+    /// both places that read a Query Store database - the enumerated per-item read (SQL Server, Managed Instance)
+    /// and the per-database loop Azure SQL Database takes, where <c>QueryStoreCollector.RunsPerDatabase</c> is
+    /// <c>IsAzureSqlDb</c>. That loop used to read and flush without calling either fetch; every scheduled run
+    /// nulls the payload's inline text and plan (see <see cref="CollectorContext.FetchQueryTextSeparately"/>), so
+    /// every Azure SQL Database row was stored with neither statement text nor plan.
+    ///
+    /// <para><paramref name="databaseName"/> is the database THIS read targeted, never the registration's initial
+    /// catalog. The by-ids queries run <c>EXECUTE [db].sys.sp_executesql</c>, which Azure SQL Database accepts only
+    /// when the named database is the connection's current one, and the per-database connection is exactly that.</para>
+    ///
+    /// <para>Each fetch isolates its own failures (it logs and returns), so neither costs the database its runtime
+    /// statistics. A budget expiry is the exception and propagates to the caller's budget handling. The caller
+    /// clears the readings first (<see cref="ClearFetchPhaseStamps"/>) and reads them after.</para>
+    /// </summary>
+    private async Task FetchQueryStorePlansAndTextAsync<TRow>(
+        DbConnection targetConnection,
+        NpgsqlConnection storeConnection,
+        ServerRuntime server,
+        string databaseName,
+        string collectorName,
+        CollectorContext context,
+        int commandTimeoutSeconds,
+        List<TRow> batch,
+        CancellationToken cancellationToken)
+    {
+        /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
+           query on purpose - it ships in plan_id order, so a budget cut truncates a SUFFIX,
+           which is the only reason the watermark can advance from a cut pass at all. */
+        /* `is SqlConnection` rather than a bare cast, and it does two jobs (merge resolution
+           against #2213's provider seam): the connection here is a provider-neutral
+           DbConnection now, and this fetch is Query-Store-only, so the pattern narrows the
+           type the signature needs AND gates the engine in one expression that cannot drift
+           from either. The enumerated path serves PostgreSQL targets since #2213; query_store
+           declares TargetEngine = SqlServer so it never reaches here for one, but relying on
+           the catalog for that would be an invariant held somewhere else. */
+        if (context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection)
+        {
+            /* #2312 investigation: timed so the log split can say whether the invariant
+               per-cycle cost lives HERE rather than in the payload - a 0-row cycle's
+               blended sql: could not distinguish them. */
+            /* #2854: stamped from finally. This one is the PARENT of the sub-split #2816
+               already fixed, which makes a bare stamp here worse than the defect it fixed:
+               probe/target/write stamp from their own handlers and report real values, so a
+               throwing fetch printed plan_fetch:0ms above non-zero children. PlanFetchOtherMs
+               then clamps a negative residual to zero and the line reads as precise while
+               being arithmetically impossible. */
+            var planFetchWatch = Stopwatch.StartNew();
+            try
+            {
+                await FetchAndStorePlansAsync(planFetchConnection, storeConnection,
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch), cancellationToken);
+            }
+            finally
+            {
+                context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
+            }
+        }
+
+        /* #2150: and this database's statement-text fetch, for the same reason and with the
+           same shape - the payload no longer carries query_sql_text, because selecting it
+           inside the shipping TOP/ORDER BY made a Top-N Sort materialize nvarchar(max) text
+           for the whole qualifying set (measured 4.67s vs 0.45s time-to-first-row). Ships in
+           query_id order so a budget cut is a suffix, which is what lets the watermark
+           advance from a cut pass.
+
+           Gated on the same flag the payload branches on, so the two can never disagree
+           about who owns the text: if the column is nulled, this runs. */
+        if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
+        {
+            /* #2312 investigation: same split as the plan fetch above. */
+            /* #2854: stamped from finally, same parent/child inconsistency as the plan fetch. */
+            var textFetchWatch = Stopwatch.StartNew();
+            try
+            {
+                await FetchAndStoreQueryTextAsync(textFetchConnection, storeConnection,
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch), cancellationToken);
+            }
+            finally
+            {
+                context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Zeroes the plan-fetch and text-fetch readings on a context that is reused from one database to the next.
+    /// Called before each database is read, by both the enumerated per-item read and the Azure per-database loop,
+    /// so a database whose fetch is skipped or faults early cannot hand the previous database's split to the log
+    /// line or to the run's fetch sums as its own.
+    /// </summary>
+    private static void ClearFetchPhaseStamps(CollectorContext context)
+    {
+        context.PerItemPlanFetchMs = 0;
+        context.PerItemTextFetchMs = 0;
+
+        /* #2811: the sub-phases clear on the SAME rule as their parents, and for the same
+           reason - an item whose fetch faults before setting them must not print the previous
+           database's split as its own. A stale sub-split is worse than a stale total, because
+           it looks precise. */
+        context.PerItemPlanProbeMs = 0;
+        context.PerItemPlanTargetMs = 0;
+        context.PerItemPlanWriteMs = 0;
+        context.PerItemPlanChunks = 0;
+        context.PerItemPlanIdsAttempted = 0;
+        context.PerItemPlanProbeIds = 0;
+        context.PerItemTextProbeMs = 0;
+        context.PerItemTextTargetMs = 0;
+        context.PerItemTextWriteMs = 0;
+        context.PerItemTextChunks = 0;
+        context.PerItemTextIdsAttempted = 0;
+        context.PerItemTextProbeIds = 0;
+    }
+
+    /// <summary>
+    /// The plan-fetch and text-fetch sub-split lines for one database, each only when that fetch actually ran.
+    /// They ride their OWN lines rather than nesting inside the per-database row line, because that line is parsed
+    /// by tooling outside this repo and "don't break the parser" outranks "one line to grep". A text-only pass
+    /// prints one line and a collector that never fetches prints none. Debug, like the line they decompose (#3102).
+    /// </summary>
+    private void LogFetchPhaseSplits(ServerRuntime server, string collectorName, string databaseName, CollectorContext context)
+    {
+        if (context.PerItemPlanFetchMs > 0)
+        {
+            _logger?.LogDebug("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                server.Config.DisplayName, collectorName, databaseName, context.PerItemPlanFetchMs,
+                context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
+                context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted,
+                context.PerItemPlanProbeIds);
+        }
+
+        if (context.PerItemTextFetchMs > 0)
+        {
+            _logger?.LogDebug("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                server.Config.DisplayName, collectorName, databaseName, context.PerItemTextFetchMs,
+                context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
+                context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted,
+                context.PerItemTextProbeIds);
         }
     }
 
@@ -4280,7 +6010,7 @@ RETURNING s.state_key";
     /// parameters cannot span a multi-statement batch, and three narrow deletes down the primary key are
     /// easier to read than one that ORs three prefixes together.
     /// </summary>
-    internal async Task PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
+    internal async Task<bool> PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
     {
         try
         {
@@ -4313,10 +6043,29 @@ RETURNING s.state_key";
                     "[server_id {ServerId}] pruned {Count} query_store state row(s) for database(s) no longer on the server: {Keys}",
                     serverId, pruned.Count, string.Join(", ", pruned));
             }
+
+            return true;
         }
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
+            return false;
+        }
+    }
+
+    /// <summary>#4660: the per-cycle entry: runs the prune when <see cref="OrphanStatePrune.IsDue"/> says so, and records
+    /// only a success, so a failure is retried on the next cycle.</summary>
+    internal async Task PruneOrphanedQueryStoreDatabaseStateIfDueAsync(int serverId, CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        if (!OrphanStatePrune.IsDue(_lastOrphanStatePruneUtc.TryGetValue(serverId, out var last) ? last : null, now))
+        {
+            return;
+        }
+
+        if (await PruneOrphanedQueryStoreDatabaseStateAsync(serverId, cancellationToken))
+        {
+            _lastOrphanStatePruneUtc[serverId] = now;
         }
     }
 
@@ -4497,8 +6246,22 @@ RETURNING s.state_key";
         ICollectorDefinition<TRow> definition, List<TRow> rows, ServerRuntime server,
         DateTime collectionTime, CollectorContext context, CancellationToken cancellationToken)
     {
-        await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
-        return await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+        try
+        {
+            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            return await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+        }
+        finally
+        {
+            /* Backfill only inserts, so it can only raise the true maximum and a stale cache is merely low, never
+               too high. The invalidate exists for exactness: without it the cache would lag the store and the
+               live path would re-collect rows the backfill already wrote, as duplicates. It runs in a finally
+               because the commit may be unknown after a fault. */
+            foreach (var db in DistinctQueryStoreDatabases(rows) ?? [])
+            {
+                _databaseWatermarkCache.Invalidate(server.ServerId, db);
+            }
+        }
     }
 
     /// <summary>
@@ -4518,33 +6281,64 @@ RETURNING s.state_key";
     public async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
         CancellationToken cancellationToken, DateTime? collectedSince = null)
+        => (await ReadLastCollectedTimeForDatabaseAsync(
+            serverId, tableName, columnName, databaseColumnName, databaseName, cancellationToken, collectedSince)).Value;
+
+    /// <summary>
+    /// The read behind <see cref="GetLastCollectedTimeForDatabaseAsync"/>, plus whether it succeeded: a null
+    /// from a failed read must never be cached as "no rows". The Query Store cache's seed uses its twin,
+    /// <see cref="ReadLastCollectedTimeAndWitnessForDatabaseAsync"/>, which also returns the witness.
+    /// </summary>
+    internal async Task<(DateTime? Value, bool Succeeded)> ReadLastCollectedTimeForDatabaseAsync(
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        CancellationToken cancellationToken, DateTime? collectedSince = null)
     {
+        var failed = false;
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var sql = collectedSince is null
-                ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
-                : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
-            using var command = new NpgsqlCommand(sql, connection);
-            /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
-            command.CommandTimeout = CommandTimeoutSeconds;
-            command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(databaseName);
-            if (collectedSince is DateTime floor)
+
+            /* #4197: same probe-then-confirm as the server-scoped twins. collectedSince non-null (Azure
+               SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first and
+               falls back to the true unbounded read only on a miss, instead of skipping straight to it. */
+            var autoWindow = collectedSince is null;
+            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+            var sql = BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: true);
+            using (var command = new NpgsqlCommand(sql, connection))
             {
+                /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
+                command.CommandTimeout = CommandTimeoutSeconds;
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.AddWithValue(databaseName);
                 /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
                    timestamptz and Postgres would convert it into the session zone on the way in. */
-                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+
+                var result = await command.ExecuteScalarAsync(cancellationToken);
+                if (result is DateTime dt)
+                {
+                    return (dt, true);
+                }
             }
 
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
+            if (autoWindow)
             {
-                return dt;
+                using var fallback = new NpgsqlCommand(
+                    BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: false), connection);
+                fallback.CommandTimeout = CommandTimeoutSeconds;
+                fallback.Parameters.AddWithValue(serverId);
+                fallback.Parameters.AddWithValue(databaseName);
+                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+                if (fallbackResult is DateTime fallbackDt)
+                {
+                    return (fallbackDt, true);
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            failed = true;
             /* Parity with the server-scoped twin (#2795). #2344's bound makes a TIMEOUT unlikely here,
                but every other failure — dropped connection, bad SQL — still returned a null that reads
                as a first run, and silence is the property that let the twin's version of this survive
@@ -4555,7 +6349,49 @@ RETURNING s.state_key";
                 + "data already stored: {Message}",
                 serverId, databaseName, tableName, columnName, ex.Message);
         }
-        return null;
+        return (null, !failed);
+    }
+
+    /// <summary>
+    /// The seed read for the per-database Query Store watermark cache (#4749): the bounded read behind
+    /// <see cref="ReadLastCollectedTimeForDatabaseAsync"/> (same bound, same failure handling), plus the
+    /// witness, the newest <c>collection_time</c> among the rows at the returned value inside the bound. It is
+    /// the row's own stamp and never this read's time, which is an upper bound and would keep serving the
+    /// value after its row left the floor. A null value has a null witness, and a failed read reports
+    /// <c>Succeeded</c> false so a null from it is never cached as "no rows".
+    /// </summary>
+    internal async Task<(DateTime? Value, DateTime? Witness, bool Succeeded)> ReadLastCollectedTimeAndWitnessForDatabaseAsync(
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        DateTime collectedSince, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(
+                BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName), connection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(databaseName);
+            /* Naive like every other timestamp bound in this store (#1969). */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(collectedSince, DateTimeKind.Unspecified));
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && reader.GetValue(0) is DateTime value)
+            {
+                return (value, reader.GetValue(1) as DateTime?, true);
+            }
+
+            return (null, null, true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Per-database watermark read failed for server {ServerId} database {Database} on "
+                + "{Table}.{Column} — falling back to the collector's default window, which re-collects "
+                + "data already stored: {Message}",
+                serverId, databaseName, tableName, columnName, ex.Message);
+            return (null, null, false);
+        }
     }
 
     /// <summary>
@@ -4563,6 +6399,13 @@ RETURNING s.state_key";
     /// collection — the numeric twin of <see cref="GetLastCollectedTimeAsync"/> (job_history dedups on
     /// <c>instance_id</c>, sysjobhistory's IDENTITY bigint). Returns null on first run or if the query
     /// fails (caller uses its documented first-run/fallback path).
+    ///
+    /// <para>#4197: this was the one of the three server-scoped watermark reads with no bound at all —
+    /// job_history is its only caller, and every cycle scanned every chunk in retention to find one bigint.
+    /// Same probe-then-confirm as the timestamp twins now: bound on <c>collection_time</c> (the
+    /// partitioning column — <c>instance_id</c> does not partition the table, so it cannot prune a chunk)
+    /// to <see cref="WatermarkPolicy.RecentWatermarkWindow"/> first, and fall back to the true unbounded
+    /// <c>MAX</c> only when the probe finds no row.</para>
     /// </summary>
     public async Task<long?> GetLastCollectedInstanceIdAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken)
@@ -4570,15 +6413,32 @@ RETURNING s.state_key";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1", connection);
-            /* Parity with both timestamp twins (#2795): explicit, not Npgsql's inherited 30 s. */
-            command.CommandTimeout = CommandTimeoutSeconds;
-            command.Parameters.AddWithValue(serverId);
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            if (result is not null && result != DBNull.Value)
+            var bound = DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+            using (var command = new NpgsqlCommand(
+                BuildServerWatermarkInstanceIdSql(tableName, columnName, bounded: true), connection))
             {
-                return Convert.ToInt64(result);
+                /* Parity with both timestamp twins (#2795): explicit, not Npgsql's inherited 30 s. */
+                command.CommandTimeout = CommandTimeoutSeconds;
+                command.Parameters.AddWithValue(serverId);
+                /* Naive like every other timestamp bound in this store (#1969). */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+                var result = await command.ExecuteScalarAsync(cancellationToken);
+                if (result is not null && result != DBNull.Value)
+                {
+                    return Convert.ToInt64(result);
+                }
+            }
+
+            using (var fallback = new NpgsqlCommand(
+                BuildServerWatermarkInstanceIdSql(tableName, columnName, bounded: false), connection))
+            {
+                fallback.CommandTimeout = CommandTimeoutSeconds;
+                fallback.Parameters.AddWithValue(serverId);
+                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+                if (fallbackResult is not null && fallbackResult != DBNull.Value)
+                {
+                    return Convert.ToInt64(fallbackResult);
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -4613,9 +6473,10 @@ RETURNING s.state_key";
             var result = await command.ExecuteScalarAsync(cancellationToken);
             return result is bool b && b;
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* Fail toward first-run (all-history) — matches a fresh store with no log yet. */
+            /* Fail toward first-run (all-history) — matches a fresh store with no log yet. A cancelled
+               request must propagate rather than read as an ordinary read failure, matching Lite's twin. */
             return false;
         }
     }
@@ -4635,7 +6496,25 @@ RETURNING s.state_key";
         {
             _logger?.LogInformation("[server_id {ServerId}] reconnected — re-probing master for database-scoped collectors.", serverId);
         }
+
+        /* #4197 part b: drop every cached watermark for this server on reconnect, unconditionally —
+           unlike the master-access verdict above this has no "was anything cached" branch worth logging,
+           because a reconnect after a connection-level failure (DarlingWorker's own catch-all sets
+           server.Runtime = null and schedules a reconnect) is exactly the situation where the store's
+           real watermark may have moved by means this cache never saw (a re-add under the same server_id
+           reaches this same path — see the remarks on ServerWatermarkCache.InvalidateServer). */
+        _watermarkCache.InvalidateServer(serverId);
+        _databaseWatermarkCache.InvalidateServer(serverId);
     }
+
+    /// <summary>Replaces the engine target provider resolved for a run. Null in production.</summary>
+    internal Func<CollectorTargetInfo, ITargetProvider>? TargetProviderOverrideForTests { get; set; }
+
+    /// <summary>Replaces the Azure per-database list. Null in production.</summary>
+    internal Func<ServerRuntime, CancellationToken, Task<List<string>>>? AzureDatabaseListOverrideForTests { get; set; }
+
+    /// <summary>Called with the database name just before its batch is written, inside the loop's try. Null in production.</summary>
+    internal Action<string>? PerDatabaseWriteFaultForTests { get; set; }
 
     /// <summary>
     /// The databases one Azure SQL DB registration's per-database sweep covers.
@@ -4736,7 +6615,7 @@ RETURNING s.state_key";
             return false;
         }
 
-        if (DateTime.UtcNow - deniedAt < AzureMasterRecheckInterval)
+        if (!CollectorCadence.IntervalElapsed(deniedAt, DateTime.UtcNow, AzureMasterRecheckInterval))
         {
             return true;
         }

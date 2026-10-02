@@ -82,6 +82,27 @@ WHERE server_id = $1";
     }
 
     /// <summary>
+    /// The server's probed engine edition from the registry, or <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
+    /// when the registry has none or the read fails. The unknown edition makes no claim, so a failed read leaves every
+    /// answer as it was. A read that HAS data asks this too when one of its fields has no source on some engine
+    /// (<c>get_memory_stats</c>' memory state on an Azure SQL Database). A cancellation still propagates.
+    /// </summary>
+    public static async Task<int> EngineEditionAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return (await ReadServerEngineAsync(postgres, serverId, cancellationToken)).EngineEdition;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return CollectorEngineCapability.UnknownEngineEdition;
+        }
+    }
+
+    /// <summary>
     /// The server's probed engine edition and engine kind, defaulting to
     /// <see cref="CollectorEngineCapability.UnknownEngineEdition"/> and <c>null</c> when the registry has no
     /// row or a NULL.

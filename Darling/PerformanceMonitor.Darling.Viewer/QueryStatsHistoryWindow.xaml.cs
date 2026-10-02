@@ -81,9 +81,9 @@ public partial class QueryStatsHistoryWindow : Window
             {
                 var totalExec = _historyData.Sum(r => r.DeltaExecutions);
                 var totalCpu = _historyData.Sum(r => r.DeltaCpuMs);
-                var first = ViewerTimeHelper.ForDisplay(_historyData.First().CollectionTime);
-                var last = ViewerTimeHelper.ForDisplay(_historyData.Last().CollectionTime);
-                SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
+                var first = ViewerTimeHelper.FormatForDisplay(_historyData.First().CollectionTime, "MM/dd HH:mm");
+                var last = ViewerTimeHelper.FormatForDisplay(_historyData.Last().CollectionTime, "MM/dd HH:mm");
+                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
             else
@@ -129,7 +129,7 @@ public partial class QueryStatsHistoryWindow : Window
         var tag = selected?.Tag?.ToString() ?? "AvgCpuMs";
         var label = selected?.Content?.ToString() ?? "Avg CPU (ms)";
 
-        var xs = _historyData.Select(r => ViewerTimeHelper.ForDisplay(r.CollectionTime).ToOADate()).ToArray();
+        var xs = _historyData.Select(r => r.CollectionTime.ToOADate()).ToArray();
         var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
 
         var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
@@ -139,13 +139,13 @@ public partial class QueryStatsHistoryWindow : Window
 
         var unit = tag.Contains("Ms") ? "ms" : "";
         if (_chartHover == null)
-            _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            _chartHover = new ChartHoverHelper(HistoryChart, unit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
         else
             _chartHover.Unit = unit;
         _chartHover.Clear();
         _chartHover.Add(scatter, label);
 
-        HistoryChart.Plot.Axes.DateTimeTicksBottom();
+        HistoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ApplyTheme(HistoryChart);
 
         HistoryChart.Refresh();
@@ -243,8 +243,10 @@ public partial class QueryStatsHistoryWindow : Window
 
         var label = $"Est Plan - {_queryHash}";
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, _databaseName);
             await viewer.LoadPlan(planXml, label, _queryText);
         }
         catch (Exception ex)
@@ -283,7 +285,7 @@ public partial class QueryStatsHistoryWindow : Window
             _actualPlanCts.Token);
 
         if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, planXml, label, _queryText);
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText, _databaseName);
     }
 
     /// <summary>"View Cached Plan" — asks the service to read the RIGHT-CLICKED snapshot's plan from the target's
@@ -331,8 +333,10 @@ public partial class QueryStatsHistoryWindow : Window
         }
 
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, _databaseName);
             await viewer.LoadPlan(result.PlanXml, label, queryText);
         }
         catch (Exception ex)

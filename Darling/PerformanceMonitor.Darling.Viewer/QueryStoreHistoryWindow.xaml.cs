@@ -86,9 +86,9 @@ public partial class QueryStoreHistoryWindow : Window
             {
                 var totalExec = _historyData.Sum(r => r.ExecutionCount);
                 var planCount = _historyData.Select(r => r.PlanId).Distinct().Count();
-                var first = ViewerTimeHelper.ForDisplay(_historyData.First().CollectionTime);
-                var last = ViewerTimeHelper.ForDisplay(_historyData.Last().CollectionTime);
-                SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
+                var first = ViewerTimeHelper.FormatForDisplay(_historyData.First().CollectionTime, "MM/dd HH:mm");
+                var last = ViewerTimeHelper.FormatForDisplay(_historyData.Last().CollectionTime, "MM/dd HH:mm");
+                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
                                    $"Total Executions: {totalExec:N0} | " +
                                    (planCount > 1 ? $"{planCount} different plans" : "Single plan");
             }
@@ -142,7 +142,7 @@ public partial class QueryStoreHistoryWindow : Window
 
         var unit = tag.Contains("Ms") ? "ms" : "";
         if (_chartHover == null)
-            _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            _chartHover = new ChartHoverHelper(HistoryChart, unit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
         else
             _chartHover.Unit = unit;
         _chartHover.Clear();
@@ -155,7 +155,7 @@ public partial class QueryStoreHistoryWindow : Window
         foreach (var planGroup in planGroups)
         {
             var ordered = planGroup.OrderBy(r => r.CollectionTime).ToList();
-            var xs = ordered.Select(r => ViewerTimeHelper.ForDisplay(r.CollectionTime).ToOADate()).ToArray();
+            var xs = ordered.Select(r => r.CollectionTime.ToOADate()).ToArray();
             var ys = ordered.Select(r => GetMetricValue(r, tag)).ToArray();
 
             var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
@@ -167,7 +167,7 @@ public partial class QueryStoreHistoryWindow : Window
             colorIndex++;
         }
 
-        HistoryChart.Plot.Axes.DateTimeTicksBottom();
+        HistoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         if (planGroups.Count > 1)
         {
             _legendPanel = HistoryChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -276,8 +276,10 @@ public partial class QueryStoreHistoryWindow : Window
 
         var label = $"Est Plan - QS {_queryId}/{planId}";
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, _databaseName);
             await viewer.LoadPlan(planXml, label, _queryText);
         }
         catch (Exception ex)
@@ -318,7 +320,7 @@ public partial class QueryStoreHistoryWindow : Window
             _actualPlanCts.Token);
 
         if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, planXml, label, _queryText);
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText, _databaseName);
     }
 
     // ── Column Filter Popup (mirrors WaitDrillDownWindow / ViewerServerTab.Filters.cs) ──

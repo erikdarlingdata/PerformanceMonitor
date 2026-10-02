@@ -117,11 +117,15 @@ public sealed class CollectionOutputBesideCostTests
     /// (#3160). Both rows here are the same collector with the same spend and the same zero output; the ONLY
     /// input that differs is how many runs recorded a note about what they found.
     ///
-    /// <para><b>Same collector on both rows on purpose.</b> The mechanism is keyed on the row's counts and
-    /// never on the collector's NAME. A name list is what #2511 exists to refuse, because it goes stale in
-    /// the direction that makes it pass: the next periodic collector to break gets the event-collector
-    /// sentence until somebody remembers to add it. Driving both readings out of one name is the assertion
-    /// that no name list is consulted.</para>
+    /// <para><b>Same collector on both rows on purpose.</b> The note mechanism is keyed on the row's counts
+    /// and never on the collector's NAME, and driving both readings out of one name is the assertion that
+    /// the note branch consults no list. #3754 did add a name set beside it — the closed set of EVENT
+    /// collectors the resting-state sentence is offered to — but with the opposite polarity from the list
+    /// #2511 refuses: that one named the periodic collectors to withhold the sentence from and went stale
+    /// in the direction that makes it pass; this one names the collectors to offer it to, so an omission
+    /// fails loud (the non-reassuring sentence) rather than silent. <c>deadlocks</c> is on it, which is why
+    /// the unnoted row below still keeps the category reading; <c>SwallowedItemFailureTests</c> pins the
+    /// set against the catalog and the snapshot branch for a collector that is not on it.</para>
     ///
     /// <para>The measured subject was <c>query_store</c>, which is not an event collector and stored zero
     /// rows on 11,728 consecutive runs on a read-replica fleet, every one carrying an empty-enumeration
@@ -191,11 +195,14 @@ public sealed class CollectionOutputBesideCostTests
             .GetParameters();
 
         /* The precondition, named so a signature change reports itself rather than turning the assertions
-           below into a vacuous pass over a list that no longer means what this test thinks. */
-        Assert.Equal(4, parameters.Length);
+           below into a vacuous pass over a list that no longer means what this test thinks. Six since
+           #3754: the faulted-run count (a RUN-CLASS count, like the note count beside it) and the
+           event-collector bool, computed by the caller from the name on IsEventCollector's own name-list
+           pattern, precisely so that this method still takes no string. */
+        Assert.Equal(6, parameters.Length);
 
         Assert.Equal(
-            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount" },
+            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector" },
             parameters.Select(p => p.Name!).ToArray());
 
         Assert.DoesNotContain(parameters, p => p.ParameterType == typeof(string));
@@ -221,7 +228,7 @@ public sealed class CollectionOutputBesideCostTests
     /// <summary>
     /// And the direction that equality cannot reach: <c>denied_since_last_success</c> must not have become a
     /// band input on the way to being consumed by the finding. Read off the TYPE with a count precondition,
-    /// so a tenth parameter — an output count, a denial flag, anything — fails here rather than passing
+    /// so a further parameter — an output count, a denial flag, anything — fails here rather than passing
     /// unnoticed while <see cref="CollectorHealthClassifier.DeniedSinceLastSuccess"/>'s doc comment still
     /// claims it never bands.
     /// </summary>
@@ -234,8 +241,11 @@ public sealed class CollectionOutputBesideCostTests
             .Select(p => p.Name!)
             .ToArray();
 
-        /* 10 since #3240 added extensionMissingCount — a run-class count like the two beside it, not an
-           output or denial-currency term, which is what this pin refuses. */
+        /* 10 after #3240 added extensionMissingCount — a run-class count like the two beside it, not an
+           output or denial-currency term, which is what this pin refuses; #4000 then removed isOnLoad
+           (an on-load collector is no longer a distinct input to the ladder, only a distinct CADENCE the
+           caller resolves before calling in), netting 9; #4748 then appended latestRunNote - the newest run's
+           own partial-failure note, a text input that is neither an output count nor denial currency - netting 10. */
         Assert.Equal(10, parameters.Length);
         Assert.DoesNotContain(parameters, p => p.Contains("rows", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(parameters, p => p.Contains("output", StringComparison.OrdinalIgnoreCase));
@@ -335,7 +345,10 @@ public sealed class CollectionOutputBesideCostTests
             var source = File.ReadAllText(Path.Combine(RepoRoot(), relative));
 
             Assert.Contains("what it BOUGHT", source, StringComparison.Ordinal);
-            Assert.Contains("that zero was CORRECT", source, StringComparison.Ordinal);
+            /* #3898: the pg_deadlocks anecdote that used to carry "that zero was CORRECT" moved to the
+               CHANGELOG (D4); the rule it taught - a zero can be the healthy reading - stays in the tail
+               right after it, so the pin re-points to that rule instead of the story. */
+            Assert.Contains("would fire on the healthy quiet install", source, StringComparison.Ordinal);
             Assert.Contains("deliberately NOT a band", source, StringComparison.Ordinal);
             Assert.Contains("needs a grant", source, StringComparison.Ordinal);
         }

@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -43,6 +44,8 @@ public partial class LocalDataService
     /// "never captured" for a server capturing fine through the other, and probing neither would let a
     /// silent capture gap read as a clean bill of health. Darling's twin is
     /// <c>DarlingDataReader.HasAnyBlockingCaptureAsync</c>.</para>
+    /// <para>Reads the report and deadlock views directly, not through <see cref="StoredEventCopies"/>: a stored
+    /// copy cannot change whether a row exists.</para>
     /// </summary>
     public async Task<bool> HasAnyBlockingCaptureAsync(int serverId)
     {
@@ -78,7 +81,7 @@ OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $3)";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* BPR per-minute severity buckets, falling back to the always-on DMV snapshot only when BPR has none
@@ -92,8 +95,7 @@ WITH bpr AS (
         CAST(COALESCE(SUM(wait_time_ms), 0) AS BIGINT) AS total_duration_ms,
         CAST(COALESCE(MAX(wait_time_ms), 0) AS BIGINT) AS max_duration_ms,
         CAST(COALESCE(AVG(wait_time_ms), 0) AS DOUBLE) AS avg_duration_ms
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (
@@ -137,8 +139,8 @@ ORDER BY bucket";
     /// Deadlock-severity buckets for one server over the window (Blocking Stats sub-tab): victim count and
     /// total / max / avg deadlock wait per minute. Reads the raw graphs, then parses + aggregates them OFF the
     /// UI thread (<see cref="Task.Run"/>) — the graph walk is CPU-bound XML work, the same reason the Deadlocks
-    /// grid parses off-thread (#1193). Windows on <c>collection_time</c> and reads <c>v_deadlocks</c> — the
-    /// IDENTICAL row-selection predicate <see cref="GetDeadlockTrendAsync"/> uses — so the deadlock COUNT shown
+    /// grid parses off-thread (#1193). Windows on <c>deadlock_time</c> (when the deadlock happened) and reads the deadlocks through <c>StoredEventCopies.Deadlocks</c> — the
+    /// IDENTICAL row-selection predicate <see cref="GetDeadlockTrendAsync"/> uses, which counts each stored deadlock once — so the deadlock COUNT shown
     /// on this tab's summary strip and the victim/wait aggregate are drawn from the exact same set of deadlock
     /// rows and reconcile in period. No LIMIT: deadlocks are rare, and a cap would drop rows the un-capped count
     /// trend keeps (breaking reconciliation) — deliberately NOT reusing the capped
@@ -152,16 +154,13 @@ ORDER BY bucket";
         using (var connection = await OpenConnectionAsync())
         using (var command = connection.CreateCommand())
         {
-            var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+            var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
             command.CommandText = @"
 SELECT
     deadlock_time,
     deadlock_graph_xml
-FROM v_deadlocks
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
+FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + @" AS dl
 ORDER BY deadlock_time";
 
             command.Parameters.Add(new DuckDBParameter { Value = serverId });

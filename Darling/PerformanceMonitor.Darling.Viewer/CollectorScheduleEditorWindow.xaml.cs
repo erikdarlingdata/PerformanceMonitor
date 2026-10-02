@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -61,6 +62,15 @@ public partial class CollectorScheduleEditorWindow : Window
         }
 
         PopulateScopeCombos();
+
+        /* The delta cadence cap (#3532), from the shared constants so the shown numbers and collector
+           list can never drift from what ValidateSchedule enforces. */
+        var deltaNames = CollectorSchedulePresets.BuildDefaultSchedule()
+            .Where(s => CollectorDeltaCalculator.IsDeltaFamily(s.Name))
+            .Select(s => s.Name);
+        FooterHintText.Text +=
+            $" Delta collectors ({string.Join(", ", deltaNames)}) accept at most {CollectorDeltaCalculator.MaxDeltaFrequencyMinutes} minutes: " +
+            $"past the {CollectorDeltaCalculator.DefaultMaxGapSeconds / 60}-minute delta gap policy every reading would be discarded as stale and recorded as zero.";
 
         try
         {
@@ -290,7 +300,7 @@ public partial class CollectorScheduleEditorWindow : Window
 
         var usesDefault = _scopeServerId is not null && UseDefaultCheckBox.IsChecked == true;
 
-        if (!usesDefault && !ValidateSchedule(out var error))
+        if (!usesDefault && !CollectorScheduleOverlay.ValidateSchedule(_editing, out var error))
         {
             MessageBox.Show(error, "Collector Schedules", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
@@ -330,29 +340,6 @@ public partial class CollectorScheduleEditorWindow : Window
         {
             SaveButton.IsEnabled = !_dataService.IsReadOnly;
         }
-    }
-
-    /// <summary>Enforces the V17 CHECK constraints before the write (frequency &gt;= 0, retention &gt;= 1) so a
-    /// bad value surfaces as a friendly message rather than a raw Postgres error.</summary>
-    private bool ValidateSchedule(out string error)
-    {
-        foreach (var item in _editing)
-        {
-            if (item.FrequencyMinutes < 0)
-            {
-                error = $"'{item.Name}': frequency (minutes) can't be negative. Use 0 to collect once on server load.";
-                return false;
-            }
-
-            if (item.RetentionDays < 1)
-            {
-                error = $"'{item.Name}': retention (days) must be at least 1.";
-                return false;
-            }
-        }
-
-        error = "";
-        return true;
     }
 
     /// <summary>

@@ -200,12 +200,45 @@ public sealed class RetentionTierRouterTests
         var sql = ViewerDataService.DailySummaryRangeSqlFor(tier);
 
         Assert.Contains($"FROM collect.{expectedRelation}", sql, StringComparison.Ordinal);
-        Assert.Contains("SELECT date_trunc('day', bucket) AS d, COUNT(DISTINCT query_hash) AS c", sql, StringComparison.Ordinal);
+        /* #3905: the distinct (day, hash) pairs, counted per day -- COUNT(DISTINCT query_hash)'s answer in a
+           shape the planner can hash. */
+        Assert.Contains("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", sql, StringComparison.Ordinal);
 
-        /* The routed CTE no longer reads the raw passthrough view... */
-        Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
+        /* The routed CTE reads the raw passthrough view ONLY for the days past the rollup's last materialized
+           DAY (#3653: the daily rollup lags a day or two behind the clock, and those days used to print
+           unique_queries = 0 beside fresh raw numbers). Exactly one raw read, inside the UNION ALL tail, gated
+           on the ceiling; the rollup half stays the routed read for everything the rollup has. */
+        var rawReads = sql.Split("FROM v_query_stats").Length - 1;
+        Assert.Equal(1, rawReads);
+        var ceilingAt = sql.IndexOf("SELECT date_trunc('day', max(bucket)) AS last_day", StringComparison.Ordinal);
+        var rollupReadAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
+        var unionAt = sql.IndexOf("UNION ALL", StringComparison.Ordinal);
+        var rawReadAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+        var tailGateAt = sql.IndexOf("AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", StringComparison.Ordinal);
+        Assert.True(ceilingAt >= 0, "the rollup's last materialized day must be read per server");
+        Assert.Contains($"FROM collect.{expectedRelation}", sql[ceilingAt..rollupReadAt], StringComparison.Ordinal);
+        Assert.True(rollupReadAt > ceilingAt, "the rollup half follows the ceiling CTE");
+        Assert.True(unionAt > rollupReadAt && rawReadAt > unionAt, "the raw half is the UNION ALL tail, after the rollup half");
+        Assert.True(tailGateAt > rawReadAt, "the raw half must be gated to the days past the ceiling, or a day gets two rows");
 
-        /* ...but the untouched sources still do. */
+        /* #3653 A6: the THIRD member — the days at or below the ceiling the rollup holds no row for while its
+           source still holds admitted rows — emits the day with a NULL count, after the raw tail, gated on the
+           same ceiling from the other side (g.d < last_day + 1 day) so no day can be both "past the ceiling,
+           answered from raw" and "below it, not carried". Its two probes are the hole scan's, per server: NOT
+           EXISTS on the routed relation, EXISTS on the relation's registered SOURCE (the daily's is the legacy
+           hourly it is hierarchical from; the hourly's is raw query_stats, read as collect.query_stats and not
+           through the passthrough view, so the raw-read count above stays one). DailySummaryNotCarriedTests
+           carries the rest of this member's pins; this one holds the ORDER and the gate. */
+        var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
+        var notCarriedGateAt = sql.IndexOf("AND g.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", StringComparison.Ordinal);
+        Assert.True(notCarriedAt > tailGateAt, "the not-carried member is the last UNION ALL member, after the raw tail");
+        Assert.True(notCarriedGateAt > notCarriedAt, "the not-carried member is gated to the days at or below the ceiling");
+        Assert.Contains($"SELECT 1 FROM collect.{expectedRelation} AS r", sql[notCarriedAt..], StringComparison.Ordinal);
+        var expectedSource = tier == RetentionTier.Daily ? TimescaleSupport.QueryStatsHourlyView : "query_stats";
+        Assert.Contains($"SELECT 1 FROM collect.{expectedSource} AS s", sql[notCarriedAt..], StringComparison.Ordinal);
+        Assert.Equal(2, sql.Split("UNION ALL").Length - 1);
+
+        /* The untouched sources still read raw. */
         foreach (var untouched in new[] { "FROM v_wait_stats", "FROM v_deadlocks", "FROM v_cpu_utilization_stats", "FROM v_collection_log", "FROM v_memory_pressure_events" })
         {
             Assert.Contains(untouched, sql, StringComparison.Ordinal);
@@ -236,10 +269,9 @@ public sealed class RetentionTierRouterTests
     public void FinOpsReaders_RouteWithoutTrippingTheirDriftGuards(RetentionTier tier)
     {
         var usage = ViewerDataService.DatabaseResourceUsageSqlFor(tier);
-        var byTotal = ViewerDataService.TopResourceConsumersByTotalSqlFor(tier);
-        var byAvg = ViewerDataService.TopResourceConsumersByAvgSqlFor(tier);
+        var topConsumers = ViewerDataService.TopResourceConsumersSqlFor(tier);
 
-        foreach (var sql in new[] { usage, byTotal, byAvg })
+        foreach (var sql in new[] { usage, topConsumers })
         {
             /* Routed off the raw passthrough, onto a rollup, with the rollup's time column. */
             Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
@@ -261,8 +293,7 @@ public sealed class RetentionTierRouterTests
         Assert.Contains($"FROM collect.{dbGrain}", usage, StringComparison.Ordinal);
         Assert.Contains("SUM(logical_reads_sum)", usage, StringComparison.Ordinal);
 
-        Assert.Contains($"FROM collect.{queryGrain}", byTotal, StringComparison.Ordinal);
-        Assert.Contains($"FROM collect.{queryGrain}", byAvg, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{queryGrain}", topConsumers, StringComparison.Ordinal);
     }
 
     /// <summary>Raw must return each constant untouched — the recent-window path is unchanged.</summary>
@@ -270,7 +301,6 @@ public sealed class RetentionTierRouterTests
     public void FinOpsReaders_RawTier_ReturnTheConstantsUnchanged()
     {
         Assert.Equal(ViewerDataService.DatabaseResourceUsageSql, ViewerDataService.DatabaseResourceUsageSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
-        Assert.Equal(ViewerDataService.TopResourceConsumersByTotalSql, ViewerDataService.TopResourceConsumersByTotalSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
-        Assert.Equal(ViewerDataService.TopResourceConsumersByAvgSql, ViewerDataService.TopResourceConsumersByAvgSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
+        Assert.Equal(ViewerDataService.TopResourceConsumersSql, ViewerDataService.TopResourceConsumersSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
     }
 }

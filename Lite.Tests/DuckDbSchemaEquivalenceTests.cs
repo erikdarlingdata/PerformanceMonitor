@@ -152,6 +152,12 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     /// always held these columns nullable; this brings Lite's DuckDB store to the same shape.
     /// <see cref="DuckDbInitializer"/>'s v57 migration drops the constraint on existing
     /// databases.</para>
+    ///
+    /// <para>Schema v67: <c>database_size_stats.total_size_mb</c> dropped NOT NULL. On Azure SQL Database
+    /// Hyperscale the LOG file lives in the log service, so the collector stores NULL for its size instead
+    /// of the roughly 1 TB <c>sys.database_files</c> reports, and every reader shows it as n/a and keeps it
+    /// out of the allocated totals. Darling's Postgres store always held the column nullable.
+    /// <see cref="DuckDbInitializer"/>'s v67 migration drops the constraint on existing databases.</para>
     /// </summary>
     private static readonly HashSet<string> IntentionalStorageDivergences = new(StringComparer.Ordinal)
     {
@@ -161,6 +167,7 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         "database_size_stats.database_id",
         "database_size_stats.file_id",
         "database_size_stats.physical_name",
+        "database_size_stats.total_size_mb",
     };
 
     /// <summary>
@@ -183,12 +190,60 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     /// this side because the DuckDB appender writes one value per DECLARED payload column, so a database
     /// without it fails the whole batch. <see cref="DuckDbInitializer"/>'s v59 migration adds it to existing
     /// databases.</para>
+    ///
+    /// <para>#3540 / schema v60: <c>sample_interval_seconds</c> on <c>wait_stats</c>, <c>file_io_stats</c>,
+    /// <c>latch_stats</c> and <c>spinlock_stats</c> — the measured seconds each row's deltas accrued over,
+    /// the column perfmon_stats and query_stats were extracted WITH. The shared calculator's (0, 0)
+    /// "no delta knowable" marker could not survive these four tables' writes without it, so a restart's
+    /// fabricated zero read as a measured idle one. INTEGER, nullable, trailing — NULL on every pre-v60 row
+    /// is "interval never recorded", which the readers distinguish from 0, "unknowable".
+    /// <see cref="DuckDbInitializer"/>'s v60 migration adds it to existing databases;
+    /// <c>DeltaFamilyIntervalColumnTests</c> is the census that keeps a seventh delta family from shipping
+    /// without it.</para>
+    ///
+    /// <para>#3540 / schema v61: the completion. <c>sample_interval_seconds</c> on <c>procedure_stats</c> and
+    /// <c>memory_grant_stats</c> — the last two Lite-stored delta families without it, so every family Lite
+    /// stores now carries the interval and the census's still-naked list is empty. And
+    /// <c>query_stats.statement_start_offset</c> / <c>statement_end_offset</c>: the two halves of that
+    /// family's delta key the store never persisted, so the restart seed could restore its pass window but
+    /// not one baseline. INTEGER (the DMV's type), nullable, trailing; BYTE offsets into the batch's nvarchar
+    /// text, <c>-1</c> as the end offset meaning "to the end of the batch", stored raw because the key string
+    /// is built over the raw values. NULL on every pre-v61 row: "never recorded", which the seed reads as
+    /// "no key can be rebuilt from this row". <see cref="DuckDbInitializer"/>'s v61 migration adds all four
+    /// to existing databases.</para>
+    ///
+    /// <para>#3653 A7 / schema v62: <c>perfmon_stats.cntr_type</c> — the Windows performance-counter type id
+    /// the DMV reports for every row, so the store can say which perfmon rows are counts and which are levels
+    /// and the collector stops differencing gauges (a falling level read as a counter reset). INTEGER (the
+    /// DMV's type), nullable, trailing; NULL on every pre-v62 row is "type never recorded", which the readers
+    /// classify by the #3702 name proxy as they did before the rung. <see cref="DuckDbInitializer"/>'s v62
+    /// migration adds it to existing databases.</para>
+    ///
+    /// <para>#4475 / schema v65: <c>group_id</c> on <c>ag_replica_states</c> and
+    /// <c>ag_database_replica_states</c> — the Availability Group's engine-assigned GUID from
+    /// <c>sys.availability_groups.group_id</c>, the same value on every replica, so the distinct-group
+    /// count can tell same-named AGs apart. VARCHAR, nullable, trailing; NULL on every pre-v65 row, which
+    /// the readers fall back to the name-plus-replica-overlap heuristic for. <see cref="DuckDbInitializer"/>'s
+    /// v65 migration adds it to existing databases.</para>
     /// </summary>
     private static readonly HashSet<string> IntentionalAppendedColumns = new(StringComparer.Ordinal)
     {
         "query_stats.host_object_name",
         "query_stats.query_plan_xml_bytes",
         "procedure_stats.query_plan_xml_bytes",
+        "wait_stats.sample_interval_seconds",
+        "file_io_stats.sample_interval_seconds",
+        "latch_stats.sample_interval_seconds",
+        "spinlock_stats.sample_interval_seconds",
+        "procedure_stats.sample_interval_seconds",
+        "memory_grant_stats.sample_interval_seconds",
+        "query_stats.statement_start_offset",
+        "query_stats.statement_end_offset",
+        /* v62 (#3653 A7): the counter's DMV type, so gauges stop being differenced. Appended, nullable INTEGER. */
+        "perfmon_stats.cntr_type",
+        /* v65 (#4475): the AG's group_id from sys.availability_groups, so same-named AGs can be told apart. Appended, nullable VARCHAR. */
+        "ag_replica_states.group_id",
+        "ag_database_replica_states.group_id",
     };
 
     [Fact]

@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
@@ -113,27 +114,44 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// #2484: the probe that lets an empty parse-on-read answer say WHICH nothing it found must read the
-    /// SAME source the read itself reads. A probe on the base table would report a server as captured for
-    /// rows the view-backed read can never return -- picking the wrong branch in precisely the case the
-    /// probe exists to get right. It is also scoped to the event_type, and windowless by design.
+    /// #2484 → #3541 A12: the probes that let an empty parse-on-read answer say WHICH nothing it found must
+    /// read the SAME source the read itself reads. A probe on the base table would report a server as
+    /// captured for rows the view-backed read can never return -- picking the wrong branch in precisely the
+    /// case the probe exists to get right. Both are windowless by design (a time bound would make them
+    /// answer the same question the read just did) and both are a MAX over <c>collection_time</c>, so they
+    /// say WHEN as well as whether — the message needs the when. The type-scoped one is scoped to
+    /// event_type; the source witness deliberately is not, because it answers "has this server's ring
+    /// buffer ever been read into the store", which is about the session, not the category. Neither is
+    /// <c>collection_log</c>: the log records a SUCCESS for a run that read a dead session and stored
+    /// nothing, which is exactly the shape being mis-reported.
     /// </summary>
     [Fact]
-    public void HasAnyEventOfTypeSql_ProbesTheSameView_ScopedToType_AndIgnoresTheWindow()
+    public void TheWitnessProbes_ReadTheSameView_AreWindowless_AndSayWhen()
     {
-        var sql = DarlingSystemHealthReader.HasAnyEventOfTypeSql;
-        Assert.Contains("FROM v_system_health_events", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("event_type = $2", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
-        /* Windowless: a time bound here would make the probe answer the same question the read just did. */
-        Assert.DoesNotContain("event_time", sql, StringComparison.Ordinal);
+        var source = DarlingSystemHealthReader.LastCaptureSql;
+        Assert.Contains("SELECT MAX(collection_time)", source, StringComparison.Ordinal);
+        Assert.Contains("FROM v_system_health_events", source, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = $1", source, StringComparison.Ordinal);
+        Assert.Contains("event_xml IS NOT NULL", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_type", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_time", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_log", source, StringComparison.Ordinal);
+
+        var ofType = DarlingSystemHealthReader.LastCaptureOfTypeSql;
+        Assert.Contains("SELECT MAX(collection_time)", ofType, StringComparison.Ordinal);
+        Assert.Contains("FROM v_system_health_events", ofType, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = $1", ofType, StringComparison.Ordinal);
+        Assert.Contains("event_type = $2", ofType, StringComparison.Ordinal);
+        Assert.Contains("event_xml IS NOT NULL", ofType, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_time", ofType, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_log", ofType, StringComparison.Ordinal);
     }
 
     [Theory]
     [InlineData(nameof(DarlingSystemHealthReader.SystemHealthEventsByTypeSql))]
     [InlineData(nameof(DarlingSystemHealthReader.DatabaseNameMapSql))]
-    [InlineData(nameof(DarlingSystemHealthReader.HasAnyEventOfTypeSql))]
+    [InlineData(nameof(DarlingSystemHealthReader.LastCaptureSql))]
+    [InlineData(nameof(DarlingSystemHealthReader.LastCaptureOfTypeSql))]
     public void Reads_ArePostgresDialect_PositionalParams(string sqlName)
     {
         var sql = (string)typeof(DarlingSystemHealthReader).GetField(sqlName)!.GetValue(null)!;
@@ -190,12 +208,12 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
     [Fact]
     public void Significance_SchedulerIssue_MatchesViewer()
     {
-        foreach (var status in new[] { "WARNING", "OK", "", null })
+        foreach (var (sqlCpu, other, mem) in new (int?, int?, int?)[] { (90, 0, 100), (89, 0, 100), (0, 50, 100), (0, 49, 100), (0, 0, 50), (0, 0, 51), (null, null, null) })
         {
-            var r = new SchedulerIssueRecord { Status = status };
+            var r = new SchedulerIssueRecord { SqlCpuUtilization = sqlCpu, OtherProcessCpu = other, MemoryUtilization = mem };
             Assert.Equal(SystemEventSignificance.IsSignificant(r), SystemHealthSignificance.IsSignificant(r));
         }
-        Assert.True(SystemHealthSignificance.IsSignificant(new SchedulerIssueRecord { Status = "WARNING" }));
+        Assert.True(SystemHealthSignificance.IsSignificant(new SchedulerIssueRecord { SqlCpuUtilization = 90 }));
     }
 
     [Fact]
@@ -293,7 +311,7 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         // SystemHealthSignificance keeps the significant rows. Assert the same significant set the
         // viewer's System Events tab surfaces.
         Assert.True(SystemHealthSignificance.IsSignificant(
-            SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor.xml"))!));            // WARNING
+            SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor_high_sql_cpu.xml"))!));  // SQL CPU 94 >= 90
         Assert.True(SystemHealthSignificance.IsSignificant(
             SystemHealthParser.ParseSevereError(LoadFixture("error_reported.xml"))!));                  // severity 24
         Assert.True(SystemHealthSignificance.IsSignificant(
@@ -342,8 +360,8 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
 /// <summary>
 /// Gated (DARLING_TEST_PG) live round-trip for the health-parser tools. Plants raw system_health_events rows
 /// (real captured-event fixtures) across the categories + a database_size_stats mapping row, then asserts each
-/// tool shreds + gates + resolves and returns its data-bearing envelope; an empty store returns the "empty"
-/// miss.
+/// tool shreds + gates + resolves and returns its data-bearing envelope with the source witness; a category
+/// never captured on a live session is the healthy "empty"; an empty store is "unavailable" (#3541 A12).
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DarlingMcpHealthParserToolsLivePostgresTests
@@ -380,7 +398,7 @@ public sealed class DarlingMcpHealthParserToolsLivePostgresTests
 VALUES ($1,$2,$3,$4,$5,$6,$7)",
                     CollectionIdGenerator.Next(), t, ServerId, ServerName, t, eventType, LoadFixture(fixture));
 
-            await PlantEvent(SystemHealthParser.SchedulerMonitorEvent, "scheduler_monitor.xml");
+            await PlantEvent(SystemHealthParser.SchedulerMonitorEvent, "scheduler_monitor_high_sql_cpu.xml");
             await PlantEvent(SystemHealthParser.ErrorReportedEvent, "error_reported.xml");
             await PlantEvent(SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_system.xml");
             await PlantEvent(SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_query_processing_warning.xml");
@@ -403,16 +421,52 @@ VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerNa
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpHealthParserTools.GetIOIssues(postgres, ServerName), ServerName, "issues");
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpHealthParserTools.GetMemoryNodeOOM(postgres, ServerName), ServerName, "events");
 
-            /* memory_conditions / memory_broker have no planted LOW rows → the "empty" miss (not a throw). */
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetMemoryConditions(postgres, ServerName)));
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetMemoryBroker(postgres, ServerName)));
+            /* memory_conditions has planted sp_server_diagnostics rows and none is LOW → rung 1 of the
+               #3541 A12 ladder: "empty", captured and gated out, with the witness saying the source was
+               observed. memory_broker's event type was never planted while OTHER types were → rung 3:
+               still "empty" (the session IS being read; the engine recorded no broker event), never
+               "unavailable". Both are the healthy answer and both must say so with the witness attached. */
+            var conditions = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetMemoryConditions(postgres, ServerName)).RootElement;
+            Assert.Equal("empty", conditions.GetProperty("status").GetString());
+            Assert.True(conditions.GetProperty("source_observed").GetBoolean());
+            Assert.Equal(t.ToString("o"), conditions.GetProperty("last_captured_at").GetString());
+            Assert.True(conditions.GetProperty("events_in_window").GetInt32() > 0);
+            Assert.Contains("Events ARE being captured", conditions.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            var broker = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetMemoryBroker(postgres, ServerName)).RootElement;
+            Assert.Equal("empty", broker.GetProperty("status").GetString());
+            Assert.True(broker.GetProperty("source_observed").GetBoolean());
+            Assert.Equal(0, broker.GetProperty("events_in_window").GetInt32());
+            Assert.Equal(JsonValueKind.Null, broker.GetProperty("last_captured_of_type_at").ValueKind);
+            Assert.Contains("the absence is a measurement", broker.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            /* The data envelope carries the same witness pair. */
+            var schedulerJson = await DarlingMcpHealthParserTools.GetSchedulerIssues(postgres, ServerName);
+            var scheduler = JsonDocument.Parse(schedulerJson).RootElement;
+            Assert.True(scheduler.GetProperty("source_observed").GetBoolean());
+            Assert.Equal(t.ToString("o"), scheduler.GetProperty("last_captured_at").GetString());
+
+            /* #4452: the utilization fields the planted high-CPU sample carries — SQL CPU pinned at 94,
+               other-process CPU 4, idle 2, memory 100 — come back on the tool's own output text. This is
+               the port's product-path pin: it asserts on the served JSON text (not typed properties) so it
+               also compiles, unchanged, against the pre-port code, where these fields are null or absent. */
+            Assert.Contains("\"sql_cpu_utilization\":94", schedulerJson, StringComparison.Ordinal);
+            Assert.Contains("\"other_process_cpu\":4", schedulerJson, StringComparison.Ordinal);
+            Assert.Contains("\"system_idle\":2", schedulerJson, StringComparison.Ordinal);
+            Assert.Contains("\"memory_utilization\":100", schedulerJson, StringComparison.Ordinal);
 
             /* an unknown server resolves to the listing error. */
-            Assert.StartsWith("Could not resolve server.", await DarlingMcpHealthParserTools.GetSystemHealth(postgres, "darling-no-such-server"), StringComparison.Ordinal);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, "darling-no-such-server")), StringComparison.Ordinal);
 
-            /* an empty store returns the miss. */
+            /* An empty store is rung 4: nothing of any type was ever captured, so this is NOT a clean bill —
+               "unavailable" with source_observed false (#3541 A12). It used to answer "empty", the same word
+               the healthy branches above earn, which is the defect. */
             await DeleteRowsAsync(connection, ct, keepServer: true);
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSchedulerIssues(postgres, ServerName)));
+            var dead = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetSchedulerIssues(postgres, ServerName)).RootElement;
+            Assert.Equal("unavailable", dead.GetProperty("status").GetString());
+            Assert.False(dead.GetProperty("source_observed").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, dead.GetProperty("last_captured_at").ValueKind);
+            Assert.Contains("NOT an all-clear", dead.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -429,5 +483,76 @@ VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerNa
         if (!keepServer) sql += $" DELETE FROM servers WHERE server_id = {ServerId};";
         using var cleanup = new NpgsqlCommand(sql, connection);
         await cleanup.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── the base filter, through the product's own read path (get_health_parser_severe_errors) ──
+
+    private static string ErrorReportedXml(int severity, int errorNumber) =>
+        $"<event name=\"error_reported\" package=\"sqlserver\" timestamp=\"2026-09-01T00:00:00.000Z\">" +
+        $"<data name=\"error_number\"><value>{errorNumber}</value></data>" +
+        $"<data name=\"severity\"><value>{severity}</value></data>" +
+        $"<data name=\"state\"><value>1</value></data>" +
+        $"<data name=\"message\"><value>base-filter probe</value></data>" +
+        $"<action name=\"database_id\"><value>1</value></action>" +
+        $"</event>";
+
+    [Fact]
+    public async Task GetSevereErrors_BaseFilter_DropsBelow16AndIgnoredNumbers_KeepsOnly19PlusSignificant()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live health-parser-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5);
+
+            async Task PlantErrorAsync(int severity, int errorNumber) =>
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, t, SystemHealthParser.ErrorReportedEvent, ErrorReportedXml(severity, errorNumber));
+
+            // sp_HealthParser's own base filter (@warnings_only = 0): severity < 16 is dropped always;
+            // 18056/17830 are dropped always, whatever the severity. 16 and 20 both survive the base
+            // filter (unfiltered), but only 20 clears the significant (warnings_only) floor of 19.
+            await PlantErrorAsync(15, 50001);   // below the base floor -> dropped entirely
+            await PlantErrorAsync(16, 50002);   // at the base floor -> kept, not significant
+            await PlantErrorAsync(20, 50003);   // above significant floor -> kept and significant
+            await PlantErrorAsync(20, 18056);   // severe but on the always-ignored list -> dropped entirely
+
+            var json = await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            // GetSevereErrors gates on SystemHealthSignificance.IsSignificant, so only the severity-20/50003
+            // row (>= 19, not ignored) is in the tool's own significant-only surface.
+            Assert.Equal(1, root.GetProperty("error_count").GetInt32());
+            var errors = root.GetProperty("errors");
+            Assert.Equal(50003, errors[0].GetProperty("error_number").GetInt32());
+
+            // The base-filter population itself (what ParseSevereError alone lets through, before
+            // significance) is exactly the 16 and the 20 -- never the 15 or the 18056 -- proving the fix
+            // through the parser directly, on the SAME planted rows the tool above just read.
+            var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
+                postgres, ServerId, t.AddMinutes(-1), t.AddMinutes(1), SystemHealthParser.ErrorReportedEvent, ct);
+            var baseFiltered = xmls.Select(SystemHealthParser.ParseSevereError).Where(r => r != null).Select(r => r!.ErrorNumber).OrderBy(n => n).ToArray();
+            Assert.Equal(new int?[] { 50002, 50003 }, baseFiltered);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
     }
 }

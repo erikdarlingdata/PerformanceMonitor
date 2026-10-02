@@ -284,6 +284,18 @@ public static class AppLogger
     {
         if (!s_initialized || s_buffer.IsEmpty) return;
 
+        FlushTo(s_logDirectory);
+    }
+
+    /// <summary>
+    /// The write half of <see cref="Flush"/>, taking the directory rather than reading the static field so a
+    /// test can drive a real write without calling <see cref="Initialize"/> — which repoints the whole
+    /// process's logging and starts the 5s timer, the hazard <see cref="CleanOldLogs"/> and
+    /// <see cref="DrainBufferedLines"/> already exist to avoid (#4281 review). Never throws: a bad directory
+    /// or a mid-batch encoding failure is caught and swallowed, same as before this seam existed.
+    /// </summary>
+    internal static void FlushTo(string logDirectory)
+    {
         /* Serialize flushes: the 5s timer and Shutdown() can call Flush concurrently, and two
            File.AppendAllText calls to the same file throw — which the catch below would swallow,
            silently dropping the lines already dequeued from the buffer. */
@@ -299,8 +311,9 @@ public static class AppLogger
 
                 if (sb.Length > 0)
                 {
-                    var logFile = Path.Combine(s_logDirectory, $"lite_{DateTime.Now:yyyyMMdd}.log");
-                    File.AppendAllText(logFile, sb.ToString());
+                    var logFile = Path.Combine(logDirectory, $"lite_{DateTime.Now:yyyyMMdd}.log");
+                    /* #4281 review: AppendAllText's strict UTF-8 encoder throws on a lone surrogate, dropping the whole batch. */
+                    File.AppendAllText(logFile, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 }
             }
             catch

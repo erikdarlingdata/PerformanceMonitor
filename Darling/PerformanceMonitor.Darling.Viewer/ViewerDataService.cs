@@ -14,6 +14,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -50,6 +51,10 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// construct a SQL Server row keep compiling, and so the two reader call sites stay the only places that
     /// have to know the column exists.
     /// </param>
+    /// <param name="registeredAt">
+    /// <c>servers.created_date</c> (#3967), defaulted for the same two reasons. Null for a server the operator
+    /// added that the service has not connected to yet, which is the honest answer: nothing has registered it.
+    /// </param>
     public DarlingServer(
         int serverId,
         string serverName,
@@ -59,7 +64,8 @@ public sealed class DarlingServer : INotifyPropertyChanged
         decimal monthlyCostUsd = 0,
         string? engineKind = null,
         int engineEdition = CollectorEngineCapability.UnknownEngineEdition,
-        int? postgresMajorVersion = null)
+        int? postgresMajorVersion = null,
+        DateTime? registeredAt = null)
     {
         ServerId = serverId;
         ServerName = serverName;
@@ -70,6 +76,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
         EngineKind = engineKind;
         EngineEdition = engineEdition;
         PostgresMajorVersion = postgresMajorVersion;
+        RegisteredAt = registeredAt;
     }
 
     public int ServerId { get; }
@@ -130,15 +137,28 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// and a PostgreSQL target — whose <c>sql_major_version</c> is <c>0</c> — rendered "SQL Server v0" in the
     /// fleet sidebar while this very object's <see cref="IsPostgres"/> and <see cref="EngineDescription"/>
     /// already knew better.</para>
+    ///
+    /// <para>It also asks <see cref="EngineEdition"/>: an Azure SQL Database reports major <c>12</c>, which the
+    /// year table would label "SQL Server 2014", so the two Azure editions (5 and 8) read as "Azure SQL
+    /// Database" and "Azure SQL Managed Instance" instead. Every other edition keeps the year.</para>
     /// </summary>
     public string VersionLabel =>
-        MonitoredEngineVersion.DescribeEngineVersion(EngineKind, SqlMajorVersion, PostgresMajorVersion);
+        MonitoredEngineVersion.DescribeEngineVersion(EngineKind, SqlMajorVersion, PostgresMajorVersion, EngineEdition);
+
+    /// <summary>
+    /// <c>servers.created_date</c>: the service's first successful connect to this server, or null when it has
+    /// not connected yet (#3967). The newest-collection reads behind the dot and the Overview card have no
+    /// window, but the collection log's retention bounds what they can see, and this is what tells a server
+    /// whose whole history retention has dropped (Offline) from one that has never collected (awaiting). See
+    /// <see cref="ServerSummaryItem.ClassifyFreshness(DateTime?, DateTime?, DateTime)"/>.
+    /// </summary>
+    public DateTime? RegisteredAt { get; }
 
     // ── Runtime-only sidebar state (not from Postgres; drives the ported Lite server-row chrome) ──
 
     private bool _isFavorite;
 
-    /// <summary>Whether the user pinned this server (from the viewer's registry, matched by name). Drives the star.</summary>
+    /// <summary>Whether the user pinned this server (from the viewer's registry, matched by server id). Drives the star.</summary>
     public bool IsFavorite
     {
         get => _isFavorite;
@@ -276,7 +296,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
     {
         var flags = ServerCollectionStatusRules.FlagsFor(
-            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc));
+            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, RegisteredAt, nowUtc));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -393,9 +413,14 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// both-queries requirement (#3145): it is the PostgreSQL vocabulary's own major, and without it the
     /// sidebar's version label has nothing but <c>sql_major_version</c> — which is <c>0</c> on every
     /// PostgreSQL target — to describe the row with.</para>
+    ///
+    /// <para><c>created_date</c> (#3967) rides along with the same both-queries requirement: it is the server's
+    /// first successful connect, and <see cref="DarlingServer.RegisteredAt"/> is what lets the sidebar dot and
+    /// the Overview card read a server whose history retention has dropped as Offline rather than awaiting its
+    /// first collection.</para>
     /// </summary>
     public const string ServersSql =
-        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0), postgres_major_version FROM servers ORDER BY display_name";
+        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0), postgres_major_version, created_date FROM servers ORDER BY display_name";
 
     /// <summary>
     /// The authoritative read-only probe (V8 security hardening): does the connected role hold UPDATE on
@@ -416,6 +441,17 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     public const string ReadOnlyProbeSql = "SELECT has_table_privilege('config_alert_log', 'UPDATE')";
 
     private readonly NpgsqlDataSource _dataSource;
+
+    /// <summary>Review D4R M3: <see cref="GetStoreSchemaVersionAsync"/>'s result, cached per instance (this
+    /// instance is per store connection) once the Queries grid's #3953 table-read gate has probed it, so a
+    /// long-window grid refresh pays the 121-column catalog probe once per session rather than on every load.
+    /// A store upgraded mid-session keeps reading raw until the viewer reconnects — errs toward raw, never
+    /// toward a stale "table" claim, same as every other input to this gate.</summary>
+    private int? _cachedStoreSchemaVersion;
+
+    /// <summary>The fleet's server clocks for the alert-history reads (#4766), held between polls: see
+    /// <see cref="ServerClockCache"/>. Per instance, like the store connection it reads.</summary>
+    private readonly ServerClockCache _alertClocks;
 
     /// <param name="connectionString">The Postgres connection string (managed-derived or BYO from darling.json).</param>
     /// <param name="connectionTimeoutSeconds">
@@ -439,8 +475,14 @@ public sealed partial class ViewerDataService : IAsyncDisposable
            from disagreeing. */
         ViewerStorePool.Publish(effectiveConnectionString);
 
-        _dataSource = NpgsqlDataSource.Create(effectiveConnectionString);
+        /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.ApplicationName,
+           set on the builder there); this is the BYO connection string's turn — set-if-absent, so an
+           operator's own ApplicationName on a bring-your-own store wins. */
+        _dataSource = NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
+        _alertClocks = new ServerClockCache(ct => GetServerClocksAsync(serverId: null, ct), AlertClockLifetime);
     }
 
     /// <summary>
@@ -524,17 +566,21 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// caller clamps it to 5–60). Pure + string-only, so it is unit-tested without a live Postgres. Detection
     /// uses the base <see cref="DbConnectionStringBuilder"/>, whose <c>ContainsKey</c> reflects exactly the keys
     /// present in the string (NpgsqlConnectionStringBuilder overrides ContainsKey to answer for every KNOWN
-    /// keyword, which can't tell "set" from "settable").
+    /// keyword, which can't tell "set" from "settable"). When the keyword is absent, the preference is APPENDED
+    /// to the caller's own string rather than emitted through a builder round trip — round-1 review on #4285's
+    /// PR measured the base builder's round trip changing 17 of 24 test strings, because its writer erases a
+    /// keyword the caller set to an explicit empty value the same way <see cref="DarlingStoreConnection"/>'s
+    /// remarks describe for <c>PinSessionTimeZoneUtc</c>; appending leaves every other keyword untouched.
     /// </summary>
     internal static string ApplyConnectionTimeout(string connectionString, int timeoutSeconds)
     {
         var builder = new DbConnectionStringBuilder { ConnectionString = connectionString };
         if (!builder.ContainsKey("Timeout"))
         {
-            builder["Timeout"] = timeoutSeconds;
+            return connectionString + ";Timeout=" + timeoutSeconds.ToString(CultureInfo.InvariantCulture);
         }
 
-        return builder.ConnectionString;
+        return connectionString;
     }
 
     /// <summary>
@@ -806,7 +852,211 @@ SELECT
        table existence cannot separate the rungs, and the rung adds exactly one column — there is no
        sibling to prefer or to explain not preferring. */
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_collector_schedules'
-                                                     AND   column_name = 'databases')";
+                                                     AND   column_name = 'databases'),
+    /* V126 probes a COLUMN for V57's reason: config_alert_settings has existed since V17, so table
+       existence cannot separate the rungs, and the rung adds exactly one column — there is no
+       sibling to prefer or to explain not preferring. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings'
+                                                     AND   column_name = 'self_disk_free_warn_gb'),
+    /* V127 probes a COLUMN for V57's reason: the four delta-family tables have existed since V4/V10, so
+       table existence cannot separate the rungs. The rung adds the same column to four tables in one
+       transaction, so any of them would answer; the wait table is chosen because it is the rung's first
+       ALTER and the family the finding was written against, and that choice is stated so nobody goes
+       looking for a significance it does not have. Named only in this probe line, never in prose, per
+       the V71 finding: the coverage ratchet strips information_schema lines but cannot strip a comment. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'wait_stats'
+                                                     AND   column_name = 'sample_interval_seconds'),
+    /* V128 probes a COLUMN for the same reason as V127: its five tables have existed since V4/V10 and
+       V63/V64, so table existence cannot separate the rungs. The rung adds the same interval column to
+       four tables and two offset columns to a fifth in one transaction, so any of the six would answer;
+       the procedure table is chosen because it is the rung's first ALTER, and that choice is stated so
+       nobody goes looking for a significance it does not have. The column NAME is shared with V127's
+       sentinel — only the TABLE differs — which is exactly why the table is part of the predicate. Named
+       only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'procedure_stats'
+                                                     AND   column_name = 'sample_interval_seconds'),
+    /* V129 probes a TABLE, which separates the rungs cleanly because the table is new in it — the same
+       shape as V103 and V106, the two log-reader tables before it. Named only in this probe line, never
+       in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_log_events'),
+    /* V130 probes a COLUMN for V127's reason: the table is V129's, so table existence cannot separate the
+       two rungs. The rung adds thirteen columns in one ALTER, so any would answer; the WAL-bytes column is
+       chosen because it is the last term of the last clause the parser lifts, and that choice is stated so
+       nobody goes looking for a significance it does not have. Named only in this probe line, never in
+       prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_log_events'
+                                                     AND   column_name = 'wal_bytes'),
+    /* V131 probes a TABLE — new in it, so table existence separates the rungs cleanly (the V116/V123 shape
+       for a config-plane table). Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'config_notification_routes'),
+    /* V132 probes a COLUMN for V57's reason: the perfmon table has existed since V4, so table existence
+       cannot separate the rungs, and the rung adds exactly one column — there is no sibling to prefer or to
+       explain not preferring. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'perfmon_stats'
+                                                     AND   column_name = 'cntr_type'),
+    /* V133 probes a COLUMN for V57's reason: both of its tables have existed since V83 / V96, so table
+       existence cannot separate the rungs. The rung adds one column to each of two tables in one
+       transaction, so either would answer; the per-database counters table is chosen because it is the
+       rung's first ALTER, and that choice is stated so nobody goes looking for a significance it does not
+       have. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_database_stats'
+                                                     AND   column_name = 'numbackends'),
+    /* V134 probes a COLUMN for V57's reason: both of its tables have existed since V1, so table existence
+       cannot separate the rungs. The rung adds one column to each of two tables in one transaction, so
+       either would answer; the CPU table's UTC twin is chosen because it is the rung's first ALTER and the
+       column the viewer's own CPU read now names, and that choice is stated so nobody goes looking for a
+       significance it does not have. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cpu_utilization_stats'
+                                                     AND   column_name = 'sample_time_utc'),
+    /* V135 probes a COLUMN for V57's reason: config_alert_settings has existed since V17, so table existence
+       cannot separate the rungs. The rung adds two columns to that one table in one transaction, so either
+       would answer; the program-name-prefix list is chosen because it is the rung's first ALTER, and that
+       choice is stated so nobody goes looking for a significance it does not have. Named only in this probe
+       line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings'
+                                                     AND   column_name = 'long_running_query_excluded_program_name_prefixes'),
+    /* V136 probes a TABLE — its one new table, so table existence separates the rungs cleanly (the V103 /
+       V106 / V129 shape for a collector table). The rung also adds six columns to a table that has existed
+       since V106, and either would answer; the new table is chosen because it is the rung's first statement,
+       and that choice is stated so nobody goes looking for a significance it does not have. Named only in
+       this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_database_size_stats'),
+    /* V137 probes a COLUMN for V57's reason: all three of its tables have existed since V76 / V17 / V53, so
+       table existence cannot separate the rungs. The rung adds eight columns across three tables in one
+       transaction, so any would answer; the Query Store health table's capture mode is chosen because it
+       is the rung's first ALTER and the one column of the six this viewer's own grid will read, and that
+       choice is stated so nobody goes looking for a significance it does not have. Named only in this
+       probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_store_health'
+                                                     AND   column_name = 'query_capture_mode'),
+    /* V138 probes a COLUMN for V57's reason: its one table has existed since V102, so table existence
+       cannot separate the rungs. The rung adds two columns and either would answer; the database scope is
+       chosen because it is the rung's first ADD COLUMN and the one the shared config reader's own predicate
+       names first, and that choice is stated so nobody goes looking for a significance it does not have.
+       Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_server_config'
+                                                     AND   column_name = 'database_name'),
+    /* V139 probes a COLUMN for V57's reason: both of its tables have existed since V53 / V88, so table existence
+       cannot separate the rungs. The rung adds one column to each of two tables in one transaction, so either
+       would answer; the write-side counters table is chosen because it is the one a viewer read names (the
+       write-side panel's shared reader), which is what makes this gate load-bearing, and that choice is stated so
+       nobody goes looking for a significance it does not have. Named only in this probe line, never in prose,
+       per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_write_stats'
+                                                     AND   column_name = 'postmaster_start_time'),
+    /* V140 probes a COLUMN for V57's reason: its one table has existed since V53, so table existence cannot
+       separate the rungs. The rung adds one column, so there is no choice of which to name; it is not yet
+       read by any viewer surface, so this gate rests on the standing invariant alone. Named only in this
+       probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'store_metrics'
+                                                     AND   column_name = 'checkpoints_timed'),
+    /* V141 probes a TABLE — its one new table, so table existence separates the rungs cleanly (the V103 /
+       V106 / V121 / V129 / V136 shape). It is not yet read by any viewer surface, so this gate rests on the
+       standing invariant alone. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'analysis_collection_caveats'),
+    /* V142 (#4196) probes an INDEX the same way V22 does: idx_index_object_stats_server_time is additive
+       (indexes are not listed in information_schema, so this reads the world-readable pg_indexes catalog like
+       V22's own arm does). Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_index_object_stats_server_time'),
+    /* V143 creates three tables at once, so any of them would answer; the replay table is chosen because the rung
+       creates it last, and that choice is stated so nobody goes looking for a significance it does not have.
+       Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'query_store_interval_latest_pending'),
+    /* V144 (#4211) probes a TABLE — its two new tables, so table existence separates the rungs cleanly (the
+       V103 / V106 / V121 / V129 / V136 / V141 shape). It is not yet read by any viewer surface, so this gate
+       rests on the standing invariant alone. Named only in this probe line, never in prose, per the V71
+       finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'raw_chunk_interval_rung_history'),
+    /* V145 (#3953) also creates three tables at once (the wide interval table beside V143's), so any would
+       answer; the replay table is chosen for the same reason as V143's own arm. Named only in this probe line,
+       never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'query_store_interval_wide_pending'),
+    /* V146 (#4215) probes a TABLE — its one new table, so table existence separates the rungs cleanly (the
+       V103 / V106 / V121 / V129 / V136 / V141 / V144 shape). It is not yet read by any viewer surface, so
+       this gate rests on the standing invariant alone. Named only in this probe line, never in prose, per
+       the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'managed_conf_verdicts'),
+    /* V147 (#4442 scope 1) probes a COLUMN DEFAULT the same way it changed one: the rung's ALTER COLUMN
+       ... SET DEFAULT is additive-in-effect (a store that already carries an operator-set value keeps it;
+       only the column's own default moves), so the probe reads world-readable information_schema.columns
+       rather than a value that could be masked by an operator override. It is not yet read by any viewer
+       surface, so this gate rests on the standing invariant alone. Named only in this probe line, never in
+       prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_service' AND column_name = 'compose_statement_timeout_seconds' AND column_default = '60'),
+    /* V148 (#4442 scope 2) probes the new read-latency histogram table. It is not yet read by any viewer
+       surface, so this gate rests on the standing invariant alone. Named only in this probe line, never in
+       prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'read_latency'),
+    /* V149 (#4250) drops query_store_plan_map's last_seen btree index and sets fillfactor 90 on it, so the
+       liveness touch's UPDATE can go HOT. This probes NEGATIVELY — the index's ABSENCE plus the fillfactor
+       reloption — unlike every other sentinel in this list, which probes an object's presence. It is not
+       yet read by any viewer surface, so this gate rests on the standing invariant alone. Named only in
+       this probe line, never in prose, per the V71 finding. */
+    ((SELECT c.reloptions FROM pg_class c WHERE c.oid = 'collect.query_store_plan_map'::regclass) @> ARRAY['fillfactor=90']
+        AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'collect' AND indexname = 'idx_query_store_plan_map_last_seen')),
+    /* V150 (#4469, #4477) adds two supporting indexes: idx_collection_log_watermark (the per-collector
+       watermark lookup) and idx_job_history_server_run (the Viewer's Job History tab read). It is not yet
+       read by any viewer surface, so this gate rests on the standing invariant alone. Named only in this
+       probe line, never in prose, per the V71 finding. */
+    (EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'collect' AND indexname = 'idx_collection_log_watermark')
+        AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'collect' AND indexname = 'idx_job_history_server_run')),
+    /* V151 (#4475) probes a COLUMN for the V36/V37 reason: ag_replica_states has existed since V34, so
+       table existence cannot separate the rungs. It is not yet read by any viewer surface, so this gate
+       rests on the standing invariant alone. Named only in this probe line, never in prose, per the V71
+       finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ag_replica_states' AND column_name = 'group_id'),
+    /* V152 (#4503) probes NEGATIVELY, the V149 shape: the six Query Store rollups' auto-created two-key
+       group index (first key one of the rung's drop-list columns, second key bucket) is ABSENT. This walks
+       query_store_stats_hourly's own pg_rewrite/pg_depend dependency to its materialization hypertable
+       rather than the TimescaleDB information views, so it needs no pg_extension guard. ANDed with V151's
+       own sentinel, copied verbatim, rather than a to_regclass(...) IS NOT NULL existence check on the
+       view: a plain-PostgreSQL store has no rollup at all, so to_regclass(...) is NULL there at every
+       version, the dependency walk finds no rows, and the bare NOT EXISTS reads that absence as ""index
+       dropped"" — misreporting a plain-PostgreSQL store at V151 as V152. That store is harmless to leave
+       unresolved here: V152 is a no-op without TimescaleDB, so a plain-PostgreSQL store's schema at V151
+       and V152 is identical, and ANDing with V151's own sentinel makes this arm require V151 first, so a
+       store below V151 fails that sentinel and falls through to the next arm instead. It is not yet read
+       by any viewer surface, so this gate rests on the standing invariant alone. Named only in this probe
+       line, never in prose, per the V71 finding. */
+    (NOT EXISTS (
+        SELECT 1
+        FROM pg_rewrite r
+        JOIN pg_depend d ON d.objid = r.oid
+        JOIN pg_class matc ON matc.oid = d.refobjid AND matc.oid <> r.ev_class
+        JOIN pg_index i ON i.indrelid = matc.oid AND i.indnkeyatts = 2
+        JOIN pg_attribute a1 ON a1.attrelid = matc.oid AND a1.attnum = i.indkey[0] AND a1.attname = 'query_hash'
+        JOIN pg_attribute a2 ON a2.attrelid = matc.oid AND a2.attnum = i.indkey[1] AND a2.attname = 'bucket'
+        WHERE r.ev_class = to_regclass('collect.query_store_stats_hourly')
+    )
+     AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ag_replica_states' AND column_name = 'group_id')),
+    /* V153 (#4608) probes an INDEX the same way V22/V142 do: idx_query_store_interval_latest_first_exec is
+       additive (indexes are not listed in information_schema, so this reads the world-readable pg_indexes
+       catalog like those arms do). It is not yet read by any viewer surface, so this gate rests on the
+       standing invariant alone. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_query_store_interval_latest_first_exec'),
+    /* V154 (#4608, split #4615) probes the second index the V153 rung's build once created in the same
+       rung, now its own rung with its own MigrationCommandTimeoutSeconds window — the same additive-index
+       shape as V153's arm above. Not yet read by any viewer surface, so this gate rests on the standing
+       invariant alone. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_query_store_interval_wide_first_exec'),
+    /* V155 (#4765) adds interval_end_time_utc to the Query Store stats table and to the interval-wide table.
+       The sentinel is the interval-wide table's column, not the stats table's: a fresh store's stats table is
+       created from the collector's current column list and so has the column before this rung ever runs,
+       while the interval-wide table only ever gets it from the rung itself. The viewer's Query Store duration trend
+       reads the column to rate each interval over its own length: its raw read (QueryStoreDurationTrendSql),
+       its table-routed twin (QueryStoreDurationTrendTableSql) and the rollup route's raw class (#4765). So this
+       sentinel is what keeps those reads off a store that lacks the column: the connect-time gate blocks a store
+       below V155 (and fails open only when the probe itself fails). Named only in this probe line, never in
+       prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_store_interval_wide' AND column_name = 'interval_end_time_utc'),
+    /* V156 (#4834) stores the hour's longest single checkpoint sync on the store's own checkpointer row. The
+       sentinel is the milliseconds column; its instant column arrives in the same statement. Not yet read by any
+       viewer surface, so this gate rests on the standing invariant alone. Named only in this probe line, never in
+       prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'store_metrics' AND column_name = 'checkpoint_longest_sync_ms'),
+    /* V157 gives a mute rule an optional store server id. The column is the sentinel. Named only in this probe line,
+       never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_mute_rules' AND column_name = 'server_id')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -828,7 +1078,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100), reader.GetBoolean(101), reader.GetBoolean(102), reader.GetBoolean(103), reader.GetBoolean(104), reader.GetBoolean(105), reader.GetBoolean(106), reader.GetBoolean(107), reader.GetBoolean(108), reader.GetBoolean(109), reader.GetBoolean(110), reader.GetBoolean(111), reader.GetBoolean(112), reader.GetBoolean(113), reader.GetBoolean(114), reader.GetBoolean(115), reader.GetBoolean(116), reader.GetBoolean(117), reader.GetBoolean(118), reader.GetBoolean(119), reader.GetBoolean(120), reader.GetBoolean(121), reader.GetBoolean(122), reader.GetBoolean(123), reader.GetBoolean(124), reader.GetBoolean(125), reader.GetBoolean(126), reader.GetBoolean(127), reader.GetBoolean(128), reader.GetBoolean(129), reader.GetBoolean(130), reader.GetBoolean(131), reader.GetBoolean(132));
             }
 
             return null;
@@ -853,7 +1103,7 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false, bool hasPgCpuCapacityHeadroom = false, bool hasCustomAlertCore = false, bool hasMuteRuleReloadBeacon = false, bool hasBuiltinAlertPersistence = false, bool hasRetentionHoldRatioKnobs = false, bool hasDeadlockRateBandKnobs = false, bool hasOversizedPlanBacklog = false, bool hasPgAlertCountKnobs = false, bool hasFleetSweepState = false, bool hasFleetSweepCadenceKnobs = false, bool hasCollectorScheduleDatabases = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false, bool hasPgCpuCapacityHeadroom = false, bool hasCustomAlertCore = false, bool hasMuteRuleReloadBeacon = false, bool hasBuiltinAlertPersistence = false, bool hasRetentionHoldRatioKnobs = false, bool hasDeadlockRateBandKnobs = false, bool hasOversizedPlanBacklog = false, bool hasPgAlertCountKnobs = false, bool hasFleetSweepState = false, bool hasFleetSweepCadenceKnobs = false, bool hasCollectorScheduleDatabases = false, bool hasSelfDiskWarnGbFloor = false, bool hasDeltaFamilyIntervalColumns = false, bool hasDeltaFamilyIntervalCompletion = false, bool hasPgLogEvents = false, bool hasPgLogEventMetrics = false, bool hasNotificationRoutes = false, bool hasPerfmonCounterType = false, bool hasPgNumbackendsAndSampledMs = false, bool hasTimeHonesty = false, bool hasLrqExclusionKnob = false, bool hasPgDatabaseSizeStatsAndHostMemory = false, bool hasQsCaptureModeRouteKnobToast = false, bool hasPgServerConfigDatabaseRoleOverrides = false, bool hasPostmasterStartTime = false, bool hasCheckpointsTimed = false, bool hasCollectionCaveats = false, bool hasIndexObjectStatsServerTimeIndex = false, bool hasQueryStoreIntervalLatest = false, bool hasRawChunkIntervalRungHistory = false, bool hasQueryStoreIntervalWide = false, bool hasManagedConfVerdicts = false, bool hasComposeTimeoutSixty = false, bool hasReadLatency = false, bool hasHotLivenessTouch = false, bool hasCollectionLogWatermarkAndJobHistoryIndexes = false, bool hasAgGroupId = false, bool hasCaggGroupIndexDrop = false, bool hasIntervalFirstExecIndexes = false, bool hasIntervalWideFirstExecIndex = false, bool hasQueryStoreIntervalEnd = false, bool hasCheckpointLongestSync = false, bool hasMuteRuleServerId = false)
     {
         /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
            A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
@@ -1002,13 +1252,479 @@ SELECT
            StorageVersion.SchemaVersion (116) rather than falling through to 115 and showing a spurious upgrade
            banner on a store that is current. The table is named only in the probe line, not this prose, per the
            V71 finding (the coverage ratchet strips information_schema lines but cannot strip a comment). */
+        /* V128 (#3540): the completion of V127 — the measured sample interval on the four delta families
+           V127 left naked, and the two statement offsets on the query table that its delta key is made of.
+           After this rung every delta family stores the interval, so a restart's fabricated (0, 0) row can
+           be told from a genuinely idle one at EVERY read, and the restart seed can rebuild the one key
+           the store could not reproduce. COLUMN-existence sentinel (the five tables have existed since
+           V4/V10 and V63/V64, so table existence cannot separate the rungs), newest-first, one rung
+           behind the top since V129 landed — a store carrying this and not V129 above maps to 128, which
+           is the honest answer for it and also what makes the upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant: the viewer's procedure duration trend
+           and procedure history reads now name the column (the stored interval is preferred over the LAG
+           derivation), so a viewer pointed below this rung would throw a raw 42703 on the Performance
+           Trends and Top Procedures surfaces — the banner has to fire before those do. The column and its
+           tables are named only in the probe line, not this prose, per the V71 finding: the coverage
+           ratchet strips information_schema lines but cannot strip a comment. */
+        /* V146 (#4215): the per-key verdict a managed store's owner connection computes once at every
+           service-owned start, one new table. TABLE-existence sentinel, newest-first, and now the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling
+           through to the rung below and showing a spurious upgrade banner on a store that is current.
+
+           The WPF viewer runs no analysis, so no viewer read names the new table; this arm exists so the version
+           banner stays truthful, which is the only effect the rung has on the viewer. Named only in the probe
+           line, not this prose, per the V71 finding: the coverage ratchet strips information_schema lines
+           but cannot strip a comment. */
+        /* V148 (#4442 scope 2): the hourly read-latency histogram table, and now the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to
+           the rung below and showing a spurious upgrade banner on a store that is current.
+
+           The WPF viewer runs no analysis, so no viewer read names the new table; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        /* V152 (#4503): the six Query Store rollups' auto-created two-key group index is now ABSENT, and
+           now the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather
+           than falling through to the rung below and showing a spurious upgrade banner on a store that is
+           current.
+
+           The WPF viewer runs no analysis, so no viewer read names any of the six rollups or their
+           indexes; this arm exists so the version banner stays truthful, which is the only effect the rung
+           has on the viewer. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V157: a mute rule's optional store server id, and now the TOP rung, so a fully-migrated store maps to
+           EXACTLY StorageVersion.SchemaVersion rather than falling through to the rung below and showing a spurious
+           upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        if (hasMuteRuleServerId)
+        {
+            return 157;
+        }
+
+        /* V156 (#4834): the hour's longest single checkpoint sync on the store's own checkpointer row, and now
+           the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than
+           falling through to the rung below and showing a spurious upgrade banner on a store that is current.
+
+           No viewer read names the columns yet; this arm exists so the version banner stays truthful, which is
+           the only effect the rung has on the viewer. Named only in the probe line, not this prose, per the
+           V71 finding. */
+        if (hasCheckpointLongestSync)
+        {
+            return 156;
+        }
+
+        /* V155 (#4765): each Query Store interval's end, and no longer the top rung now that V156 has landed
+           above it, so a store that reaches exactly V155 falls through to here rather than to the rung below
+           and shows a spurious upgrade banner on a store that is current.
+
+           No viewer read names the column yet; this arm exists so the version banner stays truthful, which
+           is the only effect the rung has on the viewer. Named only in the probe line, not this prose, per
+           the V71 finding. */
+        if (hasQueryStoreIntervalEnd)
+        {
+            return 155;
+        }
+
+        /* V154 (#4608, split #4615): query_store_interval_wide's twin of V153's index, in its own rung
+           and no longer the top rung now that V155 has landed above it, so a store that reaches exactly
+           V154 falls through to here rather than to V153 and shows a spurious upgrade banner on a store
+           that is current.
+
+           The WPF viewer runs no analysis, so no viewer read names either index; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasIntervalWideFirstExecIndex)
+        {
+            return 154;
+        }
+
+        /* V153 (#4608, split #4615): a plain btree on first_execution_time for query_store_interval_latest
+           only — no longer the top rung now that V154 (query_store_interval_wide's twin) has landed above
+           it, so a store that reaches exactly V153 falls through to here rather than to V152.
+
+           The WPF viewer runs no analysis, so no viewer read names the index; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasIntervalFirstExecIndexes)
+        {
+            return 153;
+        }
+
+        if (hasCaggGroupIndexDrop)
+        {
+            return 152;
+        }
+
+        /* V151 (#4475): ag_replica_states.group_id, a column that identifies which physical AG a replica
+           row belongs to. Formerly the TOP rung — RequiredStoreSchemaVersion is StorageVersion.SchemaVersion
+           and a store below this arm now falls through to V150 instead of stopping here.
+
+           The WPF viewer runs no analysis, so no viewer read names the new column; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasAgGroupId)
+        {
+            return 151;
+        }
+
+        /* V150 (#4469, #4477): two supporting indexes, idx_collection_log_watermark and
+           idx_job_history_server_run. Formerly the TOP rung — RequiredStoreSchemaVersion is
+           StorageVersion.SchemaVersion and a store below this arm now falls through to V149 instead of
+           stopping here.
+
+           The WPF viewer runs no analysis, so no viewer read names either index; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasCollectionLogWatermarkAndJobHistoryIndexes)
+        {
+            return 150;
+        }
+
+        /* V149 (#4250): the Query Store liveness touch drops query_store_plan_map's last_seen index and
+           sets fillfactor 90. Formerly the TOP rung — RequiredStoreSchemaVersion is StorageVersion.SchemaVersion
+           and a store below this arm now falls through to V148 instead of stopping here.
+
+           The WPF viewer runs no analysis, so no viewer read names this table; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasHotLivenessTouch)
+        {
+            return 149;
+        }
+
+        if (hasReadLatency)
+        {
+            return 148;
+        }
+
+        if (hasComposeTimeoutSixty)
+        {
+            return 147;
+        }
+
+        if (hasManagedConfVerdicts)
+        {
+            return 146;
+        }
+
+        /* V145 (#3953): the wide latest-snapshot-per-interval table beside V143's — every outcome, every column
+           the three new reads need, its own coverage and replay-record tables. TABLE-existence sentinel,
+           newest-first, one rung behind the top since V146 landed — a store carrying this and not V146 above
+           maps to 145, which is the honest answer for it and also what makes the upgrade banner correct in the
+           window between the two.
+
+           The WPF viewer runs no analysis, so no viewer read names the new tables; this arm exists so the version
+           banner stays truthful, which is the only effect the rung has on the viewer. The tables are named only in
+           the probe line, not this prose, per the V71 finding: the coverage ratchet strips information_schema lines
+           but cannot strip a comment. */
+        if (hasQueryStoreIntervalWide)
+        {
+            return 145;
+        }
+
+        /* V143 (#3953): the latest Query Store snapshot per interval, kept as it is written, with its per-server
+           coverage and the replay record for a batch whose apply failed. TABLE-existence sentinel, newest-first,
+           one rung behind the top since V144 landed — a store carrying this and not V144 above maps to 143,
+           which is the honest answer for it and also what makes the upgrade banner correct in the window
+           between the two.
+
+           The WPF viewer runs no analysis, so no viewer read names the new tables; this arm exists so the version
+           banner stays truthful, which is the only effect the rung has on the viewer. The tables are named only in
+           the probe line, not this prose, per the V71 finding: the coverage ratchet strips information_schema lines
+           but cannot strip a comment. */
+        /* V144 (#4211): the raw chunk-interval reconcile's own rung history and per-run WAL-bytes record.
+           TABLE-existence sentinel, newest-first, one rung behind the top since V145 landed — a store carrying
+           this and not V145 above maps to 144, which is the honest answer for it and also what makes the
+           upgrade banner correct in the window between the two.
+
+           The WPF viewer runs no analysis, so no viewer read names the new tables; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. The tables are
+           named only in the probe line, not this prose, per the V71 finding: the coverage ratchet strips
+           information_schema lines but cannot strip a comment. */
+        if (hasRawChunkIntervalRungHistory)
+        {
+            return 144;
+        }
+
+        if (hasQueryStoreIntervalLatest)
+        {
+            return 143;
+        }
+
+        /* V139 (#3955): the postmaster start time beside every sample of a server's cumulative checkpointer
+           counters, on the store's own self-metrics row and on the monitored targets' write-side row, so a read
+           can tell an interval that spans a restart (PostgreSQL counts the shutdown checkpoint as requested and
+           keeps the count) from one that does not. COLUMN-existence sentinel (both tables predate it, so table
+           existence cannot separate this from any rung), newest-first, one rung behind the top since V140 landed —
+           a store carrying this and not V140 above maps to 139, which is the honest answer for it and also what
+           makes the upgrade banner correct in the window between the two.
+
+           The gate is load-bearing: the write-side panel reads through the shared DarlingPgWriteStatsReader,
+           whose statement now names the new column to find the restarts inside its window, so a viewer pointed
+           at a store below this rung WOULD throw on that panel. The connect-time gate is what keeps it from
+           getting there. The column and its tables are named only in the probe line, not this prose, per the
+           V71 finding: the coverage ratchet strips information_schema lines but cannot strip a comment. */
+        /* V140 (#4037): the timed-checkpoint count beside the store's own checkpointer counters, so the
+           checkpointer pressure rule can judge the interval's PER-CHECKPOINT sync average rather than the
+           summed sync milliseconds. COLUMN-existence sentinel (its table predates it by eighty-seven rungs,
+           so table existence cannot separate this from any rung), newest-first, one rung behind the top since
+           V141 landed. No viewer surface reads the column yet, so this gate rests on the standing invariant
+           alone. The column and its table are named only in the probe line, not this prose, per the V71
+           finding. */
+        /* V141 (#3691, part a1): collect.analysis_collection_caveats, the store side of a scheduled pass's
+           collection caveats. TABLE-existence sentinel (its own new table), newest-first, one rung behind the
+           top since V142 landed. No viewer surface reads the table yet, so this gate rests on the standing
+           invariant alone. The table is named only in the probe line, not this prose, per the V71 finding. */
+        /* V142 (#4196): the supporting index for the anomaly detector's latest-two-snapshots read.
+           INDEX-existence sentinel, the same shape as V22's own arm below (indexes are not listed in
+           information_schema, so pg_indexes is read instead), newest-first, one rung below the top since V143
+           landed. No viewer surface reads the index directly (the analysis service does), so this gate rests on
+           the standing invariant alone. The index is named only in the probe line, not this prose, per the V71
+           finding. */
+        if (hasIndexObjectStatsServerTimeIndex)
+        {
+            return 142;
+        }
+
+
+        if (hasCollectionCaveats)
+        {
+            return 141;
+        }
+
+        if (hasCheckpointsTimed)
+        {
+            return 140;
+        }
+
+        if (hasPostmasterStartTime)
+        {
+            return 139;
+        }
+
+        /* V138 (#3691): the two scope columns on the PostgreSQL configuration snapshot, so a stored setting
+           row distinguishes the server-wide population from a per-database or per-role override.
+           COLUMN-existence sentinel (its table predates it by thirty-six rungs, so table existence cannot
+           separate this from any rung), newest-first, one rung behind the top since V139 landed — a store
+           carrying this and not V139 above maps to 138, which is the honest answer for it and also what makes
+           the upgrade banner correct in the window between the two.
+
+           The gate is load-bearing here for the V137 reason one rung on: the Overview tab's configuration
+           grid reads through the shared DarlingPgServerConfigReader, whose server-wide statement now names
+           both columns in its predicate, so a viewer pointed at a store below this rung WOULD throw on that
+           grid. The connect-time gate is what keeps it from getting there. The grid itself gains no column
+           and the overrides are published only by get_pg_server_config in this lane. The columns and their
+           table are named only in the probe line, not this prose, per the V71 finding: the coverage ratchet
+           strips information_schema lines but cannot strip a comment. */
+        if (hasPgServerConfigDatabaseRoleOverrides)
+        {
+            return 138;
+        }
+
+        /* V137 (#3796 / #3712 / #3783): four column sets on three existing tables — the two Query Store
+           capture modes on the health row, the store-backed twin of the uncorroborated-finding route knob on
+           the alert-settings row, and the plan dimension's TOAST bytes plus the store's own checkpointer
+           phases on the store self-metrics row. COLUMN-existence sentinel (every one of its tables predates
+           it, so table existence cannot separate this from any rung), newest-first, one rung behind the top
+           since V138 landed — a store carrying this and not V138 above maps to 137, which is the honest
+           answer for it and also what makes the upgrade banner correct in the window between the two.
+
+           The gate is load-bearing here, not only the standing invariant: since #3796's code half the Query
+           Store health grid's read (ViewerDataService.Config.cs, QueryStoreHealthSql) names the two capture
+           modes, so a viewer pointed below this rung WOULD throw on that grid — the connect-time gate is what
+           keeps it from getting there. The other six columns — the Settings window's route toggle and the
+           store-size utilisation / checkpointer reads — are each their own lane and are named by no viewer
+           read yet. The column and its table are named only in the probe line, not this prose,
+           per the V71 finding: the coverage ratchet strips information_schema lines but cannot strip a
+           comment. */
+        if (hasQsCaptureModeRouteKnobToast)
+        {
+            return 137;
+        }
+
+        /* V136 (#3691): the two PostgreSQL-target series the analysis engine had no source for — the hourly
+           per-database size series (a new table) and the host's memory from Performance Insights (six
+           columns on the CPU collector's row). TABLE-existence sentinel (the new table, the V129 shape),
+           newest-first, one rung behind the top since V137 landed — a store carrying this and not V137 above
+           maps to 136, which is the honest answer for it and also what makes the upgrade banner correct in
+           both directions.
+
+           The gate rests on that standing invariant alone: no viewer read names the new table or the six
+           columns yet — the consumer lanes are #3691's later slices — so a viewer pointed below this rung
+           would not throw on any surface today. The table is named only in the probe line, not this prose,
+           per the V71 finding: the coverage ratchet strips information_schema lines but cannot strip a
+           comment. */
+        if (hasPgDatabaseSizeStatsAndHostMemory)
+        {
+            return 136;
+        }
+
+        /* V135 (#3653 A5, Q5): the Long-Running Query alert's opt-out knob — two text[] lists on the singleton
+           alert-settings row, program-name PREFIXES and exact logins, whose sessions the alert does not
+           evaluate; DEFAULT the production read's seeds (the SQL Agent job-step prefix; the two NT AUTHORITY
+           service logins). COLUMN-existence sentinel (the table has existed since V17, so table existence
+           cannot separate this from the knob rungs before it), newest-first, one rung behind the top since
+           V136 landed — a store carrying this and not V136 above maps to 135, which is the honest answer for
+           it and also what makes the upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant: the viewer's alert-settings select and
+           upsert name both columns (the Settings window's two boxes read and write them), so a viewer pointed
+           below this rung would throw a raw 42703 the moment the operator opened Settings — the banner has to
+           fire before that does. The columns and their table are named only in the probe line, not this
+           prose, per the V71 finding: the coverage ratchet strips information_schema lines but cannot strip
+           a comment. */
+        if (hasLrqExclusionKnob)
+        {
+            return 135;
+        }
+
+        /* V134 (#3653 item 13, Q7 + Q8 — the "time honesty" rung): the UTC twin of the CPU sample's
+           server-local stamp, and the engine's time-zone id beside the offset. COLUMN-existence sentinel
+           (both tables have existed since V1, so table existence cannot separate this from any rung),
+           newest-first, one rung behind the top since V135 landed — a store carrying this and not V135 above
+           maps to 134, which is the honest answer for it and also what makes the upgrade banner correct in
+           both directions.
+
+           The gate earns its place beyond that standing invariant: the viewer's raw CPU read now names the
+           UTC column (COALESCEd ahead of the #1262 per-batch de-skew), so a viewer pointed below this rung
+           would throw a raw 42703 the moment a server tab opened its CPU chart or the Overview's CPU lane —
+           the banner has to fire before either does. The columns and their tables are named only in the
+           probe line, not this prose, per the V71 finding: the coverage ratchet strips information_schema
+           lines but cannot strip a comment. */
+        if (hasTimeHonesty)
+        {
+            return 134;
+        }
+
+        /* V133 (#3691): numbackends on the PostgreSQL per-database counters and sampled_ms on the sampled
+           waits — the connection-saturation numerator and the sampler arm's duty-cycle denominator, written
+           by the collectors and read by nothing yet. COLUMN-existence sentinel (both tables have existed
+           since their own collector rungs, so table existence cannot separate this from them), newest-first,
+           one rung behind the top since V134 landed — a store carrying this and not V134 above maps to 133,
+           which is the honest answer for it and also what makes the upgrade banner correct in both
+           directions.
+
+           The gate rests on that standing invariant alone: no viewer read names either column yet, so a
+           viewer pointed below this rung would throw nothing — the arm exists because RequiredStoreSchemaVersion
+           is StorageVersion.SchemaVersion and a current store has to map to it. The columns and their tables
+           are named only in the probe line, not this prose, per the V71 finding: the coverage ratchet strips
+           information_schema lines but cannot strip a comment. */
+        if (hasPgNumbackendsAndSampledMs)
+        {
+            return 133;
+        }
+
+        /* V132 (#3653 A7): the perfmon counter's type beside its value, so the store can say which of its
+           perfmon rows are counts and which are levels and the collector stops differencing gauges.
+           COLUMN-existence sentinel (the table has existed since V4, so table existence cannot separate the
+           rungs), newest-first, one rung behind the top since V133 landed — a store carrying this and not
+           V133 above maps to 132, which is the honest answer for it and also what makes the upgrade banner
+           correct in both directions.
+
+           The gate earns its place beyond that standing invariant: the perfmon trend read names the column
+           (the chart classifies each series by it, the #3702 name proxy only as the NULL fallback), so a
+           viewer pointed below this rung would throw a raw 42703 the moment the operator ticked a counter
+           on the Perfmon tab — the banner has to fire before the tab does. The column and its table are
+           named only in the probe line, not this prose, per the V71 finding: the coverage ratchet strips
+           information_schema lines but cannot strip a comment. */
+        if (hasPerfmonCounterType)
+        {
+            return 132;
+        }
+
+        /* V131 (#3598): config.config_notification_routes, the sparse routes that let alert FAMILIES land on
+           different channels than the parent config_notification row's. TABLE-existence sentinel (the
+           table is new in this rung, the V116/V123 shape for a config-plane table), newest-first, one rung
+           behind the top since V132 landed — a store carrying this and not V132 above maps to 131, which is
+           the honest answer for it and also what makes the upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant: the Settings window's Manage
+           Notification Routes grid reads the table by name, so a viewer pointed below this rung would
+           throw a raw 42P01 the moment the operator opened it — the banner has to fire before the grid
+           does. */
+        if (hasNotificationRoutes)
+        {
+            return 131;
+        }
+
+        /* V130 (#3602, #3603): the family-specific numbers on collect.pg_log_events — a spill's bytes, an
+           autovacuum run's relation, duration, pages, tuples, buffers and WAL — thirteen nullable columns
+           the two parser families lift out of the prose V129 stored whole. COLUMN-existence sentinel (the
+           table is V129's, so table existence cannot separate the rungs), newest-first, one rung behind the
+           top since V131 landed — a store carrying this and not V131 above maps to 130, which is the honest
+           answer for it and also what makes the upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant: the service's log-events reader names
+           the columns (the Viewer's panel is served by the same table and will name them when it grows the
+           spill / run columns), so a store below this rung would throw a raw 42703 on the first read that
+           does — the banner has to fire before that read. The column and table are named only in the probe
+           line, not this prose, per the V71 finding. */
+        if (hasPgLogEventMetrics)
+        {
+            return 130;
+        }
+
+        /* V129 (#3601): collect.pg_log_events, the classified log-event pipeline's table — the third
+           reader of the PostgreSQL server log and the first to carry more than one family (errors,
+           connections, lock waits, and the recognised-only spill / autovacuum / checkpoint shapes).
+           TABLE-existence sentinel, like V103's and V106's before it, newest-first, one rung behind the top
+           since V130 landed — a store carrying this and not V130 above maps to 129, which is the honest
+           answer for it and also what makes the upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant: the PostgreSQL Activity tab's log-events
+           panel reads the table by name, so a viewer pointed below this rung would throw a raw 42P01 on
+           that tab — the banner has to fire before the tab does. */
+        if (hasPgLogEvents)
+        {
+            return 129;
+        }
+
+        if (hasDeltaFamilyIntervalCompletion)
+        {
+            return 128;
+        }
+
+        /* V127 (#3540): the measured sample interval on the four delta families that persisted their
+           deltas naked — the measurement-layer keystone, so a restart's fabricated (0, 0) row can be told
+           from a genuinely idle one at every read. COLUMN-existence sentinel (the four tables have existed
+           since V4/V10, so table existence cannot separate the rungs), newest-first, one rung behind the
+           top since V128 landed — a store carrying this and not V128 above maps to 127, which is the
+           honest answer for it and also what makes the upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant: every viewer trend read over these four
+           families names the column (the stored interval is preferred over the LAG derivation), so a
+           viewer pointed below this rung would throw a raw 42703 on the Waits, File I/O and Latch/Spinlock
+           tabs — the banner has to fire before those tabs do. The column and its tables are named only in
+           the probe line, not this prose, per the V71 finding: the coverage ratchet strips
+           information_schema lines but cannot strip a comment. */
+        if (hasDeltaFamilyIntervalColumns)
+        {
+            return 127;
+        }
+
+        /* V126 (#3528): the Store Disk Pressure warning's GB floor on config_alert_settings — the AND
+           qualifier that stops a large store volume at a low percent paging CRITICAL. COLUMN-existence
+           sentinel (the table has existed since V17, so table existence cannot separate the rungs),
+           newest-first, one rung behind the top since V127 landed — a store carrying this and not V127
+           above maps to 126, which is the honest answer for it and also what makes the upgrade banner
+           correct in both directions.
+
+           The gate earns its place beyond that standing invariant since the viewer pass (#3563): the
+           alert-settings select now names the column, so a viewer pointed below this rung would throw
+           a raw 42703 when the Settings window prefills — the knob landed backend-first, and the
+           Settings window's box is wired now. The column is named only in the probe line, not this
+           prose, per the V71 finding: the coverage ratchet strips information_schema lines but cannot
+           strip a comment. */
+        if (hasSelfDiskWarnGbFloor)
+        {
+            return 126;
+        }
+
         /* V125 (#3477): the per-collector database scope on config_collector_schedules — the
            allow-list that lets an expensive per-database collector run against a representative
            sample instead of being turned off for the whole server. COLUMN-existence sentinel (the
            table has existed since V17, so table existence cannot separate the rungs), newest-first,
-           and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion
-           rather than falling through to 124 and showing a spurious upgrade banner on a store that
-           is current.
+           one rung behind the top — a store carrying this and not V126 above maps to 125, which is
+           the honest answer for it and also what makes the upgrade banner correct in both
+           directions.
 
            The gate earns its place beyond that standing invariant: the schedule editor's select now
            names the column, so a viewer pointed below this rung would throw a raw 42703 on OPENING
@@ -1894,6 +2610,18 @@ SELECT
         return 16;
     }
 
+    /// <summary>
+    /// #4530/#4597: the server's edition/MAXDOP/cost threshold/max memory for plan analysis, plus the
+    /// database's name and compat level when <paramref name="databaseName"/> is known, for the viewer's own
+    /// plan-opening sites (<see cref="PerformanceMonitor.Ui.PlanViewerControl.ServerMetadata"/>) — this app
+    /// has no live connection to the monitored server at plan-view time, so it reads the collected copy the
+    /// same way the MCP plan tools and the drill-downs do. Non-fatal: a missing row or a read failure
+    /// returns null, same as <see cref="DarlingServerMetadataReader.ReadAsync"/> itself.
+    /// </summary>
+    public Task<PerformanceMonitor.PlanAnalysis.ServerMetadata?> GetPlanAnalysisServerMetadataAsync(
+        int serverId, string? databaseName = null, CancellationToken cancellationToken = default) =>
+        DarlingServerMetadataReader.ReadAsync(_dataSource, serverId, databaseName, cancellationToken);
+
     /// <summary>All registered servers, ordered as the server list displays them.</summary>
     public async Task<List<DarlingServer>> GetServersAsync(CancellationToken cancellationToken = default)
     {
@@ -1914,7 +2642,8 @@ SELECT
                 reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7),
-                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
+                reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
         }
 
         return servers;
@@ -1946,6 +2675,52 @@ LIMIT 1";
         return result is null or DBNull
             ? null
             : Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// <see cref="ServerUtcOffsetSql"/> plus the zone: the newest <c>server_properties</c> row that has an
+    /// offset, with its <c>time_zone_id</c> (V134 — <c>CURRENT_TIMEZONE_ID()</c>, a Windows zone id such as
+    /// "Eastern Standard Time" on SQL Server 2022 and later, NULL before). Both columns come from the SAME
+    /// row, so the id and the offset describe one snapshot. The zone is what lets the Server-time display
+    /// mode follow a daylight-saving change; the offset is the fallback when the id is NULL or does not
+    /// resolve on the viewer's machine (#4766).
+    /// </summary>
+    public const string ServerClockSql = @"
+SELECT utc_offset_minutes, time_zone_id
+FROM server_properties
+WHERE server_id = $1
+AND   utc_offset_minutes IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The active server's clock (#4766): its time zone where the newest snapshot carries a resolvable id,
+    /// else the snapshot's fixed offset. Returns null when no offset has been collected yet, so the caller
+    /// keeps the viewer machine's offset. A store below V134 has no <c>time_zone_id</c> column (42703): that
+    /// falls back to the offset-only read, exactly what this method did before the zone existed.
+    /// </summary>
+    public async Task<ServerClock?> GetServerClockAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var command = _dataSource.CreateCommand(ServerClockSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            return ServerClock.Resolve(
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(0) ? null : reader.GetInt32(0));
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
+        {
+            var offset = await GetServerUtcOffsetMinutesAsync(serverId, cancellationToken);
+            return offset.HasValue ? ServerClock.FixedOffset(offset.Value) : null;
+        }
     }
 
     /// <summary>

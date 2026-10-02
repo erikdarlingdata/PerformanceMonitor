@@ -10,18 +10,35 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
     /// <summary>
-    /// Gets alert history from the config_alert_log table (excludes dismissed alerts).
+    /// Gets alert history from the config_alert_log table, newest first. Excludes dismissed alerts unless
+    /// <paramref name="includeDismissed"/> is set.
+    ///
+    /// <para><b>The <c>dismissed = FALSE</c> filter is a caller's choice rather than a hidden one (#3541 A3).</b>
+    /// Dismissal is the operator's acknowledgement — "I have seen this row, hide it from the grid" — and
+    /// hiding it is the right default for the Alerts History tab. It is NOT a fact about whether the alert
+    /// fired, and an agent reconstructing an incident through <c>get_alert_history</c> was handed a window
+    /// with its acknowledged criticals silently removed, under a field that called the remainder
+    /// <c>total_alerts</c>. The default stays the grid's, and the MCP tool can switch the filter off. Spelled
+    /// <c>(dismissed = FALSE OR $N)</c> so the two scopes stay two statements rather than four.</para>
+    ///
+    /// <para>On this SKU the flag reaches only the LIVE table's dismissed rows. Alerts that have aged into the
+    /// parquet archive and were dismissed there are removed by <c>v_config_alert_log</c> itself (the
+    /// <c>dismissed_archive_alerts</c> sidecar the v23 schema migration added), so no read through the view can return or count them;
+    /// the MCP tool's description says so.</para>
     /// </summary>
-    public async Task<List<AlertHistoryRow>> GetAlertHistoryAsync(int hoursBack = 24, int limit = 500, int? serverId = null, DateTime? asOfUtc = null)
+    public async Task<List<AlertHistoryRow>> GetAlertHistoryAsync(int hoursBack = 24, int limit = 500, int? serverId = null, DateTime? asOfUtc = null, bool includeDismissed = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -29,7 +46,7 @@ public partial class LocalDataService
         /* Both edges, not just the lower one: the row cap is applied by the database, so trimming
            after the read would spend the whole LIMIT on rows newer than an as_of anchor and hand back an
            empty window that looks exactly like a quiet one. */
-        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         if (serverId.HasValue)
         {
@@ -47,18 +64,20 @@ SELECT
     muted,
     detail_text,
     source,
-    context_json
+    context_json,
+    dismissed
 FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   alert_time <= $2
 AND   server_id = $3
-AND   dismissed = FALSE
+AND   (dismissed = FALSE OR $5)
 ORDER BY alert_time DESC
 LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
             command.Parameters.Add(new DuckDBParameter { Value = until });
             command.Parameters.Add(new DuckDBParameter { Value = serverId.Value });
             command.Parameters.Add(new DuckDBParameter { Value = limit });
+            command.Parameters.Add(new DuckDBParameter { Value = includeDismissed });
         }
         else
         {
@@ -76,16 +95,18 @@ SELECT
     muted,
     detail_text,
     source,
-    context_json
+    context_json,
+    dismissed
 FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   alert_time <= $2
-AND   dismissed = FALSE
+AND   (dismissed = FALSE OR $4)
 ORDER BY alert_time DESC
 LIMIT $3";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
             command.Parameters.Add(new DuckDBParameter { Value = until });
             command.Parameters.Add(new DuckDBParameter { Value = limit });
+            command.Parameters.Add(new DuckDBParameter { Value = includeDismissed });
         }
 
         var items = new List<AlertHistoryRow>();
@@ -106,11 +127,83 @@ LIMIT $3";
                 Muted = !reader.IsDBNull(9) && reader.GetBoolean(9),
                 DetailText = reader.IsDBNull(10) ? null : reader.GetString(10),
                 Source = reader.IsDBNull(11) ? "live" : reader.GetString(11),
-                ContextJson = reader.IsDBNull(12) ? null : reader.GetString(12)
+                ContextJson = reader.IsDBNull(12) ? null : reader.GetString(12),
+                Dismissed = !reader.IsDBNull(13) && reader.GetBoolean(13)
             });
         }
 
+        ApplyDisplayNames(items);
         return items;
+    }
+
+    /// <summary>
+    /// Maps each server id to the name the operator gave the server (its display name, else its address), from the
+    /// registered servers. Analysis alerts are stored under the storage name (<c>host:database</c>) and engine alerts
+    /// under the display name, so the history read uses this to show one spelling per server.
+    /// </summary>
+    public static Dictionary<int, string> BuildDisplayNameMap(IEnumerable<ServerConnection> servers)
+    {
+        var map = new Dictionary<int, string>();
+        foreach (var server in servers)
+        {
+            var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+            map[id] = ServerManager.NameForMessage(server);
+        }
+        return map;
+    }
+
+    /// <summary>Supplies the server-id to display-name map the history read shows. Null shows the stored names.
+    /// Set once at MainWindow init (before the MCP host starts); the MCP host is handed this same instance, so
+    /// the history it serves shows the same names.</summary>
+    public Func<IReadOnlyDictionary<int, string>>? DisplayNames { get; set; }
+
+    /// <summary>
+    /// Shows each row under its server's display name, found by server id, and keeps the name the row was stored with
+    /// in <see cref="AlertHistoryRow.StoredServerName"/>. A server no longer registered keeps its stored name. Display
+    /// only: nothing written to the alert log changes.
+    /// </summary>
+    private void ApplyDisplayNames(List<AlertHistoryRow> items)
+    {
+        var names = DisplayNames?.Invoke();
+        foreach (var item in items)
+        {
+            item.StoredServerName = item.ServerName;
+            if (names != null && names.TryGetValue(item.ServerId, out var display) && !string.IsNullOrWhiteSpace(display))
+                item.ServerName = display;
+        }
+    }
+
+    /// <summary>
+    /// How many dismissed rows the window (and optional server scope) holds — the rows the default
+    /// <see cref="GetAlertHistoryAsync"/> hides. The count is what turns "dismissed rows are excluded" from a
+    /// disclaimer into a measurement: zero means the filter hid nothing. Reads the same view as the history
+    /// read, so it counts exactly the rows that read COULD have returned with the filter off — which on this
+    /// SKU excludes archived-and-dismissed rows the view has already removed.
+    /// </summary>
+    public async Task<long> CountDismissedAlertsAsync(int hoursBack, int? serverId, DateTime? asOfUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var serverClause = serverId.HasValue ? "\nAND   server_id = $3" : string.Empty;
+
+        /* CAST to BIGINT: DuckDB's COUNT(*) is already BIGINT, but the cast is written so a HUGEINT can never
+           arrive here as System.Numerics.BigInteger, which Convert.ToInt64 cannot convert (see the blocking
+           reads above for the episode that taught it). */
+        command.CommandText = @"
+SELECT CAST(COUNT(*) AS BIGINT)
+FROM v_config_alert_log
+WHERE alert_time >= $1
+AND   alert_time <= $2" + serverClause + @"
+AND   dismissed = TRUE";
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = until });
+        if (serverId.HasValue)
+            command.Parameters.Add(new DuckDBParameter { Value = serverId.Value });
+
+        var result = await command.ExecuteScalarAsync();
+        return result is null || result is DBNull ? 0L : ToInt64(result);
     }
 
     /// <summary>
@@ -130,6 +223,7 @@ LIMIT $3";
             AppLogger.Info("AlertDismiss", $"Action=DismissSelected, Requested={alerts.Count}");
 
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "dismissed_archive_alerts");
         int archivedDismissed = 0;
 
         using var beginCmd = connection.CreateCommand();
@@ -235,6 +329,7 @@ AND NOT EXISTS (
             AppLogger.Info("AlertDismiss", $"Action=DismissAll, HoursBack={hoursBack}, ServerId={serverId?.ToString() ?? "all"}");
 
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "dismissed_archive_alerts");
         using var command = connection.CreateCommand();
 
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
@@ -386,6 +481,8 @@ AND    dismissed = FALSE";
     /// </summary>
     public async Task<int> PurgeOldDismissedArchiveAlertsAsync(int retentionDays = DismissedArchiveAlertRetentionDays)
     {
+        /* Not refused while a restore is pending: it is a background retention sweep, and a row it deletes that
+           the restart restores is aged out again on its next run. */
         using var connection = await OpenWriteConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM dismissed_archive_alerts WHERE alert_time < $1";
@@ -437,7 +534,11 @@ public class AlertHistoryRow
 {
     public DateTime AlertTime { get; set; }
     public int ServerId { get; set; }
+    /// <summary>The name shown for the server: its display name, else the name the row was stored with.</summary>
     public string ServerName { get; set; } = "";
+
+    /// <summary>The server name exactly as stored in the alert log (analysis rows: <c>host:database</c>). Mute rules match on it.</summary>
+    public string StoredServerName { get; set; } = "";
     public string MetricName { get; set; } = "";
     public double CurrentValue { get; set; }
     public double ThresholdValue { get; set; }
@@ -449,9 +550,33 @@ public class AlertHistoryRow
     public string Source { get; set; } = "live";
     public string? ContextJson { get; set; }
 
+    /// <summary>The operator's Viewer acknowledgement (#3541 A3): a row hidden from the Alerts History tab.
+    /// Always false on the default read, which excludes those rows; carried so a read that INCLUDES them can
+    /// label each one.</summary>
+    public bool Dismissed { get; set; }
+
     public bool IsArchived => string.Equals(Source, "archive", StringComparison.OrdinalIgnoreCase);
 
-    public string TimeLocal => AlertTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+    /// <summary>
+    /// The clock of the server this row belongs to (#4766), stamped by the list that shows the row after the read: the
+    /// server's own collected clock, else its open tab's, else the machine's (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>).
+    /// <see cref="TimeLocal"/> converts on it in Server mode, so two rows of two servers each read their own server's
+    /// wall clock. Null on a row nothing stamped (a read outside the tab, such as the MCP tools'), which then takes the
+    /// active server's clock. Not part of what the MCP tools return: they name the fields they serialize.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// <see cref="AlertTime"/> (naive UTC) in the selected display mode (#4766): UTC as stored, this machine's zone, or
+    /// the row's server's own clock. This used to be the machine's local time in every mode, so a grid in UTC or Server
+    /// mode showed local times under a header the rest of the app read in the chosen mode. An alert in the repeated
+    /// hour after a fall-back reads the same wall time in both of its occurrences, so it takes a space and its UTC
+    /// offset ("2026-11-01 01:30:00 -05:00"), as <see cref="ServerTimeHelper.FormatServerTime(DateTime, string)"/> does
+    /// for the other grids.
+    /// </summary>
+    public string TimeLocal => ServerTimeHelper.FormatInstant(
+        AlertTime, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, Clock ?? ServerTimeHelper.ActiveServerClock),
+        "yyyy-MM-dd HH:mm:ss");
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
     public string ThresholdValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, ThresholdValue);
 
@@ -465,7 +590,12 @@ public class AlertHistoryRow
         AlertDeliveryStatus.Describe(AlertSent, NotificationType, SendError, producerHadTrayChannel: true);
 
     public bool IsResolved => AlertMetricClassifier.IsResolution(MetricName);
-    public bool IsCritical => AlertMetricClassifier.IsCritical(MetricName);
-    public bool IsWarning => AlertMetricClassifier.IsWarning(MetricName);
+
+    /* #3539 A8e: the row's emphasis is the tier the alert FIRED at, read off the persisted context, and the
+       by-name classifier only for rows that carry none (written before the member existed, or fired with no
+       grade). The two arms live in AlertHistoryRowSeverity — one decision for this grid, the Darling
+       Viewer's, the web page and get_alert_history — and its summary is where the fallback's reasons are. */
+    public bool IsCritical => AlertHistoryRowSeverity.IsCritical(MetricName, ContextJson);
+    public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
 
 }

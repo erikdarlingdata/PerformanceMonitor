@@ -23,7 +23,7 @@ namespace Darling.Tests;
 ///
 /// <para><b>The defect this pins.</b> Total daily cost is <c>runs x cost-per-run</c>. Comparing totals cannot
 /// distinguish "each run got more expensive" from "the same work ran more often", so a collector whose cadence
-/// RECOVERED — strictly an improvement — reported as a regression. On prod-pos-use1-monitor-01 that fired 3,259
+/// RECOVERED — strictly an improvement — reported as a regression. On the use1 monitoring host that fired 3,259
 /// times across 612 (server, collector) pairs in one day, and 53% of those pairs had per-run cost going DOWN.
 /// Running the shipped predicate against that store, the total-cost rule matched 610 pairs and the per-run rule
 /// matched 14.</para>

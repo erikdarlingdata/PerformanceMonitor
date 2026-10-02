@@ -3,6 +3,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -117,18 +118,29 @@ public sealed class PgServerConfigTests
     }
 
     /// <summary>
-    /// The current-config read is anchored on the newest snapshot, never on an hours window. A
-    /// configuration has no window — it is the state now — and an hours filter would return NOTHING for a
-    /// server whose hourly collector last ran just outside it, which reads as "this server has no
-    /// configuration" rather than "ask again".
+    /// The current-config read is anchored on the newest snapshot, never on an hours window that could come up
+    /// empty. A configuration has no window — it is the state now — and an hours filter with no fallback would
+    /// return NOTHING for a server whose hourly collector last ran just outside it, which reads as "this
+    /// server has no configuration" rather than "ask again".
+    ///
+    /// <para><b>#3974: this is no longer "no bound at all" — it is "a day's bound, with a guaranteed retry at
+    /// none".</b> <see cref="DarlingPgServerConfigReader.ConfigSnapshotLowerBounds"/> lets TimescaleDB plan
+    /// the day's one or two chunks instead of the whole retained year, and
+    /// <see cref="DarlingPgServerConfigReader.GetCurrentConfigPageAsync"/> always falls back to
+    /// <see cref="DateTime.MinValue"/> when the day found nothing — so the property this test is named for
+    /// (a server whose collector went dark past the bound still answers with its newest snapshot, never
+    /// "no configuration") still holds; only the SQL text carries a bound now, alongside the fallback that
+    /// makes it a window in name only. <see cref="PgServerConfigToolBoundTests"/> pins the bound and the
+    /// fallback loop.</para>
     /// </summary>
     [Fact]
-    public void TheCurrentReadAnchorsOnTheNewestSnapshot_NotAWindow()
+    public void TheCurrentReadAnchorsOnTheNewestSnapshot_NeverComingUpEmptyForADarkServer()
     {
         var sql = DarlingPgServerConfigReader.CurrentConfigSql;
 
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
+        Assert.Equal(DateTime.MinValue, DarlingPgServerConfigReader.ConfigSnapshotLowerBounds(DateTime.UtcNow)[^1]);
     }
 
     /// <summary>
@@ -146,6 +158,29 @@ public sealed class PgServerConfigTests
         Assert.Contains("LAG(c.setting) OVER (PARTITION BY c.name ORDER BY c.collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE prev_time IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("setting IS DISTINCT FROM prev_setting", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3937: the server-wide change read is the same statement it was before the scoped feed landed beside
+    /// it - its text with comments stripped and whitespace collapsed, against the pre-#3937 statement verbatim -
+    /// so its rows and their order cannot have moved. The override changes are ScopedConfigChangesSql's.
+    /// </summary>
+    [Fact]
+    public void TheServerWideChangeRead_IsTheStatementItWasBeforeTheScopedFeed()
+    {
+        var sql = Regex.Replace(DarlingPgServerConfigReader.ConfigChangesSql, @"/\*.*?\*/", " ", RegexOptions.Singleline);
+        sql = Regex.Replace(sql, @"\s+", " ").Trim();
+
+        Assert.Equal(
+            "WITH ordered AS ( SELECT c.collection_time, c.name, c.setting, c.unit, c.context, c.source, c.short_desc, "
+            + "LAG(c.setting) OVER (PARTITION BY c.name ORDER BY c.collection_time) AS prev_setting, "
+            + "LAG(c.collection_time) OVER (PARTITION BY c.name ORDER BY c.collection_time) AS prev_time "
+            + "FROM pg_server_config AS c WHERE c.server_id = $1 AND c.collection_time >= $2 AND c.collection_time <= $3 "
+            + "AND coalesce(c.source, '') NOT IN ('client', 'session', 'override') "
+            + "AND c.database_name IS NULL AND c.role_name IS NULL ) "
+            + "SELECT collection_time, name, prev_setting, setting, unit, context, source, short_desc FROM ordered "
+            + "WHERE prev_time IS NOT NULL AND setting IS DISTINCT FROM prev_setting ORDER BY collection_time DESC, name LIMIT $4",
+            sql);
     }
 
     private static CollectorContext MakeContext() => new()

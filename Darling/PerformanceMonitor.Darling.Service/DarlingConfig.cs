@@ -42,6 +42,17 @@ public sealed class DarlingConfig
     [JsonPropertyName("postgres")]
     public PostgresConfig Postgres { get; set; } = new();
 
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule disable/severity-override config, read from an optional
+    /// <c>analyzer</c> section in darling.json — the same shape as erikdarlingdata/PerformanceStudio's
+    /// <c>.planview.json</c> root (<see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig"/>). Null
+    /// (the section omitted entirely) behaves exactly like an explicit <c>AnalyzerConfig.Default</c>:
+    /// no rule disabled, no severity overridden. Not auto-discovered from any other file — PM does not
+    /// couple to PlanViewer's <c>~/.planview.json</c> convention.
+    /// </summary>
+    [JsonPropertyName("analyzer")]
+    public PerformanceMonitor.PlanAnalysis.AnalyzerConfig? Analyzer { get; set; }
+
     [JsonPropertyName("servers")]
     public List<MonitoredServer> Servers { get; set; } = new();
 
@@ -101,8 +112,9 @@ public sealed class DarlingConfig
     /// (<see cref="!:DarlingManagedRoles.ReassertComposeStatementTimeoutAsync"/>). Three consequences a
     /// reader of this property should not have to rediscover:</para>
     ///
-    /// <para>1. <b>Re-assertion is managed-mode + Windows only</b>, mirroring the gate on provisioning,
-    /// which is where these roles get CREATED. A BYO store provisions them out-of-band through
+    /// <para>1. <b>Re-assertion happens only where the service provisioned the roles</b> — managed mode on
+    /// Windows, and the compose distribution's own store (#3914) — mirroring the gate on provisioning, which is
+    /// where these roles get CREATED. Any other BYO store provisions them out-of-band through
     /// <c>tools/provision-roles.sql</c> and names them itself, so there the old restart-scoped caveat still
     /// holds — and an operator has to re-run that script by hand.</para>
     ///
@@ -114,11 +126,12 @@ public sealed class DarlingConfig
     /// what was last successfully written to the roles on the paths above, but a failed re-assertion leaves
     /// the roles behind until the next reload or start converges them.</para>
     ///
-    /// <para>15 preserves the constant it replaces. It is a judgement about store size and disk speed, which
-    /// this product cannot make for someone else's deployment — a fleet-wide aggregate over a wide window on a
-    /// large store can exceed 15s with nothing wrong.</para>
+    /// <para>60 preserves the constant it replaces (raised from a shipped 15 by #4442, whose migration rung
+    /// moves an existing store's shipped-15 value to 60 too). It is a judgement about store size and disk
+    /// speed, which this product cannot make for someone else's deployment — a fleet-wide aggregate over a
+    /// wide window on a large store can exceed 60s with nothing wrong.</para>
     /// </summary>
-    public int ComposeStatementTimeoutSeconds { get; set; } = 15;
+    public int ComposeStatementTimeoutSeconds { get; set; } = 60;
 
     /// <summary>
     /// The plan-XML storage codec (#2171). Store-backed (config_service, V62), normalized to 'gzip' or
@@ -157,6 +170,19 @@ public sealed class DarlingConfig
     public bool CollectSchemaChangeEvents { get; set; } = true;
 
     /// <summary>
+    /// Whether the raw hypertable chunk-interval reconcile runs at all (#4211). Default TRUE. Rides the daily
+    /// retention purge tick (first pass after startup, then every 24h) and, for every raw hypertable, applies
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner"/>'s decisions with
+    /// <c>set_chunk_time_interval</c>. Set false to keep every table's interval exactly where it is — an
+    /// operator override survives restarts, and nothing is applied or recorded to
+    /// <c>collect.raw_chunk_interval_rung_history</c> while this is off. A file-only knob (not seeded into the
+    /// control-plane store, unlike <see cref="QueryStoreBackfillEnabled"/>), so an edit takes effect on the
+    /// next restart.
+    /// </summary>
+    [JsonPropertyName("rawChunkIntervalReconcileEnabled")]
+    public bool RawChunkIntervalReconcileEnabled { get; set; } = true;
+
+    /// <summary>
     /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is
     /// every cycle (the pre-#2862 collector, byte-identical), 4 is one cycle in four. Clamped to [1,60] on
     /// read. Only <c>procedure_stats</c> is gated; every other plan-capturing collector is untouched.
@@ -190,8 +216,9 @@ public sealed class DarlingConfig
     public AlertsConfig Alerts { get; set; } = new();
 
     /// <summary>
-    /// SMTP delivery for fired alerts. Delivery is enabled when host + from + to are all set
-    /// (no separate flag — defaults over speculative config); the password uses the same DPAPI
+    /// SMTP delivery for fired alerts. Delivery is enabled when host + from are set (no separate
+    /// flag — defaults over speculative config); <c>to</c> is the default recipient list, which a
+    /// notification route can stand in for (#4751). The password uses the same DPAPI
     /// --encrypt-password pattern as SQL auth. Optional.
     /// </summary>
     [JsonPropertyName("smtp")]
@@ -203,6 +230,19 @@ public sealed class DarlingConfig
     /// </summary>
     [JsonPropertyName("webhooks")]
     public WebhooksConfig Webhooks { get; set; } = new();
+
+    /// <summary>
+    /// The sparse notification routes layered over <see cref="Smtp"/> and <see cref="Webhooks"/> (#3598,
+    /// V131 <c>config.config_notification_routes</c>): a family or exact-metric match with a destination
+    /// per channel, empty meaning "inherit". STORE-ONLY, like mute rules — <c>JsonIgnore</c> because a
+    /// route is an operator's live tuning through the Viewer's Settings grid, not deployment plumbing, and a
+    /// darling.json copy would be overwritten by the first store reload exactly as <c>Alerts</c> is
+    /// (<c>ApplyToConfig</c> swaps it wholesale). Empty until the store reload delivers a list, which is
+    /// the pre-routes fan-out exactly.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<PerformanceMonitor.Notifications.NotificationRoute> NotificationRoutes { get; set; } =
+        Array.Empty<PerformanceMonitor.Notifications.NotificationRoute>();
 
     /// <summary>
     /// The scheduled-analysis cadence + delivery knobs (Phase-5 AN3 / control-plane Stage 1). Every
@@ -342,6 +382,22 @@ public sealed class DarlingConfig
             {
                 problems.Add($"postgres.port must be between 1 and 65535 (got {Postgres.Port}).");
             }
+
+            /* #3914: same reasoning as connectionString above — managed mode connects the web dashboard and the
+               MCP server as its own viewer and mcp roles, so a hand-set login would silently lose. */
+            foreach (var (setting, value) in new[]
+            {
+                ("postgres.webConnectionString", Postgres.WebConnectionString),
+                ("postgres.mcpConnectionString", Postgres.McpConnectionString),
+            })
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    problems.Add($"postgres.managed is true AND {setting} is set — managed mode connects the web " +
+                        "dashboard and the MCP server as its own viewer and mcp roles; remove it, or remove \"managed\" " +
+                        "to use your own PostgreSQL.");
+                }
+            }
         }
         else if (string.IsNullOrWhiteSpace(Postgres.ConnectionString))
         {
@@ -433,6 +489,25 @@ public sealed class PostgresConfig
 {
     [JsonPropertyName("connectionString")]
     public string ConnectionString { get; set; } = "";
+
+    /// <summary>
+    /// The web dashboard's store login on a store the service does not manage (#3914), normally the <c>viewer</c>
+    /// role <c>tools/provision-roles.sql</c> creates. Same forms as <see cref="ConnectionString"/>: a literal, or an
+    /// <c>env:NAME</c> / <c>file:/path</c> reference (#1804). Resolved when the web host starts, not at parse, so an
+    /// unreadable reference keeps the dashboard down with the reason logged instead of stopping collection. Unset:
+    /// the compose distribution's own store uses the <c>viewer</c> role the service provisions there, and any other
+    /// store the owner <see cref="ConnectionString"/>, with a startup warning naming what that gives up. Managed mode
+    /// derives its own; setting this there is a validation error.
+    /// </summary>
+    [JsonPropertyName("webConnectionString")]
+    public string? WebConnectionString { get; set; }
+
+    /// <summary>
+    /// The MCP server's store login on a store the service does not manage (#3914), normally the <c>mcp</c> role
+    /// <c>tools/provision-roles.sql</c> creates. Everything <see cref="WebConnectionString"/> says, for the MCP host.
+    /// </summary>
+    [JsonPropertyName("mcpConnectionString")]
+    public string? McpConnectionString { get; set; }
 
     /// <summary>Run the bundled, service-managed PostgreSQL instead of pointing at an existing one.</summary>
     [JsonPropertyName("managed")]
@@ -569,6 +644,9 @@ public sealed class AlertsConfig
     [JsonPropertyName("poisonWaitEnabled")]
     public bool PoisonWaitEnabled { get; set; } = true;
 
+    /// <summary>Read and reported but no longer consulted by the alert engine since #3539 A4 — see
+    /// <see cref="IAlertEngineSettings.PoisonWaitThresholdMs"/>. Kept so an existing darling.json and the
+    /// store's control-plane row keep round-tripping.</summary>
     [JsonPropertyName("poisonWaitThresholdMs")]
     public int PoisonWaitThresholdMs { get; set; } = 500;
 
@@ -610,14 +688,25 @@ public sealed class AlertsConfig
     /* #2349: the database file-growth alert. Ships OFF -- a new alert that starts firing on upgrade is a bad
        citizen, and the right thresholds are a property of the fleet rather than of the product. */
     public bool FileGrowthEnabled { get; set; }
+    /* #3539 A8c: MB per HOUR, averaged over FileGrowthLookbackMinutes. Same column (file_growth_rise_mb), same
+       integer, one meaning on every lookback -- the engine scales it to the window at comparison time. */
     public int FileGrowthRiseMb { get; set; } = 10240;
     public int FileGrowthVolumePercent { get; set; } = 60;
+    /* The window the rise RATE is averaged over (#3539 A8c) -- it does not rescale the threshold. */
     public int FileGrowthLookbackMinutes { get; set; } = 60;
 
     /// <summary>#2107: the store volume's self-alert warning percent (was a compile-time 10.0;
-    /// 0 disables the check — percent is its only trigger).</summary>
+    /// 0 disables the check).</summary>
     [JsonPropertyName("selfDiskFreeWarnPercent")]
     public int SelfDiskFreeWarnPercent { get; set; } = 10;
+
+    /// <summary>#3528: the store warning's GB floor — the percent above additionally requires free space
+    /// below this many GB, an AND qualifier so a large volume at a low percent never pages (0 removes the
+    /// floor). The PVS-floor composition, not the target pair's OR. 50 puts the crossover at a 500 GB
+    /// store volume: below that the percent governs exactly as before; above it, 50 GB free is the line —
+    /// which is what stops 400 GB free on a 4 TB volume reading as "act now".</summary>
+    [JsonPropertyName("selfDiskFreeWarnGb")]
+    public int SelfDiskFreeWarnGb { get; set; } = 50;
 
     /// <summary>#2107: how long collection may go quiet before Collection Stopped / Agent Not
     /// Running fire (was a compile-time 30 minutes). Defaults to the shared constant behind the
@@ -685,10 +774,12 @@ public sealed class AlertsConfig
     /// retention and deadlock-band knobs above already follow. <c>DarlingAlertSettings</c> clamps it on
     /// read.</para>
     ///
-    /// <para><b>Separate from <see cref="DeadlockCountThreshold"/> deliberately</b> — see the V122 rung and
-    /// the default constant for why the SQL Server figure's justification does not travel to an engine with
-    /// no deadlock band. The <c>enabled</c> switch IS shared: <see cref="DeadlockEnabled"/> governs both
-    /// engines.</para></summary>
+    /// <para><b>Separate from <see cref="DeadlockCountThreshold"/> deliberately</b> — see the default
+    /// constant: the two engines count with different instruments (captured graphs vs deadlocks parsed
+    /// from the server log), and an operator tuning one should not silently move the other. The V122 rung's
+    /// second reason — that a PostgreSQL server had no deadlock band to agree with — ended with #3539, which
+    /// bands the PostgreSQL card's own counter difference through the shared tiers. The <c>enabled</c>
+    /// switch IS shared: <see cref="DeadlockEnabled"/> governs both engines.</para></summary>
     [JsonPropertyName("pgDeadlockCountThreshold")]
     public int PgDeadlockCountThreshold { get; set; } = PostgresAlertEvaluator.DeadlockCountThresholdDefault;
 
@@ -807,6 +898,39 @@ public sealed class AlertsConfig
     /// <summary>Exclude CDC capture sessions (default true).</summary>
     [JsonPropertyName("longRunningQueryExcludeCdc")]
     public bool LongRunningQueryExcludeCdc { get; set; } = true;
+
+    /// <summary>
+    /// The Long-Running Query OPT-OUT knob's <c>program_name</c> arm (#3653 A5, ruling Q5): sessions whose
+    /// program name STARTS WITH an entry are not evaluated by the alert at all — not read into the decision,
+    /// not counted, not fingerprinted; the opposite of a mute rule. Case-insensitive prefix, no wildcard grammar
+    /// — <c>LongRunningQueryExclusions</c> in the Alerting library is the one rule both SKUs apply, IN the read
+    /// and ahead of its row cap (a post-read drop would let permanent background requests fill the cap; the type
+    /// says why). Stored as <c>config_alert_settings.long_running_query_excluded_program_name_prefixes</c>
+    /// (<c>text[]</c>, V135), the same shape as <c>excludedDatabases</c>, and the store row wins over this file
+    /// like every other alert knob.
+    ///
+    /// <para><b>Seeded default</b>: <c>SQLAgent - TSQL JobStep</c> — class 1 of the 7-day read of one large
+    /// production store, whose long-running population was (1) SQL Agent job steps, ~460 sessions a week across
+    /// 11 jobs, medians 35–62 min (the program name embeds the job id, hence a PREFIX); (2) the
+    /// <c>NT AUTHORITY\SYSTEM</c> / <c>NT AUTHORITY\NETWORK SERVICE</c> logins, the multi-day background — see
+    /// <see cref="LongRunningQueryExcludedLogins"/>; (3) the application's admin login — NOT excluded, because it
+    /// carries the job wave AND real ad-hoc long-runners, and this prefix already removes its share; (4) named
+    /// humans — never excluded. The seed is a DEFAULT: this initialiser and the rung's column default agree, so a
+    /// fresh file and a pre-rung row read the same; an operator clearing the list stores an empty array, which
+    /// excludes nothing on this arm.</para>
+    /// </summary>
+    [JsonPropertyName("longRunningQueryExcludedProgramNamePrefixes")]
+    public List<string> LongRunningQueryExcludedProgramNamePrefixes { get; set; } = LongRunningQueryExclusions.DefaultProgramNamePrefixes.ToList();
+
+    /// <summary>The knob's <c>login_name</c> arm (#3653 A5, Q5) — EXACT, case-insensitive (a prefix would let
+    /// <c>svc</c> swallow <c>svc_owner</c>), for the service principals whose program name is a generic driver
+    /// string; a session is excluded when EITHER arm matches and counted once, under the prefix. Stored as
+    /// <c>config_alert_settings.long_running_query_excluded_logins</c> (V135). <b>Seeded default</b>:
+    /// <c>NT AUTHORITY\SYSTEM</c> and <c>NT AUTHORITY\NETWORK SERVICE</c> — class 2 of the production read, ~70
+    /// sessions across 42 servers with medians of 4.8–8.6 DAYS, CDC-capture shaped. The application's admin login
+    /// is deliberately absent (see <see cref="LongRunningQueryExcludedProgramNamePrefixes"/>).</summary>
+    [JsonPropertyName("longRunningQueryExcludedLogins")]
+    public List<string> LongRunningQueryExcludedLogins { get; set; } = LongRunningQueryExclusions.DefaultLogins.ToList();
 }
 
 /// <summary>
@@ -834,6 +958,52 @@ public sealed class AnalysisConfig
     /// <summary>Minimum finding severity (0.0–2.0) to notify on — the shared AnalysisNotificationService floor.</summary>
     [JsonPropertyName("notifySeverity")]
     public double NotifySeverity { get; set; } = 1.5;
+
+    /// <summary>
+    /// Where a notify-worthy but UNCORROBORATED finding goes (#3712) — <c>digest</c> (default) or <c>page</c>;
+    /// see <c>FindingRouting</c>. A string rather than the enum so a hand-edited value that is neither parses
+    /// to "no opinion" (<c>DarlingAlertSettings</c> falls through it) instead of failing the whole config load.
+    ///
+    /// <para><b>The FILE half of a two-source knob.</b> This member is darling.json's value and nothing else;
+    /// the store's half is <see cref="StoreUncorroboratedRoute"/>, the V137
+    /// <c>config_alert_settings.analysis_uncorroborated_route</c> column, and the precedence
+    /// <c>DarlingAlertSettings.UncorroboratedFindingRoute</c> applies is <b>store non-NULL wins over file</b>:
+    /// a route set in the Viewer's Settings window or through <c>update_alert_settings</c> governs from the next
+    /// reload beacon, and only a NULL column defers to this value, and only an unparseable value here defers
+    /// to the shipped <c>digest</c>. The knob shipped FILE-LEVEL in #3732 because two rungs were in flight; the
+    /// column landed in V137 and the code half in the same lane as this paragraph.</para>
+    ///
+    /// <para><b>Why it stays a distinct member rather than being overwritten by the column on load.</b> It
+    /// lives inside this section for the JSON shape an operator expects (<c>analysis.uncorroboratedRoute</c>
+    /// beside <c>analysis.notifySeverity</c>), and <c>StoreConfigProvider.ApplyToConfig</c> swaps
+    /// <c>config.Analysis</c> WHOLESALE on every reload, so <c>StoreConfigProvider.LoadViewAsync</c> CARRIES
+    /// this value across the swap (the <c>BuildServerFromRow</c> backfill-from-bootstrap shape) and reads the
+    /// column into the sibling. Folding the column INTO this member would lose the file's value the moment the
+    /// store held one — and then an operator clearing the store column back to NULL ("let the file govern
+    /// again") would find nothing left to govern. Two members, one resolver, and the MCP read can say which
+    /// one decided.</para>
+    /// </summary>
+    [JsonPropertyName("uncorroboratedRoute")]
+    public string UncorroboratedRoute { get; set; } = PerformanceMonitor.Notifications.FindingRouting.DigestText;
+
+    /// <summary>
+    /// The STORE half of the #3712 route knob: <c>config.config_alert_settings.analysis_uncorroborated_route</c>
+    /// (V137, nullable <c>text</c> under a CHECK admitting only <c>digest</c> / <c>page</c>), read by
+    /// <c>StoreConfigProvider.ReadAlertSettingsAsync</c> like every appended knob and swapped in with the
+    /// section on every reload beacon. NULL is a VALUE here — "not set in the store; the file-level
+    /// <see cref="UncorroboratedRoute"/> governs" — which is what every store reads the morning after the
+    /// V137 upgrade and what a fresh seed leaves (the seed deliberately does not copy the file's value in,
+    /// or the tri-state's third state would be unreachable on every install). Non-NULL wins over the file.
+    ///
+    /// <para><see cref="JsonIgnoreAttribute">JsonIgnore</see> on purpose: darling.json has no key for it and
+    /// must not grow one by accident — a store value that could also be typed into the file is a value with
+    /// two authors and no tiebreak, the #3314 by-halves shape this member exists to avoid. It is populated by
+    /// exactly one writer, the store read, and a value that is neither spelling (impossible under the CHECK;
+    /// possible on a store whose CHECK was dropped by hand) is treated by the resolver as NULL and logged
+    /// once per reload by <c>LoadViewAsync</c>, never silently turned into a page or a digest.</para>
+    /// </summary>
+    [JsonIgnore]
+    public string? StoreUncorroboratedRoute { get; set; }
 }
 
 /// <summary>
@@ -2102,9 +2272,12 @@ public sealed class PeersConfig
 
                 if (offending is not null)
                 {
+                    /* #4316 round 1 (M3): index, never label — label can BE the offending text (peer.Name is
+                       exactly the field this check inspects), and a config-validation problem list is the kind
+                       of thing that ends up pasted into a support ticket or a log. */
                     problems.Add(
-                        $"{label}: peer text contains '{offending}'. The peers block is DISCLOSURE ONLY — its " +
-                        "text is sent verbatim to every connected MCP client — so it must carry no connection " +
+                        $"peers.stores[{i}]: peer text contains '{offending}'. The peers block is DISCLOSURE ONLY — " +
+                        "its text is sent verbatim to every connected MCP client — so it must carry no connection " +
                         "string and no credential. Describe what the peer monitors, not how to reach it.");
                     break;
                 }

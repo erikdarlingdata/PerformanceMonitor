@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
@@ -136,6 +137,13 @@ public class ScheduleManager
                 throw new InvalidOperationException($"Collector '{collectorName}' not found");
             }
 
+            /* Refuse before mutating anything, so a bad frequency can't leave a half-applied update. */
+            if (frequencyMinutes.HasValue
+                && FrequencyError(collectorName, frequencyMinutes.Value) is string frequencyError)
+            {
+                throw new InvalidOperationException(frequencyError);
+            }
+
             if (enabled.HasValue)
             {
                 schedule.Enabled = enabled.Value;
@@ -203,8 +211,25 @@ public class ScheduleManager
 
     /// <summary>
     /// Gets collectors that are due to run for a specific server, using per-server run state.
+    ///
+    /// <para>#3929/#3930: an on-load collector (<c>!IsScheduled</c>, FrequencyMinutes 0) is no longer excluded
+    /// here — it becomes due on <see cref="CollectorScheduleDefaults.OnLoadRecaptureMinutes"/> too, the same
+    /// substitution Darling's worker makes, so a server tab left open for weeks still re-captures its config
+    /// snapshot (#3930) and a trace flag turned off since the last connect eventually clears (#3929) instead of
+    /// only on the next reconnect. The tab-open path (<see cref="RemoteCollectorService.RunAllCollectorsForServerAsync"/>)
+    /// still runs every enabled collector unconditionally (on-load included), so the on-connect capture is
+    /// unchanged.</para>
     /// </summary>
     public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId)
+        => GetDueCollectorsForServer(serverId, DateTime.UtcNow);
+
+    /// <summary>The collectors due at <paramref name="atUtc"/>: the same rule as the one-argument overload, evaluated
+    /// at the caller's logical cycle time (#4640). A collector whose recorded run is later than
+    /// <paramref name="atUtc"/> is due now (#4732, <see cref="CollectorCadence.ClampDue"/>). That is a wall clock that
+    /// stepped backwards since the run was recorded, or a tab-open or refresh run
+    /// (<see cref="RemoteCollectorService.RunAllCollectorsForServerAsync"/>) that recorded its own start time after the
+    /// cycle's time was taken.</summary>
+    public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId, DateTime atUtc)
     {
         lock (_lock)
         {
@@ -217,8 +242,10 @@ public class ScheduleManager
             var due = new List<CollectorSchedule>();
             foreach (var s in schedules)
             {
-                if (!s.Enabled || !s.IsScheduled)
+                if (!s.Enabled)
                     continue;
+
+                var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(s.FrequencyMinutes);
 
                 if (runState == null || !runState.TryGetValue(s.Name, out var lastRun))
                 {
@@ -226,8 +253,14 @@ public class ScheduleManager
                     continue;
                 }
 
-                var elapsed = DateTime.UtcNow - lastRun;
-                if (elapsed.TotalMinutes >= s.FrequencyMinutes)
+                /* #4732: due when lastRun plus the interval has come, decided through the shared clamp. A run recorded
+                   after atUtc is either what a wall clock that stepped backwards leaves behind for every collector (the
+                   plain elapsed check would hold each one back for as long as the step), or a tab-open or refresh run
+                   that recorded its own start time after this cycle's time was taken (RemoteCollectorService, only the
+                   collectors it ran); the clamp counts either as due now. A run one interval or more before atUtc is
+                   due and one less than an interval before is not, exactly as before. */
+                var interval = TimeSpan.FromMinutes(intervalMinutes);
+                if (CollectorCadence.ClampDue(lastRun + interval, atUtc, interval) <= atUtc)
                 {
                     due.Add(s);
                 }
@@ -269,6 +302,20 @@ public class ScheduleManager
     }
 
     /// <summary>
+    /// A server's EFFECTIVE cadence for one collector, keyed the way the analysis pipeline and the alert read
+    /// adapter key servers — the deterministic storage-name hash — where this class keys them by connection
+    /// GUID. Null for a server the list no longer holds or a collector the schedule does not know, which
+    /// every caller reads as "use the shipped default". #3896's analysis lookback and the alert adapter's
+    /// snapshot-freshness bounds (#1812/#1839) both resolve through here.
+    /// </summary>
+    public int? GetFrequencyForStorageServer(ServerManager servers, int serverId, string collectorName)
+    {
+        var server = servers.GetAllServers().FirstOrDefault(s =>
+            RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
+        return server is null ? null : GetScheduleForServer(server.Id, collectorName)?.FrequencyMinutes;
+    }
+
+    /// <summary>
     /// Records a collector run for a specific server.
     /// </summary>
     public void MarkCollectorRunForServer(string serverId, string collectorName, DateTime runTime)
@@ -295,6 +342,14 @@ public class ScheduleManager
     {
         lock (_lock)
         {
+            foreach (var schedule in schedules)
+            {
+                if (FrequencyError(schedule.Name, schedule.FrequencyMinutes) is string frequencyError)
+                {
+                    throw new InvalidOperationException(frequencyError);
+                }
+            }
+
             _serverOverrides[serverId] = new ServerScheduleOverride { Collectors = schedules };
             SaveSchedules();
 
@@ -421,6 +476,7 @@ public class ScheduleManager
             }
 
             MergeNewDefaults();
+            SanitizeDeltaFrequencies();
         }
         catch (Exception ex)
         {
@@ -436,6 +492,7 @@ public class ScheduleManager
                     if (TryLoadV2(bakJson))
                     {
                         _logger?.LogInformation("Restored schedules from backup file");
+                        SanitizeDeltaFrequencies();
                         return;
                     }
 
@@ -443,6 +500,7 @@ public class ScheduleManager
                     _defaultSchedule = bakConfig?.Collectors ?? GetDefaultSchedules();
                     _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
                     _logger?.LogInformation("Restored v1 schedules from backup file");
+                    SanitizeDeltaFrequencies();
                     return;
                 }
                 catch { /* backup also corrupt, fall through to defaults */ }
@@ -531,6 +589,63 @@ public class ScheduleManager
     // ──────────────────────────────────────────────────────────────────
     //  Helpers
     // ──────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Why a frequency can't be honored for this collector, or null when it can (#3532). Negative is
+    /// nonsense on any collector (0 = on-load only), and a delta-family collector past
+    /// <see cref="CollectorDeltaCalculator.MaxDeltaFrequencyMinutes"/> would exceed the shared delta gap
+    /// policy every cycle and record permanent zeros. The editor shows this message before saving; the
+    /// write APIs throw it as a backstop.
+    /// </summary>
+    internal static string? FrequencyError(string collectorName, int frequencyMinutes)
+    {
+        if (frequencyMinutes < 0)
+        {
+            return $"'{collectorName}': frequency (minutes) can't be negative. Use 0 to collect once on server load.";
+        }
+
+        return CollectorDeltaCalculator.DeltaFrequencyError(collectorName, frequencyMinutes);
+    }
+
+    /// <summary>
+    /// Clamps any loaded delta-family frequency above the gap-policy cap back to the cap (#3532) — the
+    /// write APIs refuse such a cadence, but a hand-edited or pre-fix collection_schedule.json can still
+    /// carry one, and honoring it would fabricate permanent quiet (every cycle past the gap policy
+    /// re-baselines and stores a zero delta). Load-time has no user to bounce the value back to, so it
+    /// clamps and logs instead of refusing. Saves when anything changed.
+    /// </summary>
+    private void SanitizeDeltaFrequencies()
+    {
+        var changed = false;
+
+        var lists = new List<List<CollectorSchedule>> { _defaultSchedule };
+        foreach (var over in _serverOverrides.Values)
+        {
+            lists.Add(over.Collectors);
+        }
+
+        foreach (var list in lists)
+        {
+            foreach (var schedule in list)
+            {
+                if (schedule.FrequencyMinutes > CollectorDeltaCalculator.MaxDeltaFrequencyMinutes
+                    && CollectorDeltaCalculator.IsDeltaFamily(schedule.Name))
+                {
+                    _logger?.LogWarning(
+                        "Collector '{Name}' was scheduled every {Bad}m, above the {Max}m cap for delta collectors — past the {Policy}s delta gap policy every reading would be discarded and recorded as zero. Clamped to {Max}m.",
+                        schedule.Name, schedule.FrequencyMinutes, CollectorDeltaCalculator.MaxDeltaFrequencyMinutes,
+                        CollectorDeltaCalculator.DefaultMaxGapSeconds, CollectorDeltaCalculator.MaxDeltaFrequencyMinutes);
+                    schedule.FrequencyMinutes = CollectorDeltaCalculator.MaxDeltaFrequencyMinutes;
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed)
+        {
+            SaveSchedules();
+        }
+    }
 
     /// <summary>
     /// Detects which preset matches a list of collector schedules, or "Custom". This is the single

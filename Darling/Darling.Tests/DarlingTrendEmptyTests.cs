@@ -83,9 +83,10 @@ public sealed class DarlingTrendEmptyTests
             await SeedFileIoAsync(connection, ct, recent);
             await SeedQueryAsync(connection, ct, recent);
 
+            var memoryPayload = await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 4);
             foreach (var payload in new[]
                      {
-                         await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 4),
+                         memoryPayload,
                          await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 4),
                          await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName, 4),
                      })
@@ -93,6 +94,17 @@ public sealed class DarlingTrendEmptyTests
                 var root = JsonDocument.Parse(payload).RootElement;
                 Assert.False(root.TryGetProperty("status", out _));
                 Assert.True(root.GetProperty("trend").GetArrayLength() > 0);
+            }
+
+            /* #3529, now the #3548 join's UNCOVERED arm (no memory_grant_stats rows seeded near these
+               points): total_granted_mb stays an explicit null with the envelope naming the real source —
+               never the literal 0.0 an agent read as "granted was 0 all window". The covered arms live in
+               DarlingMemoryTrendGrantJoinTests. */
+            var memoryRoot = JsonDocument.Parse(memoryPayload).RootElement;
+            Assert.Contains("get_memory_grants", memoryRoot.GetProperty("granted_note").GetString(), StringComparison.Ordinal);
+            foreach (var point in memoryRoot.GetProperty("trend").EnumerateArray())
+            {
+                Assert.Equal(JsonValueKind.Null, point.GetProperty("total_granted_mb").ValueKind);
             }
 
             bodySucceeded = true;
@@ -115,7 +127,9 @@ public sealed class DarlingTrendEmptyTests
     public void EachProbe_WalksTheSameRelationAsItsTrend()
     {
         AssertSameRelation(DarlingTrendReader.HasAnyMemoryStatSql, DarlingTrendReader.MemoryTrendSql);
-        AssertSameRelation(DarlingTrendReader.HasAnyFileIoStatSql, DarlingTrendReader.FileIoLatencyTrendSql);
+        /* #3897: both file I/O statements — the ranking and the bucketed series — walk the probe's relation. */
+        AssertSameRelation(DarlingTrendReader.HasAnyFileIoStatSql, DarlingTrendReader.FileIoSeriesSql);
+        AssertSameRelation(DarlingTrendReader.HasAnyFileIoStatSql, DarlingTrendReader.FileIoTrendSql);
         AssertSameRelation(DarlingTrendReader.HasAnyQueryStatSql, DarlingTrendReader.QueryDurationTrendSql);
 
         /* And each stops at the first row: it runs on a path that already found nothing, and its only job

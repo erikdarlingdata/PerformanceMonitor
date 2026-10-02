@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -143,6 +144,12 @@ LIMIT 1";
         }
     }
 
+    /* #3896: the NEWEST capture only. database_config is an on-load snapshot — every database in one
+       capture shares its capture_time — so a database dropped since is simply absent from the newest one,
+       and a per-database latest-ever read kept counting it (and its auto_shrink, its recovery model) until
+       retention aged its old captures out. The drill-down that lists these databases
+       (PgDrillDownCollector.ConfigIssuesSql) was already anchored this way. No lookback bound: an on-load
+       capture can be weeks old on a healthy, long-connected server. */
     public const string DatabaseConfigSql = @"
 WITH latest AS (
     SELECT database_name, recovery_model, is_auto_shrink_on, is_auto_close_on,
@@ -152,6 +159,7 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY database_name ORDER BY capture_time DESC) AS rn
     FROM database_config
     WHERE server_id = $1
+    AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
 )
 SELECT
     COUNT(*) AS database_count,
@@ -226,16 +234,32 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
         }
     }
 
+    /* #3929: bounded by capture_time BETWEEN $2 AND $3 (the on-load-aware lookback PgLatestValueBounds stamps,
+       and the window's end), NOT unbounded across all retained history like before. Without the lower bound, a
+       flag's ROW_NUMBER partition never gets a fresh row once the flag is turned off (DBCC TRACESTATUS(-1)
+       lists only flags that are ON), so its last ON row stayed rn = 1 for the rest of the table's 30-day
+       retention. With it, a flag missing from every capture inside the window has no row there at all and
+       simply never appears - including a server with NO flags on, where the window can be entirely empty. The
+       upper bound matches every other latest-value read (#3896): a historical window (compare_analysis,
+       analyze_server's anchored mode) must read the state as it stood AT ITS END, not pick up a flag flipped
+       after it. The flags are the ones in the window's NEWEST capture, not each flag's own newest row: a flag
+       turned off while another stays on drops out at the next daily capture instead of lingering until its
+       last ON row leaves the window. Only a capture that finds every flag off, which writes no row, still
+       falls back to the capture before it, and the window bounds that too. */
     public const string TraceFlagsSql = @"
-WITH latest AS (
-    SELECT trace_flag, status,
-           ROW_NUMBER() OVER (PARTITION BY trace_flag ORDER BY capture_time DESC) AS rn
+SELECT trace_flag
+FROM trace_flags
+WHERE server_id = $1
+AND   is_global = true
+AND   status = true
+AND   capture_time =
+(
+    SELECT MAX(capture_time)
     FROM trace_flags
     WHERE server_id = $1
-    AND   is_global = true
+    AND   capture_time >= $2
+    AND   capture_time <= $3
 )
-SELECT trace_flag
-FROM latest WHERE rn = 1 AND status = true
 ORDER BY trace_flag";
 
     /// <summary>
@@ -249,6 +273,8 @@ ORDER BY trace_flag";
 
             using var cmd = new NpgsqlCommand(TraceFlagsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.LatestValueStartFor("trace_flags"), DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             var metadata = new Dictionary<string, double>();
@@ -283,10 +309,18 @@ ORDER BY trace_flag";
         }
     }
 
+    /// <summary>
+    /// The newest <c>server_properties</c> row for the SERVER_HARDWARE fact. On an Azure SQL Database (engine_edition 5) the CPU
+    /// count is the vcore_count parsed from the service objective (NULL for a DTU objective or an elastic pool, which leaves no
+    /// fact), not the stored cpu_count: that is the number of schedulers the database can see, which can be higher than its vCores
+    /// (a 1-vCore database reads 2). There hyperthread_ratio, physical_memory_mb, socket_count and cores_per_socket describe the
+    /// HOST, and <see cref="FactCollectorHelpers.BuildServerHardwareFact"/> carries none of them; the recommended MAXDOP is taken
+    /// from the vCores. Every other edition reads as it always did. Lite's DuckDbFactCollector carries the same CASE.
+    /// </summary>
     public const string ServerPropertiesSql = @"
-SELECT COALESCE(vcore_count, cpu_count) AS cpu_count, hyperthread_ratio, physical_memory_mb,
+SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, hyperthread_ratio, physical_memory_mb,
        socket_count, cores_per_socket, is_hadr_enabled, edition, product_version,
-       lock_pages_in_memory, instant_file_initialization_enabled, memory_dump_count
+       lock_pages_in_memory, instant_file_initialization_enabled, memory_dump_count, engine_edition
 FROM server_properties
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -318,30 +352,19 @@ LIMIT 1";
             bool? lpim = reader.IsDBNull(8) ? (bool?)null : Convert.ToBoolean(reader.GetValue(8));
             bool? ifi = reader.IsDBNull(9) ? (bool?)null : Convert.ToBoolean(reader.GetValue(9));
             int? dumpCount = reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10));
+            int? engineEdition = reader.IsDBNull(11) ? (int?)null : Convert.ToInt32(reader.GetValue(11));
+            var hardwareIsTheHosts = ServerHardwareScope.HardwareIsTheHosts(engineEdition);
 
-            if (cpuCount == 0) return;
+            var hardwareFact = FactCollectorHelpers.BuildServerHardwareFact(
+                context, hardwareIsTheHosts, cpuCount, htRatio, physicalMemMb, socketCount, coresPerSocket, hadrEnabled);
+            if (hardwareFact is null) return;
 
-            facts.Add(new Fact
-            {
-                Source = "config",
-                Key = "SERVER_HARDWARE",
-                Value = cpuCount,
-                ServerId = context.ServerId,
-                Metadata = new Dictionary<string, double>
-                {
-                    ["cpu_count"] = cpuCount,
-                    ["hyperthread_ratio"] = htRatio,
-                    ["physical_memory_mb"] = physicalMemMb,
-                    ["socket_count"] = socketCount,
-                    ["cores_per_socket"] = coresPerSocket,
-                    ["hadr_enabled"] = hadrEnabled ? 1 : 0
-                }
-            });
+            facts.Add(hardwareFact);
 
             // WS5 server-health advisories (advise-only). Gating mirrors the Lite/Dashboard
             // collectors so all consumers agree on what is worth flagging; a fact that would
             // score 0 is simply never emitted (noise control).
-            FactCollectorHelpers.EmitServerHealthFacts(context, facts, edition, physicalMemMb, lpim, ifi, dumpCount);
+            FactCollectorHelpers.EmitServerHealthFacts(context, facts, edition, physicalMemMb, lpim, ifi, dumpCount, hardwareIsTheHosts);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {

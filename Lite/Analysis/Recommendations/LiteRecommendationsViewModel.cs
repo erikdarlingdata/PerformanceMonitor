@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis.Recommendations;
 
@@ -28,6 +30,13 @@ public enum LiteRecommendationsState
     /// (<c>AnalysisService.MinimumDataHours</c>); recommendations are not meaningful yet.
     /// </summary>
     InsufficientData,
+
+    /// <summary>
+    /// The analysis window itself collected zero facts even though the engine's lifetime data-span
+    /// gate passed (<c>AnalysisService.WindowEmptyMessage</c>, #3524/#3551) — a dead collector or an
+    /// unreachable target, not a healthy server, so a distinct notice is shown, never the all-clear.
+    /// </summary>
+    WindowEmpty,
 
     /// <summary>The read completed and produced zero recommendations — the all-clear.</summary>
     Empty,
@@ -53,13 +62,17 @@ public enum LiteRecommendationsState
 /// </summary>
 public sealed class LiteRecommendationCardViewModel
 {
-    public LiteRecommendationCardViewModel(LiteRecommendationItem item, int utcOffsetMinutes = 0)
+    /// <param name="item">The recommendation this card shows.</param>
+    /// <param name="serverClock">
+    /// The monitored server's own clock (#4766), for the Ask-AI prompt's window. <c>null</c> reads the window in UTC.
+    /// </param>
+    public LiteRecommendationCardViewModel(LiteRecommendationItem item, ServerClock? serverClock = null)
     {
         Item = item ?? throw new ArgumentNullException(nameof(item));
-        _utcOffsetMinutes = utcOffsetMinutes;
+        _serverClock = serverClock ?? ServerClock.Utc;
     }
 
-    private readonly int _utcOffsetMinutes;
+    private readonly ServerClock _serverClock;
 
     /// <summary>The underlying advise-only recommendation row.</summary>
     public LiteRecommendationItem Item { get; }
@@ -102,6 +115,16 @@ public sealed class LiteRecommendationCardViewModel
     /// <summary>Whether there is advice prose to render.</summary>
     public bool HasAdvice => !string.IsNullOrEmpty(Item.AdviceText);
 
+    /// <summary>#3712: the "not paged" line — the gate's reason this finding was kept off email, the webhooks
+    /// and the tray, prefixed so the line reads as a status rather than as more advice.</summary>
+    public string NotPagedText => string.IsNullOrEmpty(Item.NotPagedReason)
+        ? string.Empty
+        : "Not paged — " + Item.NotPagedReason;
+
+    /// <summary>Whether the not-paged line should be shown (a delivered finding, or one below the notify
+    /// floor, has nothing to say here).</summary>
+    public bool ShowNotPaged => !string.IsNullOrEmpty(Item.NotPagedReason);
+
     /// <summary>The copy-paste-ready fix T-SQL, if any.</summary>
     public string? CopyPasteSql => Item.CopyPasteSql;
 
@@ -122,7 +145,9 @@ public sealed class LiteRecommendationCardViewModel
 
     /// <summary>
     /// The MCP investigation prompt copied to the clipboard by "Ask AI". The window is rendered in
-    /// the monitored server's local time (UTC window + offset) for operator legibility.
+    /// the monitored server's local time for operator legibility: each end of the window is converted with the
+    /// offset the server's clock had at that instant (#4766), so a finding from before a daylight saving change
+    /// reads right.
     /// </summary>
     public string AskAiPrompt
     {
@@ -134,17 +159,25 @@ public sealed class LiteRecommendationCardViewModel
     }
 
     /// <summary>
-    /// The finding window converted to the monitored server's local time, with a sensible fallback
-    /// when the producer carried no window (a 2h band ending "now" in server time).
+    /// The finding window converted to the monitored server's local time, each end on its own instant's offset,
+    /// with a sensible fallback when the producer carried no window (the last two hours, ending now).
     /// </summary>
     private (DateTime From, DateTime To) ServerLocalWindow()
     {
         if (Item.WindowStartUtc is { } su && Item.WindowEndUtc is { } eu)
-            return (su.AddMinutes(_utcOffsetMinutes), eu.AddMinutes(_utcOffsetMinutes));
+            return (_serverClock.ToServerLocal(su), _serverClock.ToServerLocal(eu));
 
-        var now = DateTime.UtcNow.AddMinutes(_utcOffsetMinutes);
-        return (now.AddHours(-2), now);
+        return FallbackWindow(_serverClock, DateTime.UtcNow);
     }
+
+    /// <summary>
+    /// The window of a finding that carries none: the two hours before <paramref name="utcNow"/>, each end shown
+    /// on <paramref name="serverClock"/> (#4766). The two hours are real hours. Taking the server's "now" and
+    /// subtracting two hours from that wall-clock time spans one real hour too few across a spring-forward change
+    /// (and starts at a local time that never happened) and one real hour too many across a fall-back change.
+    /// </summary>
+    internal static (DateTime From, DateTime To) FallbackWindow(ServerClock serverClock, DateTime utcNow)
+        => (serverClock.ToServerLocal(utcNow.AddHours(-2)), serverClock.ToServerLocal(utcNow));
 }
 
 /// <summary>
@@ -217,17 +250,26 @@ public sealed class LiteRecommendationsViewModel
     /// </summary>
     public string InsufficientDataMessage { get; }
 
+    /// <summary>
+    /// The window-empty message to show in the <see cref="LiteRecommendationsState.WindowEmpty"/>
+    /// state (the engine's own message, or a default, always suffixed with the Collection Health
+    /// pointer). Empty in every other state.
+    /// </summary>
+    public string WindowEmptyMessage { get; }
+
     /// <summary>Total card count across all sections.</summary>
     public int TotalCount => Sections.Sum(s => s.Count);
 
     private LiteRecommendationsViewModel(
         IReadOnlyList<LiteRecommendationSectionViewModel> sections,
         LiteRecommendationsState state,
-        string insufficientDataMessage)
+        string insufficientDataMessage,
+        string windowEmptyMessage = "")
     {
         Sections = sections;
         State = state;
         InsufficientDataMessage = insufficientDataMessage;
+        WindowEmptyMessage = windowEmptyMessage;
     }
 
     /// <summary>The default insufficient-data prose when the engine supplied none.</summary>
@@ -249,16 +291,59 @@ public sealed class LiteRecommendationsViewModel
             LiteRecommendationsState.InsufficientData,
             string.IsNullOrWhiteSpace(engineMessage) ? DefaultInsufficientDataMessage : engineMessage!);
 
+    /// <summary>The default window-empty prose when the engine supplied no message.</summary>
+    public const string DefaultWindowEmptyMessage =
+        "Nothing was collected in this analysis window, so nothing was measured — this is not an all-clear.";
+
+    /// <summary>
+    /// Appended to every window-empty message so the operator lands on the surface that diagnoses a
+    /// dead collector — the viewer's rendering of the same pointer the MCP <c>analyze_server</c> tool
+    /// appends (<c>get_collection_health</c> there, the in-app tab here).
+    /// </summary>
+    public const string WindowEmptyCollectionHealthPointer =
+        "Check the Collection Health tab to see when collectors last succeeded.";
+
+    /// <summary>
+    /// Builds the window-empty-state view-model (#3524/#3551) from the engine's
+    /// <c>AnalysisService.WindowEmptyMessage</c> (or the default when it is null/blank), suffixed with
+    /// the Collection Health pointer. Rendered instead of the all-clear when the analysis window
+    /// collected zero facts on a server whose lifetime span gate passed — a dead-collector shape.
+    /// </summary>
+    public static LiteRecommendationsViewModel WindowEmpty(string? engineMessage) =>
+        new(
+            Array.Empty<LiteRecommendationSectionViewModel>(),
+            LiteRecommendationsState.WindowEmpty,
+            string.Empty,
+            (string.IsNullOrWhiteSpace(engineMessage) ? DefaultWindowEmptyMessage : engineMessage!) +
+            " " + WindowEmptyCollectionHealthPointer);
+
+    /// <summary>
+    /// The clock one server's cards convert on (#4766): the server's own clock once one has been collected
+    /// (<paramref name="collected"/>, from <c>server_properties</c>), else the clock of that SERVER'S OWN open tab
+    /// (<paramref name="openTabClock"/>; null when it has none open), else the machine's
+    /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>, the one chain every list of a
+    /// server's rows uses). A server that has not collected its first <c>server_properties</c> row has no clock of
+    /// its own, and its server tab keeps the fixed offset the connect probe read until that row arrives, so its cards
+    /// keep that offset too rather than dropping to UTC, which is not what the tab shows for the same server. It is
+    /// never the ACTIVE tab's clock: this tab has its own server selector, so the tab the main window has selected
+    /// can be another server's, and another server's zone puts the cards an hour or more off their own. The MCP tools
+    /// keep their own stated UTC fallback (<c>McpServerLocalWindow.ClockForAsync</c>); this is the desktop's and is
+    /// separate on purpose. Pure, so the choice is unit-testable; the Recommendations tab passes the two clocks in.
+    /// </summary>
+    internal static ServerClock CardClock(ServerClock? collected, ServerClock? openTabClock) =>
+        ServerTimeHelper.ClockForServer(collected, openTabClock);
+
     /// <summary>
     /// Builds a loaded/empty view-model from the reader's flat, already-sorted list. Groups by
     /// <see cref="LiteRecommendationSeverity"/> into Critical / Warning / Info sections (empty
     /// sections are omitted), preserving the reader's intra-severity order. Critical and Warning
     /// start expanded; Info starts collapsed. The state is <see cref="LiteRecommendationsState.Empty"/>
     /// when the list is empty, else <see cref="LiteRecommendationsState.Loaded"/>.
-    /// <paramref name="utcOffsetMinutes"/> is carried onto each card for the Ask-AI prompt's window.
+    /// <paramref name="serverClock"/> is the clock of the server the items belong to (#4766); it is carried onto
+    /// each card for the Ask-AI prompt's window, and <c>null</c> reads that window in UTC.
     /// </summary>
     public static LiteRecommendationsViewModel FromItems(
-        IEnumerable<LiteRecommendationItem> items, int utcOffsetMinutes = 0)
+        IEnumerable<LiteRecommendationItem> items, ServerClock? serverClock = null)
     {
         var list = items as IReadOnlyList<LiteRecommendationItem> ?? items?.ToList()
                    ?? (IReadOnlyList<LiteRecommendationItem>)Array.Empty<LiteRecommendationItem>();
@@ -266,7 +351,7 @@ public sealed class LiteRecommendationsViewModel
         if (list.Count == 0)
             return new(Array.Empty<LiteRecommendationSectionViewModel>(), LiteRecommendationsState.Empty, string.Empty);
 
-        return new(GroupByIncident(list, utcOffsetMinutes), LiteRecommendationsState.Loaded, string.Empty);
+        return new(GroupByIncident(list, serverClock ?? ServerClock.Utc), LiteRecommendationsState.Loaded, string.Empty);
     }
 
     /// <summary>
@@ -279,7 +364,7 @@ public sealed class LiteRecommendationsViewModel
     /// Mirrors the Dashboard's GroupByIncident.
     /// </summary>
     private static List<LiteRecommendationSectionViewModel> GroupByIncident(
-        IReadOnlyList<LiteRecommendationItem> list, int utcOffsetMinutes)
+        IReadOnlyList<LiteRecommendationItem> list, ServerClock serverClock)
     {
         var order = new List<string>();
         var buckets = new Dictionary<string, List<LiteRecommendationItem>>(StringComparer.Ordinal);
@@ -298,7 +383,7 @@ public sealed class LiteRecommendationsViewModel
 
         var sections = new List<LiteRecommendationSectionViewModel>(order.Count);
         foreach (var key in order)
-            sections.Add(BuildIncidentSection(buckets[key], utcOffsetMinutes));
+            sections.Add(BuildIncidentSection(buckets[key], serverClock));
         return sections;
     }
 
@@ -308,10 +393,10 @@ public sealed class LiteRecommendationsViewModel
     /// section expands unless the incident is Info-only.
     /// </summary>
     private static LiteRecommendationSectionViewModel BuildIncidentSection(
-        IReadOnlyList<LiteRecommendationItem> incidentItems, int utcOffsetMinutes)
+        IReadOnlyList<LiteRecommendationItem> incidentItems, ServerClock serverClock)
     {
         var cards = incidentItems
-            .Select(i => new LiteRecommendationCardViewModel(i, utcOffsetMinutes))
+            .Select(i => new LiteRecommendationCardViewModel(i, serverClock))
             .ToList();
         var primary = cards[0]; // reader sorted severity-desc -> the first card is the incident primary
         var severity = primary.Severity;

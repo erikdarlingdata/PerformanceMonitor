@@ -41,9 +41,12 @@ public class McpSchemaCompatTests
     /// model-facing value. Registering these types as no-op singletons makes the SDK's
     /// IServiceProviderIsService report them as services, exactly as production DI does.
     /// </summary>
+    /// <remarks>#3898: the shared <see cref="McpServedSchema"/> predicate, which also keeps nullable value types
+    /// and arrays (get_tool_guide's <c>string[]</c>) model-facing, so their schemas are checked here too; the old
+    /// inline one called both services and dropped them. The guide catalog is registered by the registration
+    /// itself.</remarks>
     private static bool IsServiceParameter(Type t) =>
-        !t.IsPrimitive && t != typeof(string) && !t.IsEnum && t != typeof(decimal) &&
-        t != typeof(DateTime) && t != typeof(DateTimeOffset) && t != typeof(Guid) && t != typeof(TimeSpan);
+        McpServedSchema.IsServiceParameter(t) && t != typeof(PerformanceMonitor.Common.McpToolGuideCatalog);
 
     private static readonly MethodInfo GeminiCompatibleToolsMethod =
         typeof(McpSchemaCompat).GetMethod(

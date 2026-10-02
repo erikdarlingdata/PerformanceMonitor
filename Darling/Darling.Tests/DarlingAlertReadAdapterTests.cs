@@ -15,6 +15,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -123,12 +124,11 @@ public sealed class DarlingAlertReadAdapterTests
         Assert.Contains("ORDER BY deadlock_time DESC", DarlingAlertReadAdapter.DeadlocksSql);
         Assert.Contains("LIMIT 50", DarlingAlertReadAdapter.DeadlocksSql);
 
-        /* Poison waits: Lite's exact wait-type list, 3-row window, parameterized 10-minute floor. */
+        /* Poison waits (#3539 A4): the same wait-type list, a parameterized window floor, and an
+           ACCUMULATION per wait type — see PoisonWaitsSql_IsAWindowAccumulation_NotTheNewestDeltas. */
         Assert.Contains("'THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE'",
             DarlingAlertReadAdapter.PoisonWaitsSql);
-        Assert.Contains("delta_waiting_tasks > 0", DarlingAlertReadAdapter.PoisonWaitsSql);
         Assert.Contains("collection_time >= $2", DarlingAlertReadAdapter.PoisonWaitsSql);
-        Assert.Contains("LIMIT 3", DarlingAlertReadAdapter.PoisonWaitsSql);
 
         /* Long-running queries: latest snapshot only, parameterized staleness floor ($4 — never
            now()), user sessions, parameterized cap, filter splice point. */
@@ -148,10 +148,83 @@ public sealed class DarlingAlertReadAdapterTests
         Assert.Contains("LIMIT 5", DarlingAlertReadAdapter.AnomalousJobsSql);
     }
 
+    /// <summary>
+    /// #3539 A4: the poison read SUMs every row in the window per wait type. Three things the retired text
+    /// had must be ABSENT — the <c>delta_waiting_tasks &gt; 0</c> filter (a task waiting across the interval
+    /// boundary accrues time with zero completed tasks, and the measured fleet holds such rows), the
+    /// <c>LIMIT 3</c> (a limit on a sum is an undercount) and any threshold — and the shape must be the sums,
+    /// the row count and the newest collection_time, grouped by wait type. The Lite twin's DuckDB text is
+    /// pinned to the same clauses in Lite.Tests so the two SKUs cannot drift.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitsSql_IsAWindowAccumulation_NotTheNewestDeltas()
+    {
+        var sql = DarlingAlertReadAdapter.PoisonWaitsSql;
+
+        Assert.DoesNotContain("delta_waiting_tasks > 0", sql);
+        Assert.DoesNotContain("LIMIT", sql);
+        Assert.DoesNotContain("avg_ms_per_wait", sql);
+
+        Assert.Contains("SUM(delta_wait_time_ms)::bigint AS accumulated_wait_ms", sql);
+        Assert.Contains("SUM(delta_waiting_tasks)::bigint AS accumulated_waits", sql);
+        Assert.Contains("COUNT(*)::bigint AS observed_intervals", sql);
+        Assert.Contains("MAX(collection_time) AS newest_collection_time", sql);
+        Assert.Contains("GROUP BY wait_type", sql);
+        /* No interval handling: the V128 lane owns sample_interval_seconds and rebases onto this text. */
+        Assert.DoesNotContain("sample_interval", sql);
+
+        /* The read-side wait-type list IS the evaluator's, spelled once each and equal. */
+        foreach (var waitType in PoisonWaitEvaluator.SqlServerWaitTypes)
+        {
+            Assert.Contains($"'{waitType}'", sql, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void Adapter_ImplementsTheSharedReadSeam()
     {
         Assert.True(typeof(IAlertReadAdapter).IsAssignableFrom(typeof(DarlingAlertReadAdapter)));
+    }
+
+    /* ---------------- database states: "no verdict" is never the Darling store's answer ---------------- */
+
+    [Fact]
+    public void GetDatabaseStates_IsDeclaredNonNullable_AndOnlyTheInterfaceMemberIsNullable()
+    {
+        /* The compile-time half of "the Darling store never returns null": the public method's declared result
+           is a list that cannot be null, while the IAlertReadAdapter member the engine calls may be null (null
+           means "no verdict" there, and Darling has no way to say it). */
+        var context = new System.Reflection.NullabilityInfoContext();
+
+        var adapterResult = context.Create(typeof(DarlingAlertReadAdapter).GetMethod("GetDatabaseStatesAsync")!.ReturnParameter);
+        var interfaceResult = context.Create(typeof(IAlertReadAdapter).GetMethod("GetDatabaseStatesAsync")!.ReturnParameter);
+
+        Assert.Equal(System.Reflection.NullabilityState.NotNull, adapterResult.GenericTypeArguments[0].ReadState);
+        Assert.Equal(System.Reflection.NullabilityState.Nullable, interfaceResult.GenericTypeArguments[0].ReadState);
+    }
+
+    [Fact]
+    public async Task GetDatabaseStates_ForAServerWithNoRows_ReturnsAnEmptyList_NeverNull()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert-read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var adapter = new DarlingAlertReadAdapter(postgres);
+
+        /* A server key no collector uses, so it has no database_states rows. */
+        var serverKey = (-717172).ToString(CultureInfo.InvariantCulture);
+        var states = await adapter.GetDatabaseStatesAsync(serverKey, ct);
+
+        Assert.NotNull(states);
+        Assert.Empty(states);
     }
 
     /* ---------------- gated live E2E ---------------- */
@@ -213,10 +286,30 @@ public sealed class DarlingAlertReadAdapterTests
                 1L, collectionTime, TestServerId, TestServerName, utcNow.AddMinutes(-4),
                 "process1", "UPDATE Users SET Reputation = 1", DeadlockGraphXml);
 
-            /* --- poison waits: 100000ms over 50 tasks -> 2000ms avg --- */
+            /* --- poison waits (#3539 A4): four THREADPOOL rows inside the window that the retired read
+                   judged wrongly or not at all — a 703-task 8 ms storm row, a time-with-no-completed-task
+                   row (the old tasks > 0 filter dropped it), a (0, 0) calculator marker, and one more storm
+                   row; plus one RESOURCE_SEMAPHORE row, and a THREADPOOL row OUTSIDE the window that must
+                   not be summed. Expected THREADPOOL: 5,779 + 304 + 0 + 594,000 = 600,083 ms across
+                   703 + 0 + 0 + 29,700 waits over 4 observed intervals. --- */
             await InsertAsync(connection,
                 "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                1L, collectionTime, TestServerId, TestServerName, "THREADPOOL", 50L, 100000L);
+                1L, collectionTime.AddMinutes(-3), TestServerId, TestServerName, "THREADPOOL", 703L, 5779L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                2L, collectionTime.AddMinutes(-2), TestServerId, TestServerName, "THREADPOOL", 0L, 304L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                3L, collectionTime.AddMinutes(-1), TestServerId, TestServerName, "THREADPOOL", 0L, 0L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                4L, collectionTime, TestServerId, TestServerName, "THREADPOOL", 29700L, 594000L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                4L, collectionTime, TestServerId, TestServerName, "RESOURCE_SEMAPHORE", 8L, 3154L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                0L, collectionTime.AddMinutes(-30), TestServerId, TestServerName, "THREADPOOL", 1000L, 999999L);
 
             /* --- long-running queries: one 10-minute query + one in an excluded database --- */
             await InsertAsync(connection,
@@ -228,6 +321,49 @@ public sealed class DarlingAlertReadAdapterTests
                 "INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, total_elapsed_time_ms, cpu_time_ms, reads, writes, wait_type, blocking_session_id, query_hash, program_name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                 2L, collectionTime, TestServerId, TestServerName, 72, "ExcludedDb",
                 "SELECT 1", 720000L, 1L, 1L, 0L, "CXPACKET", 0, "0x1111111111111111", "HammerDB");
+
+            /* --- long-running queries, the #3653 (A5, Q5) opt-out knob's four classes in one snapshot, so the
+                   SEEDED knob can be exercised against real PostgreSQL ILIKE … ESCAPE and real COUNT(DISTINCT):
+                   74 a job step under the admin login (prefix arm); 75 a job step running as SYSTEM (BOTH arms —
+                   must count ONCE, under the prefix); 76 the multi-day background under NETWORK SERVICE, spelled
+                   in lower case and carrying TWO request rows (one session, not two — the counts are sessions);
+                   71 above is the named human's ad-hoc query that stays. --- */
+            const string lrqInsert = "INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, total_elapsed_time_ms, cpu_time_ms, reads, writes, wait_type, blocking_session_id, query_hash, program_name, login_name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)";
+            await InsertAsync(connection, lrqInsert,
+                3L, collectionTime, TestServerId, TestServerName, 74, "StackOverflow",
+                "EXEC dbo.NightlyRebuild", 3_600_000L, 5L, 5L, 5L, "PAGEIOLATCH_SH", 0, "0x2222222222222222",
+                "SQLAgent - TSQL JobStep (Job 0x1D6B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 2)", "app_admin");
+            await InsertAsync(connection, lrqInsert,
+                4L, collectionTime, TestServerId, TestServerName, 75, "StackOverflow",
+                "EXEC dbo.CdcCapture", 2_400_000L, 5L, 5L, 5L, "SLEEP_TASK", 0, "0x3333333333333333",
+                "SQLAgent - TSQL JobStep (Job 0x2A3B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 1)", @"NT AUTHORITY\SYSTEM");
+            await InsertAsync(connection, lrqInsert,
+                5L, collectionTime, TestServerId, TestServerName, 76, "StackOverflow",
+                "sp_replcmds", 500_000_000L, 5L, 5L, 5L, "PREEMPTIVE_OS_WAITFORSINGLEOBJECT", 0, "0x4444444444444444",
+                ".Net SqlClient Data Provider", @"nt authority\network service");
+            await InsertAsync(connection, lrqInsert,
+                5L, collectionTime, TestServerId, TestServerName, 76, "StackOverflow",
+                "sp_replcmds (second request, MARS)", 499_000_000L, 5L, 5L, 5L, "PREEMPTIVE_OS_WAITFORSINGLEOBJECT", 0, "0x4444444444444444",
+                ".Net SqlClient Data Provider", @"nt authority\network service");
+
+            /* --- long-running queries, #3742's lie in one snapshot: SIX sessions in the excluded database, every one
+                   LONGER than every real session (81–86, 600M ms and up — the reporting ETL that always runs long),
+                   plus 87, a job step ALSO in the excluded database (the knob's prefix arm and the database arm both
+                   match — it must count ONCE, under the prefix, the database arm being last). Under the retired
+                   shape a cap of 5 read 81–85, dropped all five in C#, and returned an EMPTY page while 76, 74, 75 and
+                   71 ran on; the read now removes them ahead of LIMIT and counts them. The database is spelled
+                   "ExcludedDb" in the rows and "excludeddb" in the list below — the match is case-insensitive. --- */
+            for (var i = 0; i < 6; i++)
+            {
+                await InsertAsync(connection, lrqInsert,
+                    6L + i, collectionTime, TestServerId, TestServerName, 81 + i, "ExcludedDb",
+                    "INSERT INTO dbo.FactSales SELECT …", 600_000_000L + i, 5L, 5L, 5L, "PAGEIOLATCH_SH", 0, "0x" + (81 + i).ToString("X16", CultureInfo.InvariantCulture),
+                    ".Net SqlClient Data Provider", "svc_etl");
+            }
+            await InsertAsync(connection, lrqInsert,
+                12L, collectionTime, TestServerId, TestServerName, 87, "ExcludedDb",
+                "EXEC dbo.RebuildReportingIndexes", 550_000_000L, 5L, 5L, 5L, "PAGEIOLATCH_SH", 0, "0x8787878787878787",
+                "SQLAgent - TSQL JobStep (Job 0x3C4D0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 1)", "app_admin");
 
             /* --- volumes: two files on C:\ (MAX total / MIN free), one on healthy D:\ --- */
             await InsertAsync(connection,
@@ -284,26 +420,126 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal("UPDATE Users SET Reputation = 1", deadlock.VictimSqlText);
             Assert.Equal("SPID 55 (victim) vs SPID 60", deadlock.ProcessSummary);
 
-            /* --- poison waits: fetch-then-threshold, exactly like Lite's loop --- */
-            var poison = await adapter.GetPoisonWaitDeltasAsync(TestServerKey, thresholdMs: 500, ct);
-            var worst = Assert.Single(poison);
-            Assert.Equal("THREADPOOL", worst.WaitType);
-            Assert.Equal(100000L, worst.DeltaMs);
-            Assert.Equal(50L, worst.DeltaTasks);
-            Assert.Equal(2000d, worst.AvgMsPerWait, precision: 3);
-            Assert.Empty(await adapter.GetPoisonWaitDeltasAsync(TestServerKey, thresholdMs: 5000, ct));
+            /* --- poison waits: the window sum per type, no threshold, worst first; the out-of-window row
+                   is excluded and the sub-bar RESOURCE_SEMAPHORE row comes back too (observed-and-quiet is
+                   an answer the engine needs) --- */
+            var poison = await adapter.GetPoisonWaitAccumulationAsync(TestServerKey, PoisonWaitEvaluator.WindowMinutes, ct);
+            Assert.Equal(2, poison.Count);
+            Assert.Equal("THREADPOOL", poison[0].WaitType);
+            Assert.Equal(600_083L, poison[0].AccumulatedWaitMs);
+            Assert.Equal(30_403L, poison[0].AccumulatedWaits);
+            Assert.Equal(4L, poison[0].ObservedIntervals);
+            /* PostgreSQL's timestamp is microsecond-precision and .NET's DateTime carries 100 ns ticks, so
+               the seeded instant round-trips truncated to the microsecond (CI: 15:39:48.9353066 stored as
+               .9353060). Compare at the store's precision; the point of the pin is that the NEWEST in-window
+               row's clock came back, not the out-of-window one's — asserted separately below. */
+            Assert.Equal(collectionTime.Ticks / 10, poison[0].NewestCollectionTime.Ticks / 10);
+            Assert.True(poison[0].NewestCollectionTime > collectionTime.AddMinutes(-2),
+                "the newest collection_time must be the in-window row's, not the -30 minute row's");
+            Assert.Equal("RESOURCE_SEMAPHORE", poison[1].WaitType);
+            Assert.Equal(3_154L, poison[1].AccumulatedWaitMs);
+            Assert.Equal(1L, poison[1].ObservedIntervals);
+            /* And the evaluator reads that window as the storm it is: Warning, where the retired shape saw
+               a 20 ms average on the biggest row and slept. */
+            var graded = PoisonWaitEvaluator.EvaluateSqlServer(poison);
+            var storm = Assert.Single(graded);
+            Assert.Equal("THREADPOOL", storm.WaitType);
+            Assert.Equal(AlertSeverityLevel.Warning, storm.Severity);
 
-            /* --- long-running queries: threshold + excluded-database drop --- */
-            var lrq = await adapter.GetLongRunningQueriesAsync(
+            /* --- long-running queries: threshold + the excluded-database arm, with an EMPTY knob — every session
+                   the knob could name is evaluated, both knob counts 0, the two knob arms' FALSE literals leave the
+                   pre-knob rows intact, and the database arm (#3742) removes the EIGHT ExcludedDb sessions (72,
+                   81–86, 87) IN the read and counts them: with the knob empty, 87's job step is the database
+                   list's. A cap of 10 shows the whole kept set. --- */
+            var lrqRead = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 10,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.None, ct);
+            Assert.Equal(0, lrqRead.ExcludedByProgramPrefix);
+            Assert.Equal(0, lrqRead.ExcludedByLogin);
+            Assert.Equal(0, lrqRead.ExcludedCount);
+            Assert.Equal(8, lrqRead.ExcludedByDatabase);
+            Assert.Equal(new[] { 76, 76, 74, 75, 71 }, lrqRead.Sessions.Select(q => q.SessionId).ToArray()); /* longest first; no ExcludedDb row */
+            var query = Assert.Single(lrqRead.Sessions, q => q.SessionId == 71);
+            Assert.Equal(600L, query.ElapsedSeconds);
+            Assert.Equal("HammerDB", query.ProgramName);
+            Assert.Equal("", query.LoginName);                                    /* NULL login_name reads as empty */
+            Assert.Equal("0x9AAF0129E4E9AD07", query.QueryHash);
+            Assert.Equal(@"nt authority\network service", lrqRead.Sessions[0].LoginName);
+
+            /* --- #3742, THE LIE, at the shipped cap: five real rows exist and eight excluded-database sessions
+                   run longer than or between them. The retired post-read filter would have read 81–85, dropped all
+                   five, and returned NOTHING — the alert switched off for every other database by a setting
+                   about one. The page is now a page of MATCHES: N = 5 rows, every one a match, the interleaved
+                   excluded rows gone ahead of LIMIT and counted. --- */
+            var pageOfFive = await adapter.GetLongRunningQueriesAsync(
                 TestServerKey, thresholdMinutes: 5, maxResults: 5,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
-                excludedDatabases: new List<string> { "excludeddb" }, ct);
-            var query = Assert.Single(lrq);
-            Assert.Equal(71, query.SessionId);
-            Assert.Equal(600L, query.ElapsedSeconds);
-            Assert.Equal("HammerDB", query.ProgramName);
-            Assert.Equal("0x9AAF0129E4E9AD07", query.QueryHash);
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.None, ct);
+            Assert.Equal(new[] { 76, 76, 74, 75, 71 }, pageOfFive.Sessions.Select(q => q.SessionId).ToArray());
+            Assert.DoesNotContain(pageOfFive.Sessions, q => string.Equals(q.DatabaseName, "ExcludedDb", StringComparison.OrdinalIgnoreCase));
+            Assert.Equal(8, pageOfFive.ExcludedByDatabase);
+
+            /* --- and WITHOUT the list, the same cap holds exactly the excluded database's longest five: the row set
+                   the retired shape read and threw away. The control that makes the assertion above mean something
+                   — the six ETL sessions really are the longest on this server. --- */
+            var unfiltered = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 5,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string>(), LongRunningQueryExclusions.None, ct);
+            Assert.Equal(new[] { 86, 85, 84, 83, 82 }, unfiltered.Sessions.Select(q => q.SessionId).ToArray());
+            Assert.Equal(0, unfiltered.ExcludedByDatabase);
+
+            /* --- the SEEDED knob against real PostgreSQL, at a cap of ONE: the three background sessions and the
+                   eight excluded-database sessions are all gone BEFORE the cap, so the single row is the human's
+                   query. The counts are SESSIONS by arm — 74, 75 and 87 under the prefix (75 also runs as SYSTEM:
+                   once, here; 87 also sits in the excluded database: once, HERE, the knob being the earlier arm),
+                   76 under login despite its two request rows, and the SEVEN ExcludedDb sessions the knob does
+                   not name (72, 81–86) under the database list. 3 + 1 + 7 = the eleven sessions the page does
+                   not show. Before #3742 this cap had to be 2, because 72 was dropped after the cap and a cap of
+                   1 held 72 alone. --- */
+            var seededRead = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 1,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.Defaults, ct);
+            Assert.Equal(71, Assert.Single(seededRead.Sessions).SessionId);
+            Assert.Equal(3, seededRead.ExcludedByProgramPrefix);
+            Assert.Equal(1, seededRead.ExcludedByLogin);
+            Assert.Equal(4, seededRead.ExcludedCount);
+            Assert.Equal(7, seededRead.ExcludedByDatabase);
+
+            /* --- an operator who CLEARED the login default: the prefix arm alone, so the NETWORK SERVICE session
+                   is evaluated again and is the longest. Present-and-empty means empty, not re-seeded. --- */
+            var prefixOnlyRead = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 2,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string> { "excludeddb" },
+                LongRunningQueryExclusions.From(LongRunningQueryExclusions.DefaultProgramNamePrefixes, null), ct);
+            Assert.Equal(new[] { 76, 76 }, prefixOnlyRead.Sessions.Select(q => q.SessionId).ToArray()); /* its two request rows fill the cap of 2 */
+            Assert.Equal(3, prefixOnlyRead.ExcludedByProgramPrefix);
+            Assert.Equal(0, prefixOnlyRead.ExcludedByLogin);
+            Assert.Equal(7, prefixOnlyRead.ExcludedByDatabase);
+
+            /* --- a row with NO database name is never on an excluded database (the rule since the list existed):
+                   plant one over the threshold with database_name NULL, and it stays under a list that names
+                   everything else. Planted late so the reads above keep their arithmetic. --- */
+            await InsertAsync(connection,
+                "INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, total_elapsed_time_ms, cpu_time_ms, reads, writes, wait_type, blocking_session_id, query_hash, program_name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                13L, collectionTime, TestServerId, TestServerName, 88, DBNull.Value,
+                "DBCC CHECKDB", 900_000L, 1L, 1L, 0L, "CXPACKET", 0, "0x8888888888888888", "HammerDB");
+            var noDatabaseRead = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 10,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string> { "excludeddb", "StackOverflow" }, LongRunningQueryExclusions.None, ct);
+            Assert.Equal(88, Assert.Single(noDatabaseRead.Sessions).SessionId);
+            Assert.Equal("", noDatabaseRead.Sessions[0].DatabaseName);
+            Assert.Equal(12, noDatabaseRead.ExcludedByDatabase);   /* 8 ExcludedDb + 71, 74, 75, 76 in StackOverflow */
 
             /* --- volumes: per-volume rollup, worst free-ratio first --- */
             var volumes = await adapter.GetVolumeFreeSpaceAsync(TestServerKey, ct);
@@ -407,5 +643,68 @@ public sealed class DarlingAlertReadAdapterTests
             $"DELETE FROM running_jobs WHERE server_id = {TestServerId};" +
             $"DELETE FROM server_properties WHERE server_id = {TestServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
+    }
+
+    /* ---------------- #4606 database-state maintenance deadlock retry ---------------- */
+
+    private static PostgresException Deadlock() =>
+        new("deadlock detected", "ERROR", "ERROR", PostgresErrorCodes.DeadlockDetected);
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_OneDeadlock_RetriesOnce_AndSucceeds()
+    {
+        /* The field case (#4606): a drop_chunks holding or waiting for an AccessExclusiveLock picks the
+           seed's AccessShareLock as the deadlock victim — the retry completes the maintenance sequence
+           instead of surfacing the failure to the alert pass. Same shape as DarlingRetentionTests'
+           DropChunksRetry_OneDeadlock_RetriesOnce_AndSucceeds. */
+        var calls = 0;
+        await DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+            () => { calls++; if (calls == 1) throw Deadlock(); return Task.CompletedTask; },
+            TestServerId, logger: null);
+
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_TwoDeadlocks_GivesUpAndSurfaces()
+    {
+        /* A second deadlock in a row is STANDING contention — the same posture as the purge's retry:
+           exactly two attempts, then the failure propagates to the caller (this method has no
+           DELETE-fallback path to fall back to; the read fails and the caller's existing catch arm
+           records it). */
+        var calls = 0;
+        await Assert.ThrowsAsync<PostgresException>(() =>
+            DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+                () => { calls++; throw Deadlock(); },
+                TestServerId, logger: null));
+
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_NonDeadlockPostgresException_DoesNotRetry()
+    {
+        /* Only 40P01 earns a retry — any other PostgresException (a missing relation, a permission
+           error) keeps the original single-shot posture, exactly like DarlingRetentionTests'
+           DropChunksRetry_NonDeadlockFailure_DoesNotRetry. */
+        var calls = 0;
+        var notADeadlock = new PostgresException("relation does not exist", "ERROR", "ERROR", "42P01");
+        await Assert.ThrowsAsync<PostgresException>(() =>
+            DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+                () => { calls++; throw notADeadlock; },
+                TestServerId, logger: null));
+
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_CleanRun_IsSingleShot()
+    {
+        var calls = 0;
+        await DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+            () => { calls++; return Task.CompletedTask; },
+            TestServerId, logger: null);
+
+        Assert.Equal(1, calls);
     }
 }

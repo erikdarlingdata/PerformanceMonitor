@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
@@ -104,6 +105,111 @@ public class DarlingPgSessionStatesReaderTests
     public void LongRunningSql_ExcludesIdleInTransactionSessions()
     {
         Assert.Contains("s.is_idle_in_transaction = false", LongRunningSql, StringComparison.Ordinal);
+    }
+
+    // ── #3539 — the noise opt-outs SQL Server's read has had all along ───────────────────────────
+
+    /// <summary>
+    /// Non-client backends are out unconditionally — the sibling of SQL Server's <c>session_id &gt; 50</c>.
+    /// Autovacuum workers and walsenders are the two that reached the alert in the field (an autovacuum of
+    /// a large table at minute 31, a streaming standby's walsender for as long as it is connected). NULL
+    /// keeps the row: <c>backend_type</c> is privileged and comes back NULL without <c>pg_monitor</c>, and a
+    /// filter that dropped NULL would silence the alert on exactly the targets the collector has already
+    /// flagged as redacted.
+    /// </summary>
+    [Fact]
+    public void LongRunningSql_ExcludesNonClientBackends_KeepingRedactedNulls()
+    {
+        Assert.Contains("coalesce(s.backend_type, 'client backend') = 'client backend'", LongRunningSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The four maintenance statements are out unconditionally, by the whitelisted command tag — the only
+    /// statement handle this table has, because it stores no text. <c>CREATE</c> is deliberately not among
+    /// them: the tag cannot separate an index build from a <c>CREATE TABLE AS</c>, so a CREATE is reported
+    /// with its tag rather than dropped on a guess. NULL-safe in the KEEPING direction like the backend
+    /// filter — a NULL tag is a session the collector could not classify, not a maintenance statement.
+    /// </summary>
+    [Fact]
+    public void LongRunningSql_ExcludesMaintenanceStatementsByCommandTag_ButNotCreate()
+    {
+        Assert.Contains("coalesce(s.command_tag, '') NOT IN ('VACUUM', 'ANALYZE', 'REINDEX', 'CLUSTER')", LongRunningSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'CREATE'", LongRunningSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The dump/restore utilities ride the SHARED <c>longRunningQueryExcludeBackups</c> switch (SQL Server's
+    /// <c>BackupsFilter</c>), so the filter is in the text exactly when the switch is on, and the four names
+    /// are libpq's <c>fallback_application_name</c> for those tools. <c>psql</c> is not in the list — an
+    /// operator's ad-hoc statement running long IS a long-running query. The default rendering (the constant
+    /// under the pre-#3539 name) is the switch-on shape, because that is the shipped default.
+    /// </summary>
+    [Fact]
+    public void LongRunningSql_DropsDumpAndRestoreUtilities_OnlyWhenTheSharedBackupsSwitchIsOn()
+    {
+        var on = DarlingPgSessionStatesReader.BuildCurrentLongRunningSessionsSql(excludeBackups: true);
+        var off = DarlingPgSessionStatesReader.BuildCurrentLongRunningSessionsSql(excludeBackups: false);
+
+        Assert.Equal(
+            "AND   coalesce(s.application_name, '') NOT IN ('pg_dump', 'pg_dumpall', 'pg_restore', 'pg_basebackup')",
+            DarlingPgSessionStatesReader.BackupUtilitiesFilter);
+        Assert.Contains(DarlingPgSessionStatesReader.BackupUtilitiesFilter, on, StringComparison.Ordinal);
+        Assert.DoesNotContain("application_name", off.Replace("s.application_name,", ""), StringComparison.Ordinal);
+        Assert.DoesNotContain("'psql'", on, StringComparison.Ordinal);
+        Assert.Equal(on, LongRunningSql);
+
+        /* The placeholder never reaches the server, on either setting. */
+        Assert.DoesNotContain("{0}", on, StringComparison.Ordinal);
+        Assert.DoesNotContain("{0}", off, StringComparison.Ordinal);
+
+        /* And the unconditional filters are in BOTH renderings - the switch governs only the utilities. */
+        foreach (var sql in new[] { on, off })
+        {
+            Assert.Contains("'client backend'", sql, StringComparison.Ordinal);
+            Assert.Contains("'VACUUM'", sql, StringComparison.Ordinal);
+            Assert.Contains("s.is_idle_in_transaction = false", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// <c>excludedDatabases</c> is applied IN the read, ahead of <c>LIMIT $4</c>, as the <c>candidates</c> CTE's
+    /// third flag (#3742) — the same shape on both engines, now the RIGHT one. Until #3742 this reader ran a C#
+    /// <c>FilterExcludedDatabases</c> after the cap (and this test executed its rule), so an excluded database's
+    /// sessions consumed the page and the alert came back short or empty while matches existed. Both
+    /// renderings carry the flag as the builder's empty-arm <c>FALSE</c>, the outer <c>WHERE</c> names all three
+    /// flags before the cap, the third count scalar is <c>AND NOT</c> both knob flags, and the reader has no
+    /// post-read filter left. The set shape (real operands, the exact/case-insensitive rule, a NULL-database
+    /// row kept) is <c>PgLongRunningQueryExclusionTests</c>' — through the shared builder, and live.
+    /// </summary>
+    [Fact]
+    public void ExcludedDatabases_IsTheThirdFlagAheadOfTheCap_NotAFilterAfterIt()
+    {
+        foreach (var sql in new[]
+        {
+            DarlingPgSessionStatesReader.CurrentLongRunningSessionsSql,
+            DarlingPgSessionStatesReader.CurrentLongRunningSessionsSqlBackupsIncluded,
+        })
+        {
+            Assert.Contains("FALSE AS excluded_by_database", sql, StringComparison.Ordinal);
+            var filter = sql.IndexOf("WHERE NOT (s.excluded_by_program_prefix OR s.excluded_by_login OR s.excluded_by_database)", StringComparison.Ordinal);
+            var limit = sql.IndexOf("LIMIT $4", StringComparison.Ordinal);
+            Assert.True(filter >= 0, "the three-flag filter is missing");
+            Assert.True(limit > filter, "the database list must be applied ahead of the row cap");
+            Assert.Contains(
+                "CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count",
+                sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("{3}", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Equal("s.database_name", DarlingPgSessionStatesReader.ExclusionDatabaseNameColumn);
+
+        /* The retired helper is gone from the reader, not disabled — with a positive control on the same text so
+           a matcher that quietly stopped matching cannot report a clean bill. */
+        var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgSessionStatesReader.cs");
+        Assert.Contains("excluded_by_database_count", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("public static List<LongRunningSessionRow> FilterExcludedDatabases(", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("excludedDatabases.Any(", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("IReadOnlyList<string>? excludedDatabases", reader, StringComparison.Ordinal);
     }
 
     // ── Scoping and parameterisation ─────────────────────────────────────────────────────────────

@@ -120,7 +120,10 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
         @"AND[ \t]+min_worker_time[ \t]*>=[ \t]*(?<minWorker>\d+)[ \t]*\r?\n"
         + @"[ \t]*AND[ \t]+max_worker_time[ \t]*>=[ \t]*(?<maxWorker>\d+)[ \t]*\r?\n"
         + @"[ \t]*AND[ \t]+execution_count[ \t]*>=[ \t]*(?<executions>\d+)[ \t]*\r?\n"
-        + @"[ \t]*AND[ \t]+creation_time_utc[ \t]*<=[ \t]*\$\d+[ \t]*\r?\n"
+        + @"[ \t]*AND[ \t]+(?:creation_time_utc[ \t]*<=[ \t]*\$\d+"
+        /* Darling's form since #4821: the newest offset as a rough filter an hour wider than the bound; the exact
+           test is the reader's, through ServerLocalTimes.CreatedByWindowStart. Normalized to the canonical line. */
+        + @"|creation_time[ \t]*-[ \t]*make_interval\([ \t]*mins[ \t]*=>[ \t]*svr\.offset_minutes[ \t]*\)[ \t]*<=[ \t]*\$\d+[ \t]*\+[ \t]*interval[ \t]*'1 hour')[ \t]*\r?\n"
         + @"[ \t]*AND[ \t]+max_worker_time::DOUBLE[ \t]+PRECISION[ \t]*/[ \t]*"
         + @"NULLIF\(min_worker_time,[ \t]*0\)[ \t]*>=[ \t]*(?<ratio>\d+)",
         RegexOptions.IgnoreCase);
@@ -396,7 +399,12 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
     /// regressed-queries read where it is the third — and that is a parameter layout, not a floor.
     /// </summary>
     private static string Normalize(string block) =>
-        Regex.Replace(Regex.Replace(block, @"\$\d+", _ => "$?"), @"\s+", " ").Trim();
+        Regex.Replace(
+            Regex.Replace(
+                Regex.Replace(block, @"\$\d+", _ => "$?"),
+                @"creation_time\s*-\s*make_interval\(\s*mins\s*=>\s*svr\.offset_minutes\s*\)\s*<=\s*\$\?\s*\+\s*interval\s*'1 hour'",
+                _ => "creation_time_utc <= $?"),
+            @"\s+", " ").Trim();
 
     /// <summary>
     /// Reads source with line endings collapsed to LF. <c>.gitattributes</c> checks the working tree out

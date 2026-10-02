@@ -634,7 +634,7 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         if (!string.IsNullOrEmpty(node.SqlText))
         {
             var copySql = new MenuItem { Header = "Copy SQL Text" };
-            copySql.Click += (_, _) => Clipboard.SetDataObject(node.SqlText, false);
+            copySql.Click += (_, _) => ClipboardText.TrySetText(node.SqlText);
             menu.Items.Add(copySql);
         }
 

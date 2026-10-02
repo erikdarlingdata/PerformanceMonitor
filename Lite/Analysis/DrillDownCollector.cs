@@ -28,10 +28,17 @@ public partial class DrillDownCollector
     private readonly IPlanFetcher? _planFetcher;
     private const int TextLimit = 500;
 
-    public DrillDownCollector(DuckDbInitializer duckDb, IPlanFetcher? planFetcher = null)
+    /// <summary>
+    /// The cadence each collector runs at on a server, for the latest-value lookbacks (#3896) — the fact
+    /// collector's, so a list and the count it details are bounded alike. Null is every shipped default.
+    /// </summary>
+    private readonly Func<int, string, int?>? _collectorFrequencyMinutes;
+
+    public DrillDownCollector(DuckDbInitializer duckDb, IPlanFetcher? planFetcher = null, Func<int, string, int?>? collectorFrequencyMinutes = null)
     {
         _duckDb = duckDb;
         _planFetcher = planFetcher;
+        _collectorFrequencyMinutes = collectorFrequencyMinutes;
     }
 
     /// <summary>
@@ -49,7 +56,11 @@ public partial class DrillDownCollector
             try
             {
                 finding.DrillDown = new Dictionary<string, object>();
-                var pathKeys = finding.StoryPath.Split(" → ", StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+                /* #3859: the finding's OWN typed keys, not a re-parse of its display string. This line used to
+                   split StoryPath on " → " — one of six such readers — so a fact key containing the arrow, or a
+                   change to the engine's join separator, would have quietly stopped every key test below from
+                   matching. Same keys, same order, nothing here can mis-parse. */
+                var pathKeys = finding.PathKeys.ToHashSet(StringComparer.Ordinal);
 
                 /* D7: the config drill-down is a single cheap config-table read and is
                    required to build config/RCSI/db-config advice, which legitimately scores

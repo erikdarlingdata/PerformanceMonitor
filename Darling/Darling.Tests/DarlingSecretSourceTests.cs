@@ -59,6 +59,33 @@ public sealed class DarlingSecretSourceTests
         }
     }
 
+    /// <summary>
+    /// #3914: a variable that is set to whitespace resolves to nothing, exactly like an unset one — the file branch
+    /// already trims to nothing and refuses. It used to come back as the whitespace itself, which a caller that
+    /// reads blank as "not configured" (the web and MCP store logins) then treated as unset, and the surface
+    /// landed on the owner login it was configured to avoid.
+    /// </summary>
+    [Theory]
+    [InlineData(" ")]
+    [InlineData("\t")]
+    [InlineData("  \r\n ")]
+    public void Resolve_Env_SetToWhitespace_IsAConfigurationError_NotABlankSecret(string blank)
+    {
+        var name = "DARLING_TEST_SECRET_" + Guid.NewGuid().ToString("N");
+        try
+        {
+            Environment.SetEnvironmentVariable(name, blank);
+            var ex = Assert.Throws<InvalidOperationException>(
+                () => DarlingSecretSource.Resolve($"env:{name}", "postgres.webConnectionString"));
+            Assert.Contains("postgres.webConnectionString", ex.Message, StringComparison.Ordinal);
+            Assert.Contains(name, ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(name, null);
+        }
+    }
+
     [Fact]
     public void Resolve_File_ReadsTrimmed_TheComposeSecretsShape()
     {

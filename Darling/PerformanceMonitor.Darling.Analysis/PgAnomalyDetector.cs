@@ -37,6 +37,32 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// Baseline computation and caching are handled by <see cref="PgBaselineProvider"/>.
 ///
 /// <para>
+/// #3653 (A8, first slice): every z-score family hands the shared <see cref="AnomalyGate"/> the
+/// window PEAK and the window MEAN as a pair, and the gate fires only when BOTH clear the existing
+/// cutoffs — the peak alone tested a window MAX against a per-sample distribution, so the verdict's
+/// null expectation grew with the number of samples in the window (a 24-hour anchored pass reported
+/// more anomalies than the 4-hour scheduled pass on identical behaviour; the post-install pages ran
+/// 11 → 24/h on the measured population). Every window read here already computed AVG beside MAX
+/// except <see cref="IoTileWindowSql"/>, which read AVG ALONE while its siblings read the peak under the
+/// same shared cutoffs; it now reads both and reports the peak like the rest. The reported deviation
+/// (Value, deviation_sigma) stays the PEAK's; the mean's rides beside it as mean_deviation_sigma.
+/// Lite's AnomalyDetector carries the identical reads, verbatim.
+/// </para>
+///
+/// <para>
+/// #3741 (the last leg of that slice): the WAIT-PROFILE detector, which never went through the gate,
+/// gets the same pair. Its window read computed a peak ms/sec and nothing else, and its inline gate
+/// tested that peak alone — modified z on the median/MAD frame at the heavy-tail 5.0 cutoff AND the
+/// 250 ms/sec floor — so one hot collection in an otherwise quiet window fired the one metric the
+/// fleet measured as heavy-tailed by nature. <see cref="WaitRateTileWindowSql"/> now reads AVG beside MAX
+/// and the trustworthy robust arm is ONE <see cref="AnomalyGate"/> pair call: peak and mean both clear
+/// the 5.0 cutoff, the floor stays on the peak. The ratio arm (a trustworthy bucket without robust
+/// statistics) asks the same of both ratios; the no-baseline arm stays on the peak's absolute bar, as
+/// the ruling says. <c>current_ms_per_sec</c> stays the peak; <c>avg_ms_per_sec</c> and
+/// <c>mean_modified_z</c> ride beside it.
+/// </para>
+///
+/// <para>
 /// Postgres discipline (see PgFindingStore): the SQL is Lite-verbatim against the
 /// V4 passthrough views (already dialect-shared — no QUALIFY in the detector
 /// queries), with every window bound a naive-UTC Kind-Unspecified parameter.
@@ -49,7 +75,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// the PgFindingStore/DarlingAlertReadAdapter pattern.
 /// </para>
 /// </summary>
-public class PgAnomalyDetector
+public class PgAnomalyDetector : IAnomalyDetector
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly PgBaselineProvider _baselineProvider;
@@ -96,6 +122,23 @@ public class PgAnomalyDetector
         metadata["baseline_median"] = baseline.Median;
         metadata["baseline_mad"] = baseline.Mad;
         metadata["confidence"] = baseline.Confidence;
+        /* #3691 lane 41: the DISTINCT-DAY count, which the bucket has always carried and no fact ever showed.
+           The zero-history extremity's claim is "N samples across D days of this hour, never once non-zero", and
+           a sample count alone cannot say it — 250 samples from two busy afternoons is not a month. Stamped on
+           every z-family fact, not only the zero-history ones: it is the same quality signal IsTrustworthy's day
+           floor reads, and an operator reading any baseline fact wants it beside baseline_samples. */
+        metadata["baseline_distinct_days"] = baseline.DistinctDays;
+        /* #3859: on the FLAT tier that count is a CEILING PROXY, not a measurement, and the fact says so.
+           CollapseToFlat takes MAX(DistinctDays) over the hour buckets rather than a global DISTINCT-days
+           query - a calendar day recurs across the 24 buckets so summing would double-count - and each
+           (hour, dow) bucket holds at most ~5 same-weekday dates in a 30-day window, so a Flat bucket
+           reports about 5 however much history it actually pooled. The admission lives at the CollapseToFlat
+           site, where it is a comment nothing downstream can read; this stamp is what stops a
+           get_analysis_facts reader treating the ceiling as a measurement, which is the whole defect. Stamped
+           only where it is true - the Full and HourOnly tiers count their own days, and an unconditional flag
+           would say nothing. */
+        if (baseline.Tier == BaselineTier.Flat)
+            metadata["baseline_distinct_days_is_proxy"] = 1;
     }
 
     /// <summary>
@@ -147,110 +190,273 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
      + (SELECT COUNT(*) FROM v_cpu_utilization_stats
         WHERE server_id = $1 AND collection_time >= $2)";
 
-    public const string CpuWindowSql = @"
-SELECT MAX(sqlserver_cpu_utilization) AS peak_cpu,
+    /* #3653 A8 option B (lane L2a): the tiled CPU window read — one row per target-local hour
+       (WindowTiles.LocalHourSql, $4..$6 bound from the ANALYSIS window's clock, never the cached
+       baseline clock — see the recipe doc). The peak-time subquery is dropped for a per-tile
+       array_agg ORDER BY, which the correlated LIMIT-1 subquery cannot express per group. Column
+       order (0 local_hour, 1 peak, 2 avg, 3 count, 4 peak_time) is the reader's ordinal contract.
+       #4731: every peak-time array_agg in the anomaly detectors orders `<value> DESC NULLS LAST,
+       collection_time DESC`. PostgreSQL sorts NULLs first under DESC, and the MAX beside it ignores
+       them, so without NULLS LAST a sample with no value could be reported as the peak time; the
+       collection_time key makes two samples tied on the peak report the later one. */
+    public const string CpuTileWindowSql = @"
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(sqlserver_cpu_utilization) AS peak_cpu,
        AVG(sqlserver_cpu_utilization) AS avg_cpu,
        COUNT(*) AS sample_count,
-       (SELECT collection_time FROM v_cpu_utilization_stats
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-        ORDER BY sqlserver_cpu_utilization DESC LIMIT 1) AS peak_time
+       (array_agg(collection_time ORDER BY sqlserver_cpu_utilization DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
-AND   collection_time >= $2 AND collection_time < $3";
+AND   collection_time >= $2 AND collection_time < $3
+GROUP BY local_hour
+ORDER BY local_hour";
 
-    /* Wait-profile current window: all-types wait ms/sec per collection (interval via LAG — never an
-       assumed cadence, mirrors the WaitMsPerSec baseline), then PEAK across collections. Window bound
-       aligned to the baseline (>= $2 AND < $3). */
-    public const string WaitRateWindowSql = @"
+    /* Wait-profile current window: all-types wait ms/sec per collection (the collection's STORED interval
+       since V127, the LAG for pre-V127 collections — never an assumed cadence; mirrors the WaitMsPerSec
+       baseline), then PEAK and MEAN across collections. A restart collection (every row's stored interval
+       0) has a NULL interval, so it is neither a peak candidate, nor a term of the mean, nor counted as a
+       sample — before #3540 it was a sample worth 0.00 ms/sec. Window bound aligned to the baseline
+       (>= $2 AND < $3).
+
+       #3741: the MEAN beside the peak, same arm, same guard — AVG over exactly the collections MAX ranges
+       over (a NULL-interval collection contributes NULL to both, and AVG ignores NULL as MAX does), so the
+       two statistics describe the same sample set and the pair gate compares like with like. The peak
+       alone tested a window MAX against a per-collection distribution, so one hot collection in a quiet
+       window read as a profile shift; the mean of N collections drawn from the baseline sits at the
+       baseline whatever N is, and requiring it to clear the same bar removes that bias without a new
+       number. Column ORDER is the reader's ordinal contract (0 peak, 1 avg, 2 total, 3 count) — pinned. */
+    /* #3653 A8 option B (lane L2a): the tiled wait-rate window read. The per_collection CTE is
+       unchanged — it must expose collection_time under that name for WindowTiles.LocalHourSql to key
+       on — and the OUTER select groups by local_hour instead of collapsing to one row. Column order
+       (0 local_hour, 1 peak, 2 avg, 3 total, 4 count) is the reader's ordinal contract. $4..$6 bind
+       from the ANALYSIS window's clock. */
+    public const string WaitRateTileWindowSql = @"
 WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
-           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
     GROUP BY collection_time
 )
-SELECT MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec ELSE 0 END) AS peak_ms_per_sec,
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec,
+       AVG(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS avg_ms_per_sec,
        SUM(total_wait_ms) AS total_wait_ms,
        COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count
+FROM per_collection
+GROUP BY local_hour
+ORDER BY local_hour";
+
+    /* Young-baseline bar read: the same window and per-collection shape as WaitRateTileWindowSql, with the
+       bar's numerator leaving out AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase. Returns the
+       whole-window peak (NULL when no collection is rated). */
+    public static readonly string YoungBaselineBarPeakSql = @"
+WITH per_collection AS (
+    SELECT collection_time,
+           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_wait_time_ms >= 0
+    GROUP BY collection_time
+)
+SELECT MAX(CASE WHEN interval_sec > 0 THEN bar_wait_ms / interval_sec END) AS bar_peak_ms_per_sec
 FROM per_collection";
 
-    /* Top 6 wait-type contributors in the window (named in the metadata KEY). */
+    /* The newest server-properties row's engine edition, read only by the young-baseline arm. */
+    public const string EngineEditionSql = @"
+SELECT engine_edition
+FROM server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /* Top 6 wait-type contributors in the window (named in the metadata KEY). A wait stored with and without the
+       trailing space the collector trims from #4884 on is one contributor: the inner query sums per stored
+       spelling, the outer query merges the spellings on rtrim(wait_type), once per group rather than per row. */
     public const string WaitContribWindowSql = @"
-SELECT wait_type,
-       SUM(delta_wait_time_ms)::BIGINT AS total_ms
-FROM v_wait_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   delta_wait_time_ms > 0
-GROUP BY wait_type
+SELECT rtrim(wait_type) AS wait_type,
+       SUM(spelling_ms)::BIGINT AS total_ms
+FROM (
+    SELECT wait_type,
+           SUM(delta_wait_time_ms) AS spelling_ms
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_wait_time_ms > 0
+    GROUP BY wait_type
+) AS per_spelling
+GROUP BY rtrim(wait_type)
 ORDER BY total_ms DESC
 LIMIT 6";
 
     /* current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
        snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
-       overview/alert path (Lite LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
+       overview/alert path (Lite LocalDataService.Overview.cs / LocalDataService.Blocking.cs).
+
+       the CURRENT window counts report and deadlock events by when they HAPPENED (event_time /
+       deadlock_time), so the spike counts the events the grids show; $4 is the EventWindowFloor for $2, the
+       partition-column bound with no upper side. The DMV snapshot arm stays on collection_time because a
+       snapshot's event_time IS its collection time. The BASELINE this count is judged against comes from the
+       continuous aggregates, which bucket the hypertable's own column (collection_time) by design. */
     public const string BlockingWindowSql = @"
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3), 0),
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3)) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS current_deadlocks";
+     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $4) AS current_deadlocks";
 
-    public const string IoWindowSql = @"
-SELECT AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
-       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat
+    /* The same read for an Azure SQL Database master target ($4 = the names of the databases monitored as their
+       own targets, skipped on both arms, a NULL database still counting; $5 = the event-window floor, which takes
+       the number after the list so the scoped read keeps the list where it was). The deadlock count comes from DeadlockGraphsCountSql through the every-process
+       rule, so this read carries no deadlock column. */
+    public const string BlockingSkippingSeparateCountSql = @"
+SELECT
+    COALESCE(NULLIF(
+        (SELECT COUNT(*) FROM v_blocked_process_reports
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $5
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))), 0),
+        (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))))) AS current_blocking,
+    0::bigint AS current_deadlocks";
+
+    /* $4 is the raw scoped list and $5 the event-window floor, as in BlockingSkippingSeparateCountSql. */
+    public const string DeadlockGraphsCountSql = @"
+SELECT deadlock_graph_xml FROM v_deadlocks
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $5
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>Deadlocks whose row names a database that is not separately monitored (the event's database on the telemetry arm;
+    /// master is the connection's fallback stamp, so it goes to the graph check): counted without reading their graphs.
+    /// $4 is the raw list, $5 the event-window floor.</summary>
+    public const string DeadlockOutsideCountSql = @"
+SELECT COUNT(*) FROM v_deadlocks
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $5
+AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /* #3653 (A8): the I/O window read hands the gate the PEAK and the MEAN per-file-row latency, like every
+       sibling family. Until this slice it read AVG ALONE — the one z-score detector judging a window average
+       against cutoffs its siblings met with a window MAX, so a single file's stall burst that would have fired
+       on CPU or batch requests was diluted here, and an averaged window carried none of the per-sample peak the
+       ReadLatencyFloorMs / IoLatencyFallbackMs bars were sized for. The baseline is the per-file-row read ratio
+       at this same grain (PgBaselineProvider's io_latency arm), so MAX over the same rows is the statistic the
+       other families test. Lite-verbatim. */
+    /* #3653 A8 option B (lane L2a): the tiled I/O window read — ONE read feeds both the read-latency
+       and write-latency gates, each scored through EvaluateTiles with its own WindowTile list built
+       from this one row set (design's I/O row: "ONE tiled read feeds both gates"). Column order
+       (0 local_hour, 1 peak_read, 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write,
+       6 write_sample_count) is the reader's ordinal contract. $4..$6 bind from the ANALYSIS window's clock.
+
+       #4731: each side counts its OWN samples, as Lite's twin does. The one COUNT(*) over the (reads OR
+       writes) rows counted a write-only row as a read sample (its read peak and mean NULL, read as 0), so the
+       read gate admitted tiles Lite rejects and window_samples differed between the products. A tile whose
+       side has no rows now carries 0 samples for that side and never enters that side's gate. */
+    public const string IoTileWindowSql = @"
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
+       AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
+       COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count,
+       MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat,
+       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat,
+       COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count
 FROM v_file_io_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   (delta_reads > 0 OR delta_writes > 0)";
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+AND   (delta_reads > 0 OR delta_writes > 0)
+GROUP BY local_hour
+ORDER BY local_hour";
 
-    public const string BatchRequestWindowSql = @"
-SELECT AVG(delta_cntr_value) AS avg_batch,
-       MAX(delta_cntr_value) AS peak_batch,
-       COUNT(*) AS sample_count
+    /* #3653 A8 option B (lane L2b): the tiled batch-requests window read — one row per target-local hour
+       (WindowTiles.LocalHourSql, $4..$6 bound from the ANALYSIS window's clock via BindTiledWindow).
+       Per-second rate per sample (#3527) — delta_cntr_value spans one collection interval, so divide by
+       the row's MEASURED sample_interval_seconds (#2234). Interval <= 0 marks an unknowable delta (first
+       sighting/reset/gap) and the row is skipped, never read as 0. Keeps the window statistic in the same
+       requests/sec unit as the baseline and the BatchRequestFloor/Fallback thresholds. Column order
+       (0 local_hour, 1 peak, 2 avg, 3 count, 4 peak_time) is the reader's ordinal contract. */
+    public const string BatchRequestTileWindowSql = @"
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS peak_batch,
+       AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
+       COUNT(*) AS sample_count,
+       (array_agg(collection_time ORDER BY delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM v_perfmon_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   counter_name = 'Batch Requests/sec'
-AND   delta_cntr_value >= 0";
+AND   delta_cntr_value >= 0
+AND   sample_interval_seconds > 0
+GROUP BY local_hour
+ORDER BY local_hour";
 
-    public const string SessionWindowSql = @"
+    /* #3653 A8 option B (lane L2b): the tiled session-count window read — the CTE keeps summing per
+       collection_time (WindowTiles.LocalHourSql reads collection_time under that name); the OUTER select
+       groups by target-local hour. Column order (0 local_hour, 1 peak, 2 avg, 3 count, 4 peak_time) is the
+       reader's ordinal contract. */
+    public const string SessionTileWindowSql = @"
 WITH per_collection AS (
     SELECT collection_time,
            SUM(connection_count)::DOUBLE PRECISION AS total_connections
     FROM v_session_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY collection_time
 )
-SELECT AVG(total_connections) AS avg_connections,
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_connections) AS peak_connections,
-       COUNT(*) AS sample_count
-FROM per_collection";
+       AVG(total_connections) AS avg_connections,
+       COUNT(*) AS sample_count,
+       (array_agg(collection_time ORDER BY total_connections DESC NULLS LAST, collection_time DESC))[1] AS peak_time
+FROM per_collection
+GROUP BY local_hour
+ORDER BY local_hour";
 
-    public const string QueryDurationWindowSql = @"
+    /* #3653 A8 option B (lane L2b): the tiled query-duration window read — the CTE keeps summing per
+       collection_time (WindowTiles.LocalHourSql reads collection_time under that name); the OUTER select
+       groups by target-local hour. Column order (0 local_hour, 1 peak, 2 avg, 3 count, 4 peak_time) is the
+       reader's ordinal contract. */
+    public const string QueryDurationTileWindowSql = @"
 WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_elapsed_time)::DOUBLE PRECISION AS total_elapsed
     FROM v_query_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_execution_count > 0
     AND   delta_elapsed_time >= 0
     GROUP BY collection_time
 )
-SELECT AVG(total_elapsed) AS avg_elapsed,
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_elapsed) AS peak_elapsed,
-       COUNT(*) AS sample_count
-FROM per_collection";
+       AVG(total_elapsed) AS avg_elapsed,
+       COUNT(*) AS sample_count,
+       (array_agg(collection_time ORDER BY total_elapsed DESC NULLS LAST, collection_time DESC))[1] AS peak_time
+FROM per_collection
+GROUP BY local_hour
+ORDER BY local_hour";
 
-    public const string MemoryWindowSql = @"
-SELECT AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS avg_pressure,
+    /* #3653 A8 option B (lane L2b): the tiled memory-pressure window read — one row per target-local hour
+       (WindowTiles.LocalHourSql, $4..$6 bound via BindTiledWindow). Column order (0 local_hour, 1 peak, 2
+       avg, 3 count, 4 peak_time) is the reader's ordinal contract. */
+    public const string MemoryTileWindowSql = @"
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS peak_pressure,
-       COUNT(*) AS sample_count
+       AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS avg_pressure,
+       COUNT(*) AS sample_count,
+       (array_agg(collection_time ORDER BY total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM v_memory_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   target_server_memory_mb > 0";
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+AND   target_server_memory_mb > 0
+GROUP BY local_hour
+ORDER BY local_hour";
 
     public const string ObjectGrowthSql = @"
 WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 2),
@@ -416,36 +622,66 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Cpu, context.TimeRangeStart, context.CancellationToken);
-
-            if (baseline.SampleCount == 0) return;
-            // No effectiveStdDev<=0 early return — an untrustworthy/zero-dispersion baseline falls
-            // back to the absolute bar (below) rather than going silent.
-            var effectiveStdDev = baseline.EffectiveStdDev;
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.Cpu, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(CpuWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            List<WindowTile> tiles;
+            using (var cmd = new NpgsqlCommand(CpuTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+            {
+                BindTiledWindow(cmd, context, map);
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                tiles = await ReadTilesAsync(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4, context.CancellationToken);
+            }
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var peakCpu = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var avgCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-            var peakTime = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+            var cpuThreshold = GetDeviationThreshold(MetricNames.Cpu);
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
+                cpuThreshold, ModifiedZThresholdFor(MetricNames.Cpu, cpuThreshold), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap,
+                window);
 
-            if (windowSamples == 0) return;
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peakCpu, avgCpu;
+            long windowSamples;
+            DateTime? peakTime;
+            Dictionary<string, double>? tileMetadata = null;
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakCpu,
-                GetDeviationThreshold(MetricNames.Cpu), ModifiedZThresholdFor(MetricNames.Cpu, GetDeviationThreshold(MetricNames.Cpu)), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap);
+            if (tv is { } verdict)
+            {
+                decision = verdict.Decision;
+                baseline = verdict.Bucket;
+                peakCpu = verdict.Tile.Peak;
+                avgCpu = verdict.Tile.Mean;
+                windowSamples = verdict.Tile.Samples;
+                peakTime = verdict.Tile.PeakTimeUtc;
+                tileMetadata = new Dictionary<string, double>();
+                WindowTiles.AddTileMetadata(tileMetadata, verdict, tiles, map.WindowClock);
+            }
+            else
+            {
+                // Never-blind fallback (design §1): no tile scored — today's whole-window path, unchanged.
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.Cpu, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+                peakCpu = whole.Peak;
+                avgCpu = whole.Mean;
+                windowSamples = whole.Samples;
+                peakTime = whole.PeakTimeUtc;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakCpu, avgCpu,
+                    cpuThreshold, ModifiedZThresholdFor(MetricNames.Cpu, cpuThreshold), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap,
+                    window: window);
+            }
+
             if (!decision.Fire) return;
 
+            var effectiveStdDev = baseline.EffectiveStdDev;
             var metadata = new Dictionary<string, double>
             {
                 ["peak_cpu"] = peakCpu,
@@ -453,14 +689,20 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
+                ["baseline_zero_history"] = decision.ZeroHistory ? 1 : 0,
                 ["baseline_samples"] = baseline.SampleCount,
                 ["window_samples"] = windowSamples,
                 ["peak_time_ticks"] = peakTime?.Ticks ?? 0
             };
             AddBaselineContext(metadata, baseline);
+            if (tileMetadata is not null)
+            {
+                foreach (var (k, v) in tileMetadata) metadata[k] = v;
+            }
 
             anomalies.Add(new Fact
             {
@@ -490,29 +732,46 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart, context.CancellationToken);
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            // Current window: all-types wait ms/sec per collection (interval via LAG), then PEAK.
-            double peakRate;
-            double totalWaitMs;
-            long collectionCount;
-            using (var rateCmd = new NpgsqlCommand(WaitRateWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+            // Current window: all-types wait ms/sec per collection (interval via LAG), tiled by target-local
+            // hour (#3653 A8 option B, lane L2a) — the ordinals are WaitRateTileWindowSql's column order, pinned.
+            // #3653 A8 hygiene: total_wait_ms (ordinal 3) is not one of WindowTile's fields (it isn't a
+            // peak/mean/sample statistic), so it is summed in THIS SAME reader pass, from the same rows the
+            // tiles are built from — a second NpgsqlCommand re-running the identical SQL used to do this read,
+            // doubling the store round trip every pass took (live-measured: pg_stat_statements showed 2 calls
+            // to this statement per pass before this fix, 1 after). Lite's twin (AnomalyDetector.cs
+            // DetectWaitAnomalies) already reads once, in one loop; this brings the SQL Server store side to
+            // the same shape.
+            List<WindowTile> tiles = new();
+            double totalWaitMs = 0;
+            using (var rateCmd = new NpgsqlCommand(WaitRateTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
             {
-                rateCmd.Parameters.AddWithValue(context.ServerId);
-                rateCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-                rateCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-
+                BindTiledWindow(rateCmd, context, map);
                 using var rateReader = await rateCmd.ExecuteReaderAsync(context.CancellationToken);
-                if (!await rateReader.ReadAsync(context.CancellationToken)) return;
-                peakRate = rateReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(rateReader.GetValue(0));
-                totalWaitMs = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
-                collectionCount = rateReader.IsDBNull(2) ? 0L : Convert.ToInt64(rateReader.GetValue(2));
+                while (await rateReader.ReadAsync(context.CancellationToken))
+                {
+                    tiles.Add(WindowTiles.ReadTile(rateReader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 4, peakTimeOrdinal: -1));
+                    totalWaitMs += rateReader.IsDBNull(3) ? 0.0 : Convert.ToDouble(rateReader.GetValue(3));
+                }
             }
 
-            if (collectionCount == 0) return; // no rated collection in the window
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return; // no rated collection in the window
+
+            var peakRate = whole.Peak;
+            var avgRate = whole.Mean;
+
+            // The coordinator's ruling for this family (#3653 A8 option B, lane L2a): the start-bucket arm
+            // choice stays exactly as it is today (robust z / classical ratio / no-baseline). Only the
+            // robust-z arm moves onto EvaluateTiles; the ratio and no-baseline arms stay whole-window,
+            // unchanged, fed from WholeWindow(tiles) — no second SQL read for them.
+            var baseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart, context.CancellationToken);
 
             /* #1743: the modified z-score replaces the ratio as the trusted-baseline trigger —
                fleet-measured, it strictly CONTAINS the ratio's catches at every cutoff (nothing the
@@ -523,39 +782,130 @@ ORDER BY ms_delta DESC LIMIT 1";
                floor is what was measured WITH the 5.0 cutoff. The ratio still rides the metadata
                for display and for scoring pre-#1743 facts; a bucket without robust stats keeps the
                classical ratio trigger; an untrustworthy baseline keeps the absolute peak-rate bar
-               (NOT silence) so a genuinely heavy profile still surfaces on a young store (is_new). */
+               (NOT silence) so a genuinely heavy profile still surfaces on a young store (is_new).
+
+               #3741 (the last leg of #3653 Q1 / #3724): the trusted robust arm is no longer an inline
+               test of the peak alone — it is the shared AnomalyGate PAIR call every other baseline
+               detector took in #3724, so the window PEAK and the window MEAN must BOTH clear the 5.0
+               modified-z cutoff, with the 250 ms/sec floor on the peak only (the gate's rule: the floor
+               is the "trivial value" ceiling for the value the finding reports, sized for a peak). The
+               gate speaks the same frame this arm always spoke: DecideRobustFirst judges both statistics
+               as modified z against the bucket's median and EffectiveRobustSigma — the exact arithmetic
+               of BaselineMath.ModifiedZScore, which still stamps the uncapped modified_z the scorer
+               grades — and the EffectiveRobustSigma > 0 guard on this arm means the classical frame
+               inside the gate is unreachable here, so the same 5.0 is passed as both cutoffs and the
+               absolute bar is the family's one bar. The mean's z is judged against the SAME per-collection
+               median/MAD as the peak's, as #3724 did for every other family (one centre, one dispersion,
+               one body). Said honestly for a heavy-tailed family: the mean of N draws converges to the
+               distribution's MEAN, which sits above its median when the tail is to the right, so the
+               mean clause's null expectation is a little above zero and the clause is a little LESS
+               strict than a symmetric reading would suggest — a bias toward firing, never toward
+               silence, and bounded, because it can only admit a window the peak already admitted; the
+               median-centred alternative (option b in #3741) was weighed and the ruling took the engine's
+               precedent. The ratio arm asks the same of both ratios (peak/mean AND window-mean/mean over
+               DefaultRatioThreshold). The no-baseline arm stays on the peak's absolute bar alone — there
+               is no z to trust on either statistic there, and the ruling keeps that bar where it was. */
             bool isNew;
+            // True only when the young-baseline bar fired with the Azure exclusion applied: the contributors it left out
+            // are stamped so the finding's text can say they did not count toward the threshold.
+            var barExcludedApplied = false;
             double ratio;
-            var modifiedZ = BaselineMath.ModifiedZScore(baseline, peakRate);
+            double scoredPeakRate = peakRate;
+            double scoredAvgRate = avgRate;
+            var scoredBaseline = baseline;
+            Dictionary<string, double>? tileMetadata = null;
+            double fireThreshold;
             if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
             {
                 isNew = false;
                 ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
-                if (modifiedZ < HeavyTailModifiedZThreshold || peakRate < WaitProfileFallbackMsPerSec) return;
+
+                /* #3653 A8 option B (lane L2a), coordinator ruling: only the robust-z arm moves onto
+                   EvaluateTiles. A null verdict (no tile scored) falls back to today's whole-window
+                   EvaluateZScore over WholeWindow(tiles) — the never-blind rule. */
+                var tv = AnomalyGate.EvaluateTiles(
+                    tiles, map,
+                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, WaitProfileFallbackMsPerSec, WaitProfileFallbackMsPerSec, SigmaDisplayCap,
+                    window);
+
+                AnomalyGate.ZDecision decision;
+                if (tv is { } verdict)
+                {
+                    decision = verdict.Decision;
+                    scoredBaseline = verdict.Bucket;
+                    scoredPeakRate = verdict.Tile.Peak;
+                    scoredAvgRate = verdict.Tile.Mean;
+                    tileMetadata = new Dictionary<string, double>();
+                    WindowTiles.AddTileMetadata(tileMetadata, verdict, tiles, map.WindowClock);
+                }
+                else
+                {
+                    decision = AnomalyGate.EvaluateZScore(
+                        baseline, peakRate, avgRate,
+                        HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, WaitProfileFallbackMsPerSec, WaitProfileFallbackMsPerSec, SigmaDisplayCap,
+                        window: window);
+                }
+                if (!decision.Fire) return;
+                fireThreshold = decision.ThresholdUsed;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
                 isNew = false;
                 ratio = peakRate / baseline.Mean;
-                if (ratio < DefaultRatioThreshold) return;
+                var meanRatio = avgRate / baseline.Mean;
+                if (ratio < DefaultRatioThreshold || meanRatio < DefaultRatioThreshold) return;
+                fireThreshold = DefaultRatioThreshold;
             }
             else
             {
                 isNew = true;
-                ratio = peakRate >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
+                // On an Azure SQL Database the bar leaves out YoungBaselineBarExcludedWaitsAzureSqlDatabase
+                // (a steady platform timer); the reported rates below stay the all-types figures.
+                var barPeak = peakRate;
+                if (await IsAzureSqlDatabaseAsync(connection, context))
+                {
+                    barPeak = await ReadYoungBaselineBarPeakAsync(connection, context);
+                    barExcludedApplied = true;
+                }
+                ratio = barPeak >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
                 if (ratio < DefaultRatioThreshold) return;
+                fireThreshold = 0;
             }
 
+            var modifiedZ = BaselineMath.ModifiedZScore(scoredBaseline, scoredPeakRate);
+            var meanModifiedZ = BaselineMath.ModifiedZScore(scoredBaseline, scoredAvgRate);
+
+            /* current_ms_per_sec stays the PEAK (the value the story leads with and the ratio is taken
+               on); avg_ms_per_sec is the window mean beside it, mean_modified_z its deviation in the
+               same uncapped frame as modified_z — the wait profile's own vocabulary, where the other
+               families' deviation_sigma / mean_deviation_sigma pair is the capped one (#3741). Both are
+               stamped on every arm: 0 modified z on a robust-less bucket, exactly as modified_z is.
+               #3653 A8 option B (lane L2a): on the robust-z arm these are the WORST TILE's values (or
+               the whole window's, on the never-blind fallback); the ratio and no-baseline arms below
+               keep reporting the whole-window peak/mean, unchanged. */
             var metadata = new Dictionary<string, double>
             {
-                ["current_ms_per_sec"] = peakRate,
-                ["baseline_mean"] = baseline.Mean,
+                ["current_ms_per_sec"] = scoredPeakRate,
+                ["avg_ms_per_sec"] = scoredAvgRate,
+                ["baseline_mean"] = scoredBaseline.Mean,
                 ["total_wait_ms"] = totalWaitMs,
                 ["ratio"] = ratio,
                 ["modified_z"] = modifiedZ,
-                ["is_new"] = isNew ? 1 : 0
+                ["mean_modified_z"] = meanModifiedZ,
+                ["is_new"] = isNew ? 1 : 0,
+                ["fire_threshold"] = fireThreshold,
+                /* #3871 rider: the DefaultRatioThreshold this detector gates on is measured now (its own
+                   distribution, 3,655 windows / 14 d / p99 3.14), and the stamp is how a reader tells a
+                   measured bar from an inherited one without opening the source. The frozen Dashboard
+                   mirror does NOT stamp it: its private copy of the constant is pinned as unmeasured on
+                   that tier, and a lineage stamp there would claim what its own comment denies. */
+                ["threshold_lineage"] = 1
             };
-            AddBaselineContext(metadata, baseline);
+            AddBaselineContext(metadata, scoredBaseline);
+            if (tileMetadata is not null)
+            {
+                foreach (var (k, v) in tileMetadata) metadata[k] = v;
+            }
 
             // Top 6 contributors — named in the metadata KEY (a Dictionary<string,double> can't hold
             // the type name in the value), value = the type's total wait ms in the window.
@@ -570,6 +920,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 {
                     var waitType = contribReader.GetString(0);
                     metadata[$"contrib_{waitType}"] = Convert.ToDouble(contribReader.GetValue(1));
+                    if (barExcludedApplied && AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase.Contains(waitType))
+                        metadata[$"{AnomalyThresholds.BarExcludedMetadataPrefix}{waitType}"] = 1;
                 }
             }
 
@@ -603,16 +955,28 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(BlockingWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+            /* The baselines above stay server-wide: a server-wide baseline against a filtered count can only
+               make a master spike less likely, which is accepted. */
+            var separate = PgFactCollector.SeparateDatabases(context);
+            using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
+            if (separate is not null) cmd.Parameters.AddWithValue(separate);
+            cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-            var currentBlocking = Convert.ToInt64(reader.GetValue(0));
-            var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            long currentBlocking, currentDeadlocks;
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                if (!await reader.ReadAsync(context.CancellationToken)) return;
+                currentBlocking = Convert.ToInt64(reader.GetValue(0));
+                currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            }
+            if (separate is not null)
+                currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
+                    connection, DeadlockOutsideCountSql, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                    separate, context.CancellationToken, DarlingAnalysisService.AnalysisCommandTimeoutSeconds);
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),
@@ -627,6 +991,9 @@ ORDER BY ms_delta DESC LIMIT 1";
             // SampleCount>0): a thin/zero-history baseline falls back to the absolute event count rather
             // than an inflated ratio. is_new marks that fallback so the composer renders it honestly as
             // a first occurrence — never the dishonest "spiked to 100×" the sentinel used to render.
+            // #4731: CountFamilyMetadata (one function for both products) assembles the fact's keys, and beside
+            // is_new it stamps baseline_zero_history, so a MEASURED zero is worded as one rather than as a
+            // first occurrence. The firing rule below is unchanged.
             var blockingTrust = blockingBaseline.IsTrustworthy;
             var deadlockTrust = deadlockBaseline.IsTrustworthy;
             var baselineBlockingRate = blockingBaseline.SampleCount > 0 ? blockingBaseline.Mean : 0;
@@ -636,14 +1003,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             // baseline; untrustworthy → fire on the count alone).
             if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
-                var isNew = !blockingTrust;
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_count"] = currentBlocking,
-                    ["baseline_rate"] = baselineBlockingRate,
-                    ["ratio"] = isNew ? NoBaselineRatio : currentBlockingPerHour / baselineBlockingRate,
-                    ["is_new"] = isNew ? 1 : 0
-                };
+                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline);
                 AddBaselineContext(metadata, blockingBaseline);
 
                 anomalies.Add(new Fact
@@ -660,14 +1020,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             // baseline; untrustworthy → fire on the count alone).
             if (currentDeadlocks >= 3 && (!deadlockTrust || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
             {
-                var isNew = !deadlockTrust;
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_count"] = currentDeadlocks,
-                    ["baseline_rate"] = baselineDeadlockRate,
-                    ["ratio"] = isNew ? NoBaselineRatio : currentDeadlocksPerHour / baselineDeadlockRate,
-                    ["is_new"] = isNew ? 1 : 0
-                };
+                var metadata = CountFamilyMetadata.Build(currentDeadlocks, currentDeadlocksPerHour, baselineDeadlockRate, deadlockBaseline);
                 AddBaselineContext(metadata, deadlockBaseline);
 
                 anomalies.Add(new Fact
@@ -687,89 +1040,186 @@ ORDER BY ms_delta DESC LIMIT 1";
     }
 
     /// <summary>
+    /// #4731: turns one <see cref="IoTileWindowSql"/> row into the read tile and the write tile, each with its
+    /// OWN sample count (ordinals 3 and 6) - Lite's twin makes the same two <see cref="WindowTiles.ReadTile"/>
+    /// calls, and the parity pin in <c>DarlingAnomalyBaselineTests</c> holds the two products to it. Static and
+    /// internal so a unit test can feed it a hand-built row with unequal read and write counts.
+    /// </summary>
+    internal static void ReadIoTiles(System.Data.IDataRecord reader, List<WindowTile> readTiles, List<WindowTile> writeTiles)
+    {
+        readTiles.Add(WindowTiles.ReadTile(reader, 0, 1, 2, 3));
+        writeTiles.Add(WindowTiles.ReadTile(reader, 0, 4, 5, 6));
+    }
+
+    /// <summary>
     /// Detects I/O latency anomalies using z-score against time-bucketed baseline.
     /// </summary>
     private async Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies)
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.CancellationToken);
-
-            if (baseline.SampleCount == 0) return;
-            var effectiveStdDev = baseline.EffectiveStdDev;
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var readMap = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(IoWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-            var currentReadLat = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var currentWriteLat = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-
-            var ioThreshold = GetDeviationThreshold(MetricNames.IoLatency);
-
-            // Read latency anomaly
-            var readDecision = AnomalyGate.EvaluateZScore(
-                baseline, currentReadLat,
-                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
-            if (readDecision.Fire)
+            // #3653 A8 option B (lane L2a): ONE tiled read feeds both gates (design's I/O row) — each
+            // family builds its own WindowTile list from the same rows (0 local_hour, 1 peak_read,
+            // 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write, 6 write_sample_count - #4731).
+            var readTiles = new List<WindowTile>();
+            var writeTiles = new List<WindowTile>();
+            using (var cmd = new NpgsqlCommand(IoTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
             {
-                var metadata = new Dictionary<string, double>
+                BindTiledWindow(cmd, context, readMap);
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
                 {
-                    ["current_latency_ms"] = currentReadLat,
-                    ["baseline_mean_ms"] = baseline.Mean,
-                    ["baseline_stddev_ms"] = effectiveStdDev,
-                    ["deviation_sigma"] = readDecision.Sigma,
-                ["fire_threshold"] = readDecision.ThresholdUsed,
-                    ["baseline_low_quality"] = readDecision.LowQualityBaseline ? 1 : 0,
-                    ["fallback_exceedance"] = readDecision.FallbackExceedance,
-                    ["baseline_samples"] = baseline.SampleCount
-                };
-                AddBaselineContext(metadata, baseline);
-
-                anomalies.Add(new Fact
-                {
-                    Source = "anomaly",
-                    Key = "ANOMALY_READ_LATENCY",
-                    Value = currentReadLat,
-                    ServerId = context.ServerId,
-                    Metadata = metadata
-                });
+                    ReadIoTiles(reader, readTiles, writeTiles);
+                }
             }
 
-            // Write latency anomaly
-            var writeDecision = AnomalyGate.EvaluateZScore(
-                baseline, currentWriteLat,
-                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
-            if (writeDecision.Fire)
-            {
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_latency_ms"] = currentWriteLat,
-                    ["baseline_mean_ms"] = baseline.Mean,
-                    ["baseline_stddev_ms"] = effectiveStdDev,
-                    ["deviation_sigma"] = writeDecision.Sigma,
-                ["fire_threshold"] = writeDecision.ThresholdUsed,
-                    ["baseline_low_quality"] = writeDecision.LowQualityBaseline ? 1 : 0,
-                    ["fallback_exceedance"] = writeDecision.FallbackExceedance,
-                    ["baseline_samples"] = baseline.SampleCount
-                };
-                AddBaselineContext(metadata, baseline);
+            var ioThreshold = GetDeviationThreshold(MetricNames.IoLatency);
+            var modifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold);
 
-                anomalies.Add(new Fact
+            // Read latency anomaly — the reported value and sigma are the worst tile's peak (#3653 A8 B).
+            var wholeRead = WindowTiles.WholeWindow(readTiles);
+            if (wholeRead.Samples > 0)
+            {
+                var readTv = AnomalyGate.EvaluateTiles(
+                    readTiles, readMap,
+                    ioThreshold, modifiedZThreshold, ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                    window);
+
+                AnomalyGate.ZDecision readDecision;
+                BaselineBucket readBaseline;
+                double peakReadLat, avgReadLat;
+                Dictionary<string, double>? readTileMetadata = null;
+                if (readTv is { } verdict)
                 {
-                    Source = "anomaly",
-                    Key = "ANOMALY_WRITE_LATENCY",
-                    Value = currentWriteLat,
-                    ServerId = context.ServerId,
-                    Metadata = metadata
-                });
+                    readDecision = verdict.Decision;
+                    readBaseline = verdict.Bucket;
+                    peakReadLat = verdict.Tile.Peak;
+                    avgReadLat = verdict.Tile.Mean;
+                    readTileMetadata = new Dictionary<string, double>();
+                    WindowTiles.AddTileMetadata(readTileMetadata, verdict, readTiles, readMap.WindowClock);
+                }
+                else
+                {
+                    readBaseline = await _baselineProvider.GetBaselineAsync(
+                        context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.CancellationToken);
+                    peakReadLat = wholeRead.Peak;
+                    avgReadLat = wholeRead.Mean;
+                    readDecision = readBaseline.SampleCount == 0
+                        ? default
+                        : AnomalyGate.EvaluateZScore(
+                            readBaseline, peakReadLat, avgReadLat,
+                            ioThreshold, modifiedZThreshold, ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                            window: window);
+                }
+
+                if (readDecision.Fire)
+                {
+                    var metadata = new Dictionary<string, double>
+                    {
+                        ["current_latency_ms"] = peakReadLat,
+                        ["avg_latency_ms"] = avgReadLat,
+                        ["baseline_mean_ms"] = readBaseline.Mean,
+                        ["baseline_stddev_ms"] = readBaseline.EffectiveStdDev,
+                        ["deviation_sigma"] = readDecision.Sigma,
+                        ["mean_deviation_sigma"] = readDecision.MeanSigma ?? 0,
+                        ["fire_threshold"] = readDecision.ThresholdUsed,
+                        ["baseline_low_quality"] = readDecision.LowQualityBaseline ? 1 : 0,
+                        ["fallback_exceedance"] = readDecision.FallbackExceedance,
+                        ["baseline_zero_history"] = readDecision.ZeroHistory ? 1 : 0,
+                        ["baseline_samples"] = readBaseline.SampleCount
+                    };
+                    AddBaselineContext(metadata, readBaseline);
+                    if (readTileMetadata is not null)
+                    {
+                        foreach (var (k, v) in readTileMetadata) metadata[k] = v;
+                    }
+
+                    anomalies.Add(new Fact
+                    {
+                        Source = "anomaly",
+                        Key = "ANOMALY_READ_LATENCY",
+                        Value = peakReadLat,
+                        ServerId = context.ServerId,
+                        Metadata = metadata
+                    });
+                }
+            }
+
+            // Write latency anomaly — its own tile list, its own map lookup (each gate scores independently).
+            var writeMap = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+            var wholeWrite = WindowTiles.WholeWindow(writeTiles);
+            if (wholeWrite.Samples > 0)
+            {
+                var writeTv = AnomalyGate.EvaluateTiles(
+                    writeTiles, writeMap,
+                    ioThreshold, modifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                    window);
+
+                AnomalyGate.ZDecision writeDecision;
+                BaselineBucket writeBaseline;
+                double peakWriteLat, avgWriteLat;
+                Dictionary<string, double>? writeTileMetadata = null;
+                if (writeTv is { } verdict)
+                {
+                    writeDecision = verdict.Decision;
+                    writeBaseline = verdict.Bucket;
+                    peakWriteLat = verdict.Tile.Peak;
+                    avgWriteLat = verdict.Tile.Mean;
+                    writeTileMetadata = new Dictionary<string, double>();
+                    WindowTiles.AddTileMetadata(writeTileMetadata, verdict, writeTiles, writeMap.WindowClock);
+                }
+                else
+                {
+                    writeBaseline = await _baselineProvider.GetBaselineAsync(
+                        context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.CancellationToken);
+                    peakWriteLat = wholeWrite.Peak;
+                    avgWriteLat = wholeWrite.Mean;
+                    writeDecision = writeBaseline.SampleCount == 0
+                        ? default
+                        : AnomalyGate.EvaluateZScore(
+                            writeBaseline, peakWriteLat, avgWriteLat,
+                            ioThreshold, modifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                            window: window);
+                }
+
+                if (writeDecision.Fire)
+                {
+                    var metadata = new Dictionary<string, double>
+                    {
+                        ["current_latency_ms"] = peakWriteLat,
+                        ["avg_latency_ms"] = avgWriteLat,
+                        ["baseline_mean_ms"] = writeBaseline.Mean,
+                        ["baseline_stddev_ms"] = writeBaseline.EffectiveStdDev,
+                        ["deviation_sigma"] = writeDecision.Sigma,
+                        ["mean_deviation_sigma"] = writeDecision.MeanSigma ?? 0,
+                        ["fire_threshold"] = writeDecision.ThresholdUsed,
+                        ["baseline_low_quality"] = writeDecision.LowQualityBaseline ? 1 : 0,
+                        ["fallback_exceedance"] = writeDecision.FallbackExceedance,
+                        ["baseline_zero_history"] = writeDecision.ZeroHistory ? 1 : 0,
+                        ["baseline_samples"] = writeBaseline.SampleCount
+                    };
+                    AddBaselineContext(metadata, writeBaseline);
+                    if (writeTileMetadata is not null)
+                    {
+                        foreach (var (k, v) in writeTileMetadata) metadata[k] = v;
+                    }
+
+                    anomalies.Add(new Fact
+                    {
+                        Source = "anomaly",
+                        Key = "ANOMALY_WRITE_LATENCY",
+                        Value = peakWriteLat,
+                        ServerId = context.ServerId,
+                        Metadata = metadata
+                    });
+                }
             }
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
@@ -785,33 +1235,63 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart, context.CancellationToken);
-
-            if (baseline.SampleCount == 0) return;
-            var effectiveStdDev = baseline.EffectiveStdDev;
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(BatchRequestWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            List<WindowTile> tiles;
+            using (var cmd = new NpgsqlCommand(BatchRequestTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+            {
+                BindTiledWindow(cmd, context, map);
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                tiles = await ReadTilesAsync(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4, context.CancellationToken);
+            }
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var avgBatch = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var peakBatch = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+            var batchThreshold = GetDeviationThreshold(MetricNames.BatchRequests);
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
+                batchThreshold, ModifiedZThresholdFor(MetricNames.BatchRequests, batchThreshold), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap,
+                window);
 
-            if (windowSamples == 0) return;
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peakBatch, avgBatch;
+            long windowSamples;
+            Dictionary<string, double>? tileMetadata = null;
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakBatch,
-                GetDeviationThreshold(MetricNames.BatchRequests), ModifiedZThresholdFor(MetricNames.BatchRequests, GetDeviationThreshold(MetricNames.BatchRequests)), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap);
+            if (tv is { } verdict)
+            {
+                decision = verdict.Decision;
+                baseline = verdict.Bucket;
+                peakBatch = verdict.Tile.Peak;
+                avgBatch = verdict.Tile.Mean;
+                windowSamples = verdict.Tile.Samples;
+                tileMetadata = new Dictionary<string, double>();
+                WindowTiles.AddTileMetadata(tileMetadata, verdict, tiles, map.WindowClock);
+            }
+            else
+            {
+                // Never-blind fallback (design §1): no tile scored — today's whole-window path, unchanged.
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+                peakBatch = whole.Peak;
+                avgBatch = whole.Mean;
+                windowSamples = whole.Samples;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakBatch, avgBatch,
+                    batchThreshold, ModifiedZThresholdFor(MetricNames.BatchRequests, batchThreshold), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap,
+                    window: window);
+            }
+
             if (!decision.Fire) return;
 
+            var effectiveStdDev = baseline.EffectiveStdDev;
             var metadata = new Dictionary<string, double>
             {
                 ["peak_batch_requests"] = peakBatch,
@@ -819,13 +1299,19 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
+                ["baseline_zero_history"] = decision.ZeroHistory ? 1 : 0,
                 ["baseline_samples"] = baseline.SampleCount,
                 ["window_samples"] = windowSamples
             };
             AddBaselineContext(metadata, baseline);
+            if (tileMetadata is not null)
+            {
+                foreach (var (k, v) in tileMetadata) metadata[k] = v;
+            }
 
             anomalies.Add(new Fact
             {
@@ -849,33 +1335,63 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.SessionCount, context.TimeRangeStart, context.CancellationToken);
-
-            if (baseline.SampleCount == 0) return;
-            var effectiveStdDev = baseline.EffectiveStdDev;
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.SessionCount, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(SessionWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            List<WindowTile> tiles;
+            using (var cmd = new NpgsqlCommand(SessionTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+            {
+                BindTiledWindow(cmd, context, map);
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                tiles = await ReadTilesAsync(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4, context.CancellationToken);
+            }
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var avgConnections = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var peakConnections = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+            var sessionThreshold = GetDeviationThreshold(MetricNames.SessionCount);
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
+                sessionThreshold, ModifiedZThresholdFor(MetricNames.SessionCount, sessionThreshold), SessionCountFloor, SessionCountFallback, SigmaDisplayCap,
+                window);
 
-            if (windowSamples == 0) return;
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peakConnections, avgConnections;
+            long windowSamples;
+            Dictionary<string, double>? tileMetadata = null;
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakConnections,
-                GetDeviationThreshold(MetricNames.SessionCount), ModifiedZThresholdFor(MetricNames.SessionCount, GetDeviationThreshold(MetricNames.SessionCount)), SessionCountFloor, SessionCountFallback, SigmaDisplayCap);
+            if (tv is { } verdict)
+            {
+                decision = verdict.Decision;
+                baseline = verdict.Bucket;
+                peakConnections = verdict.Tile.Peak;
+                avgConnections = verdict.Tile.Mean;
+                windowSamples = verdict.Tile.Samples;
+                tileMetadata = new Dictionary<string, double>();
+                WindowTiles.AddTileMetadata(tileMetadata, verdict, tiles, map.WindowClock);
+            }
+            else
+            {
+                // Never-blind fallback (design §1): no tile scored — today's whole-window path, unchanged.
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.SessionCount, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+                peakConnections = whole.Peak;
+                avgConnections = whole.Mean;
+                windowSamples = whole.Samples;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakConnections, avgConnections,
+                    sessionThreshold, ModifiedZThresholdFor(MetricNames.SessionCount, sessionThreshold), SessionCountFloor, SessionCountFallback, SigmaDisplayCap,
+                    window: window);
+            }
+
             if (!decision.Fire) return;
 
+            var effectiveStdDev = baseline.EffectiveStdDev;
             var metadata = new Dictionary<string, double>
             {
                 ["peak_connections"] = peakConnections,
@@ -883,13 +1399,19 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
+                ["baseline_zero_history"] = decision.ZeroHistory ? 1 : 0,
                 ["baseline_samples"] = baseline.SampleCount,
                 ["window_samples"] = windowSamples
             };
             AddBaselineContext(metadata, baseline);
+            if (tileMetadata is not null)
+            {
+                foreach (var (k, v) in tileMetadata) metadata[k] = v;
+            }
 
             anomalies.Add(new Fact
             {
@@ -914,33 +1436,63 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart, context.CancellationToken);
-
-            if (baseline.SampleCount == 0) return;
-            var effectiveStdDev = baseline.EffectiveStdDev;
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(QueryDurationWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            List<WindowTile> tiles;
+            using (var cmd = new NpgsqlCommand(QueryDurationTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+            {
+                BindTiledWindow(cmd, context, map);
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                tiles = await ReadTilesAsync(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4, context.CancellationToken);
+            }
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var avgElapsed = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var peakElapsed = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+            var queryDurationThreshold = GetDeviationThreshold(MetricNames.QueryDuration);
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
+                queryDurationThreshold, ModifiedZThresholdFor(MetricNames.QueryDuration, queryDurationThreshold), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap,
+                window);
 
-            if (windowSamples == 0) return;
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peakElapsed, avgElapsed;
+            long windowSamples;
+            Dictionary<string, double>? tileMetadata = null;
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakElapsed,
-                GetDeviationThreshold(MetricNames.QueryDuration), ModifiedZThresholdFor(MetricNames.QueryDuration, GetDeviationThreshold(MetricNames.QueryDuration)), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap);
+            if (tv is { } verdict)
+            {
+                decision = verdict.Decision;
+                baseline = verdict.Bucket;
+                peakElapsed = verdict.Tile.Peak;
+                avgElapsed = verdict.Tile.Mean;
+                windowSamples = verdict.Tile.Samples;
+                tileMetadata = new Dictionary<string, double>();
+                WindowTiles.AddTileMetadata(tileMetadata, verdict, tiles, map.WindowClock);
+            }
+            else
+            {
+                // Never-blind fallback (design §1): no tile scored — today's whole-window path, unchanged.
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+                peakElapsed = whole.Peak;
+                avgElapsed = whole.Mean;
+                windowSamples = whole.Samples;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakElapsed, avgElapsed,
+                    queryDurationThreshold, ModifiedZThresholdFor(MetricNames.QueryDuration, queryDurationThreshold), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap,
+                    window: window);
+            }
+
             if (!decision.Fire) return;
 
+            var effectiveStdDev = baseline.EffectiveStdDev;
             var metadata = new Dictionary<string, double>
             {
                 ["peak_total_elapsed_us"] = peakElapsed,
@@ -948,13 +1500,19 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
+                ["baseline_zero_history"] = decision.ZeroHistory ? 1 : 0,
                 ["baseline_samples"] = baseline.SampleCount,
                 ["window_samples"] = windowSamples
             };
             AddBaselineContext(metadata, baseline);
+            if (tileMetadata is not null)
+            {
+                foreach (var (k, v) in tileMetadata) metadata[k] = v;
+            }
 
             anomalies.Add(new Fact
             {
@@ -980,33 +1538,63 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Memory, context.TimeRangeStart, context.CancellationToken);
-
-            if (baseline.SampleCount == 0) return;
-            var effectiveStdDev = baseline.EffectiveStdDev;
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.Memory, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(MemoryWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            List<WindowTile> tiles;
+            using (var cmd = new NpgsqlCommand(MemoryTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+            {
+                BindTiledWindow(cmd, context, map);
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                tiles = await ReadTilesAsync(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4, context.CancellationToken);
+            }
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var avgPressure = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var peakPressure = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+            var memoryThreshold = GetDeviationThreshold(MetricNames.Memory);
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
+                memoryThreshold, ModifiedZThresholdFor(MetricNames.Memory, memoryThreshold), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap,
+                window);
 
-            if (windowSamples == 0) return;
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peakPressure, avgPressure;
+            long windowSamples;
+            Dictionary<string, double>? tileMetadata = null;
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakPressure,
-                GetDeviationThreshold(MetricNames.Memory), ModifiedZThresholdFor(MetricNames.Memory, GetDeviationThreshold(MetricNames.Memory)), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap);
+            if (tv is { } verdict)
+            {
+                decision = verdict.Decision;
+                baseline = verdict.Bucket;
+                peakPressure = verdict.Tile.Peak;
+                avgPressure = verdict.Tile.Mean;
+                windowSamples = verdict.Tile.Samples;
+                tileMetadata = new Dictionary<string, double>();
+                WindowTiles.AddTileMetadata(tileMetadata, verdict, tiles, map.WindowClock);
+            }
+            else
+            {
+                // Never-blind fallback (design §1): no tile scored — today's whole-window path, unchanged.
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.Memory, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+                peakPressure = whole.Peak;
+                avgPressure = whole.Mean;
+                windowSamples = whole.Samples;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakPressure, avgPressure,
+                    memoryThreshold, ModifiedZThresholdFor(MetricNames.Memory, memoryThreshold), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap,
+                    window: window);
+            }
+
             if (!decision.Fire) return;
 
+            var effectiveStdDev = baseline.EffectiveStdDev;
             var metadata = new Dictionary<string, double>
             {
                 ["peak_memory_pressure_pct"] = peakPressure,
@@ -1014,13 +1602,19 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
+                ["baseline_zero_history"] = decision.ZeroHistory ? 1 : 0,
                 ["baseline_samples"] = baseline.SampleCount,
                 ["window_samples"] = windowSamples
             };
             AddBaselineContext(metadata, baseline);
+            if (tileMetadata is not null)
+            {
+                foreach (var (k, v) in tileMetadata) metadata[k] = v;
+            }
 
             anomalies.Add(new Fact
             {
@@ -1040,4 +1634,68 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// <summary>Kind-Unspecified for query bounds — Npgsql 6+ rejects Kind-Utc against <c>timestamp</c>.</summary>
     private static DateTime AsNaive(DateTime value) =>
         DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
+
+    /// <summary>True when the newest server_properties row says Azure SQL Database (engine edition 5).</summary>
+    private static async Task<bool> IsAzureSqlDatabaseAsync(NpgsqlConnection connection, AnalysisContext context)
+    {
+        using var cmd = new NpgsqlCommand(EngineEditionSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        var edition = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return edition is not null and not DBNull
+            && Convert.ToInt32(edition) == PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
+    }
+
+    /// <summary>Peak ms/sec across the window's collections with the young-baseline excluded waits left out.</summary>
+    private static async Task<double> ReadYoungBaselineBarPeakAsync(NpgsqlConnection connection, AnalysisContext context)
+    {
+        using var cmd = new NpgsqlCommand(YoungBaselineBarPeakSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        var peak = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return peak is null or DBNull ? 0.0 : Convert.ToDouble(peak);
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L2a): binds a tiled window statement's six parameters — $1 server id, $2/$3 the
+    /// analysis window bounds (naive UTC, exactly as every non-tiled read here binds them), then $4..$6 from
+    /// <paramref name="map"/>'s <see cref="BaselineBucketMap.WindowClock"/> in the SAME order
+    /// <c>PgBaselineProvider.ComputeBucketsAsync</c> binds them (transition instant, then
+    /// <c>OffsetBeforeMinutes</c>, then <c>OffsetAfterMinutes</c>) — the map's clock is resolved over the
+    /// ANALYSIS window (design §1), never the cached 30-day baseline window, so a caller must not substitute
+    /// its own. Shared by every tiled family in this file (CPU, waits, I/O; batch/sessions/query/memory follow
+    /// in lane L2b) so the bind order cannot drift between them.
+    /// </summary>
+    private static void BindTiledWindow(NpgsqlCommand cmd, AnalysisContext context, BaselineBucketMap map)
+    {
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        cmd.Parameters.AddWithValue(AsNaive(map.WindowClock.TransitionAtUtc));
+        cmd.Parameters.AddWithValue(map.WindowClock.OffsetBeforeMinutes);
+        cmd.Parameters.AddWithValue(map.WindowClock.OffsetAfterMinutes);
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L2a): reads every row of a tiled window statement into a
+    /// <see cref="WindowTile"/> list, through <see cref="WindowTiles.ReadTile"/> — shared by every tiled
+    /// family in this file so the ordinal wiring cannot drift between them. <paramref name="peakTimeOrdinal"/>
+    /// defaults to -1 (no peak time column) for families that don't track one.
+    /// </summary>
+    private static async Task<List<WindowTile>> ReadTilesAsync(
+        NpgsqlDataReader reader,
+        int localHourOrdinal,
+        int peakOrdinal,
+        int meanOrdinal,
+        int samplesOrdinal,
+        int peakTimeOrdinal,
+        CancellationToken cancellationToken)
+    {
+        var tiles = new List<WindowTile>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            tiles.Add(WindowTiles.ReadTile(reader, localHourOrdinal, peakOrdinal, meanOrdinal, samplesOrdinal, peakTimeOrdinal));
+        }
+        return tiles;
+    }
 }

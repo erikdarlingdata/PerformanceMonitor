@@ -32,7 +32,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>managedidentity</c>, secret-less), never plaintext. A SQL credential PROFILE is resolved to its concrete
 /// username + secret at write time. The INTERACTIVE Entra modes (MFA / device-code / default-credential) have
 /// no headless connect path (<see cref="ServerStoreCredential"/>) and are blocked with a clear message rather
-/// than written un-honorable. Favorites stay viewer-local (<see cref="ViewerServerStore.SetFavorite"/>).</para>
+/// than written un-honorable. Favorites stay viewer-local (<see cref="ViewerServerStore.SetFavorite(int, bool, string[])"/>),
+/// filed under the server's id so they follow it through an edit of its host (#4768).</para>
 ///
 /// <para><b>Engine (#3499).</b> The dialog authors both engines the service monitors: SQL Server (the checked
 /// default — an untouched dialog renders the exact pre-selector form) and PostgreSQL, which the service had
@@ -669,6 +670,24 @@ public partial class AddServerDialog : Window
         _ => null
     };
 
+    /// <summary>What the Add dialog says when the address is taken by a server that is already monitored.</summary>
+    private const string AlreadyMonitoredMessage =
+        "A server with this address (and database / read-only intent) is already monitored. Edit it from Manage Servers instead.";
+
+    /// <summary>
+    /// What the Add dialog says when <see cref="ViewerDataService.AddMonitoredServerAsync"/> wrote nothing (#4789).
+    /// The same server again reads as already monitored; a different server that hashes to the same id is named,
+    /// because that is the one the operator has to reconcile with; a vanished holder just asks for another try.
+    /// </summary>
+    internal static string DescribeRefusedAdd(MonitoredServerAddResult result) => result.Outcome switch
+    {
+        MonitoredServerAddOutcome.Duplicate => AlreadyMonitoredMessage,
+        MonitoredServerAddOutcome.Collides =>
+            $"Not saved: this server's id collides with '{result.Occupant?.Name}', a different server that is already monitored. "
+            + "Saving it would overwrite that server, so nothing was changed.",
+        _ => "Not saved: nothing was written. Try again.",
+    };
+
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         if (_dataService is null)
@@ -689,10 +708,9 @@ public partial class AddServerDialog : Window
                 return;
             }
 
-            /* Refuse to point this definition at an address another server already monitors: on Add the
-               upsert's ON CONFLICT DO UPDATE would clobber that row's excluded databases / capture override,
-               and on Edit it would leave two registrations collecting the same real instance under two
-               identities — #2228's shape, arrived at from the registry side.
+            /* Refuse to point this definition at an address another server already monitors: on Add it
+               would register one real instance twice, and on Edit it would leave two registrations collecting
+               the same real instance under two identities — #2228's shape, arrived at from the registry side.
 
                #2158: checked against the ADDRESS rather than against a derived id. Now that an edit preserves
                its identity, a row's server_id no longer has to equal the hash of its own address, so the old
@@ -705,18 +723,40 @@ public partial class AddServerDialog : Window
                 row.Host, row.Database, row.ReadOnlyIntent, row.IsPostgres, row.Port);
             if (occupant is not null && occupant.ServerId != row.ServerId)
             {
-                StatusText.Text = "A server with this address (and database / read-only intent) is already monitored. Edit it from Manage Servers instead.";
+                StatusText.Text = AlreadyMonitoredMessage;
                 SaveButton.IsEnabled = true;
                 return;
             }
 
-            /* One row, one identity, in place — no delete. The upsert's ON CONFLICT (server_id) arm rewrites
-               the address on the row that already owns this id, so the server's collected history stays
-               attached to it. */
-            await _dataService.UpsertMonitoredServerAsync(row);
+            if (_originalServerId is null)
+            {
+                /* An ADD (#4789) writes only into a free id. The id is a 32-bit hash of the identity, so a
+                   DIFFERENT server can already hold the one this row derived, and the upsert below would
+                   rewrite that server with this address: it stops being monitored and its collected history
+                   shows under the new one. The insert leaves the holder alone, and what it finds there decides
+                   the message — the same server is "already monitored", a different one is an id collision —
+                   and neither saves anything. */
+                var addResult = await _dataService.AddMonitoredServerAsync(row);
+                if (addResult.Outcome != MonitoredServerAddOutcome.Added)
+                {
+                    StatusText.Text = DescribeRefusedAdd(addResult);
+                    SaveButton.IsEnabled = true;
+                    return;
+                }
+            }
+            else
+            {
+                /* One row, one identity, in place — no delete. The upsert's ON CONFLICT (server_id) arm rewrites
+                   the address on the row that already owns this id, so the server's collected history stays
+                   attached to it. */
+                await _dataService.UpsertMonitoredServerAsync(row);
+            }
 
-            /* Favorites are viewer-local (the service never reads them) — keyed by the server address. */
-            _serverStore.SetFavorite(row.Host, FavoriteCheckBox.IsChecked == true);
+            /* Favorites are viewer-local (the service never reads them), filed under the server's id, which an
+               edit of the host keeps (#2158), so the flag stays with the server (#4768). Earlier versions filed
+               it under the host: the old and the new one are handed over so a leftover entry under either is
+               cleared, and unchecking here leaves nothing set. */
+            _serverStore.SetFavorite(row.ServerId, FavoriteCheckBox.IsChecked == true, _existing?.Host, row.Host);
 
             SavedDisplayName = row.Name;
             DialogResult = true;

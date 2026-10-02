@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -61,7 +62,8 @@ LIMIT 10";
 
     /// <summary>
     /// Lists the large (>= 10 GB) data/log files on PERCENTAGE autogrowth (WS3), latest
-    /// snapshot per file, excluding system databases — and attaches a copy-paste
+    /// snapshot per file within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's
+    /// end (#3896), excluding system databases — and attaches a copy-paste
     /// ALTER DATABASE ... MODIFY FILE fix per file (FILEGROWTH set to a size-tiered fixed MB).
     /// Same structured fields + SHARED renderer as the Dashboard collector so the copy-paste
     /// is byte-identical across apps. Lite is advise/copy-paste only — there is no Apply, so
@@ -69,10 +71,18 @@ LIMIT 10";
     /// </summary>
     private async Task CollectAutogrowthPercentFiles(AnalysisFinding finding, AnalysisContext context)
     {
+        /* #3896: a no-op in the pass, whose fact collector stamped the bounds on this context already. */
+        await LatestValueBounds.EnsureAsync(_duckDb, _collectorFrequencyMinutes, context);
+
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
+        /* #3896: the SAME bounds as the fact that fires this drill-down (DuckDbFactCollector's
+           CollectFileAutogrowthFactsAsync) — $2 the lookback start, $3 the window end — so the list names
+           exactly the files the count counted. It had no time bound at all: a dropped database's file sat in
+           the list, with an ALTER DATABASE for a database that no longer exists, for the whole
+           database_size_stats retention. */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 WITH latest AS (
@@ -80,6 +90,8 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY database_name, file_id ORDER BY collection_time DESC) AS rn
     FROM v_database_size_stats
     WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
 )
 SELECT database_name, file_type_desc, file_name, total_size_mb, growth_pct
 FROM latest
@@ -91,6 +103,8 @@ ORDER BY total_size_mb DESC
 LIMIT 50";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

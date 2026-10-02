@@ -194,6 +194,48 @@ public sealed class DarlingDeliveryModeTests
         Assert.Equal(4, history.Records.Count); // inherited the global Per-event
     }
 
+    /* ---------------- pure: what a Per-event split reports back to the engine (#4822) ---------------- */
+
+    [Fact]
+    public async Task PerEvent_EverySendFailed_ReportsAFailedDelivery_SoTheEngineTriesTheAlertAgain()
+    {
+        using var endpoint = new CapturingWebhookEndpoint(statusCode: 500);
+        var config = new DarlingConfig();
+        config.Alerts.DeliveryMode = AlertNotificationMode.PerEvent;
+        config.Webhooks.GenericUrl = endpoint.Url;
+        var (deliverer, history) = BuildDeliverer(config);
+
+        var delivery = await deliverer.DeliverAndReportAsync(OutcomeWithIncidents(3), TestContext.Current.CancellationToken);
+
+        /* Each incident got its own post and its own row, and every post was refused. */
+        Assert.Equal(3, endpoint.Bodies.Count);
+        Assert.Equal(3, history.Records.Count);
+        Assert.All(history.Records, r => Assert.False(r.Delivery.Sent));
+        /* Before #4822 the split answered null, which the engine reads as delivered: a deadlock, blocking or
+           poison wait alert nothing had reached waited out its whole cooldown instead of a minute. */
+        Assert.True(FailedSendBackoff.EveryChannelFailed(delivery));
+    }
+
+    [Fact]
+    public async Task PerEvent_OneSendDelivered_ReportsItDelivered_SoTheAlertIsNotSentTwice()
+    {
+        /* The first incident's post is refused, the second is accepted. */
+        using var endpoint = new CapturingWebhookEndpoint(statusSequence: new[] { 500, 200 });
+        var config = new DarlingConfig();
+        config.Alerts.DeliveryMode = AlertNotificationMode.PerEvent;
+        config.Webhooks.GenericUrl = endpoint.Url;
+        var (deliverer, history) = BuildDeliverer(config);
+
+        var delivery = await deliverer.DeliverAndReportAsync(OutcomeWithIncidents(2), TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, endpoint.Bodies.Count);
+        Assert.Equal(new[] { false, true }, history.Records.Select(r => r.Delivery.Sent).ToArray());
+        /* The split reached a channel, so a retry would only page it a second time. */
+        Assert.NotNull(delivery);
+        Assert.True(delivery!.Sent);
+        Assert.False(FailedSendBackoff.EveryChannelFailed(delivery));
+    }
+
     /* ---------------- live (DARLING_TEST_PG): seed -> read round-trip of the V18 columns ---------------- */
 
     [Fact]
@@ -259,8 +301,9 @@ public sealed class DarlingDeliveryModeTests
     {
         var settings = new DarlingAlertSettings(config);
         var history = new RecordingHistoryStore();
-        /* SMTP + webhooks unconfigured (DarlingConfig defaults): no channel attempts, so each send records a
-           single "tray" row — isolating the Summary-vs-Per-event fan-out we assert on. */
+        /* SMTP + webhooks are whatever the config holds, unconfigured by default (DarlingConfig defaults): no
+           channel attempts, so each send records a single "tray" row — isolating the Summary-vs-Per-event
+           fan-out we assert on. The #4822 tests point a webhook at a loopback endpoint instead. */
         var webhooks = new WebhookAlertService(
             settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
         var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance, resolveOverride);
@@ -300,5 +343,6 @@ public sealed class DarlingDeliveryModeTests
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
     }
 }

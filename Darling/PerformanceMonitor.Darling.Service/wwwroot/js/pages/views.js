@@ -25,13 +25,73 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, relTime } from "../util.js";
-import { renderPanel, VIZ } from "../panels.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, fmtNum } from "../util.js";
+import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
 import { DASHBOARD_TEMPLATES } from "../view-templates.js";
+import { resolveReadTable } from "../read-fields.js";
 import * as api from "../views-api.js";
+import { refreshChoiceOf } from "../refresh-policy.js";
+import { buildRefreshControl } from "../refresh-control.js";
+
+/* #4666: the saved view/notebook on screen and its effective auto-refresh choice. app.js reads it through
+   currentViewRefresh() to time the page's own re-render, and is told about a change through
+   onViewRefreshChange(). A choice made by a session that cannot save is remembered per view id for this page
+   load only, so the 5-minute re-render does not snap the select back to the stored value. */
+let currentRefresh = null;
+let refreshListener = null;
+const sessionRefreshChoice = new Map();
+
+/** The loaded saved view's effective refresh choice ("off" | "1m" | "5m" | "15m"), or null off a view page. */
+export function currentViewRefresh() {
+  return currentRefresh;
+}
+
+/** app.js registers one callback, called whenever the operator changes the loaded view's choice. */
+export function onViewRefreshChange(fn) {
+  refreshListener = fn;
+}
+
+/** Clears the loaded view's choice; app.js calls it when the route leaves a view page. */
+export function clearViewRefresh() {
+  currentRefresh = null;
+}
+
+/** The labelled "Auto-refresh:" select for a saved view or notebook page. */
+function viewRefreshControl(view, def, isNotebook, canEdit) {
+  const id = String(view.id);
+  const stored = refreshChoiceOf(def, isNotebook);
+  const initial = sessionRefreshChoice.has(id) ? sessionRefreshChoice.get(id) : stored;
+  currentRefresh = initial;
+  const control = buildRefreshControl(initial, async (choice) => {
+    currentRefresh = choice;
+    if (refreshListener) refreshListener();
+    if (!canEdit) {
+      sessionRefreshChoice.set(id, choice);
+      control.note("not saved: read-only");
+      return;
+    }
+    control.note("Saving…");
+    const res = await api.updateView(view.id, {
+      name: view.name,
+      description: view.description ?? null,
+      definition: { ...def, refresh: choice },
+      version: view.version,
+    });
+    if (res.kind === "data" && res.data) {
+      view.version = res.data.version;
+      def.refresh = choice;
+      sessionRefreshChoice.delete(id);
+      control.note("Saved");
+    } else {
+      sessionRefreshChoice.set(id, choice);
+      control.note("not saved: " + (res.message || "save failed"));
+    }
+  });
+  return control.root;
+}
 
 /** The time-range choices the rendered view's chrome offers (mirrors the composer's RANGE_OPTIONS). */
 const VIEW_RANGE_OPTIONS = [
@@ -244,7 +304,7 @@ async function createFromTemplate(template, server, status) {
    measure picker greys on, none of which a v1 read template uses, and importing it would couple this page to the
    editor module for a name and a label. Returns [] on any failure; every caller handles an empty fleet. */
 async function loadServerNames() {
-  const res = await apiGet("/api/fleet");
+  const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
   return [...(res.data.cards || [])]
     .map((c) => ({ value: c.server_name || c.display_name, label: c.display_name || c.server_name }))
@@ -397,14 +457,20 @@ function rememberScope(id, state) {
 }
 
 export async function renderView(main, id) {
+  const ourHash = location.hash;
   mount(main, loadingStrip("Loading view…"));
 
   const [session, catalog, res, fleetRes] = await Promise.all([
     api.getSession(),
     api.getCatalog(),
     api.getView(id),
-    apiGet("/api/fleet"),
+    apiGetFleet(),
   ]);
+
+  /* If the user navigated away while we were loading, ignore this response — a late /api/fleet or view
+     read should not replace the new page's content or start panels under the wrong route (#4204). */
+  if (location.hash !== ourHash) return;
+
   if (res.kind === "error") {
     mount(main, [el("div", { class: "page-head" }, [backToViews(), el("h2", { text: "View" })]), errorStrip(res.message)]);
     return;
@@ -415,7 +481,7 @@ export async function renderView(main, id) {
 
   /* A notebook is the same stored row with a kind:"notebook" definition — render it as a document, not a grid. */
   if (isNotebookDefinition(def)) {
-    renderNotebookDoc(main, view, session, catalog, fleetRes);
+    renderNotebookDoc(main, { mode: "saved", view, session, catalog, fleetRes });
     return;
   }
 
@@ -430,6 +496,7 @@ export async function renderView(main, id) {
     el("h2", { text: view.name || "View" }),
     view.description ? el("div", { class: "meta", text: view.description }) : null,
     el("div", { class: "spacer" }),
+    viewRefreshControl(view, def, false, canEdit),
     exportButton(view),
     canEdit ? el("a", { class: "btn small", href: "#/view/" + encodeURIComponent(id) + "/edit", text: "Edit" }) : null,
     canEdit ? deleteButton(id, status) : null,
@@ -470,6 +537,11 @@ export async function renderView(main, id) {
 
   mount(main, [head, status, controls, gridBox]);
   renderGrid();
+  /* Clear any stale AbortSignal left by the previous page (e.g. server.js's per-render panelAbort) so it
+     cannot bleed into SUBSEQUENT view renders — the onChange scope re-render and any poll-triggered
+     renderView call. View panels carry no per-render abort controller, so undefined (unabortable) is the
+     correct state after this grid is built (#4204). */
+  setPanelSignal();
 }
 
 /* ─────────────────────────── notebook renderer (#1563 D7) ─────────────────────────── */
@@ -484,68 +556,311 @@ export async function renderView(main, id) {
  * visible and the scope bar can't silently lie for it; server scope still applies (#2788). Export/Delete/Edit
  * are shared with the dashboard renderer; Edit points at the notebook composer route.
  */
-async function renderNotebookDoc(main, view, session, catalog, fleetRes) {
-  const def = view.definition || {};
+/**
+ * `opts`:
+ *   { mode: "saved", view, session, catalog, fleetRes }                          — an ordinary saved notebook.
+ *   { mode: "alert", definition, alert, status, notes, canEdit, catalog, server, provenance, isLive, onOpenLive }
+ *     — #4222's read-only alert-notebook render: an IN-MEMORY definition bound to one firing (no saved `view`
+ *     row, no /api/fleet read — the server is fixed — and no scope bar, since there is nothing to re-scope).
+ *     `server` is the link's server, the scope a panel cell falls back to when no alert row matched.
+ *     `provenance` is the description string "Save as notebook" writes; `onOpenLive` is called (with no args)
+ *     when the viewer clicks "Open live", and is this function's caller's job to turn into dropping the read
+ *     cells' `as_of` and re-rendering — see triage.js. `isLive` (#4368) is an optional `() => boolean` the
+ *     caller supplies to say whether its route is still the one on screen; each alert-mode read cell checks it
+ *     right before mounting its settled result, so a result that lands after a route change is dropped instead
+ *     of painted into a holder no longer attached to the visible document — the fetch and the limiter's
+ *     release still run either way. Omitted (saved mode, or an alert-mode caller that doesn't pass it) means
+ *     "always live", i.e. today's behaviour.
+ * Saved-view behaviour (mode:"saved") is UNCHANGED by this refactor: same scope bar, same Export/Edit/Delete,
+ * same panel-cell rendering. The alert mode is read-only: no scope bar (nothing to re-scope: read cells carry
+ * their own `as_of`/`hours`, and a composed `panel` cell carries its own absolute `range`, which wins over the
+ * scope's hours), no Export/Edit/Delete, and a header/status cell pair rendered directly from `alert`/`status`
+ * rather than through a read. The other cell kinds render through saved mode's own renderCell (a markdown cell
+ * as prose, a panel cell as a composed panel scoped to the alert's server); a kind this page cannot draw gets
+ * a plain "not shown here" card, never nothing.
+ *
+ * Alert mode checks its read and panel cells against `opts.catalog`, the /api/catalog body the caller fetched
+ * (triage.js passes it), exactly as saved mode does. A caller that passes none gets the empty catalog, so every
+ * read and panel cell then fails its own catalog check with an error card instead of loading.
+ */
+export async function renderNotebookDoc(main, opts) {
+  const isAlert = opts.mode === "alert";
+  const def = isAlert ? (opts.definition || {}) : (opts.view.definition || {});
   const cells = Array.isArray(def.cells) ? def.cells : [];
-  const canEdit = !!session.can_edit;
+  const canEdit = isAlert ? !!opts.canEdit : !!opts.session.can_edit;
+  /* Alert mode validates its cells against the catalog its caller passed, the same /api/catalog body saved mode
+     uses: a read the catalog lists must render, not fail as "Unknown read" (it did while this was always the
+     empty catalog). The empty catalog is only what an alert-mode caller that passes none gets. */
+  const catalog = isAlert ? (opts.catalog || { reads: [], compose: {} }) : opts.catalog;
   const readSet = new Set((catalog.reads || []).map((r) => r.name));
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
 
   const status = el("div", { class: "view-status" });
-  const head = el("div", { class: "page-head" }, [
-    backToViews(),
-    el("h2", { text: view.name || "Notebook" }),
-    el("span", { class: "notebook-badge", text: "Notebook" }),
-    view.description ? el("div", { class: "meta", text: view.description }) : null,
-    el("div", { class: "spacer" }),
-    exportButton(view),
-    canEdit ? el("a", { class: "btn small", href: "#/notebook/" + encodeURIComponent(view.id) + "/edit", text: "Edit" }) : null,
-    canEdit ? deleteButton(view.id, status) : null,
-  ]);
+  const head = isAlert
+    ? el("div", { class: "page-head" }, [
+        el("h2", { text: "Alert notebook" }),
+        el("span", { class: "notebook-badge", text: "Notebook" }),
+        el("div", { class: "spacer" }),
+        canEdit ? saveAsNotebookButton(def, opts.provenance, status) : null,
+        openLiveButton(opts.onOpenLive),
+      ])
+    : el("div", { class: "page-head" }, [
+        backToViews(),
+        el("h2", { text: opts.view.name || "Notebook" }),
+        el("span", { class: "notebook-badge", text: "Notebook" }),
+        opts.view.description ? el("div", { class: "meta", text: opts.view.description }) : null,
+        el("div", { class: "spacer" }),
+        viewRefreshControl(opts.view, def, true, canEdit),
+        exportButton(opts.view),
+        canEdit ? el("a", { class: "btn small", href: "#/notebook/" + encodeURIComponent(opts.view.id) + "/edit", text: "Edit" }) : null,
+        canEdit ? deleteButton(opts.view.id, status) : null,
+      ]);
 
   if (!cells.length) {
     mount(main, [head, status, emptyStrip("This notebook has no cells yet.")]);
     return;
   }
 
-  /* Scope bar identical to a dashboard's: it only drives the panel cells (markdown is static). Skipped when a
-     notebook is prose-only (no panel cells to re-scope). */
-  const fleet = fleetOptions(fleetRes);
-  const variables = Array.isArray(def.variables) ? def.variables.filter((v) => v && v.name) : [];
-  const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
-  const hasPanels = cells.some((c) => c && c.type === "panel" && c.source != null);
-
-  const state = seedState(view.id, defaultHours, variables);
-
-  function currentScope() {
-    return {
+  /* Alert mode has no scope bar: the server is fixed to the firing, read cells already carry as_of/hours, and a
+     composed panel cell carries its own absolute `range`. A panel cell names no server, so it takes the one the
+     endpoint sent: `opts.scopeServer`, the envelope's `scope_server`, which is the REGISTRY name (the endpoint
+     resolves the matched alert row's server_id, else the link's server, to servers.server_name). Never a display
+     name: the matched row's `server_name` and the link's own `server` are display names, and the compose runner
+     filters on the registry name (`server_name = ANY(...)`), so a chart scoped by either drew "no data" under a
+     firing alert on every server whose two names differ. `hours` is only the window a panel falls back to once
+     "Open live" has dropped its `range` — while the cell carries one, the range wins over the scope's hours
+     (compose.js buildRunBody). With no scope_server the scope names none, and each panel cell says so. Saved mode
+     keeps its scope bar exactly as before. */
+  let controls = null;
+  let currentScope = () => ({ server: "All", hours: 24, variables: [], values: {} });
+  if (isAlert) {
+    const scopeServer = opts.scopeServer || "";
+    currentScope = () => ({ server: scopeServer, hours: 24, variables: [], values: {} });
+  }
+  if (!isAlert) {
+    const fleet = fleetOptions(opts.fleetRes);
+    const variables = Array.isArray(def.variables) ? def.variables.filter((v) => v && v.name) : [];
+    const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
+    const hasPanels = cells.some((c) => c && c.type === "panel" && c.source != null);
+    const state = seedState(opts.view.id, defaultHours, variables);
+    currentScope = () => ({
       server: state.server,
       hours: state.hours,
       variables: variables.map((v) => ({ name: v.name, dimension: v.dimension, default: v.default || undefined })),
       values: { ...state.values },
-    };
+    });
+    const onChange = () => { rememberScope(opts.view.id, state); renderDoc(); };
+    controls = hasPanels ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
   }
 
   const docBox = el("div", { class: "notebook-doc" });
+  const limiter = isAlert ? new InFlightLimiter(3) : null;
   function renderDoc() {
-    mount(docBox, cells.map((cell) => renderCell(cell, readSet, sourceSet, currentScope())));
+    if (isAlert) {
+      /* Alert-mode cells load top to bottom, at most 3 in flight (#4222's cost rule) — renderCell/renderPanel
+         return synchronously with the fetch outstanding, so the limiter gates ACQUIRING a slot before the cell
+         node is even built, then releases it off renderPanel's onSettled callback. */
+      const scope = currentScope();
+      mount(docBox, cells.map((cell, i) => renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter)));
+    } else {
+      mount(docBox, cells.map((cell) => renderCell(cell, readSet, sourceSet, currentScope())));
+    }
   }
 
-  const onChange = () => { rememberScope(view.id, state); renderDoc(); };
-  const controls = hasPanels ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
   mount(main, [head, status, controls, docBox]);
   renderDoc();
 }
 
+/* A max-N in-flight gate (#4222 cost rule) for the alert notebook's client-side cell loads. A cell asks for a
+   slot; if none is free it queues (FIFO) until release() frees one. Kept tiny and dependency-free — this is not
+   a general scheduler, just the one "at most 3 outstanding reads" rule the cost design calls for. */
+class InFlightLimiter {
+  constructor(max) {
+    this.max = max;
+    this.active = 0;
+    this.queue = [];
+  }
+  acquire() {
+    if (this.active < this.max) {
+      this.active++;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.queue.push(resolve));
+  }
+  release() {
+    const next = this.queue.shift();
+    if (next) {
+      next();
+    } else {
+      this.active = Math.max(0, this.active - 1);
+    }
+  }
+}
+
+/* One alert-notebook cell -> a document block. header/status render directly from the endpoint's own facts (no
+   read); a read cell queues on the limiter, then renders through the SAME v1 renderPanel dashboards use —
+   explicit `viz` per cell, no derive.js guessing (#4222). A stale/empty firing (no alert, "Unknown" status, an
+   empty read) renders honest empty sections, never an error page: header/status always render (their own null
+   guards below), and renderPanel already degrades a read's own empty/error kinds to a strip, not a throw.
+   markdown and panel cells (the templates' prose and charts) render through saved mode's own renderCell, so a
+   cell looks and validates the same in an alert notebook and in a saved one; a kind with no renderer here gets
+   a "not shown" card, never nothing. */
+function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) {
+  if (!cell || typeof cell !== "object") return null;
+  if (cell.type === "header") {
+    return renderAlertHeaderCell(cell, opts);
+  }
+  if (cell.type === "status") {
+    return el("div", { class: "notebook-panel panel card" }, [
+      el("h3", {}, [cell.title || "Status"]),
+      el("div", { class: "panel-body" }, [el("span", { class: "fv", text: cell.status || "Unknown" })]),
+    ]);
+  }
+  if (cell.type === "read") {
+    if (!cell.read || !readSet.has(cell.read) || !cell.viz || !VIZ[cell.viz]) {
+      return panelErrorCard(cell.title, "Unknown read '" + (cell.read || "") + "' or visualization '" + (cell.viz || "") + "'.");
+    }
+    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(cell), release));
+  }
+  /* A markdown cell is prose: no load, so no slot — the same air-gapped renderMarkdown a saved notebook uses. */
+  if (cell.type === "markdown") {
+    return renderCell(cell, readSet, sourceSet, scope);
+  }
+  /* A composed panel cell (a chart): saved mode's own renderCell -> panelOrError -> renderComposedPanelCard path,
+     scoped to the alert's server and windowed by the cell's own `range` (the scope's hours only apply once "Open
+     live" has dropped it). It queues on the same limiter as a read cell — each one is a /api/compose/run — and
+     panelOrError fires `release` itself for a cell that never starts a load, so a bad panel cannot hold a slot.
+     Without a server there is nothing to scope the chart to, and running it unscoped would chart the whole
+     fleet under an alert for one server, so the cell says so instead. The scope comes from the endpoint's
+     `scope_server` only; a display name would pass the truthiness check and then match no rows. */
+  if (cell.type === "panel") {
+    if (!scope.server) {
+      return notShownCard(cell.title, "This chart is not shown here: the alert link names no server to scope it to, or names one this service does not monitor.");
+    }
+    return gatedCell(opts, limiter, (release) => renderCell(cell, readSet, sourceSet, scope, release));
+  }
+  /* Any other kind has no renderer on this page. Say so: a cell that silently vanishes reads as evidence that
+     does not exist. */
+  return notShownCard(cell.title, "This notebook cell (type '" + String(cell.type) + "') is not shown here.");
+}
+
+/* A cell whose load is gated by the alert notebook's in-flight limiter. `build(release)` makes the cell's node
+   once a slot is granted and must call `release` exactly once when its load ends (renderPanel and the composed
+   card both take it as their onSettled callback).
+   Cells load top to bottom: acquiring a slot is async, so a later cell's slot request cannot resolve before
+   an earlier one queued first (the limiter's queue is FIFO) — build is only called once the slot is granted, at
+   which point it starts the fetch and returns synchronously.
+   #4368: `opts.isLive` — set by triage.js to a `location.hash === ourHash` check, the same route-change
+   guard renderView already uses for its own await gap — is checked before mounting the settled result.
+   A route change after the slot was granted still lets the fetch finish and the limiter release (so the
+   NEXT page's own reads aren't starved by a request this page no longer owns); it only stops the result
+   from painting into a holder that is no longer attached to the visible document. */
+function gatedCell(opts, limiter, build) {
+  const holder = el("div", { class: "notebook-panel" }, [loadingStrip()]);
+  limiter.acquire().then(() => {
+    /* A route change (a fresh #/triage link, or navigating off the page entirely) between queueing and the
+       slot opening: this cell's holder is no longer attached to the visible document, and its own reads
+       are for a firing nobody is looking at any more. The cell still runs and its own onSettled still
+       releases the limiter's slot below — the fetch and release always happen, so a superseded batch never
+       starves the page that replaced it — only the RESULT is dropped instead of painted into a dead node. */
+    const stillLive = !opts.isLive || opts.isLive();
+    const rendered = build(() => limiter.release());
+    if (stillLive) mount(holder, rendered);
+  });
+  return holder;
+}
+
+/* A card that says a cell is not drawn on this page, and why — used where the cell cannot render here. The
+   message goes through el()'s child-text path (never innerHTML), like every other string on this page. */
+function notShownCard(title, message) {
+  return el("div", { class: "notebook-panel panel card" }, [
+    el("h3", {}, [title || "Cell"]),
+    el("div", { class: "panel-body" }, [noticeStrip(message)]),
+  ]);
+}
+
+/* The header cell: the endpoint's own alert facts, rendered directly (no read — they arrived with the envelope).
+   A null `alert` (stale/no match) renders the honest empty state instead of blank fields. */
+function renderAlertHeaderCell(cell, opts) {
+  const a = opts.alert;
+  const rows = [];
+  if (a) {
+    rows.push(["Server", a.server_name || "\u2014"]);
+    rows.push(["Metric", a.metric_name || "\u2014"]);
+    rows.push(["Fired", a.alert_time ? localTime(a.alert_time) : "\u2014"]);
+    if (a.incident_since) rows.push(["Incident since", localTime(a.incident_since)]);
+    if (a.involved_objects) rows.push(["Involved objects", a.involved_objects]);
+    if (a.database) rows.push(["Database", a.database]);
+    if (typeof a.total_occurrences === "number") rows.push(["Total occurrences", String(a.total_occurrences)]);
+    /* current_value/threshold_value (#4368): same fmtNum(_, 1) triage.js's alertFields uses for the matched
+       alert card, so the two pages format the same fields the same way. Omitted only when BOTH are absent —
+       fmtNum already renders a lone missing side as "\u2014" rather than dropping the whole line. */
+    if (typeof a.current_value === "number" || typeof a.threshold_value === "number") {
+      rows.push(["Value vs threshold", "current " + fmtNum(a.current_value, 1) + " vs threshold " + fmtNum(a.threshold_value, 1)]);
+    }
+  }
+  const body = a
+    ? [
+        el("div", { class: "detail-fields" }, rows.map(([k, v]) =>
+          el("div", { class: "detail-field" }, [el("span", { class: "fk", text: k }), el("span", { class: "fv", text: v })])
+        )),
+        /* detail_text (#4368): the same <pre class="code"> block triage.js's alertFields uses — through el()'s
+           text path (textContent), never innerHTML, since this is alert/query text the server only echoes. */
+        a.detail_text ? el("pre", { class: "code", text: a.detail_text }) : null,
+      ]
+    : emptyStrip("No matching alert history row for this link.");
+  return el("div", { class: "notebook-panel panel card" }, [
+    el("h3", {}, [cell.title || "Alert"]),
+    el("div", { class: "panel-body" }, [body]),
+  ]);
+}
+
+/* "Save as notebook" (#4222): POSTs the bound in-memory definition to /api/views, unmodified except for the
+   description carrying the provenance string ("from alert template <id> v<version>, <metric> on <server> at
+   <at>", built by the caller — triage.js — since it has the template/metric/server/at facts, not this module).
+   Only mounted when the seat can edit (canEdit gate above), matching every other edit affordance on this page. */
+function saveAsNotebookButton(definition, provenance, status) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Save as notebook" });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    mount(status, el("div", { class: "strip loading", text: "Saving\u2026" }));
+    const name = "Alert notebook " + new Date().toISOString();
+    const res = await api.createView({ name, description: provenance || null, definition });
+    if (res.kind === "data" && res.data && res.data.id != null) {
+      location.hash = "#/notebook/" + encodeURIComponent(res.data.id);
+      return;
+    }
+    btn.disabled = false;
+    mount(status, errorStrip(res.message || "Could not save this notebook."));
+  });
+  return btn;
+}
+
+/* "Open live" (#4222): drops the absolute window pins (today: each read cell's `as_of`) so the notebook falls
+   back to a relative/live view. `onOpenLive` is the caller's (triage.js's) re-render with as_of stripped — this
+   module has no state of its own to mutate, since the definition is the caller's in-memory object. */
+function openLiveButton(onOpenLive) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Open live" });
+  btn.addEventListener("click", () => { if (onOpenLive) onOpenLive(); });
+  return btn;
+}
+
 /* One notebook cell -> a document block: a markdown cell renders through renderMarkdown (XSS-safe); a panel cell
-   through the shared panelOrError (unknown source/viz -> a clean strip, exactly as in the dashboard grid). */
-function renderCell(cell, readSet, sourceSet, scope) {
+   through the shared panelOrError (unknown source/viz -> a clean strip, exactly as in the dashboard grid).
+   `onSettled` is optional and only the alert notebook passes it (its in-flight limiter's release): see panelOrError. */
+function renderCell(cell, readSet, sourceSet, scope, onSettled) {
   if (!cell || typeof cell !== "object") return null;
   if (cell.type === "markdown") {
     return el("div", { class: "notebook-md markdown-body" }, [renderMarkdown(cell.text)]);
   }
   if (cell.type === "panel") {
-    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope)]);
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled)]);
+  }
+  /* A `read` cell (design D7, #4222) is a v1 read panel, FLAT like a panel cell: routed through the exact same
+     panelOrError -> renderPanel path a dashboard read panel uses (its own fixed params, scope-independent).
+     Minimal routing only; renderNotebookDoc's broader refactor is a later slice's job. */
+  if (cell.type === "read") {
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled)]);
   }
   return null;
 }
@@ -740,30 +1055,37 @@ function checkRow(label, checked, onToggle) {
 
 /* Pre-check a panel against the catalog so an unknown read/source/viz is a clean strip, not an opaque 404 / crash.
    A composed panel (names a `source`) runs through /api/compose/run with the view scope; a read panel through the
-   v1 renderPanel (its own fixed params, scope-independent). */
-function panelOrError(p, readSet, sourceSet, scope) {
+   v1 renderPanel (its own fixed params, scope-independent).
+   `onSettled` (optional; the alert notebook's in-flight limiter release, #4222) is called exactly once per call: by
+   the renderer when its load ends, or right here when the panel cannot start a load and becomes an error card —
+   so a bad cell cannot hold a limiter slot. Every other caller omits it. */
+function panelOrError(p, readSet, sourceSet, scope, onSettled) {
+  const fail = (title, message) => {
+    if (onSettled) onSettled();
+    return panelErrorCard(title, message);
+  };
   if (!p || typeof p !== "object") {
-    return panelErrorCard("Invalid panel", "This panel is not an object.");
+    return fail("Invalid panel", "This panel is not an object.");
   }
   if (p.path != null) {
-    return panelErrorCard(p.title, "This panel uses raw 'path' mode, which is not supported.");
+    return fail(p.title, "This panel uses raw 'path' mode, which is not supported.");
   }
   if (p.source != null) {
     if (!sourceSet.has(p.source)) {
-      return panelErrorCard(p.title, "Unknown source '" + p.source + "'. It may have been renamed or removed.");
+      return fail(p.title, "Unknown source '" + p.source + "'. It may have been renamed or removed.");
     }
     if (!p.viz) {
-      return panelErrorCard(p.title, "This composed panel has no chart type.");
+      return fail(p.title, "This composed panel has no chart type.");
     }
-    return renderComposedPanelCard(p, scope);
+    return renderComposedPanelCard(p, scope, onSettled);
   }
   if (!p.read || !readSet.has(p.read)) {
-    return panelErrorCard(p.title, "Unknown read '" + (p.read || "") + "'. It may have been renamed or removed.");
+    return fail(p.title, "Unknown read '" + (p.read || "") + "'. It may have been renamed or removed.");
   }
   if (!p.viz || !VIZ[p.viz]) {
-    return panelErrorCard(p.title, "Unknown visualization '" + (p.viz || "") + "'.");
+    return fail(p.title, "Unknown visualization '" + (p.viz || "") + "'.");
   }
-  return renderPanel(p);
+  return renderPanel(p, onSettled);
 }
 
 function panelErrorCard(title, message) {

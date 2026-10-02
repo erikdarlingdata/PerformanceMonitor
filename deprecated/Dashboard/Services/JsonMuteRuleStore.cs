@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
 
@@ -42,7 +43,7 @@ namespace PerformanceMonitorDashboard.Services
             Load();
         }
 
-        public Task<IReadOnlyList<MuteRule>> LoadAllAsync()
+        public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default)
         {
             lock (_lock)
             {

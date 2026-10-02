@@ -84,7 +84,7 @@ public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>
            stored event_time column; the ROW's own EventTimeLocal comes from the XML @timestamp (a Stage-2a
            parser concern, tested there). */
         var eventTime = Truncate(DateTime.UtcNow.AddHours(-1));
-        await SeedHealthEventAsync(SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor.xml"), eventTime);
+        await SeedHealthEventAsync(SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor_high_sql_cpu.xml"), eventTime);
         await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, LoadFixture("error_reported.xml"), eventTime);
         await SeedHealthEventAsync(SystemHealthParser.SpServerDiagnosticsEvent, LoadFixture("sp_server_diagnostics_system.xml"), eventTime);
         await SeedHealthEventAsync(SystemHealthParser.SpServerDiagnosticsEvent, LoadFixture("sp_server_diagnostics_resource.xml"), eventTime);
@@ -177,8 +177,8 @@ public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>
         var service = new LocalDataService(_duckDb);
 
         // One in-window scheduler warning, one stored 48h ago — a 24h read must return only the recent one.
-        await SeedHealthEventAsync(SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor.xml"), Truncate(DateTime.UtcNow.AddHours(-1)));
-        await SeedHealthEventAsync(SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor.xml"), Truncate(DateTime.UtcNow.AddHours(-48)));
+        await SeedHealthEventAsync(SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor_high_sql_cpu.xml"), Truncate(DateTime.UtcNow.AddHours(-1)));
+        await SeedHealthEventAsync(SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor_high_sql_cpu.xml"), Truncate(DateTime.UtcNow.AddHours(-48)));
 
         Assert.Single(await service.GetSchedulerIssuesAsync(ServerId, hoursBack: 24));
     }

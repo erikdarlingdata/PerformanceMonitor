@@ -8,10 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -74,14 +78,49 @@ public partial class ManageServersWindow : Window
                 freshness = new Dictionary<int, DateTime>();
             }
 
+            /* #3967: the registry's first-connect instants, so a server whose whole history retention has
+               dropped reads "None retained" rather than "Never" — the registration rule the sidebar dot and the
+               Overview card apply. Defensive like the freshness read: a failure leaves every row on "Never". */
+            Dictionary<int, DateTime?> registered;
+            try
+            {
+                registered = (await _dataService.GetServersAsync()).ToDictionary(s => s.ServerId, s => s.RegisteredAt);
+            }
+            catch (Exception ex)
+            {
+                ViewerLogger.Warn("ManageServersWindow", $"registry read failed: {ex.Message}");
+                registered = new Dictionary<int, DateTime?>();
+            }
+
+            /* Every server's own clock, read once for the list (#4766): each row's "Last Collected" converts on ITS
+               server's clock, not on the clock of whichever server tab was active last. Defensive like the reads
+               above: a failure leaves every row on the viewer machine's offset, the same as a server whose clock
+               has not been collected. */
+            IReadOnlyDictionary<int, ServerClock> clocks;
+            try
+            {
+                clocks = await _dataService.GetServerClocksAsync(null, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                ViewerLogger.Warn("ManageServersWindow", $"server clock read failed: {ex.Message}");
+                clocks = new Dictionary<int, ServerClock>();
+            }
+
+            var nowUtc = DateTime.UtcNow;
             var items = new List<ManagedServerListItem>(rows.Count);
             foreach (var row in rows)
             {
                 var lastCollected = freshness.TryGetValue(row.ServerId, out var t) ? t : (DateTime?)null;
-                items.Add(new ManagedServerListItem(row, _serverStore.IsFavorite(row.Host))
+                var registeredAt = registered.TryGetValue(row.ServerId, out var r) ? r : null;
+                /* The flag is filed under the server's id (#4768); the host is what earlier versions filed it under. */
+                items.Add(new ManagedServerListItem(row, _serverStore.IsFavorite(row.ServerId, row.Host))
                 {
                     InstalledVersion = appVersion,
                     LastCollectedUtc = lastCollected,
+                    Clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, row.ServerId, TimeZoneInfo.Local, nowUtc),
+                    HistoryAgedOut = lastCollected is null
+                        && ServerSummaryItem.ClassifyFreshness(null, registeredAt, nowUtc) == ServerFreshness.Offline,
                 });
             }
 
@@ -250,7 +289,7 @@ public partial class ManageServersWindow : Window
         {
             await _dataService.DeleteMonitoredServerAsync(selected.Row.ServerId);
             /* Drop the viewer-local favorite pin too, so a removed server doesn't linger starred. */
-            _serverStore.SetFavorite(selected.Row.Host, false);
+            _serverStore.SetFavorite(selected.Row.ServerId, false, selected.Row.Host);
             ServersChanged = true;
             await RefreshGridAsync();
         }
@@ -318,10 +357,29 @@ public sealed class ManagedServerListItem
     /// collectors), set once before binding; null when the Darling service has not collected this server yet.</summary>
     public DateTime? LastCollectedUtc { get; set; }
 
+    /// <summary>This row's own server's clock (its time zone where one is known, else its UTC offset; the viewer
+    /// machine's offset while none is collected), set once before binding (#4766). Every row of the list
+    /// converts on its own clock, so in Server mode each shows its own server's hour and not the active server
+    /// tab's. Null (a row built without one) falls back to the active server's clock.</summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>True when there is no collection to show because retention has dropped all of it (#3967): the
+    /// server registered before the collection log's horizon and nothing newer is left. Set once before
+    /// binding.</summary>
+    public bool HistoryAgedOut { get; set; }
+
     /// <summary>The "Last Collected" cell: the newest collection time rendered in the viewer's timestamp-display
-    /// mode (Server/Local/UTC via <see cref="ViewerTimeHelper.ForDisplay"/>), or "Never" when the service has
-    /// not collected this server yet. Labeled "Last Collected" — the SERVICE connects and collects, the viewer
-    /// never does — so this reflects service activity, not a viewer connection.</summary>
+    /// mode (Server/Local/UTC via <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, TimeZoneInfo, string)"/>
+    /// on this row's own <see cref="Clock"/>, which adds the UTC offset to a time in the repeated autumn hour, #4766),
+    /// "None retained" when retention
+    /// has dropped all of it, or "Never" when the service has not collected this server yet. Labeled "Last
+    /// Collected" — the SERVICE connects and collects, the viewer never does — so this reflects service
+    /// activity, not a viewer connection.</summary>
     public string LastCollectedDisplay =>
-        LastCollectedUtc is { } utc ? ViewerTimeHelper.ForDisplay(utc).ToString("yyyy-MM-dd HH:mm") : "Never";
+        LastCollectedUtc is { } utc
+            ? ViewerTimeHelper.FormatForDisplay(
+                utc, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock),
+                "yyyy-MM-dd HH:mm")
+        : HistoryAgedOut ? "None retained"
+        : "Never";
 }

@@ -39,10 +39,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
-            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
-
-            var bpr = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, fromServer, toServer, SelectedDatabaseFilter));
+            var bpr = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
             _blockedProcessFilterMgr!.UpdateData(bpr);
         }
         catch (Exception ex)
@@ -55,10 +52,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
-            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
-
-            var dlr = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromServer, toServer));
+            var dlr = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, 0, e.StartUtc, e.EndUtc));
             _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(dlr));
         }
         catch (Exception ex)
@@ -73,18 +67,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null, toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
             // For narrow time ranges (drill-downs), pad the query by ±1 hour
             // so hourly slicer buckets overlap the display range
@@ -98,7 +81,7 @@ public partial class ServerTab : UserControl
             var data = await Task.Run(() => _dataService.GetActiveQuerySlicerDataAsync(_serverId, hoursBack, queryFrom, queryTo, SelectedDatabaseFilter));
             _activeQueriesSlicerData = data;
             _activeQueriesSlicerMetric = "Sessions";
-            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, queryFrom, queryTo);
+            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, queryFrom, queryTo, DateTime.UtcNow);
             if (data.Count > 0)
                 ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
         }
@@ -115,11 +98,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            // Slicer sends UTC dates; GetTimeRange expects server time for fromDate/toDate
-            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
-            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
-
-            var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromServer, toServer, SelectedDatabaseFilter));
+            var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
             LiveSnapshotIndicator.Text = "";
         }
@@ -138,23 +117,12 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null, toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
             var data = await Task.Run(() => _dataService.GetQueryStatsSlicerDataAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
             _queryStatsSlicerData = data;
             _queryStatsSlicerMetric = "TotalCpu";
-            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
             if (data.Count > 0)
                 QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
@@ -168,11 +136,12 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
-            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
-            var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes, SelectedDatabaseFilter));
+            var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, ServerClock, SelectedDatabaseFilter));
             _queryStatsFilterMgr!.UpdateData(queryStats);
-            await RefreshQueryStatsComparisonAsync(fromServer, toServer);
+            /* #4284: the comparison reads UTC collection_time directly, with no offset conversion of its own
+               (same as the banner below), so it takes e.StartUtc/e.EndUtc -- the same pair the grid read above takes. */
+            await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {
@@ -189,23 +158,12 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null, toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
             var data = await Task.Run(() => _dataService.GetQueryStoreSlicerDataAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
             _queryStoreSlicerData = data;
             _queryStoreSlicerMetric = "TotalCpu";
-            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
             if (data.Count > 0)
                 QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
@@ -219,11 +177,11 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
-            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
-            var qsData = await Task.Run(() => _dataService.GetQueryStoreTopQueriesAsync(_serverId, 0, 50, fromServer, toServer, SelectedDatabaseFilter));
+            var qsData = await Task.Run(() => _dataService.GetQueryStoreTopQueriesAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
             _queryStoreFilterMgr!.UpdateData(qsData);
-            await RefreshQueryStoreComparisonAsync(fromServer, toServer);
+            /* #4284: UTC comparison and banner bounds -- see the twin comment in OnQueryStatsSlicerChanged above. */
+            await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {
@@ -240,23 +198,12 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null, toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
             var data = await Task.Run(() => _dataService.GetProcStatsSlicerDataAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
             _procStatsSlicerData = data;
             _procStatsSlicerMetric = "TotalCpu";
-            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
             if (data.Count > 0)
                 ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
@@ -270,11 +217,11 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
-            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
-            var procStats = await Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes, SelectedDatabaseFilter));
+            var procStats = await Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, ServerClock, SelectedDatabaseFilter));
             _procStatsFilterMgr!.UpdateData(procStats);
-            await RefreshProcStatsComparisonAsync(fromServer, toServer);
+            /* #4284: UTC comparison and banner bounds -- see the twin comment in OnQueryStatsSlicerChanged above. */
+            await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {

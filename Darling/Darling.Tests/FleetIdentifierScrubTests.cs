@@ -181,25 +181,63 @@ public sealed class FleetIdentifierScrubTests
           + Environment.NewLine + string.Join(Environment.NewLine, offenders));
     }
 
+    /// <summary>
+    /// #4004's review: the committed skills are part of the published tree, so both sweeps read them; other checkouts
+    /// under <c>.claude/worktrees</c> (their own skills included) and local state beside them stay out.
+    /// </summary>
+    [Fact]
+    public void TheCommittedSkills_AreScanned_AndNothingElseUnderClaude()
+    {
+        var sep = Path.DirectorySeparatorChar;
+        Assert.Contains(TrackedSourceFiles(), f => f.EndsWith($"{sep}.claude{sep}skills{sep}lane-orders{sep}SKILL.md", StringComparison.Ordinal));
+
+        Assert.False(IsUnpublishedClaudeState($"{sep}.claude{sep}skills{sep}build{sep}SKILL.md"));
+        Assert.True(IsUnpublishedClaudeState($"{sep}.claude{sep}worktrees{sep}agent-x{sep}Darling{sep}README.md"));
+        Assert.True(IsUnpublishedClaudeState($"{sep}.claude{sep}worktrees{sep}agent-x{sep}.claude{sep}skills{sep}build{sep}SKILL.md"));
+        Assert.True(IsUnpublishedClaudeState($"{sep}.claude{sep}settings.local.json"));
+        Assert.True(IsUnpublishedClaudeState($"{sep}Lite{sep}.claude{sep}settings.local.json"));
+    }
+
     private static IEnumerable<string> TrackedSourceFiles()
     {
         var extensions = new[] { ".cs", ".ps1", ".md", ".json", ".xaml", ".js", ".yml", ".yaml", ".sql" };
 
+        /* Every exclusion below is judged on the path BELOW the repo root (#4004's lane): a checkout that itself
+           lives under .claude/worktrees matched the .claude exclusion on every file, scanned nothing, and failed as
+           "the sweep lost the tree". */
+        var root = RepoRoot();
+        string InRepo(string f) => Path.DirectorySeparatorChar + Path.GetRelativePath(root, f);
+
         return Directory
-            .EnumerateFiles(RepoRoot(), "*", SearchOption.AllDirectories)
+            .EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Where(f => extensions.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}.git{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}node_modules{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}pg-runtime{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}.git{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}node_modules{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}pg-runtime{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             /*
-                .claude/worktrees holds separate checkouts of other branches. They are not part of
-                the tree this repo publishes, and scanning them makes the guard permanently red on
-                a developer box while staying green in CI, where they do not exist -- which is the
-                worst of both, because a local red that never goes away trains people to ignore it.
+                .claude/worktrees holds separate checkouts of other branches, and the rest of .claude
+                beside the skills is one developer's local state. None of it is part of the tree this
+                repo publishes, and scanning it makes the guard permanently red on a developer box while
+                staying green in CI, where it does not exist -- which is the worst of both, because a
+                local red that never goes away trains people to ignore it. The committed skills ARE
+                published, and are meant to be machine-neutral, so they are scanned (#4004's review).
             */
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}.claude{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
+            .Where(f => !IsUnpublishedClaudeState(InRepo(f)));
+    }
+
+    /// <summary>
+    /// Whether a path below the repo root (led by a separator) is in a <c>.claude</c> directory other than the root's
+    /// committed <c>.claude/skills</c>, the one part <c>.gitignore</c> publishes (<c>.claude/*</c>, then
+    /// <c>!.claude/skills/</c>). A worktree's own skills sit under <c>.claude/worktrees</c>, so they stay out.
+    /// <c>Lite.Tests/AuroraOnlySqlIsGatedTests</c> spells the same rule.
+    /// </summary>
+    private static bool IsUnpublishedClaudeState(string inRepo)
+    {
+        var claude = $"{Path.DirectorySeparatorChar}.claude{Path.DirectorySeparatorChar}";
+        return inRepo.Contains(claude, StringComparison.Ordinal)
+            && !inRepo.StartsWith($"{claude}skills{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

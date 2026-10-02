@@ -405,6 +405,7 @@ public class PagerDutyWebhookTests
         public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity => 1.5;
         public int AnalysisNotifyCooldownMinutes => 360;
+        public int AnalysisPageCap => 10;
         public string TriageBaseUrl => "";
     }
 }

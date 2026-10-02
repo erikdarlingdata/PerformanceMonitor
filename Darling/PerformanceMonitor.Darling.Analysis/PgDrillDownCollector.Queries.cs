@@ -8,9 +8,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -110,19 +116,105 @@ LIMIT 5";
         }
     }
 
+    /// <summary>
+    /// #3648: <c>max_dop</c> here is <c>sys.dm_exec_query_stats.max_dop</c> — a PER-PLAN high-water mark since
+    /// the plan entered the cache, not a per-execution reading and not a per-statement one. This read groups
+    /// by (database, query_hash), so the old <c>MAX(max_dop)</c> folded every plan the statement text had
+    /// inside the window into one number and kept the largest: the highest DOP ANY plan for the hash ever ran
+    /// at, with nothing saying which plan, when, or whether that plan still exists. Live consequence: a High
+    /// CPU card read 16 for the #1 query on an instance whose MAXDOP had been 1 across its whole 14-day config
+    /// history and whose stored plan for that hash was serial (<c>NonParallelPlanReason="MaxDOPSetToOne"</c>)
+    /// — a plan compiled before the pin, still cached with its old counter. A reader recommended a MAXDOP 1
+    /// Query Store hint from the field and had to retract it after reading the plan. The same card's row #3
+    /// said 1, honestly, for a hash with one serial plan — so the field was self-consistent and wrong.
+    ///
+    /// <para>Now: <c>max_dop</c> is the NEWEST plan's reading (the row with the latest <c>collection_time</c>
+    /// among the rows that spent CPU in the window; ties broken by compile time, then by CPU spent), because
+    /// the card's question is what the query is doing to the CPU at this moment. The cross-plan maximum
+    /// survives as <c>max_dop_any_plan</c> with <c>max_dop_any_plan_last_seen</c> and <c>plan_count</c>
+    /// beside it — a history with provenance — and the reader coerces NULL to null, not 0: the DMV never
+    /// reports 0, so 0 was "no reading" rendered as a degree of parallelism. <c>dop_note</c> is the shared
+    /// sentence (<c>PerformanceMonitor.Common.QueryDopProvenance</c>) a renderer prints verbatim when the
+    /// history disagrees with the headline. New columns are appended after the old ones so the existing
+    /// ordinals are untouched; the SQL is byte-identical to Lite's <c>CollectTopCpuQueries</c> text.</para>
+    ///
+    /// <para>#3959: the ranking and the cut to five happen without the statement text, and <c>query_text</c> is
+    /// read afterwards for the five that print. <c>v_query_stats</c> resolves text from the fleet-wide
+    /// <c>query_text_dim</c> for every row it returns, so projecting it inside the window resolved and sorted
+    /// the whole window's text to keep five. The printed value is the same <c>LEFT(MAX(query_text), 500)</c>
+    /// over the same rows.</para>
+    /// </summary>
     public const string TopCpuQueriesSql = @"
-SELECT database_name, query_hash,
-       SUM(delta_worker_time)::BIGINT AS total_cpu_us,
-       SUM(delta_execution_count)::BIGINT AS exec_count,
-       MAX(max_dop) AS max_dop,
-       SUM(delta_spills)::BIGINT AS spills,
-       LEFT(MAX(query_text), 500) AS query_text
-FROM v_query_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   delta_worker_time > 0
-GROUP BY database_name, query_hash
-ORDER BY total_cpu_us DESC
-LIMIT 5";
+WITH windowed AS
+(
+    -- #3648: rank each hash's rows newest-first and carry the hash-wide maximum onto every row, so the
+    -- outer aggregate can name WHICH reading is current and WHEN the maximum was last seen. Explicit
+    -- NULLS LAST on the tie-breakers: DuckDB and Postgres default DESC null placement differently.
+    SELECT database_name, query_hash, query_plan_hash, collection_time, max_dop,
+           delta_worker_time, delta_execution_count, delta_spills,
+           ROW_NUMBER() OVER
+           (
+               PARTITION BY database_name, query_hash
+               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
+           ) AS newest_rn,
+           MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
+    FROM v_query_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    AND   delta_worker_time > 0
+),
+top_queries AS
+(
+    -- #3959: ranked and cut WITHOUT the statement text. The text used to ride the window above for every
+    -- row it read, to print five, and on Darling v_query_stats resolves it from the fleet's text dimension
+    -- row by row. The final SELECT reads it for the five that print.
+    SELECT database_name, query_hash,
+           SUM(delta_worker_time)::BIGINT AS total_cpu_us,
+           SUM(delta_execution_count)::BIGINT AS exec_count,
+           MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
+           SUM(delta_spills)::BIGINT AS spills,
+           COUNT(DISTINCT query_plan_hash) AS plan_count,
+           MAX(max_dop_any_plan) AS max_dop_any_plan,
+           MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
+    FROM windowed
+    GROUP BY database_name, query_hash
+    ORDER BY total_cpu_us DESC
+    LIMIT 5
+)
+SELECT t.database_name, t.query_hash,
+       t.total_cpu_us,
+       t.exec_count,
+       t.max_dop,
+       t.spills,
+       -- #3959: the same MAX over the same rows the single pass took it over (this group's window rows,
+       -- under the window's own filter). Equality first, which the (server_id, query_hash, collection_time)
+       -- index serves. GROUP BY puts a NULL key's rows in one group that equality cannot match, so only
+       -- a group with a NULL key reads them NULL-safe.
+       COALESCE
+       (
+           (
+               SELECT LEFT(MAX(v.query_text), 500)
+               FROM v_query_stats AS v
+               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
+               AND   v.delta_worker_time > 0
+               AND   v.database_name = t.database_name
+               AND   v.query_hash = t.query_hash
+           ),
+           CASE WHEN t.database_name IS NULL OR t.query_hash IS NULL THEN
+           (
+               SELECT LEFT(MAX(v.query_text), 500)
+               FROM v_query_stats AS v
+               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
+               AND   v.delta_worker_time > 0
+               AND   v.database_name IS NOT DISTINCT FROM t.database_name
+               AND   v.query_hash IS NOT DISTINCT FROM t.query_hash
+           )
+           END
+       ) AS query_text,
+       t.plan_count,
+       t.max_dop_any_plan,
+       t.max_dop_any_plan_last_seen
+FROM top_queries AS t
+ORDER BY t.total_cpu_us DESC";
 
     private async Task CollectTopCpuQueries(AnalysisFinding finding, AnalysisContext context)
     {
@@ -138,15 +230,24 @@ LIMIT 5";
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            var maxDop = reader.IsDBNull(4) ? (int?)null : Convert.ToInt32(reader.GetValue(4));
+            var planCount = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7));
+            var maxDopAnyPlan = reader.IsDBNull(8) ? (int?)null : Convert.ToInt32(reader.GetValue(8));
+            var maxDopAnyPlanLastSeen = reader.IsDBNull(9) ? (DateTime?)null : reader.GetDateTime(9);
             items.Add(new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 query_hash = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 total_cpu_ms = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2)) / 1000.0,
                 execution_count = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
-                max_dop = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
+                /* #3648: newest plan's reading, null when unknown — never 0. History fields follow. */
+                max_dop = maxDop,
                 spills = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
-                query_text = reader.IsDBNull(6) ? "" : reader.GetString(6)
+                query_text = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                plan_count = planCount,
+                max_dop_any_plan = maxDopAnyPlan,
+                max_dop_any_plan_last_seen = maxDopAnyPlanLastSeen?.ToString("o"),
+                dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)
             });
         }
 
@@ -194,33 +295,51 @@ LIMIT 5";
             finding.DrillDown!["top_spilling_queries"] = items;
     }
 
+    /// <summary>
+    /// How many parameter-sensitive plans the drill-down reports: the <c>LIMIT</c> this statement carried until the
+    /// compiled-before-the-window test moved to the reader (#4821), which has to run BEFORE the cap for the cap to
+    /// keep the same plans.
+    /// </summary>
+    internal const int ParameterSensitiveMaxOffenders = 5;
+
     public const string ParameterSensitiveSql = @"
-WITH svr AS
+WITH newest AS
 (
-    -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
-    -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
-    -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
-    SELECT COALESCE
-    (
-        (
-            SELECT sp.utc_offset_minutes
-            FROM server_properties AS sp
-            WHERE sp.server_id = $1
-            AND   sp.utc_offset_minutes IS NOT NULL
-            ORDER BY sp.collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+    -- Detector A's creation_time clock (#4821): creation_time is the monitored server's local wall clock and
+    -- the window bound is naive UTC, so the reader converts each plan's creation_time through the server's
+    -- ServerClock -- the zone where the newest snapshot reports one, its fixed offset otherwise -- instead of
+    -- subtracting one offset in SQL, which put a plan compiled before the zone's last daylight saving change
+    -- an hour off. This CTE is that newest snapshot's zone id and offset from the SAME server_properties row,
+    -- handed back on every output row. The SQL keeps the newest offset only as a rough filter an hour wider
+    -- than the window bound; the reader applies the exact test and the cap. svr below is exactly one row even
+    -- when server_properties has not been collected yet: offset 0 and no zone, UTC.
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+),
+svr AS
+(
+    SELECT
+        COALESCE((SELECT utc_offset_minutes FROM newest), 0) AS offset_minutes,
+        (SELECT time_zone_id FROM newest) AS time_zone_id
 ),
 latest AS
 (
+    -- #3902: the base table, not v_query_stats. The view resolves statement text for EVERY row it returns
+    -- by joining query_text_dim -- the whole fleet's text dimension -- and the window sort below then
+    -- carries each row's text, so this read paid for the window's worth of text to print five. The row
+    -- keeps the two halves the view would have COALESCEd (the inline legacy text and the digest). This
+    -- read resolves neither against the dimension: the reader keeps the first five plans that pass its
+    -- exact test, and ParameterSensitiveTextSql then resolves the digests of those plans only.
     SELECT
         database_name,
         query_hash,
         query_plan_hash,
         execution_count,
-        creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,
+        creation_time,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -228,37 +347,124 @@ latest AS
         min_spills,
         max_spills,
         query_text,
+        query_text_digest,
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_hash, query_plan_hash
             ORDER BY collection_time DESC
         ) AS rn
-    FROM v_query_stats, svr
+    FROM query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   delta_execution_count > 0
+),
+offenders AS
+(
+    SELECT
+        database_name,
+        query_hash,
+        query_plan_hash,
+        execution_count,
+        min_worker_time,
+        max_worker_time,
+        max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
+        max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
+        CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
+        creation_time,
+        query_text,
+        query_text_digest,
+        svr.offset_minutes,
+        svr.time_zone_id
+    FROM latest, svr
+    -- The creation_time predicate is a rough filter only (#4821): the newest offset, an hour wider than the bound.
+    -- The reader makes the exact compiled-before-the-window test on the converted time and keeps the first five,
+    -- so this read has no LIMIT.
+    WHERE rn = 1
+    AND   min_worker_time >= 10000
+    AND   max_worker_time >= 250000
+    AND   execution_count >= 20
+    AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
+    AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
 )
 SELECT
-    database_name,
-    query_hash,
-    query_plan_hash,
-    execution_count,
-    min_worker_time,
-    max_worker_time,
-    max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
-    max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
-    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
-    LEFT(query_text, 500) AS query_text
-FROM latest
-WHERE rn = 1
-AND   min_worker_time >= 10000
-AND   max_worker_time >= 250000
-AND   execution_count >= 20
-AND   creation_time_utc <= $2
-AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC
-LIMIT 5";
+    o.database_name,
+    o.query_hash,
+    o.query_plan_hash,
+    o.execution_count,
+    o.min_worker_time,
+    o.max_worker_time,
+    o.worker_ratio,
+    o.grant_ratio,
+    o.spill_divergence,
+    -- The inline legacy text only, NULL for a row that carries just a digest. This read runs before the
+    -- reader's cap, so it comes back with every plan that passes the rough filter, and a join to the text
+    -- dimension here would resolve text for all of them to print five (#3902). The text of the plans that
+    -- print is resolved by a second read, by digest, for those plans only (ParameterSensitiveTextSql); the
+    -- reader takes this inline text first and that read's text otherwise, as the view's COALESCE did.
+    LEFT(o.query_text, 500) AS query_text,
+    -- Appended after the older columns so their ordinals are untouched (#4821): the plan's local creation time
+    -- and the newest snapshot's offset and zone, for the reader's conversion, then the text digest for the
+    -- second read.
+    o.creation_time AS creation_time_local,
+    o.offset_minutes,
+    o.time_zone_id,
+    o.query_text_digest
+FROM offenders AS o
+ORDER BY o.worker_ratio DESC";
+
+    /// <summary>
+    /// The statement text of the parameter-sensitive plans the reader keeps, by digest (#3902, #4821): one
+    /// dimension row per digest by primary key, so the read touches the digests it is given and nothing else.
+    /// <see cref="ParameterSensitiveSql"/> runs before the reader's cap and so cannot resolve text itself
+    /// without resolving it for every plan that passes its rough filter. <c>$1</c> is ONE <c>bytea[]</c> (the
+    /// dimension's digest type): the digests <see cref="DigestsToResolve"/> picks. The cut to 500 characters stays
+    /// in SQL, so it is still PostgreSQL's character count, and <c>LEFT(COALESCE(a, b), 500)</c> is
+    /// <c>COALESCE(LEFT(a, 500), LEFT(b, 500))</c>: the reader takes the inline text when the row has it and
+    /// this read's text otherwise, as the view's own <c>COALESCE</c> did.
+    /// </summary>
+    public const string ParameterSensitiveTextSql = @"
+SELECT digest, LEFT(query_text, 500)
+FROM query_text_dim
+WHERE digest = ANY($1)";
+
+    /// <summary>
+    /// The digests <see cref="ParameterSensitiveTextSql"/> is asked for (#4821): those of the kept rows whose inline
+    /// text is NULL, each once. Inline text wins over the dimension's when it is not NULL, even when it is empty,
+    /// exactly as the view's <c>COALESCE</c> did, so a row that has it needs no lookup; a row with neither inline
+    /// text nor a digest has nothing to look up and reads as empty text. Two plans of one statement share a digest, and
+    /// the reader hands over a new array for every row, so digests are compared by content.
+    /// </summary>
+    internal static IReadOnlyList<byte[]> DigestsToResolve(IEnumerable<(string? InlineText, byte[]? Digest)> keptRows)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var digests = new List<byte[]>();
+        foreach (var (inlineText, digest) in keptRows)
+        {
+            if (inlineText is null && digest is not null && seen.Add(DigestKey(digest)))
+                digests.Add(digest);
+        }
+
+        return digests;
+    }
+
+    /// <summary>
+    /// A parameter-sensitive plan the reader kept, before its statement text is settled (#4821): the columns of
+    /// <see cref="ParameterSensitiveSql"/> the drill-down prints, plus the inline legacy text and the digest that
+    /// <see cref="ParameterSensitiveTextSql"/> resolves for a row with no inline text.
+    /// </summary>
+    private sealed record ParameterSensitivePlan(
+        string Database,
+        string QueryHash,
+        string QueryPlanHash,
+        long ExecutionCount,
+        long MinWorkerTimeUs,
+        long MaxWorkerTimeUs,
+        double WorkerRatio,
+        double GrantRatio,
+        bool SpillsOnSomeInputs,
+        string? InlineText,
+        byte[]? TextDigest);
 
     /// <summary>
     /// Top parameter-sensitive plans behind a PARAMETER_SENSITIVITY finding.
@@ -268,53 +474,145 @@ LIMIT 5";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
+        var windowStart = AsNaive(context.TimeRangeStart);
         using var cmd = new NpgsqlCommand(ParameterSensitiveSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
         cmd.Parameters.AddWithValue(context.ServerId);
-        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(windowStart);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-        var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-        while (await reader.ReadAsync(context.CancellationToken))
+        ServerClock? clock = null;
+        var kept = new List<ParameterSensitivePlan>();
+        /* Closed before the text read below: a connection runs one reader at a time. */
+        await using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
         {
-            items.Add(new
+            while (await reader.ReadAsync(context.CancellationToken))
             {
-                database = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                query_hash = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                query_plan_hash = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                execution_count = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
-                min_worker_time_us = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
-                max_worker_time_us = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
-                worker_ratio = reader.IsDBNull(6) ? 0.0 : Convert.ToDouble(reader.GetValue(6)),
-                grant_ratio = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
-                spills_on_some_inputs = !reader.IsDBNull(8) && Convert.ToInt32(reader.GetValue(8)) == 1,
-                query_text = reader.IsDBNull(9) ? "" : reader.GetString(9)
-            });
+                /* #4821: the compiled-before-the-window test on each plan's own converted creation time, then the cap.
+                   Every row carries the same newest-snapshot zone and offset, so the clock is built once. */
+                clock ??= ServerLocalTimes.ClockFrom(
+                    reader.IsDBNull(12) ? null : reader.GetString(12),
+                    reader.IsDBNull(11) ? null : reader.GetInt32(11));
+                if (!ServerLocalTimes.CreatedByWindowStart(clock, reader.IsDBNull(10) ? null : reader.GetDateTime(10), windowStart))
+                    continue;
+
+                kept.Add(new ParameterSensitivePlan(
+                    Database: reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    QueryHash: reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    QueryPlanHash: reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    ExecutionCount: reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
+                    MinWorkerTimeUs: reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
+                    MaxWorkerTimeUs: reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+                    WorkerRatio: reader.IsDBNull(6) ? 0.0 : Convert.ToDouble(reader.GetValue(6)),
+                    GrantRatio: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
+                    SpillsOnSomeInputs: !reader.IsDBNull(8) && Convert.ToInt32(reader.GetValue(8)) == 1,
+                    InlineText: reader.IsDBNull(9) ? null : reader.GetString(9),
+                    TextDigest: reader.IsDBNull(13) ? null : reader.GetFieldValue<byte[]>(13)));
+                if (kept.Count >= ParameterSensitiveMaxOffenders)
+                    break;
+            }
         }
 
-        if (items.Count > 0)
-            finding.DrillDown!["parameter_sensitive_queries"] = items;
+        if (kept.Count == 0)
+            return;
+
+        /* #3902, #4821: statement text for the plans that print, not for every plan the read above returned. One
+           read by digest, only when a kept row has a digest and no inline text, on the same connection. */
+        var digests = DigestsToResolve(kept.Select(p => (InlineText: p.InlineText, Digest: p.TextDigest)));
+        var dimensionText = digests.Count == 0
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : await ReadParameterSensitiveTextAsync(connection, digests, context.CancellationToken);
+
+        finding.DrillDown!["parameter_sensitive_queries"] = kept.Select(p => (object)new
+        {
+            database = p.Database,
+            query_hash = p.QueryHash,
+            query_plan_hash = p.QueryPlanHash,
+            execution_count = p.ExecutionCount,
+            min_worker_time_us = p.MinWorkerTimeUs,
+            max_worker_time_us = p.MaxWorkerTimeUs,
+            worker_ratio = p.WorkerRatio,
+            grant_ratio = p.GrantRatio,
+            spills_on_some_inputs = p.SpillsOnSomeInputs,
+            query_text = SettledQueryText(p.InlineText, p.TextDigest, dimensionText)
+        }).ToList();
     }
 
-    public const string RegressedQueriesSql = @"
-WITH svr AS
+    /// <summary>
+    /// The text the drill-down prints for a kept plan: the view's own <c>COALESCE</c>. Inline text wins when it is
+    /// not NULL, even when empty; otherwise the dimension's text for the plan's digest; a digest with no dimension
+    /// row yet, or no digest at all, reads as empty text rather than dropping the offender.
+    /// </summary>
+    internal static string SettledQueryText(string? inlineText, byte[]? digest, IReadOnlyDictionary<string, string> dimensionText) =>
+        inlineText
+        ?? (digest is not null && dimensionText.TryGetValue(DigestKey(digest), out var text) ? text : "");
+
+    /// <summary>
+    /// A digest's key in the text <see cref="ReadParameterSensitiveTextAsync"/> returns: its content, since the reader
+    /// hands over a new array for every row.
+    /// </summary>
+    internal static string DigestKey(byte[] digest) => Convert.ToHexString(digest);
+
+    /// <summary>
+    /// Runs <see cref="ParameterSensitiveTextSql"/> once for <paramref name="digests"/>, on the connection the plans
+    /// were read on (#4821), and returns each digest's text keyed by its hex form. The digests travel as ONE
+    /// <c>bytea[]</c> parameter, however many plans print.
+    /// </summary>
+    private static async Task<Dictionary<string, string>> ReadParameterSensitiveTextAsync(
+        NpgsqlConnection connection, IReadOnlyList<byte[]> digests, CancellationToken cancellationToken)
+    {
+        using var cmd = new NpgsqlCommand(ParameterSensitiveTextSql, connection);
+        cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,
+            Value = digests.ToArray()
+        });
+
+        var text = new Dictionary<string, string>(StringComparer.Ordinal);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(1))
+                text[DigestKey(reader.GetFieldValue<byte[]>(0))] = reader.GetString(1);
+        }
+
+        return text;
+    }
+
+    public const string RegressedQueriesSql = RegressedQueriesHead + RegressedQueriesRawMiddle + RegressedQueriesTail;
+
+    /// <summary>
+    /// The regressed-queries read over the latest-snapshot interval table (#3953): <see cref="RegressedQueriesSql"/>
+    /// with its <c>deduped</c> CTE, <c>ROW_NUMBER</c> and <c>rn = 1</c> gone and <c>plan_dedup</c> reading
+    /// <c>query_store_interval_latest</c>. The head (the de-skew and PSP signature) and the tail (<c>latest</c> down)
+    /// are shared constants, so the two cannot drift. It runs when the fact read the table this pass
+    /// (<see cref="AnalysisContext.PlanRegressionReadsIntervalTable"/>), so it reproduces what the fact reported.
+    /// </summary>
+    public const string RegressedQueriesTableSql = RegressedQueriesHead + RegressedQueriesTableMiddle + RegressedQueriesTail;
+
+    /// <summary>The de-skew and PSP-signature CTEs, shared by both regressed-queries reads (#3953 split).</summary>
+    private const string RegressedQueriesHead = @"
+WITH newest AS
 (
-    -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
-    -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
-    -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
-    SELECT COALESCE
-    (
-        (
-            SELECT sp.utc_offset_minutes
-            FROM server_properties AS sp
-            WHERE sp.server_id = $1
-            AND   sp.utc_offset_minutes IS NOT NULL
-            ORDER BY sp.collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+    -- The newest snapshot's zone id and offset from the SAME server_properties row (#4821), handed back on every
+    -- output row. Detector A's creation_time is the monitored server's local wall clock and the window bound is
+    -- naive UTC, so the reader converts the plan-cache signature's creation time through the server's ServerClock --
+    -- the zone where the snapshot reports one, its fixed offset otherwise -- rather than subtracting one offset in
+    -- SQL, which put a plan compiled before the zone's last daylight saving change an hour off. svr below is
+    -- exactly one row even when server_properties has not been collected yet: offset 0 and no zone, which is UTC.
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+),
+svr AS
+(
+    SELECT
+        COALESCE((SELECT utc_offset_minutes FROM newest), 0) AS offset_minutes,
+        (SELECT time_zone_id FROM newest) AS time_zone_id
 ),
 psp_signature AS
 (
@@ -323,9 +621,14 @@ psp_signature AS
     -- the detector's own thresholds is what keeps the flag honest: a query flagged here IS one the
     -- detector counts when it fires, never a looser lookalike. Grant/spill divergence stay metadata
     -- on the PSP side — they do not fire the detector alone, so they do not fire this flag alone.
-    SELECT DISTINCT
+    -- #4821: the detector's compiled-before-the-window test is the reader's, on a converted time. The SQL keeps
+    -- the newest offset as a rough filter an hour wider than the bound and hands back the EARLIEST creation_time
+    -- (the server's local wall clock) among the plans that carry the signature: a plan compiled before the
+    -- window exists exactly when the earliest one was.
+    SELECT
         database_name,
-        query_hash
+        query_hash,
+        MIN(creation_time) AS creation_time_local
     FROM
     (
         SELECT
@@ -333,7 +636,7 @@ psp_signature AS
             query_hash,
             query_plan_hash,
             execution_count,
-            creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,
+            creation_time,
             min_worker_time,
             max_worker_time,
             ROW_NUMBER() OVER
@@ -341,20 +644,24 @@ psp_signature AS
                 PARTITION BY database_name, query_hash, query_plan_hash
                 ORDER BY collection_time DESC
             ) AS rn
-        FROM v_query_stats, svr
+        FROM v_query_stats
         WHERE server_id = $1
         AND   collection_time >= $3
         AND   collection_time <= $4
         AND   delta_execution_count > 0
-    ) AS latest_cache
+    ) AS latest_cache, svr
     WHERE rn = 1
     AND   min_worker_time >= 10000
     AND   max_worker_time >= 250000
     AND   execution_count >= 20
-    AND   creation_time_utc <= $3
+    AND   creation_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
     AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+    GROUP BY database_name, query_hash
 ),
-deduped AS
+";
+
+    /// <summary>The raw read's dedup and <c>plan_dedup</c> over it, byte-identical to the pre-#3953 text.</summary>
+    private const string RegressedQueriesRawMiddle = @"deduped AS
 (
     -- LOAD-BEARING (correctness, not just perf): query_store_stats rows are CUMULATIVE per-Query-Store-
     -- interval snapshots. The QueryStoreCollector is incremental and re-fetches the OPEN interval every
@@ -399,6 +706,16 @@ deduped AS
     -- safety. query_store_stats is a hypertable partitioned on collection_time, so this lets TimescaleDB
     -- exclude whole chunks instead of decompress-then-filter as retained history grows.
     AND   collection_time >= $2 - interval '1 day'
+    -- #3902: the PLAN_REGRESSION fact's offenders when the fact ran this pass ($5/$6, from
+    -- AnalysisContext.PlanRegressionOffenders), otherwise every query ($5 NULL). The top five this read
+    -- returns are the head of the ranking the fact has already computed -- the same detection over the same
+    -- window -- so deduplicating the server's whole slice again to find them was the pass's most expensive
+    -- read run twice. The one way the two rankings can part: the fact folds each plan_id into one
+    -- query_plan_hash and this read folds rows by their own, so a plan_id whose snapshots carry two hashes
+    -- can score differently here (#2312 measured 0 of 38,420 plans changing hash in a day). The arrays are
+    -- matched independently, which admits every pairing of the listed databases and query ids: a superset
+    -- of the offenders, never a subset.
+    AND   ($5::text[] IS NULL OR (database_name = ANY($5::text[]) AND query_id = ANY($6::bigint[])))
 ),
 plan_dedup AS
 (
@@ -424,7 +741,46 @@ plan_dedup AS
     GROUP BY database_name, query_id, replica_role, query_plan_hash
     HAVING SUM(execution_count) >= 25
 ),
-latest AS
+";
+
+    /// <summary>The table twin's <c>plan_dedup</c>.</summary>
+    private const string RegressedQueriesTableMiddle = @"plan_dedup AS
+(
+    -- #3953: the table twin. query_store_interval_latest already holds each interval's latest snapshot (the raw
+    -- twin's deduped CTE and its rn = 1), so this aggregates it directly, with the same predicates and #3902's
+    -- offender filter moved over unchanged. $7 is the raw twin's $2 - interval '1 day', bound bare (#2387), on
+    -- collection_time as there and on the table's partitioning column, which last_execution_time >= $2 implies
+    -- because one Query Store interval spans at most a day.
+    -- Aggregate the DISTINCT intervals (rn = 1) per (query_id, plan hash). Collapses the old
+    -- plan_agg(per plan_id) + plan_dedup(per hash) two-stage into one: a weighted-avg of weighted-avgs
+    -- equals the direct execution_count-weighted avg, and MAX(plan_id) is unchanged. MAX(plan_id) carries
+    -- the most recently observed plan_id in the hash forward (newer plans are less likely evicted by
+    -- Query Store retention; any plan_id sharing the hash forces the same execution shape).
+    SELECT
+        database_name,
+        query_id,
+        replica_role,
+        query_plan_hash,
+        MAX(plan_id) AS plan_id,
+        any_value(query_hash) AS query_hash,
+        any_value(query_text) AS query_text,
+        SUM(execution_count) AS execs,
+        SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
+        SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        MAX(last_execution_time) AS last_exec
+    FROM query_store_interval_latest
+    WHERE server_id = $1
+    AND   last_execution_time >= $2
+    AND   collection_time >= $7
+    AND   first_execution_time >= $7
+    AND   ($5::text[] IS NULL OR (database_name = ANY($5::text[]) AND query_id = ANY($6::bigint[])))
+    GROUP BY database_name, query_id, replica_role, query_plan_hash
+    HAVING SUM(execution_count) >= 25
+),
+";
+
+    /// <summary>Everything from <c>latest</c> down, shared by both regressed-queries reads.</summary>
+    private const string RegressedQueriesTail = @"latest AS
 (
     -- The most recently executed plan per query. DISTINCT ON instead of the old self-referential rank,
     -- so plan_dedup is materialized ONCE rather than the whole pipeline running twice (once per side).
@@ -455,6 +811,10 @@ scored AS
         b.plan_id AS best_plan_id,
         b.cpu_per_exec AS best_cpu,
         b.dur_per_exec AS best_dur,
+        -- #3953: when the best plan last ran. With the interval table the window really reaches 14 days, so a
+        -- best plan can be up to two weeks old; the operator text states its age and the unattended force bot
+        -- gates on it (ForcePlanBotPolicy.MaxBestPlanAgeDays).
+        b.last_exec AS best_plan_last_seen,
         -- #2138: the SAME CPU-primary scoring as the PLAN_REGRESSION fact (PgFactCollector.QueryPerf.cs,
         -- where the rationale lives). The drill-down must agree with the fact that displays it: under the
         -- old GREATEST a duration-only regression could appear here that the fact never counted.
@@ -475,13 +835,15 @@ scored AS
         -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
         -- plan cache? Keyed on (database, query_hash) — the hash bridges Query Store and the cache.
         -- Steers the force-plan remediation's caution text; the future bot never auto-forces on true.
-        EXISTS
+        -- #4821: this hands back the signature's earliest creation_time (NULL when the query carries no
+        -- signature) and the reader decides compiled-before-the-window on the converted time, so the flag
+        -- is the reader's. psp_signature has one row per key, so the subquery returns at most one.
         (
-            SELECT 1
+            SELECT p.creation_time_local
             FROM psp_signature AS p
             WHERE p.database_name = l.database_name
             AND   p.query_hash = l.query_hash
-        ) AS parameter_sensitivity_cofired
+        ) AS parameter_sensitivity_creation_time_local
     FROM latest AS l
     JOIN cheapest AS b
       ON  b.database_name = l.database_name
@@ -513,7 +875,10 @@ SELECT
     regression_factor,
     query_text,
     replica_role,
-    parameter_sensitivity_cofired
+    parameter_sensitivity_creation_time_local,
+    best_plan_last_seen,
+    (SELECT offset_minutes FROM svr) AS offset_minutes,
+    (SELECT time_zone_id FROM svr) AS time_zone_id
 FROM scored
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
@@ -524,26 +889,64 @@ LIMIT 5";
     /// Top regressed queries behind a PLAN_REGRESSION finding.
     /// Re-runs Detector B's detection for the top 5 offenders. Uses the same 14-day
     /// last_execution_time comparison window as the detector — NOT the standard analysis
-    /// window — so the days-old "best plan" baseline is present.
+    /// window — so the days-old "best plan" baseline is present. Since #3902 it re-runs it over
+    /// the queries the fact reported this pass (<see cref="AnalysisContext.PlanRegressionOffenders"/>),
+    /// and over every query only when the fact did not run.
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(RegressedQueriesSql, connection);
+        /* #3953: the source the fact read this pass, so the drill-down can reproduce it; when the fact did not
+           decide, the same decision the fact makes, over the same bound. */
+        var windowStart = AsNaive(context.TimeRangeStart.AddDays(-14));
+        var readsTable = context.PlanRegressionReadsIntervalTable
+            ?? await QueryStoreIntervalLatest.ReadsTableAsync(
+                connection, context.ServerId, windowStart.AddDays(-1), DrillDownCommandTimeoutSeconds, null, context.CancellationToken);
+
+        using var cmd = new NpgsqlCommand(readsTable ? RegressedQueriesTableSql : RegressedQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
         cmd.Parameters.AddWithValue(context.ServerId);
-        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-14)));
+        cmd.Parameters.AddWithValue(windowStart);
         /* $3/$4: the STANDARD analysis window for the psp_signature CTE — deliberately not the 14-day
            comparison window above, so the flag matches what the PARAMETER_SENSITIVITY detector itself
-           would report for this run. */
-        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+           would report for this run. The start is also the bound of the reader's exact compiled-before-the-window
+           test on each row (#4821). */
+        var pspWindowStart = AsNaive(context.TimeRangeStart);
+        cmd.Parameters.AddWithValue(pspWindowStart);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
+        /* $5/$6 (#3902): the fact's offenders, or NULL when it did not run, failed, or reported none — typed
+           explicitly, because a NULL carries no array type for the server to infer. An empty list is read as
+           unrestricted rather than as "nothing": a pass whose fact found no regression raises no
+           PLAN_REGRESSION finding to drill into, so a caller that drills anyway is not following a fact. */
+        var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+            Value = offenders is null ? DBNull.Value : offenders.Select(o => o.DatabaseName).ToArray()
+        });
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint,
+            Value = offenders is null ? DBNull.Value : offenders.Select(o => o.QueryId).ToArray()
+        });
+        if (readsTable)
+        {
+            /* $7 (#3953): the raw twin's "$2 - interval '1 day'", bound bare so both the collection_time bound and
+               the table's partitioning column are compared against a parameter (#2387). */
+            cmd.Parameters.AddWithValue(windowStart.AddDays(-1));
+        }
+
+        ServerClock? clock = null;
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            /* #4821: the newest snapshot's zone and offset ride on every row (columns 15 and 14), so the clock is built once. */
+            clock ??= ServerLocalTimes.ClockFrom(
+                reader.IsDBNull(15) ? null : reader.GetString(15),
+                reader.IsDBNull(14) ? null : reader.GetInt32(14));
             items.Add(new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -565,7 +968,11 @@ LIMIT 5";
                 replica_role = reader.IsDBNull(11) ? "" : reader.GetString(11),
                 /* #2138 gap 3: the plan-cache PSP signature co-fired for this query's hash. Steers the
                    force-plan caution text; the future bot never auto-forces a flagged target. */
-                parameter_sensitivity_cofired = !reader.IsDBNull(12) && reader.GetBoolean(12)
+                parameter_sensitivity_cofired = ServerLocalTimes.CreatedByWindowStart(
+                    clock, reader.IsDBNull(12) ? null : reader.GetDateTime(12), pspWindowStart),
+                /* #3953: when the best plan last ran (naive UTC), appended so the ordinals above are untouched.
+                   The force-plan bot's age gate and the advice's age read it. */
+                best_plan_last_seen = reader.IsDBNull(13) ? (DateTime?)null : reader.GetDateTime(13)
             });
         }
 
@@ -573,7 +980,32 @@ LIMIT 5";
             finding.DrillDown!["regressed_queries"] = items;
     }
 
+    /// <summary>
+    /// #3648: the same per-plan <c>max_dop</c> provenance as <see cref="TopCpuQueriesSql"/> — see the essay
+    /// there. This read is one hash, unfiltered by CPU spent, so the newest-plan tie-break (compile time,
+    /// then CPU spent) is what separates a stale parallel plan still sitting in the cache from the serial
+    /// one doing the work at the same <c>collection_time</c>. Byte-identical to Lite's
+    /// <c>CollectBadActorDetail</c> text.
+    /// </summary>
     public const string BadActorDetailSql = @"
+WITH windowed AS
+(
+    -- #3648: see CollectTopCpuQueries' windowed CTE; same ranking, same hash-wide maximum.
+    SELECT database_name, query_hash, query_plan_hash, collection_time, max_dop,
+           delta_worker_time, delta_execution_count, delta_elapsed_time, delta_logical_reads, delta_spills,
+           query_text,
+           ROW_NUMBER() OVER
+           (
+               PARTITION BY database_name, query_hash
+               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
+           ) AS newest_rn,
+           MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   query_hash = $4
+)
 SELECT database_name, query_hash,
        LEFT(MAX(query_text), 500) AS query_text,
        SUM(delta_execution_count)::BIGINT AS exec_count,
@@ -589,12 +1021,11 @@ SELECT database_name, query_hash,
        SUM(delta_worker_time)::BIGINT AS total_cpu_us,
        SUM(delta_logical_reads)::BIGINT AS total_reads,
        SUM(delta_spills)::BIGINT AS total_spills,
-       MAX(max_dop) AS max_dop
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   query_hash = $4
+       MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
+       COUNT(DISTINCT query_plan_hash) AS plan_count,
+       MAX(max_dop_any_plan) AS max_dop_any_plan,
+       MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
+FROM windowed
 GROUP BY database_name, query_hash";
 
     private async Task CollectBadActorDetail(AnalysisFinding finding, AnalysisContext context)
@@ -615,6 +1046,10 @@ GROUP BY database_name, query_hash";
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (await reader.ReadAsync(context.CancellationToken))
         {
+            var maxDop = reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10));
+            var planCount = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11));
+            var maxDopAnyPlan = reader.IsDBNull(12) ? (int?)null : Convert.ToInt32(reader.GetValue(12));
+            var maxDopAnyPlanLastSeen = reader.IsDBNull(13) ? (DateTime?)null : reader.GetDateTime(13);
             finding.DrillDown!["bad_actor_query"] = new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -627,7 +1062,12 @@ GROUP BY database_name, query_hash";
                 total_cpu_ms = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)) / 1000.0,
                 total_reads = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
                 total_spills = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
-                max_dop = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10))
+                /* #3648: newest plan's reading, null when unknown — never 0. History fields follow. */
+                max_dop = maxDop,
+                plan_count = planCount,
+                max_dop_any_plan = maxDopAnyPlan,
+                max_dop_any_plan_last_seen = maxDopAnyPlanLastSeen?.ToString("o"),
+                dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)
             };
         }
     }

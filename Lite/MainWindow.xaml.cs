@@ -17,6 +17,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Threading;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
@@ -29,6 +30,7 @@ using PerformanceMonitor.Ui;
 /* Type alias (not a namespace import) so PerformanceMonitor.Alerting's CpuAlertMode enum can never
    collide with this app's own CpuAlertMode. */
 using AlertEngine = PerformanceMonitor.Alerting.AlertEngine;
+using FailedSendRetryTracker = PerformanceMonitor.Alerting.FailedSendRetryTracker;
 using AlertReadFailureCounter = PerformanceMonitor.Alerting.AlertReadFailureCounter;
 
 namespace PerformanceMonitorLite;
@@ -41,6 +43,7 @@ public partial class MainWindow : Window
     private readonly ScheduleManager _scheduleManager;
     private RemoteCollectorService? _collectorService;
     private CollectionBackgroundService? _backgroundService;
+    private AnalysisNotificationService? _analysisNotificationService;
     private CancellationTokenSource? _backgroundCts;
     private SystemTrayService? _trayService;
     private WindowResumeGuard? _resumeGuard;
@@ -58,8 +61,20 @@ public partial class MainWindow : Window
 
     /// <summary>When the last down alert (Lost / AlreadyDownAtFirstSight / StillDown) fired per server —
     /// the re-fire clock for <see cref="PerformanceMonitor.Common.ConnectionAlertPolicy"/> (#1659).
-    /// Stamped on every down alert delivered, cleared on Restored.</summary>
+    /// Stamped when a down alert is sent, whatever the send then reports, and cleared on Restored.</summary>
     private readonly Dictionary<string, DateTime> _lastConnectionDownAlertUtc = new();
+
+    /// <summary>When a "Server Unreachable" that no channel delivered is due again, per server (#4795). Passed
+    /// to <see cref="PerformanceMonitor.Common.ConnectionAlertPolicy.Decide"/> through
+    /// <see cref="_connectionAlertSends"/>, recorded from the send's answer, and cleared on a restore or when the
+    /// server is removed.</summary>
+    private readonly FailedSendRetryTracker _connectionAlertRetries = new();
+
+    /// <summary>The servers whose "Server Unreachable" send has not answered yet (#4795). While a server is in
+    /// here its retry is not offered to the policy, so a slow send is not followed by a second copy of itself on the
+    /// next tick. Added right before the send is handed to <see cref="NoteConnectionAlertSentAsync"/>, removed in
+    /// that step's <c>finally</c>.</summary>
+    private readonly ConnectionAlertSendsInFlight _connectionAlertSends = new();
     private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
     private readonly Dictionary<string, bool> _previousXeSessionFailureStates = new();
     private readonly DispatcherTimer _statusTimer;
@@ -85,6 +100,14 @@ public partial class MainWindow : Window
     private readonly IAlertSettings _alertSettings = new AppAlertSettings();
     private readonly MuteRuleService _muteRuleService;
     private EmailAlertService _emailAlertService;
+
+    /// <summary>The webhook service the email service fans out to, held so the status timer can read each
+    /// channel's failures in a row (#4750) — the counts were otherwise read only by tests.</summary>
+    private readonly WebhookAlertService _webhookAlertService;
+
+    /// <summary>Which webhook channels are currently announced as failing (#4750), by channel name — the edge
+    /// state for <see cref="CheckWebhookChannelsAndNotify"/>, the <see cref="_previousConnectionStates"/> idiom.</summary>
+    private readonly Dictionary<string, bool> _webhookChannelFailing = new(StringComparer.Ordinal);
     /* Held so the engine's edge-trigger watermark seed/persist (#1145, via LiteAlertStateStore)
        shares one store with the webhook cooldown seeding below. */
     private readonly DuckDbAlertHistoryStore _alertHistoryStore;
@@ -100,17 +123,22 @@ public partial class MainWindow : Window
            (Plan E E3c): the shared send core fans out to it. The history store is shared
            by both so the webhook service can seed its cooldown across restart (#1145). */
         _alertHistoryStore = new DuckDbAlertHistoryStore(_databaseInitializer);
-        var webhookAlertService = new WebhookAlertService(
+        _webhookAlertService = new WebhookAlertService(
             _alertSettings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>(), _alertHistoryStore);
         _emailAlertService = new EmailAlertService(
             _alertSettings,
             _alertHistoryStore,
-            webhookAlertService,
+            _webhookAlertService,
             new AppLoggerAdapter<EmailAlertService>());
         _muteRuleService = new MuteRuleService(
             new DuckDbMuteRuleStore(_databaseInitializer),
             new AppLoggerAdapter<MuteRuleService>());
         _serverManager = new ServerManager(App.SharedConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
+        /* The edition comes from _engineEditions, the same as the alert sweep's: the live status when it has read
+           one, else the edition seeded from the store in MainWindow_Loaded. */
+        PerformanceMonitorLite.Analysis.AnalysisService.SeparatelyMonitoredDatabasesProvider = serverId =>
+            _engineEditions.SeparatelyMonitoredDatabasesOrNull(
+                serverId, _serverManager.GetAllServers(), id => _serverManager.GetConnectionStatus(id).SqlEngineEdition);
         // Two-phase wiring (§3.1): build the ProfileManager (one-way ServerManager injection for the
         // referential-integrity query), then late-inject it back as the ServerManager's IProfileLookup
         // so CheckConnectionAsync resolves profile-backed servers through the same fail-closed logic.
@@ -126,6 +154,7 @@ public partial class MainWindow : Window
             UpdateStatusBar();
             await RefreshOverviewAsync();
             CheckConnectionsAndNotify();
+            CheckWebhookChannelsAndNotify();
 
             /* Auto-refresh alert history if the tab is active */
             if (ServerTabControl.SelectedItem == AlertsTab)
@@ -166,6 +195,11 @@ public partial class MainWindow : Window
 
             // Initialize the DuckDB database
             await _databaseInitializer.InitializeAsync();
+
+            /* The stored engine editions, for the Azure master scope. Awaited here, before anything below that reads
+               the scope starts, so the first alert sweep and the first analysis already have them. The wait is
+               bounded (KnownEngineEditions.StartupSeedLimit), so a stalled read cannot hold up the start. */
+            await SeedKnownEngineEditionsAsync();
 
             /* Edge-trigger watermark restore (#1145) now happens inside the shared AlertEngine:
                it seeds each server's watermarks from LiteAlertStateStore before that server's
@@ -209,13 +243,20 @@ public partial class MainWindow : Window
             // Routes high-severity analysis findings to email/Slack/Teams; the background
             // service runs scheduled analysis and hands findings to it.
             /* serverId resolver: Lite uses the finding's stable int id as a string (Plan E E3c). */
-            var analysisNotificationService = new AnalysisNotificationService(
-                _emailAlertService, _alertSettings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>());
+            /* #3916 PR B: pages wait out a hold-back window, so the flush re-reads the mute registry — a mute
+               written inside the window drops the queued page. The read fails OPEN (logged, "not muted"): the
+               finding already passed the queue-time mute filter in FindingStore. */
+            var muteReadStore = new PerformanceMonitorLite.Analysis.FindingStore(_databaseInitializer);
+            var analysisNotificationService = _analysisNotificationService = new AnalysisNotificationService(
+                _emailAlertService, _alertSettings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>(),
+                isStoryMuted: async (serverId, storyPathHash) =>
+                    (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash));
 
             _backgroundService = new CollectionBackgroundService(
                 _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,
                 analysisNotificationService,
-                new AppLoggerAdapter<CollectionBackgroundService>());
+                new AppLoggerAdapter<CollectionBackgroundService>(),
+                _scheduleManager);
 
             // Start background collection.
             // Off the UI thread on purpose: DuckDB.NET is synchronous and Lite has no
@@ -310,7 +351,8 @@ public partial class MainWindow : Window
             }
 
             // Initialize alerts history tab
-            AlertsHistoryContent.Initialize(_dataService);
+            _dataService.DisplayNames = () => LocalDataService.BuildDisplayNameMap(_serverManager.GetAllServers());
+            AlertsHistoryContent.Initialize(_dataService, OpenTabClockFor);
             AlertsHistoryContent.MuteRuleService = _muteRuleService;
             AlertsHistoryContent.AlertsDismissed += OnAlertHistoryDismissed;
 
@@ -333,10 +375,10 @@ public partial class MainWindow : Window
             AvailabilityGroupsContent.Initialize(_dataService);
 
             // Initialize FinOps tab
-            FinOpsContent.Initialize(_dataService, _serverManager);
+            FinOpsContent.Initialize(_dataService, _serverManager, OpenTabClockFor);
 
             // Initialize Recommendations tab (advise-only)
-            RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager);
+            RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager, OpenTabClockFor);
 
             // Start MCP server if enabled
             await StartMcpServerAsync();
@@ -492,6 +534,10 @@ public partial class MainWindow : Window
             }
         }
 
+        /* #3916 PR B: drop the analysis hold-back queue unstamped once collection has stopped — a page queued
+           at close is not a delivery, so nothing holds its story and the next launch re-attempts it. */
+        _analysisNotificationService?.Dispose();
+
         // Stop all server tab refresh timers
         foreach (var tab in _openServerTabs.Values)
         {
@@ -502,6 +548,11 @@ public partial class MainWindow : Window
         }
 
         _statusTimer.Stop();
+
+        /* Close the sentinel connection (#4262) now that collection/archival can no longer run against
+           it — dispose is a write-lock acquire, and by this point nothing should still be holding a read
+           lock behind it. */
+        _databaseInitializer.Dispose();
 
         _closingCleanupDone = true;
 
@@ -520,10 +571,10 @@ public partial class MainWindow : Window
         // Only respond to tab selection changes, not child control selection events that bubble up
         if (e.OriginalSource != ServerTabControl) return;
 
-        /* Restore the selected tab's UTC offset so charts use the correct server timezone */
+        /* Restore the selected tab's server clock so the time text and the slicer labels use the correct server timezone */
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
-            ServerTimeHelper.UtcOffsetMinutes = serverTab.UtcOffsetMinutes;
+            ServerTimeHelper.ActiveServerClock = serverTab.ServerClock;
             StatusText.Text = $"Connected to {serverTab.Server.DisplayNameWithIntent}";
         }
 
@@ -584,7 +635,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port);
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, _scheduleManager);
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }
         catch (Exception ex)
@@ -669,8 +720,18 @@ public partial class MainWindow : Window
             DatabaseSizeText.Text = "Database: New";
         }
 
+        /* Lite's own database after a fatal error. While it is reopening, or after every reopen failed, nothing
+           is stored, so the collection status says stopped whatever the collection service reports. */
+        var localDatabase = _databaseInitializer.LocalDatabaseHealth;
+        LocalDatabaseStatusText.Text = localDatabase.StatusLine ?? string.Empty;
+        LocalDatabaseStatusText.Visibility = localDatabase.StatusLine is null ? Visibility.Collapsed : Visibility.Visible;
+
         // Update collection status
-        if (_backgroundService != null)
+        if (localDatabase.CollectionStopped)
+        {
+            CollectionStatusText.Text = "Collection: Stopped (local database failed)";
+        }
+        else if (_backgroundService != null)
         {
             if (_backgroundService.IsCollecting)
             {
@@ -713,26 +774,36 @@ public partial class MainWindow : Window
             selectedServerId = serverTab.ServerId;
         }
 
-        var health = _collectorService.GetHealthSummary(selectedServerId);
+        PaintCollectorHealth(CollectorHealthText, _collectorService.GetHealthSummary(selectedServerId));
+    }
 
+    /// <summary>
+    /// Paints the status bar's collector-health text (#4679). The ink is a <c>SetResourceReference</c>, not a copy of
+    /// the brush: a copy kept the OLD theme's colour after a live theme switch (Dark's #E4E6EB on Light's white bar,
+    /// 1.25:1) until the next 30 s tick. Every theme in Lite and the Darling Viewer declares <c>CriticalTextBrush</c>
+    /// (Viewer4629Tests pins it), so there is no fallback brush. "Logging: BROKEN" used a fixed Brushes.Red, 4.00:1 on
+    /// Light, 3.84:1 on Dark and 3.61:1 on Cool Breeze; CriticalTextBrush is 6.41, 5.59 and 5.79.
+    /// </summary>
+    internal static void PaintCollectorHealth(TextBlock text, CollectorHealthSummary health)
+    {
         if (health.TotalCollectors == 0)
         {
-            CollectorHealthText.Text = "";
+            text.Text = "";
             return;
         }
 
         if (health.LoggingFailures > 0)
         {
-            CollectorHealthText.Text = $"Logging: BROKEN ({health.LoggingFailures} failures)";
-            CollectorHealthText.Foreground = System.Windows.Media.Brushes.Red;
-            CollectorHealthText.ToolTip = $"collection_log INSERT is failing.\nThis means collector errors are invisible.\nCheck the log file for details.";
+            text.Text = $"Logging: BROKEN ({health.LoggingFailures} failures)";
+            text.SetResourceReference(TextBlock.ForegroundProperty, "CriticalTextBrush");
+            text.ToolTip = $"collection_log INSERT is failing.\nThis means collector errors are invisible.\nCheck the log file for details.";
         }
         else if (health.ErroringCollectors > 0)
         {
             var names = string.Join(", ", health.Errors.Select(e => e.CollectorName));
-            CollectorHealthText.Text = $"Collectors: {health.ErroringCollectors} erroring";
-            CollectorHealthText.Foreground = System.Windows.Media.Brushes.OrangeRed;
-            CollectorHealthText.ToolTip = $"Failing: {names}\n\n" +
+            text.Text = $"Collectors: {health.ErroringCollectors} erroring";
+            text.SetResourceReference(TextBlock.ForegroundProperty, "CriticalTextBrush");
+            text.ToolTip = $"Failing: {names}\n\n" +
                 string.Join("\n", health.Errors.Select(e =>
                     $"{e.CollectorName}: {e.ConsecutiveErrors}x consecutive - {e.LastErrorMessage}"));
         }
@@ -740,20 +811,38 @@ public partial class MainWindow : Window
         {
             /* XE session couldn't be created (#1086). Permission failures don't
                increment ConsecutiveErrors, so without this branch the status bar
-               would show OK while blocking/deadlock capture is dead. */
+               would show OK while a blocking, deadlock or long-query capture is dead. */
             var names = string.Join(", ", health.XeSessionFailures.Select(e => e.CollectorName));
-            CollectorHealthText.Text = $"Capture down: {names}";
-            CollectorHealthText.Foreground = System.Windows.Media.Brushes.OrangeRed;
-            CollectorHealthText.ToolTip = string.Join("\n", health.XeSessionFailures.Select(e =>
+            text.Text = $"Capture down: {names}";
+            text.SetResourceReference(TextBlock.ForegroundProperty, "CriticalTextBrush");
+            text.ToolTip = string.Join("\n", health.XeSessionFailures.Select(e =>
                 $"{e.CollectorName}: {e.XeSessionMessage}"));
         }
         else
         {
-            CollectorHealthText.Text = $"Collectors: {health.TotalCollectors} OK";
-            CollectorHealthText.Foreground = (System.Windows.Media.Brush)FindResource("ForegroundBrush");
-            CollectorHealthText.ToolTip = null;
+            text.Text = $"Collectors: {health.TotalCollectors} OK";
+            text.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundBrush");
+            text.ToolTip = null;
         }
     }
+
+    /// <summary>
+    /// Names the Extended Events captures the "Capture Not Running" notice reports down (#1086, #4731), each by
+    /// its collector: <c>blocked_process_report</c> is blocking, <c>deadlocks</c> is deadlock and
+    /// <c>long_query_completions</c> is long-query. Any other collector is named as itself, so a capture this map has
+    /// not learned about is never announced as a different one. The notice took every collector that was not
+    /// blocking for deadlock, so a long-query capture whose session could not be created (the Azure SQL Database
+    /// ensure refuses it per database) was announced as a deadlock capture that cannot start. Two or more join
+    /// with " and ".
+    /// </summary>
+    internal static string NameXeCaptures(IEnumerable<string> collectorNames)
+        => string.Join(" and ", collectorNames.Select(name => name switch
+        {
+            "blocked_process_report" => "blocking",
+            "deadlocks" => "deadlock",
+            "long_query_completions" => "long-query",
+            _ => name,
+        }));
 
     private async Task RefreshOverviewAsync()
     {
@@ -775,8 +864,9 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
-                    var summary = await Task.Run(() => _dataService.GetServerSummaryAsync(serverId, server.DisplayNameWithIntent));
+                    /* IsCardFor matches a card to its server with GetServerId, so the card is built under that same id. */
+                    var serverId = RemoteCollectorService.GetServerId(server);
+                    var summary = await Task.Run(() => _dataService.GetServerSummaryAsync(serverId, server.DisplayNameWithIntent, server.RegisteredAtUtc));
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;
@@ -825,8 +915,9 @@ public partial class MainWindow : Window
     {
         if (e.ClickCount == 2 && sender is FrameworkElement fe && fe.DataContext is ServerSummaryItem summary)
         {
-            var server = _serverManager.GetAllServers()
-                .FirstOrDefault(s => s.ServerName == summary.ServerName);
+            /* By the card's storage server id, never its host name: databases on one Azure SQL Database server
+               share a host name, so a name match opens the first of them for every card. */
+            var server = summary.FindServer(_serverManager.GetAllServers());
             if (server != null)
             {
                 ConnectToServer(server);
@@ -993,7 +1084,7 @@ public partial class MainWindow : Window
         }
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;
-        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition == 5,
+        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, isAwsRds: status.IsAwsRds,
             isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false);
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem
@@ -1025,6 +1116,15 @@ public partial class MainWindow : Window
         {
             if (_collectorService != null)
             {
+                /* Registered with the reset gate for the whole run, the way the scheduled sweep and the
+                   tab-open sweep are. Unregistered, the size-triggered reset could delete monitor.duckdb
+                   while these collectors held connections to it; connections opened afterwards attach to
+                   the deleted instance, the reset's re-initialization binds to it too, and everything
+                   collected until the next restart is lost. The registration belongs here and not inside
+                   RunCollectorAsync: that method also runs inside the registered sweeps, and a nested
+                   registration there would wait out the reset's drain timeout. */
+                using var collectionScope = await CollectionResetGate.BeginCollectionAsync();
+
                 var onLoadCollectors = _scheduleManager.GetOnLoadCollectorsForServer(server.Id);
                 foreach (var collector in onLoadCollectors)
                 {
@@ -1087,6 +1187,8 @@ public partial class MainWindow : Window
     private StackPanel CreateTabHeader(ServerConnection server)
     {
         var panel = new StackPanel { Orientation = Orientation.Horizontal };
+        /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only, so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
+        panel.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
 
         var tabLabel = server.ReadOnlyIntent ? $"{server.DisplayName} (RO)" : server.DisplayName;
         panel.Children.Add(new TextBlock
@@ -1291,6 +1393,26 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The clock of the open server tab for <paramref name="serverId"/> (#4766), or null when that server has no tab
+    /// open. It is what the Alerts History and Recommendations lists convert a server's rows on when the store holds
+    /// no clock for it yet: the tab keeps the fixed offset its connect probe read until the first collected row
+    /// arrives, so the lists agree with that server's own tab. It reads UI objects, so callers ask it on the UI
+    /// thread.
+    /// </summary>
+    private ServerClock? OpenTabClockFor(int serverId)
+    {
+        foreach (var tab in _openServerTabs.Values)
+        {
+            if (tab.Content is ServerTab st && st.ServerId == serverId)
+            {
+                return st.ServerClock;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// When alerts are cleared from Alert History via "Dismiss All", acknowledge the matching
     /// server tab badge(s) so the at-a-glance indicator stays consistent with the cleared list
     /// (issue #1092). The argument is the DB server_id filter that was in effect; null means the
@@ -1401,6 +1523,7 @@ public partial class MainWindow : Window
             RefreshServerList();
             var msg = $"Added {dialog.AddedCount} server(s)";
             if (dialog.SkippedCount > 0) msg += $", skipped {dialog.SkippedCount} duplicate(s)";
+            if (dialog.CollidedCount > 0) msg += $", {dialog.CollidedCount} collided";
             if (dialog.FailedCount > 0) msg += $", {dialog.FailedCount} failed";
             StatusText.Text = msg + ".";
         }
@@ -1408,10 +1531,10 @@ public partial class MainWindow : Window
 
     private void ManageServersButton_Click(object sender, RoutedEventArgs e)
     {
-        /* #2033: hand this door the SAME per-server deep cleanup the sidebar Remove runs (health, AG edge
-           state, tag assignments), so the two delete paths cannot drift. The ClearHealthExcept sweep below
-           stays as the belt for anything else that changed while the dialog was open. */
-        var window = new ManageServersWindow(_serverManager, _profileManager, ForgetServerRuntimeStateAsync) { Owner = this };
+        /* #2033: hand this door the SAME removal the sidebar Remove runs (health, AG edge state, tag
+           assignments, then the registry entry), so the two delete paths cannot drift. The ClearHealthExcept
+           sweep below stays as the belt for anything else that changed while the dialog was open. */
+        var window = new ManageServersWindow(_serverManager, _profileManager, RemoveServerAsync) { Owner = this };
         window.ShowDialog();
 
         if (window.ServersChanged)
@@ -1538,7 +1661,7 @@ public partial class MainWindow : Window
         try
         {
             // Import server connections (upsert by server name)
-            var (imported, skipped) = _serverManager.ImportServersFromFile(serversJsonPath);
+            var (imported, skipped, collided) = _serverManager.ImportServersFromFile(serversJsonPath);
 
             // Import credential profiles from the SHARED config dir (M-1: NOT the per-user copy loop
             // below — profiles.json, like servers.json, lives in App.SharedConfigDirectory, so it must
@@ -1586,6 +1709,8 @@ public partial class MainWindow : Window
             var message = $"Imported {imported} server connection(s).";
             if (skipped > 0)
                 message += $"\nSkipped {skipped} duplicate(s) (already configured).";
+            if (collided > 0)
+                message += $"\n{collided} collided: not imported because the server's id matches a different server already configured (see the log).";
             if (profilesImported > 0)
                 message += $"\nImported {profilesImported} credential profile(s).";
             if (settingsCopied > 0)
@@ -1769,38 +1894,67 @@ public partial class MainWindow : Window
         if (result == MessageBoxResult.Yes)
         {
             CloseServerTab(server.Id);
-            await ForgetServerRuntimeStateAsync(server);
-            _serverManager.DeleteServer(server.Id);
+            await RemoveServerAsync(server);
             RefreshServerList();
             StatusText.Text = $"Removed server: {server.DisplayNameWithIntent}";
         }
     }
 
     /// <summary>
-    /// The ONE deep-cleanup for a server leaving monitoring (#2033) — every piece of per-server runtime
+    /// The ONE removal of a server from monitoring (#2033) — every piece of per-server runtime
     /// state keyed on the deterministic storage-name hash, which a removed-then-re-added server gets BACK:
     /// collection health, AG edge state (#1696 — stale role state pages a phantom failover on re-add), and
-    /// tag assignments (#2020 — stale rows silently resurrect the old tags). Both delete doors call this —
-    /// the sidebar context menu's Remove and Manage Servers' Delete — so the two paths cannot drift again;
-    /// before this, Manage Servers deleted the registry entry and left all three behind.
+    /// tag assignments (#2020 — stale rows silently resurrect the old tags) — and then the registry entry
+    /// itself (#4795). Both doors call this — the sidebar context menu's Remove and Manage Servers' Delete —
+    /// so the two paths cannot drift again; before this, Manage Servers deleted the registry entry and left
+    /// all three behind.
     /// </summary>
-    private async Task ForgetServerRuntimeStateAsync(ServerConnection server)
+    private async Task RemoveServerAsync(ServerConnection server)
     {
         var removedServerId = RemoteCollectorService.GetDeterministicHashCode(
             RemoteCollectorService.GetServerNameForStorage(server));
-        _collectorService?.ClearHealthForServer(removedServerId);
-        _agAlertEvaluator.Forget(removedServerId);
+
+        /* The tag clear is the removal's only await, so it runs first, while the server is still whole: nothing
+           has been dropped yet for a timer tick to see half-done. */
         if (_dataService != null)
         {
             try
             {
                 await _dataService.ClearServerTagsForServerAsync(removedServerId);
             }
+            catch (PendingRestoreException ex)
+            {
+                AppLogger.Warn("Tags", $"Tags for the removed server were not cleared: {ex.Message}");
+            }
             catch (Exception ex)
             {
                 AppLogger.Info("Tags", $"Failed to clear tags for removed server: {ex.Message}");
             }
         }
+
+        /* #4795: from the first drop to the delete nothing is awaited, so this runs on the UI thread without a
+           timer tick in between. The state used to be dropped, then the tag clear awaited, then the registry entry
+           deleted by the caller: a tick during that await still found the server registered and re-created the
+           state that had just been dropped. */
+        _collectorService?.ClearHealthForServer(removedServerId);
+        _agAlertEvaluator.Forget(removedServerId);
+        /* #4795: the connection alert keeps its own per-server state, keyed by the connection's id rather than the
+           storage-name hash. The pending retry goes with the server, and so do the two marks a send still in
+           flight would read when its answer arrives: without the previous-state mark, that answer would find the
+           server down and record a retry for a server that is gone, which nothing would ever clear. The tick's
+           collector-error and XE-session marks are keyed the same way and go too, so a re-add starts from no mark
+           rather than comparing its first readings against the removed server's. */
+        _connectionAlertRetries.Clear(server.Id);
+        _previousConnectionStates.Remove(server.Id);
+        _lastConnectionDownAlertUtc.Remove(server.Id);
+        _previousCollectorErrorStates.Remove(server.Id);
+        _previousXeSessionFailureStates.Remove(server.Id);
+        /* #3540 A4: the delta baselines and pass window too. The tab-close path already drops them, but a
+           server deleted from Manage Servers with no tab open kept its cached counters, and a re-add inside
+           the gap policy's hour subtracted the new server's counters from the old one's — a fabricated
+           delta against a different identity. Same deterministic id, same one deep-cleanup. */
+        _collectorService?.DeltaCalculator?.ClearServer(removedServerId);
+        _serverManager.DeleteServer(server.Id);
     }
 
     private bool _sidebarCollapsed;
@@ -1858,21 +2012,63 @@ public partial class MainWindow : Window
             var silenced = _alertStateService.IsServerSilenced(server.Id);
             server.SetSilenced(silenced);
 
-            /* Keep the Overview card's bell in step (matched by server name). Only a real flip triggers a
-               rebind, so a quiet 30-second poll never churns the Overview or resets its scroll position. */
-            foreach (var summary in _overviewSummaries)
+            /* Keep the Overview card's bell in step (matched by storage server id, not host name, so databases
+               on one Azure SQL Database server each keep their own bell). Only a real flip triggers a rebind,
+               so a quiet 30-second poll never churns the Overview or resets its scroll position. */
+            if (ServerSummaryItem.StampSilenced(_overviewSummaries, server, silenced))
             {
-                if (summary.ServerName == server.ServerName && summary.IsSilenced != silenced)
-                {
-                    summary.IsSilenced = silenced;
-                    overviewChanged = true;
-                }
+                overviewChanged = true;
             }
         }
 
         if (overviewChanged)
         {
             ApplyOverviewView();
+        }
+    }
+
+    /// <summary>
+    /// The tray notice for a webhook channel that keeps failing (#4750), on the same status timer as
+    /// <see cref="CheckConnectionsAndNotify"/>: one notice when a channel reaches
+    /// <see cref="WebhookAlertService.FailingChannelThreshold"/> failures in a row, one when it delivers again
+    /// or is turned off (no destination left in the settings; Lite has no routes), and none in between — an
+    /// edge like the server-down notice, decided by the same
+    /// <see cref="WebhookChannelFailurePolicy"/> Darling's "Notification Channel Failing" alert uses. A channel
+    /// can fail for weeks while another one delivers every alert, and nothing else told the user.
+    /// The text names the channel and the count and never the error, which can carry the webhook URL.
+    /// The edge state advances whether or not alerts are enabled (the XE-session notice's rule), so switching
+    /// alerts back on does not announce a failure that was already standing.
+    /// </summary>
+    private void CheckWebhookChannelsAndNotify()
+    {
+        try
+        {
+            foreach (var channel in _webhookAlertService.GetChannelFailureCounts())
+            {
+                _webhookChannelFailing.TryGetValue(channel.Channel, out var wasFailing);
+                var notice = WebhookChannelFailurePolicy.Decide(wasFailing, channel.ConsecutiveFailures, channel.Configured);
+                if (notice == WebhookChannelNotice.None)
+                {
+                    continue;
+                }
+
+                _webhookChannelFailing[channel.Channel] = notice == WebhookChannelNotice.Failing;
+
+                if (App.AlertsEnabled
+                    && WebhookChannelTrayNotice.For(notice, channel.Channel, channel.ConsecutiveFailures) is { } text)
+                {
+                    _trayService?.ShowNotification(
+                        text.Title,
+                        text.Message,
+                        notice == WebhookChannelNotice.Failing
+                            ? Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning
+                            : Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("ConnectionAlerts", $"Webhook channel check failed: {ex.Message}");
         }
     }
 
@@ -1898,13 +2094,27 @@ public partial class MainWindow : Window
 
                 /* null = never observed: a silent baseline (no edge, but a refresh). */
                 bool? previouslyOnline = _previousConnectionStates.TryGetValue(server.Id, out var prev) ? prev : null;
+                /* #4732: one clock reading is the policy's "now" and the "now" the retry's due time is clamped against. */
+                var nowUtc = DateTime.UtcNow;
                 var connectionDecision = ConnectionAlertPolicy.Decide(
                     previouslyOnline,
                     isOnline,
                     App.NotifyConnectionDownAtStartup,
                     App.ConnectionRefireMinutes > 0 ? TimeSpan.FromMinutes(App.ConnectionRefireMinutes) : null,
-                    _lastConnectionDownAlertUtc.TryGetValue(server.Id, out var lastDown) ? lastDown : null,
-                    DateTime.UtcNow);
+                    /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading, not waited out. */
+                    LastFiredStamp.TryGet(_lastConnectionDownAlertUtc, server.Id, nowUtc, out var lastDown) ? lastDown : null,
+                    nowUtc,
+                    /* #4795: none while this server's last send is still running. The due time only moves when the
+                       send's answer is recorded, which can be a whole SMTP timeout after the send began, and until
+                       then every tick would find the retry due and send it again. */
+                    _connectionAlertSends.RetryDueUtc(server.Id, _connectionAlertRetries, nowUtc));
+
+                /* #4795: a restore ends the outage and any retry still pending for it, whether or not the
+                   notify toggles below let the notice out. */
+                if (connectionDecision == ConnectionAlertDecision.Restored)
+                {
+                    _connectionAlertRetries.Clear(server.Id);
+                }
 
                 if (App.AlertsEnabled && App.NotifyConnectionChanges)
                 {
@@ -1924,6 +2134,10 @@ public partial class MainWindow : Window
                         {
                             ConnectionAlertDecision.AlreadyDownAtFirstSight =>
                                 $"Already unreachable when monitoring started: {reason}",
+                            /* #4795: with re-fire off a StillDown can only be the retry of an alert no channel
+                               delivered. With re-fire on the text stays as it was. */
+                            ConnectionAlertDecision.StillDown when App.ConnectionRefireMinutes <= 0 =>
+                                $"Still unreachable (the previous alert reached no channel, so it is sent again): {reason}",
                             ConnectionAlertDecision.StillDown =>
                                 $"Still unreachable (re-alerting every {App.ConnectionRefireMinutes} min): {reason}",
                             _ => reason
@@ -1934,8 +2148,13 @@ public partial class MainWindow : Window
                             $"{server.DisplayNameWithIntent} is unreachable: {reason}",
                             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
 
-                        SendConnectionAlert(server, "Server Unreachable", reason, detail);
+                        var send = SendConnectionAlert(server, "Server Unreachable", reason, detail);
                         _lastConnectionDownAlertUtc[server.Id] = DateTime.UtcNow;
+                        /* #4795: marked running here and unmarked in the note's finally. The retry tracker is NOT
+                           cleared at dispatch: that would end the failed-send streak, and a lasting failure would
+                           be retried at a minute every time instead of doubling. */
+                        _connectionAlertSends.Begin(server.Id);
+                        _ = NoteConnectionAlertSentAsync(server.Id, send);
                     }
                     else if (connectionDecision == ConnectionAlertDecision.Restored)
                     {
@@ -1958,16 +2177,16 @@ public partial class MainWindow : Window
                 if (_previousCollectorErrorStates.TryGetValue(server.Id, out var prevHasErrors) && prevHasErrors != hasErrors)
                     needsRefresh = true;
 
-                /* One-time balloon when blocking/deadlock capture can't start because the
-                   XE session couldn't be created (#1086). Edge-triggered on the false→true
-                   transition so it doesn't re-fire every poll while the condition persists. */
+                /* One-time balloon when an Extended Events capture (blocking, deadlock or long-query)
+                   can't start because its XE session couldn't be created or read (#1086, #4731).
+                   Edge-triggered on the false→true transition so it doesn't re-fire every poll while
+                   the condition persists. */
                 bool xeSessionDown = healthSummary?.XeSessionFailures.Count > 0;
                 _previousXeSessionFailureStates.TryGetValue(server.Id, out var wasXeSessionDown);
 
                 if (App.AlertsEnabled && xeSessionDown && !wasXeSessionDown)
                 {
-                    var captures = string.Join(" and ", healthSummary!.XeSessionFailures
-                        .Select(f => f.CollectorName == "blocked_process_report" ? "blocking" : "deadlock"));
+                    var captures = NameXeCaptures(healthSummary!.XeSessionFailures.Select(f => f.CollectorName));
                     var reason = healthSummary.XeSessionFailures[0].XeSessionMessage ?? "unknown error";
 
                     _trayService?.ShowNotification(

@@ -9,11 +9,15 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -222,9 +226,467 @@ public sealed class StoreSelfMetricsTests
         Assert.Contains("WHERE metric_time < $1", StoreSelfMetrics.RetentionDeleteSql, StringComparison.Ordinal);
     }
 
+    /* ---------------- #3582: the rows the inventory was blind to, and the reconciliation ---------------- */
+
+    /// <summary>
+    /// #3582: the aggregate rows are sized through the MATERIALIZATION and named by the VIEW. Pinned
+    /// because the hypertable arm cannot be made to see them — <c>timescaledb_information.hypertables</c>
+    /// ends <c>AND ca.mat_hypertable_id IS NULL</c> on 2.28.1 — so a second enumeration over the
+    /// aggregates view is the only route, and it has to size the internal hypertable while reporting the
+    /// name an operator knows. The chunk count comes from the <c>chunks</c> view and NOT from a count over
+    /// <c>chunk_compression_stats</c>, which returns zero rows for a hypertable whose compression is off
+    /// (measured: a two-chunk materialization yielded no rows until compression was enabled).
+    /// </summary>
+    [Fact]
+    public void ContinuousAggregateInsertSql_SizesTheMaterialization_UnderTheViewName()
+    {
+        var sql = StoreSelfMetrics.ContinuousAggregateInsertSql;
+
+        Assert.Contains("FROM timescaledb_information.continuous_aggregates ca", sql, StringComparison.Ordinal);
+        Assert.Contains("ca.view_name,", sql, StringComparison.Ordinal);
+        Assert.Contains($"'{StoreSelfMetrics.ContinuousAggregateObjectKind}'", sql, StringComparison.Ordinal);
+        Assert.Equal("continuous_aggregate", StoreSelfMetrics.ContinuousAggregateObjectKind);
+
+        /* Both size functions take the MATERIALIZATION regclass, built from the view's own columns. */
+        const string mat = "format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass";
+        Assert.Contains($"hypertable_detailed_size({mat})", sql, StringComparison.Ordinal);
+        Assert.Contains($"chunk_compression_stats({mat})", sql, StringComparison.Ordinal);
+
+        /* The chunk count: from the chunks view, matched on the materialization's name, never inferred
+           from the compression-stats row count. */
+        Assert.Contains("FROM timescaledb_information.chunks ch", sql, StringComparison.Ordinal);
+        Assert.Contains("ch.hypertable_name = ca.materialization_hypertable_name", sql, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"count\(\*\)::integer AS chunk_count\s+FROM chunk_compression_stats", sql);
+
+        /* And the hypertable arm is UNFILTERED — the omission is the view's, not a predicate of ours. */
+        Assert.DoesNotContain("WHERE", StoreSelfMetrics.HypertableInsertSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3582, extended #4609: the seven product-owned plain tables the walk used to lump are named,
+    /// schema-qualified, sized with <c>pg_total_relation_size</c> and row-counted from the planner's
+    /// estimate — and the census predicate that keeps them OUT of the catch-all names the same seven by
+    /// <c>(schema, relation)</c>. The two halves are pinned against each other: a table named here and
+    /// not there would be counted twice, one named there and not here would vanish from both.
+    /// </summary>
+    [Fact]
+    public void TableInsertSql_NamesTheSevenProductTables_AndTheCensusExcludesExactlyThose()
+    {
+        var sql = StoreSelfMetrics.TableInsertSql;
+        Assert.Equal("table", StoreSelfMetrics.TableObjectKind);
+        Assert.Contains($"'{StoreSelfMetrics.TableObjectKind}'", sql, StringComparison.Ordinal);
+
+        var qualified = new[]
+        {
+            QueryStoreTextStore.TableName,
+            QueryStorePlanMap.TableName,
+            StoreSelfMetrics.AlertLogTable,
+            "collect." + QueryStoreIntervalLatest.TableName,
+            "collect." + QueryStoreIntervalLatest.PendingTableName,
+            "collect." + QueryStoreIntervalWide.TableName,
+            "collect." + QueryStoreIntervalWide.PendingTableName,
+        };
+        Assert.Equal(
+            new[]
+            {
+                "collect.query_store_text",
+                "collect.query_store_plan_map",
+                "config.config_alert_log",
+                "collect.query_store_interval_latest",
+                "collect.query_store_interval_latest_pending",
+                "collect.query_store_interval_wide",
+                "collect.query_store_interval_wide_pending",
+            },
+            qualified);
+
+        foreach (var table in qualified)
+        {
+            Assert.Contains($"'{table}',", sql, StringComparison.Ordinal);
+            Assert.Contains($"pg_total_relation_size('{table}')", sql, StringComparison.Ordinal);
+            /* The planner's estimate, NULL where it is -1 (never analysed) — never a 15 GiB count(*) an hour. */
+            Assert.Contains($"(SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{table}'::regclass)", sql, StringComparison.Ordinal);
+
+            /* The census names the same table by the same compound constant, compared against the
+               concatenated schema.relation — no hand-typed (schema, relation) tuple to drift (review catch). */
+            Assert.Contains($"'{table}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("(n.nspname || '.' || c.relname) IN (", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
+        /* The two payload dimensions are in the same predicate, so they leave the catch-all too. */
+        Assert.Contains($"'collect.{PayloadDimensions.QueryTextDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
+        Assert.Contains($"'collect.{PayloadDimensions.QueryPlanDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
+        /* Exactly nine names, and none of them typed by hand: every quoted name in the predicate is one of
+           the nine constants. */
+        var quoted = System.Text.RegularExpressions.Regex.Matches(StoreSelfMetrics.NamedRelationPredicateSql, @"'([^']+)'").Select(m => m.Groups[1].Value).ToArray();
+        Assert.Equal(10, quoted.Length); /* nine names plus the '.' separator literal */
+        Assert.Equal(
+            new[] { $"collect.{PayloadDimensions.QueryTextDimTable}", $"collect.{PayloadDimensions.QueryPlanDimTable}" }.Concat(qualified).OrderBy(x => x, StringComparer.Ordinal),
+            quoted.Where(q => q != ".").OrderBy(x => x, StringComparer.Ordinal));
+        Assert.Equal(7, sql.Split("UNION ALL").Length);
+        Assert.DoesNotContain("count(*)", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The census (#4609): every plain (non-hypertable) <c>collect.*</c> table the migrations create is
+    /// either one of <see cref="StoreSelfMetrics.NamedRelationPredicateSql"/>'s named tables or listed here
+    /// with a one-line reason it deliberately stays in <see cref="StoreSelfMetrics.OtherObjectKind"/>. RED
+    /// on the code before #4609 named only three: it would have found the four per-interval tables missing
+    /// from both lists and failed.
+    /// </summary>
+    [Fact]
+    public void PlainCollectTableCensus_EveryTableIsNamedOrDeliberatelyInOther()
+    {
+        /* The CREATE TABLE statements live inside SQL string literals, not code, so this reads their
+           BODIES (CSharpSourceWalker.StringLiteralBodies) rather than the stripped-code text
+           StripCommentsAndStrings produces — that would blank exactly the text this census needs. */
+        var migrationsPath = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "PgMigrations.cs");
+        var rawText = File.ReadAllText(migrationsPath);
+        var literalText = string.Join("\n", CSharpSourceWalker.StringLiteralBodies(rawText).Select(b => b.Text));
+
+        var plainTables = Regex.Matches(literalText, @"CREATE TABLE IF NOT EXISTS collect\.([a-z0-9_]+)")
+            .Select(m => "collect." + m.Groups[1].Value)
+            .Distinct()
+            .ToArray();
+        Assert.NotEmpty(plainTables);
+
+        var hypertableTables = PerformanceMonitor.Collectors.CollectorCatalog.All
+            .Select(c => c.TargetTable.Contains('.', StringComparison.Ordinal) ? c.TargetTable : "collect." + c.TargetTable)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var named = Regex.Matches(StoreSelfMetrics.NamedRelationPredicateSql, @"'([^']+)'")
+            .Select(m => m.Groups[1].Value)
+            .Where(q => q != "." && q.StartsWith("collect.", StringComparison.Ordinal))
+            .ToHashSet(StringComparer.Ordinal);
+
+        /* Every plain collect.* table the product creates that is neither a hypertable nor a named row must
+           be one of these, with the one-line reason it is deliberately left in "other". Adding a plain table
+           without updating one of the three lists fails here — the census's whole point. */
+        var deliberatelyOther = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["collect.query_store_interval_latest_coverage"] = "one row per server, bytes too small to matter; the owning table's health already surfaces it",
+            ["collect.query_store_interval_wide_coverage"] = "one row per server, bytes too small to matter; the owning table's health already surfaces it",
+            ["collect.raw_chunk_interval_rung_history"] = "self-telemetry about the store's own tuning, not collected monitoring data (V144 doc)",
+            ["collect.raw_chunk_interval_reconcile_runs"] = "self-telemetry about the store's own tuning, not collected monitoring data (V144 doc)",
+            ["collect.store_metrics"] = "the inventory measuring itself would recurse; StoreMetrics_IsNotACollectorTable pins the exclusion",
+            ["collect.collector_state"] = "per-server collector bookkeeping, bytes too small to matter",
+            ["collect.collector_cost"] = "per-server collector telemetry, bytes too small to matter",
+            ["collect.collector_stall_probes"] = "per-server collector telemetry, bytes too small to matter",
+            ["collect.analysis_state"] = "per-server analysis bookkeeping, bytes too small to matter",
+            ["collect.analysis_collection_caveats"] = "per-server analysis bookkeeping, bytes too small to matter",
+            ["collect.managed_conf_verdicts"] = "per-server bookkeeping, bytes too small to matter",
+            ["collect.default_trace_events"] = "a static reference table shipped by the product, not growth to watch",
+            ["collect.job_history"] = "per-server bookkeeping, bytes too small to matter",
+            ["collect.store_log_events"] = "self-telemetry about the store's own logging, not collected monitoring data",
+            ["collect.store_log_captures"] = "self-telemetry about the store's own logging, not collected monitoring data",
+            ["collect.read_latency"] = "internal self-telemetry (the read-path histogram), not collected monitoring data (V148 doc)",
+            ["collect.pg_statement_text"] = "dimension-shaped content keyed to facts rather than collected as facts, pruned on last_seen (V73 doc)",
+            ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
+        };
+
+        var unaccounted = plainTables
+            .Where(t => !hypertableTables.Contains(t))
+            .Where(t => !named.Contains(t))
+            .Where(t => !deliberatelyOther.ContainsKey(t))
+            .ToArray();
+
+        Assert.Empty(unaccounted);
+    }
+
+    /// <summary>
+    /// #3582: the two catch-all rows, in both store shapes. The census is the same predicate three ways —
+    /// which relations count, which are system, which are already named — and the TimescaleDB variant adds
+    /// the three anti-joins that remove what the hypertable and aggregate rows already sized (their roots,
+    /// and every chunk relation), while the plain variant names no TimescaleDB catalog at all, because on
+    /// that store none exists and the statement would fail. <c>NOT c.relisshared</c> is pinned by itself:
+    /// the shared catalogs are outside <c>pg_database_size</c>, and summing them made a rig census EXCEED
+    /// the database — an over-100% reconciliation is wrong in the direction nobody checks.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(StoreSelfMetrics.UnenumeratedInsertSql), true)]
+    [InlineData(nameof(StoreSelfMetrics.UnenumeratedPlainInsertSql), false)]
+    public void UnenumeratedInsertSql_WritesOtherAndSystem_OverTheSharedCensus(string sqlName, bool timescale)
+    {
+        var sql = (string)typeof(StoreSelfMetrics).GetField(sqlName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+
+        Assert.Equal("other", StoreSelfMetrics.OtherObjectKind);
+        Assert.Equal("system", StoreSelfMetrics.SystemObjectKind);
+        Assert.Contains($"'{StoreSelfMetrics.OtherObjectName}', '{StoreSelfMetrics.OtherObjectKind}'", sql, StringComparison.Ordinal);
+        Assert.Contains($"'{StoreSelfMetrics.SystemObjectName}', '{StoreSelfMetrics.SystemObjectKind}'", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM census WHERE NOT is_system", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM census WHERE is_system", sql, StringComparison.Ordinal);
+
+        /* The shared fragments, verbatim — the MCP reader's live top-N composes the same three. */
+        Assert.Contains(StoreSelfMetrics.CensusRelationPredicateSql, sql, StringComparison.Ordinal);
+        Assert.Contains(StoreSelfMetrics.SystemSchemaPredicateSql, sql, StringComparison.Ordinal);
+        Assert.Contains("NOT " + StoreSelfMetrics.NamedRelationPredicateSql, sql, StringComparison.Ordinal);
+
+        Assert.Contains("c.relkind IN ('r', 'm', 'p', 'S')", StoreSelfMetrics.CensusRelationPredicateSql, StringComparison.Ordinal);
+        Assert.Contains("NOT c.relisshared", StoreSelfMetrics.CensusRelationPredicateSql, StringComparison.Ordinal);
+        Assert.Contains("starts_with(n.nspname, '_timescaledb_')", StoreSelfMetrics.SystemSchemaPredicateSql, StringComparison.Ordinal);
+        Assert.Contains("'pg_catalog', 'information_schema'", StoreSelfMetrics.SystemSchemaPredicateSql, StringComparison.Ordinal);
+
+        /* An empty bucket is a ZERO row, never a missing one — the reconciliation reads absence as "the
+           statement did not run". */
+        Assert.Contains("coalesce(sum(pg_total_relation_size(oid)), 0)::bigint, count(*)::integer", sql, StringComparison.Ordinal);
+
+        if (timescale)
+        {
+            Assert.Contains(StoreSelfMetrics.TimescaleInventoriedPredicateSql, sql, StringComparison.Ordinal);
+            Assert.Contains("FROM timescaledb_information.hypertables h", sql, StringComparison.Ordinal);
+            Assert.Contains("FROM timescaledb_information.continuous_aggregates ca", sql, StringComparison.Ordinal);
+            /* #3918: chunks through the PUBLIC view, whose chunk_schema / chunk_name survive the 2.29 chunk
+               catalog rewrite, and compressed data through compress_relid, the one catalog column that names
+               it on every version (on 2.29+ it is in no chunk row at all). */
+            Assert.Contains("FROM timescaledb_information.chunks ch", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE ch.chunk_schema = n.nspname AND ch.chunk_name = c.relname", sql, StringComparison.Ordinal);
+            Assert.Contains("FROM _timescaledb_catalog.compression_settings cs", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE cs.compress_relid = c.oid", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("_timescaledb_catalog.chunk ", sql, StringComparison.Ordinal);
+            /* Name joins and an OID comparison, never a regclass cast a vanished relation would make RAISE. */
+            Assert.DoesNotContain("::regclass", StoreSelfMetrics.TimescaleInventoriedPredicateSql, StringComparison.Ordinal);
+        }
+        else
+        {
+            /* The plain variant READS no TimescaleDB catalog. It still NAMES timescaledb_information as a
+               string literal inside the system-schema predicate, which is a different thing. */
+            Assert.DoesNotContain("FROM timescaledb_information", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("FROM _timescaledb_catalog", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #3918: the census names only relations and columns that have the SAME shape on both TimescaleDB catalog
+    /// generations, so one statement serves a 2.28.1 store and a 2.29+ store with no version branch. 2.29.0
+    /// rebuilt <c>_timescaledb_catalog.chunk</c> (dropping <c>schema_name</c>, <c>table_name</c> and
+    /// <c>compressed_chunk_id</c> for <c>relid regclass</c>), and a column a statement names that the catalog
+    /// lacks fails at analysis, before a row is read: that is how the first cut of this fragment took the whole
+    /// hourly sweep down with 42703. The allow-list is every <c>alias.column</c> the fragment may name, each
+    /// checked on 2.28.1 and 2.30.1: the three public views' columns (each version's update script rebuilds
+    /// them under the same names), <c>compression_settings.compress_relid</c> (identical in both install
+    /// scripts), and <c>pg_class</c> / <c>pg_namespace</c>. A new reference fails here until someone has
+    /// checked it against both shapes, and an allowed one that stops being used fails too, so the list cannot
+    /// rot into a superset.
+    /// </summary>
+    [Fact]
+    public void TimescaleInventoriedPredicate_NamesOnlyColumnsBothCatalogShapesHave()
+    {
+        var predicate = StoreSelfMetrics.TimescaleInventoriedPredicateSql;
+
+        var relations = Regex.Matches(predicate, @"\bFROM\s+([a-z_]+\.[a-z_]+)\s+([a-z]+)\b")
+            .Select(m => $"{m.Groups[1].Value} {m.Groups[2].Value}")
+            .ToArray();
+        Assert.Equal(
+            new[]
+            {
+                "timescaledb_information.hypertables h",
+                "timescaledb_information.continuous_aggregates ca",
+                "timescaledb_information.chunks ch",
+                "_timescaledb_catalog.compression_settings cs",
+            },
+            relations);
+
+        var allowed = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["h"] = new[] { "hypertable_schema", "hypertable_name" },
+            ["ca"] = new[] { "materialization_hypertable_schema", "materialization_hypertable_name" },
+            ["ch"] = new[] { "chunk_schema", "chunk_name" },
+            ["cs"] = new[] { "compress_relid" },
+            ["c"] = new[] { "relname", "oid" },
+            ["n"] = new[] { "nspname" },
+        };
+
+        /* [a-z]+ before the dot, with no underscore, matches the aliases and never the schema-qualified
+           relation names above (every one of those schemas has an underscore right before its last word). */
+        var references = Regex.Matches(predicate, @"\b([a-z]+)\.([a-z_]+)\b")
+            .Select(m => (Alias: m.Groups[1].Value, Column: m.Groups[2].Value))
+            .ToArray();
+        Assert.NotEmpty(references);
+        Assert.All(references, r => Assert.True(
+            allowed.TryGetValue(r.Alias, out var columns) && columns.Contains(r.Column, StringComparer.Ordinal),
+            $"{r.Alias}.{r.Column} has not been checked against both TimescaleDB catalog shapes (2.28.1 and 2.29+)"));
+        foreach (var (alias, columns) in allowed)
+        {
+            foreach (var column in columns)
+            {
+                Assert.Contains((alias, column), references);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #3918, tree-wide: no Darling product source reads <c>_timescaledb_catalog.chunk</c>. Its columns are
+    /// TimescaleDB's private business and 2.29.0 rewrote them, so a read written against one shape fails at
+    /// analysis on the other, and the bundled version, a bring-your-own store and a store whose extension update
+    /// did not complete can each be on either. The public <c>timescaledb_information.chunks</c> view carries the
+    /// same facts under names every version's update script preserves, and a chunk's compressed relation is
+    /// <c>_timescaledb_catalog.compression_settings.compress_relid</c> on every version. Matches the SQL shape
+    /// (<c>FROM</c> or <c>JOIN</c> the table), so prose that names the catalog, like the explanation on
+    /// <see cref="StoreSelfMetrics.TimescaleInventoriedPredicateSql"/>, is not a hit.
+    /// </summary>
+    [Fact]
+    public void NoDarlingProductSqlReadsTheChunkCatalog()
+    {
+        var root = RepoRoot();
+        var offenders = new List<string>();
+        var scanned = 0;
+
+        foreach (var project in new[]
+        {
+            "PerformanceMonitor.Darling.Storage", "PerformanceMonitor.Darling.Service",
+            "PerformanceMonitor.Darling.Analysis", "PerformanceMonitor.Darling.Viewer",
+        })
+        {
+            var dir = Path.Combine(root, "Darling", project);
+            Assert.True(Directory.Exists(dir), $"product project not found: {dir}");
+
+            foreach (var path in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(dir, path);
+                var top = relative.Split(Path.DirectorySeparatorChar)[0];
+                if (string.Equals(top, "bin", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(top, "obj", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                scanned++;
+                var text = File.ReadAllText(path);
+                foreach (Match match in Regex.Matches(text, @"\b(?:FROM|JOIN)\s+_timescaledb_catalog\.chunk\b", RegexOptions.IgnoreCase))
+                {
+                    offenders.Add($"{project}/{relative}:{text.AsSpan(0, match.Index).Count('\n') + 1}");
+                }
+            }
+        }
+
+        /* An empty scan is how a guard starts reporting clean, so a moved tree fails here rather than passing. */
+        Assert.True(scanned >= 100, $"the product scan found only {scanned} source files; the projects have moved");
+        Assert.Empty(offenders);
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile);
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
+    }
+
+    /// <summary>
+    /// #3574 (managed-mode self-proof): the owner's evidence row embeds the SAME evidence SELECT the MCP
+    /// reader runs — one string, two consumers — and maps its columns the way the class summary states.
+    /// The count is written only where the view admits the sweep's role to every job's history (the two
+    /// tests the reader's <c>Visibility</c> derives <c>All</c> from, in SQL), the newest row travels as its
+    /// AGE at the sweep, and the window width is computed from the two binds rather than restated.
+    /// </summary>
+    [Fact]
+    public void JobHistoryInsertSql_EmbedsTheSharedEvidenceRead_AndMapsTheOverloadedColumns()
+    {
+        var sql = StoreSelfMetrics.JobHistoryInsertSql;
+
+        Assert.Equal("job_history", StoreSelfMetrics.JobHistoryObjectKind);
+        Assert.Contains($"'{StoreSelfMetrics.JobHistoryObjectKind}'", sql, StringComparison.Ordinal);
+        Assert.Contains(StoreSelfMetrics.JobHistoryEvidenceSql, sql, StringComparison.Ordinal);
+        Assert.Contains("(metric_time, object_name, object_kind, row_count, total_runs, schedule_interval_ms, last_run_duration_ms)", sql, StringComparison.Ordinal);
+
+        /* $2 is metric_time, $1 the window start the embedded SELECT already binds. */
+        Assert.Matches(@"SELECT\s+\$2,\s+e\.reader_role,\s+'job_history',", sql);
+        Assert.Contains("h.start_time >= $1", sql, StringComparison.Ordinal);
+
+        /* The census-or-NULL rule for the count. */
+        Assert.Matches(@"CASE\s+WHEN e\.reader_is_database_owner_member\s+OR \(e\.job_count > 0 AND e\.owner_member_job_count >= e\.job_count\)\s+THEN e\.rows_observed\s+END", sql);
+
+        /* Population, window width from the binds, age of the newest row — in that column order. */
+        Assert.Contains("e.jobs_run_in_window,", sql, StringComparison.Ordinal);
+        Assert.Contains("(EXTRACT(EPOCH FROM (($2::timestamp AT TIME ZONE 'UTC') - $1)) * 1000)::bigint", sql, StringComparison.Ordinal);
+        Assert.Contains("(EXTRACT(EPOCH FROM (($2::timestamp AT TIME ZONE 'UTC') - e.newest_row_at)) * 1000)::bigint", sql, StringComparison.Ordinal);
+        Assert.Equal(24, StoreSelfMetrics.JobHistoryEvidenceWindowHours);
+    }
+
+    /// <summary>
+    /// The kind vocabulary is the on-disk contract: every kind the sweep writes has a named constant, the
+    /// constant appears quoted in the statement that writes it, and no two kinds share a spelling. A
+    /// drifted kind returns zero rows to every reader rather than an error.
+    /// </summary>
+    [Fact]
+    public void ObjectKinds_AreNamedOnce_DistinctAndWrittenByTheirArms()
+    {
+        var kinds = new (string Kind, string Sql)[]
+        {
+            (StoreSelfMetrics.HypertableObjectKind, StoreSelfMetrics.HypertableInsertSql),
+            (StoreSelfMetrics.ContinuousAggregateObjectKind, StoreSelfMetrics.ContinuousAggregateInsertSql),
+            (StoreSelfMetrics.BackgroundJobObjectKind, StoreSelfMetrics.BackgroundJobInsertSql),
+            (StoreSelfMetrics.DimensionObjectKind, StoreSelfMetrics.DimensionInsertSql),
+            (StoreSelfMetrics.TableObjectKind, StoreSelfMetrics.TableInsertSql),
+            (StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.UnenumeratedInsertSql),
+            (StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.UnenumeratedInsertSql),
+            (StoreSelfMetrics.JobHistoryObjectKind, StoreSelfMetrics.JobHistoryInsertSql),
+            /* #3783: the checkpointer row, both statements (17+ and the pre-17 bgwriter shape) under ONE kind. */
+            (StoreSelfMetrics.CheckpointerObjectKind, StoreSelfMetrics.CheckpointerInsertSql),
+            (StoreSelfMetrics.StoreObjectKind, StoreSelfMetrics.StoreInsertSql),
+        };
+
+        Assert.Equal(kinds.Length, kinds.Select(k => k.Kind).Distinct(StringComparer.Ordinal).Count());
+        Assert.Contains($"'{StoreSelfMetrics.CheckpointerObjectKind}'", StoreSelfMetrics.CheckpointerBgwriterInsertSql, StringComparison.Ordinal);
+        Assert.All(kinds, k => Assert.Contains($"'{k.Kind}'", k.Sql, StringComparison.Ordinal));
+
+        /* The three pre-#3582 spellings the shipped stores already hold 400 days of. */
+        Assert.Equal("hypertable", StoreSelfMetrics.HypertableObjectKind);
+        Assert.Equal("dimension", StoreSelfMetrics.DimensionObjectKind);
+        Assert.Equal("background_job", StoreSelfMetrics.BackgroundJobObjectKind);
+    }
+
+    /// <summary>
+    /// #4834: the hour's longest single checkpoint sync rides on the checkpointer row, written by BOTH arms of the
+    /// insert (17+ and the pre-17 bgwriter shape) from the sweep's two parameters, with the types stated because a
+    /// parameter in a SELECT list is otherwise inferred as text.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerBgwriterInsertSql))]
+    public void TheCheckpointerInsertSql_WritesTheHoursLongestSync_FromParametersTwoAndThree(string sqlName)
+    {
+        var sql = ((string)typeof(StoreSelfMetrics)
+            .GetField(sqlName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!
+            .GetValue(null)!).Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        Assert.Contains("checkpoints_timed, checkpoint_longest_sync_ms, checkpoint_longest_sync_at)", sql, StringComparison.Ordinal);
+        Assert.Contains("$2::bigint,\n    $3::timestamp\nFROM ", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>Every other kind leaves the two columns NULL: no other statement the sweep runs names them.</summary>
+    [Fact]
+    public void NoOtherKindsInsert_NamesTheLongestSyncColumns()
+    {
+        var others = typeof(StoreSelfMetrics)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("Sql", StringComparison.Ordinal))
+            .Where(f => f.Name is not nameof(StoreSelfMetrics.CheckpointerInsertSql) and not nameof(StoreSelfMetrics.CheckpointerBgwriterInsertSql))
+            .Select(f => (f.Name, Sql: (string)f.GetRawConstantValue()!))
+            .ToList();
+
+        Assert.True(others.Count >= 10, "the census of the sweep's statements found too few to mean anything");
+        Assert.All(others, o => Assert.False(
+            o.Sql.Contains("checkpoint_longest_sync", StringComparison.Ordinal),
+            $"{o.Name} names the checkpointer's longest-sync columns, but only the checkpointer row carries them"));
+    }
+
     [Theory]
     [InlineData(nameof(StoreSelfMetrics.HypertableInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.ContinuousAggregateInsertSql))]
     [InlineData(nameof(StoreSelfMetrics.DimensionInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.TableInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.UnenumeratedInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.UnenumeratedPlainInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.JobHistoryInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerBgwriterInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.ExtensionInstalledSql))]
+    [InlineData(nameof(StoreSelfMetrics.ToastLiveBytesUpdateSql))]
     [InlineData(nameof(StoreSelfMetrics.StoreInsertSql))]
     [InlineData(nameof(StoreSelfMetrics.RetentionDeleteSql))]
     public void SweepSql_IsPostgresDialect_PositionalParams_NoBareNow(string sqlName)
@@ -251,6 +713,19 @@ public sealed class StoreSelfMetricsTests
     /// converts + applies compression policies so real background jobs exist, then asserts one run writes
     /// hypertable, dimension, store, AND background_job rows — the job rows carrying a schedule interval,
     /// because "duration vs cadence" is the series' whole point.
+    ///
+    /// <para><b>#3582 extends it to the kinds the inventory was blind to, and to the reconciliation.</b>
+    /// The aggregates are created first (<see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/>), so
+    /// one run must also write one <c>continuous_aggregate</c> row per rollup view, one <c>table</c> row per
+    /// name <see cref="StoreSelfMetrics.TableInsertSql"/> carries, exactly one <c>other</c> and one <c>system</c> row, and the owner's
+    /// <c>job_history</c> row — and the rows of that one sweep, read back through the real MCP reader and
+    /// its real reconciliation, must RECONCILE against the sweep's own <c>pg_database_size</c>: every byte
+    /// attributed to some row, residual inside the bar, no object left over from an older sweep. On a rig
+    /// the residual was exactly the database directory's non-relation files (161,471 bytes on 17 MiB);
+    /// here only the bar is asserted, because refresh policies fire immediately on creation (#1788) and
+    /// move the catalogs between the sweep's statements. The connection is the database owner, so the
+    /// owner row must carry a COUNT (not the NULL a filtered role writes) and decode as <c>Observed</c>
+    /// for the role that swept.</para>
     /// </summary>
     [Fact]
     public async Task Sweep_EndToEnd_WritesEveryObjectKind_IncludingBackgroundJobs_AgainstDevPostgres()
@@ -269,19 +744,42 @@ public sealed class StoreSelfMetricsTests
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        /* #3582: the aggregates, so the materializations exist to be inventoried. */
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
         await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct);
 
         var written = await StoreSelfMetrics.SweepAsync(
-            connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+            connection, timescaleAvailable: true, DateTime.UtcNow, null, null, null, ct);
         Assert.True(written > 0, "the sweep wrote nothing");
 
-        await using var kinds = new NpgsqlCommand(@"
+        /* One table row per name TableInsertSql carries — the same source the census test
+           (TableInsertSql_NamesTheSevenProductTables_AndTheCensusExcludesExactlyThose) pins, so this
+           count cannot drift from the product's own named-table list. */
+        var expectedTableRows = StoreSelfMetrics.TableInsertSql.Split("UNION ALL").Length;
+
+        await using var kinds = new NpgsqlCommand($@"
 SELECT
-    count(*) FILTER (WHERE object_kind = 'hypertable'),
-    count(*) FILTER (WHERE object_kind = 'dimension'),
-    count(*) FILTER (WHERE object_kind = 'store'),
-    count(*) FILTER (WHERE object_kind = 'background_job'),
-    count(*) FILTER (WHERE object_kind = 'background_job' AND schedule_interval_ms > 0)
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.HypertableObjectKind}'),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.DimensionObjectKind}'),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.StoreObjectKind}'),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.BackgroundJobObjectKind}'),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.BackgroundJobObjectKind}' AND schedule_interval_ms > 0),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.ContinuousAggregateObjectKind}'),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.ContinuousAggregateObjectKind}' AND total_bytes > 0 AND chunk_count IS NOT NULL),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.TableObjectKind}'),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.OtherObjectKind}'),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.SystemObjectKind}'),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.JobHistoryObjectKind}'),
+    (SELECT count(*) FROM timescaledb_information.continuous_aggregates),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'
+                     AND object_name = '{StoreSelfMetrics.CheckpointerObjectName}'
+                     AND checkpoint_write_ms IS NOT NULL AND checkpoint_sync_ms IS NOT NULL AND checkpoints_requested IS NOT NULL
+                     AND total_bytes IS NULL AND toast_bytes IS NULL),
+    count(*) FILTER (WHERE object_kind <> '{StoreSelfMetrics.CheckpointerObjectKind}'
+                     AND (checkpoint_write_ms IS NOT NULL OR checkpoint_sync_ms IS NOT NULL OR checkpoints_requested IS NOT NULL)),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.DimensionObjectKind}' AND toast_bytes IS NOT NULL),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.DimensionObjectKind}' AND toast_live_bytes IS NOT NULL),
+    (SELECT count(*) FROM pg_extension WHERE extname = '{StoreSelfMetrics.FreespacemapExtensionName}')
 FROM collect.store_metrics", connection);
         await using var reader = await kinds.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
@@ -291,15 +789,446 @@ FROM collect.store_metrics", connection);
         Assert.Equal(1, reader.GetInt64(2));
         Assert.True(reader.GetInt64(3) > 0, "no background_job rows — the compression policies just applied guarantee jobs exist");
         Assert.True(reader.GetInt64(4) > 0, "background_job rows carry no schedule interval — duration-vs-cadence needs it");
+
+        /* #3582: one aggregate row per aggregate the catalog knows — the population the hypertable arm
+           cannot see — each sized (a materialization's root alone is non-zero) and chunk-counted. */
+        var aggregatesInCatalog = reader.GetInt64(11);
+        Assert.True(aggregatesInCatalog > 0, "EnsureContinuousAggregatesAsync left no aggregates to inventory");
+        Assert.Equal(aggregatesInCatalog, reader.GetInt64(5));
+        Assert.Equal(aggregatesInCatalog, reader.GetInt64(6));
+        Assert.Equal(expectedTableRows, reader.GetInt64(7));
+        Assert.Equal(1, reader.GetInt64(8));
+        Assert.Equal(1, reader.GetInt64(9));
+        Assert.Equal(1, reader.GetInt64(10));
+
+        /* #3783: exactly one checkpointer row, under the one name, all three counters non-NULL and every other
+           column NULL; no other kind's row carries a checkpointer column; both dimension rows carry a TOAST size;
+           and toast_live_bytes is filled EXACTLY when the scratch store carries pg_freespacemap (the fresh scratch
+           store does not, so this is the dormant NULL the fenced UPDATE must leave alone). */
+        Assert.Equal(1, reader.GetInt64(12));
+        Assert.Equal(0, reader.GetInt64(13));
+        Assert.Equal(2, reader.GetInt64(14));
+        var extensionInstalled = reader.GetInt64(16);
+        Assert.Equal(extensionInstalled > 0 ? 2 : 0, reader.GetInt64(15));
         await reader.CloseAsync();
 
         /* And the READ path carries the new fields end to end (the review catch: written but never read
            back would leave get_store_metrics returning job rows with null metrics). */
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var latest = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct);
-        var job = latest.FirstOrDefault(r => r.ObjectKind == "background_job");
+        var job = latest.FirstOrDefault(r => r.ObjectKind == StoreSelfMetrics.BackgroundJobObjectKind);
         Assert.NotNull(job);
         Assert.True(job!.ScheduleIntervalMs is > 0, "the reader dropped the job's schedule interval");
+
+        /* #3582: the reconciliation, through the real reader over the real rows. One sweep, so no row is
+           from an older one; both catch-all rows present; every byte attributed inside the bar; and the
+           named rows are a non-trivial share even of an empty store (roots and indexes are real bytes). */
+        /* #4619: one sweep, so no row is outside it and the existence check has nothing to ask. */
+        Assert.Empty(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.RowsOutsideTheSweep(latest));
+        var inventory = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeInventory(
+            latest, new Dictionary<(string ObjectKind, string ObjectName), bool?>());
+        Assert.NotNull(inventory);
+        Assert.Equal(0, inventory!.StaleRowCount);
+        Assert.Equal(0, inventory.UncheckedRowCount);
+        Assert.Empty(inventory.DroppedObjects);
+        Assert.True(inventory.CatchAllPresent, "a catch-all row is missing from the sweep");
+        Assert.True(inventory.EnumeratedBytes > 0);
+        Assert.True(inventory.DatabaseBytes > inventory.EnumeratedBytes);
+        Assert.True(inventory.Reconciled,
+            $"the inventory did not reconcile: database {inventory.DatabaseBytes}, attributed {inventory.AttributedBytes}, "
+            + $"residual {inventory.ResidualBytes}, bar {inventory.ToleranceBytes}");
+        Assert.Contains(StoreSelfMetrics.ContinuousAggregateObjectKind, inventory.BytesByKind.Keys);
+        Assert.Contains(StoreSelfMetrics.TableObjectKind, inventory.BytesByKind.Keys);
+
+        /* #3574: the owner's row. This connection is the database owner, so the sweep's role was admitted
+           to every job's history and wrote a COUNT; decoded, that is an Observed reading for that role,
+           over the 24-hour window, taken moments ago. */
+        var history = Assert.Single(latest, r => r.ObjectKind == StoreSelfMetrics.JobHistoryObjectKind);
+        Assert.NotNull(history.RowCount);
+        Assert.NotNull(history.TotalRuns);
+        Assert.Equal(StoreSelfMetrics.JobHistoryEvidenceWindowHours * 3_600_000L, history.ScheduleIntervalMs);
+
+        var owner = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(latest, DateTime.UtcNow);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.OwnerJobHistoryEvidenceStatus.Observed, owner.Status);
+        Assert.Equal(history.ObjectName, owner.ReaderRole);
+        Assert.Equal(history.RowCount, owner.RowsObserved);
+        Assert.Equal(24.0, owner.WindowHours);
+        Assert.True(owner.AgeHours is >= 0 and < 1);
+        /* A row seen implies a newest-row instant that decodes to no later than the sweep itself. */
+        if (owner.RowsObserved > 0)
+        {
+            Assert.NotNull(owner.NewestRowAt);
+            Assert.True(owner.NewestRowAt <= owner.ObservedAt);
+        }
+
+        /* #3783: the TOAST pair rides the latest read on the dimension rows and nowhere else, and the reader's
+           facts say 'not measured' on this extension-less scratch store rather than inventing a percentage. */
+        var dims = latest.Where(r => r.ObjectKind == StoreSelfMetrics.DimensionObjectKind).ToList();
+        Assert.Equal(2, dims.Count);
+        Assert.All(dims, d => Assert.NotNull(d.ToastBytes));
+        Assert.All(latest.Where(r => r.ObjectKind != StoreSelfMetrics.DimensionObjectKind), r => Assert.Null(r.ToastBytes));
+        if (extensionInstalled == 0)
+        {
+            Assert.All(dims, d =>
+            {
+                Assert.Null(d.ToastLiveBytes);
+                var facts = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ToastFacts.For(d);
+                Assert.NotNull(facts);
+                Assert.Null(facts!.UtilisationPercent);
+                /* A fresh scratch store's dimensions hold no rows, so their TOAST files are ZERO bytes and the
+                   note says so; a file with bytes in it takes the 'not measured' arm that names the extension. */
+                if (d.ToastBytes == 0)
+                {
+                    Assert.Contains("empty", facts.Note, StringComparison.Ordinal);
+                }
+                else
+                {
+                    Assert.Contains("not measured", facts.Note, StringComparison.Ordinal);
+                    Assert.Contains(StoreSelfMetrics.FreespacemapExtensionName, facts.Note, StringComparison.Ordinal);
+                }
+            });
+        }
+
+        /* #3783: the checkpointer, through the real pair read. One sweep = one row = NoPrevious with the raw
+           counters carried; a second sweep two seconds later = an Observed interval whose deltas are non-negative
+           and whose span is the two stamps' difference, not an assumed hour. The interval's requested count is
+           exactly the checkpoints this test forces in between, which is what makes the delta a MEASUREMENT of the
+           store rather than a difference of two numbers that happened to be there. */
+        var first = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.NoPrevious, first.Status);
+        Assert.NotNull(first.CumulativeWriteMs);
+        Assert.NotNull(first.CumulativeSyncMs);
+        Assert.NotNull(first.CumulativeRequested);
+        Assert.Null(first.SyncMs);
+
+        /* CHECKPOINT is a REQUESTED checkpoint (num_requested increments; the write/sync phases add real ms). The
+           scratch connection is the database owner, and CHECKPOINT needs superuser or pg_checkpoint (15+): the dev
+           fixture's role is superuser, so this is the one write to the server's own counters the test makes. */
+        await using (var checkpoint = new NpgsqlCommand("CHECKPOINT", connection) { CommandTimeout = 60 })
+        {
+            await checkpoint.ExecuteNonQueryAsync(ct);
+        }
+
+        var secondSweepAt = DateTime.UtcNow.AddSeconds(2);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, secondSweepAt, null, null, null, ct);
+
+        var second = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, second.Status);
+        Assert.Equal(DateTime.SpecifyKind(first.ObservedAt!.Value, DateTimeKind.Utc), second.PreviousAt);
+        Assert.True(second.IntervalSeconds is > 0, $"interval {second.IntervalSeconds} must be the two stamps' span");
+        Assert.True(second.WriteMs is >= 0);
+        Assert.True(second.SyncMs is >= 0);
+        Assert.True(second.Requested is >= 1, $"the forced CHECKPOINT must land in the interval's requested count, not {second.Requested}");
+        Assert.Equal(first.CumulativeRequested + second.Requested, second.CumulativeRequested);
+        Assert.True(second.IsPressure, "one requested checkpoint in the interval IS the pressure arm");
+
+        /* #4823: the one-column sync-time read the once-a-minute sampler takes, through the shipped statement for this
+           server's major. A value in the same milliseconds the hourly row stores, and never behind the row the sweep
+           just wrote from the same cumulative counter. */
+        var sampledSyncMs = await StoreSelfMetrics.ReadCheckpointerSyncTimeMsAsync(connection, ct);
+        Assert.NotNull(sampledSyncMs);
+        Assert.True(sampledSyncMs >= second.CumulativeSyncMs,
+            $"the sampled sync time {sampledSyncMs} ms cannot be behind the {second.CumulativeSyncMs} ms the sweep stored from the same counter");
+
+        /* #4619: the existence check, through the shipped SQL, over the names THIS SWEEP WROTE. Every one must
+           resolve back to its object: a kind whose lookup drifted from the sweep's name form (the job name, a
+           schema-qualified table, the role) would call a live object dropped, and only the real sweep's own
+           names prove they round-trip. */
+        var logging = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(dataSource, ct);
+        Assert.NotEqual(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered, logging.Status);
+        var swept = (await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct))
+            .Where(r => r.ObjectKind != StoreSelfMetrics.StoreObjectKind)
+            .ToList();
+        Assert.Contains(swept, r => r.ObjectKind == StoreSelfMetrics.BackgroundJobObjectKind);
+        Assert.Contains(swept, r => r.ObjectKind == StoreSelfMetrics.TableObjectKind);
+        Assert.Contains(swept, r => r.ObjectKind == StoreSelfMetrics.JobHistoryObjectKind);
+        var everyName = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetObjectExistenceAsync(dataSource, logging, swept, ct);
+        Assert.NotNull(everyName);
+        Assert.Equal(swept.Count, everyName!.Count);
+        foreach (var row in swept)
+        {
+            Assert.True(everyName.TryGetValue((row.ObjectKind, row.ObjectName), out var verdict) && verdict == true,
+                $"{row.ObjectKind} '{row.ObjectName}' was just swept, but the existence check says {(verdict is null ? "no verdict" : verdict.ToString())}");
+        }
+
+        /* The negative control through the same string: a name per kind that nothing carries is gone, and the
+           two shapes with no lookup (a table name without its schema, a kind the check does not know) get no
+           verdict rather than a guess. */
+        static PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.StoreMetricRow Named(string kind, string name)
+            => new(kind, name, DateTime.UtcNow, null, null, null, null, null, null);
+        var gone = new[]
+        {
+            Named(StoreSelfMetrics.HypertableObjectKind, "no_such_hypertable_4619"),
+            Named(StoreSelfMetrics.ContinuousAggregateObjectKind, "no_such_view_4619"),
+            Named(StoreSelfMetrics.BackgroundJobObjectKind, "policy_refresh_continuous_aggregate no_such_view_4619 [999999]"),
+            Named(StoreSelfMetrics.DimensionObjectKind, "no_such_dimension_4619"),
+            Named(StoreSelfMetrics.TableObjectKind, "collect.no_such_table_4619"),
+            Named(StoreSelfMetrics.JobHistoryObjectKind, "no_such_role_4619"),
+        };
+        var noVerdict = new[] { Named(StoreSelfMetrics.TableObjectKind, "unqualified_4619"), Named("no_such_kind_4619", "x") };
+        var negative = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetObjectExistenceAsync(
+            dataSource, logging, gone.Concat(noVerdict).ToList(), ct);
+        Assert.NotNull(negative);
+        Assert.All(gone, r => Assert.False(negative![(r.ObjectKind, r.ObjectName)], $"{r.ObjectKind} '{r.ObjectName}' should be gone"));
+        Assert.All(noVerdict, r => Assert.Null(negative![(r.ObjectKind, r.ObjectName)]));
+
+        /* The plain-PostgreSQL variant, on the same names: the three TimescaleDB kinds get no verdict (their
+           views do not exist on such a store), and every other kind is judged exactly as above. */
+        var timescaleKinds = new[]
+        {
+            StoreSelfMetrics.HypertableObjectKind, StoreSelfMetrics.ContinuousAggregateObjectKind, StoreSelfMetrics.BackgroundJobObjectKind,
+        };
+        var plain = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetObjectExistenceAsync(
+            dataSource,
+            logging with { Status = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered },
+            swept,
+            ct);
+        Assert.NotNull(plain);
+        Assert.All(swept, r => Assert.Equal(timescaleKinds.Contains(r.ObjectKind) ? (bool?)null : true, plain![(r.ObjectKind, r.ObjectName)]));
+
+        /* And the split end to end, with both retirements the issue found on production stores: a job
+           deleted while its object stays (#3653's frozen rollups), and a view dropped (#4289's superseded
+           baselines) along with any job the sweep had a row for. Sweep again, and the rows the newest sweep
+           did not write are exactly those, all DROPPED, and nothing is a sweep gap. Then remove one live
+           hypertable's row from the newest sweep, the shape of a sweep that missed it: that one is a gap.
+           (The view's own refresh job usually has no row: the sweep lists jobs from job_stats, which shows
+           a job only once the scheduler has run it.) The view is a LEAF — no other aggregate is built on
+           its materialization — so dropping it retires exactly one aggregate row. */
+        string retiredView;
+        await using (var leaf = new NpgsqlCommand(@"
+SELECT ca.view_name
+FROM timescaledb_information.continuous_aggregates ca
+WHERE ca.view_schema = 'collect'
+AND   NOT EXISTS (
+        SELECT 1 FROM timescaledb_information.continuous_aggregates child
+        WHERE child.hypertable_schema = ca.materialization_hypertable_schema
+        AND   child.hypertable_name = ca.materialization_hypertable_name)
+ORDER BY ca.view_name
+LIMIT 1", connection))
+        {
+            retiredView = (string)(await leaf.ExecuteScalarAsync(ct))!;
+        }
+
+        bool ServesTheView(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.StoreMetricRow r)
+            => r.ObjectKind == StoreSelfMetrics.BackgroundJobObjectKind && r.ObjectName.Contains(" " + retiredView + " [", StringComparison.Ordinal);
+        var retiredJob = swept.First(r => r.ObjectKind == StoreSelfMetrics.BackgroundJobObjectKind && !ServesTheView(r)).ObjectName;
+        var retiredJobId = int.Parse(retiredJob[(retiredJob.LastIndexOf('[') + 1)..^1], CultureInfo.InvariantCulture);
+        var retiredJobs = swept.Where(ServesTheView).Select(r => r.ObjectName).Append(retiredJob).ToList();
+        Assert.True(swept.Any(r => r.ObjectKind == StoreSelfMetrics.ContinuousAggregateObjectKind && r.ObjectName == retiredView), $"the sweep wrote no continuous_aggregate row for {retiredView}");
+        await ExecAsync(connection, $"SELECT delete_job({retiredJobId})", ct);
+        await ExecAsync(connection, $"DROP MATERIALIZED VIEW collect.{retiredView} CASCADE", ct);
+
+        var thirdSweepAt = secondSweepAt.AddSeconds(2);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, thirdSweepAt, null, null, null, ct);
+
+        async Task<PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.InventoryReconciliation> InventoryNowAsync()
+        {
+            var now = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct);
+            var outside = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.RowsOutsideTheSweep(now);
+            var existence = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetObjectExistenceAsync(dataSource, logging, outside, ct);
+            Assert.NotNull(existence);
+            return PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeInventory(now, existence)!;
+        }
+
+        var afterRetiring = await InventoryNowAsync();
+        Assert.Equal(0, afterRetiring.StaleRowCount);
+        Assert.Equal(0, afterRetiring.UncheckedRowCount);
+        Assert.Equal(
+            retiredJobs.Select(j => (StoreSelfMetrics.BackgroundJobObjectKind, j)).Append((StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView)).OrderBy(k => k),
+            afterRetiring.DroppedObjects.Select(d => (d.ObjectKind, d.ObjectName)).OrderBy(k => k));
+        Assert.All(afterRetiring.DroppedObjects, d => Assert.Equal(DateTime.SpecifyKind(secondSweepAt, DateTimeKind.Unspecified), d.LastRowAt, TimeSpan.FromMilliseconds(1)));
+
+        var missedHypertable = swept.First(r => r.ObjectKind == StoreSelfMetrics.HypertableObjectKind).ObjectName;
+        await using (var miss = new NpgsqlCommand(
+            "DELETE FROM collect.store_metrics WHERE object_kind = $1 AND object_name = $2 AND metric_time = $3", connection))
+        {
+            miss.Parameters.AddWithValue(StoreSelfMetrics.HypertableObjectKind);
+            miss.Parameters.AddWithValue(missedHypertable);
+            miss.Parameters.AddWithValue(DateTime.SpecifyKind(thirdSweepAt, DateTimeKind.Unspecified));
+            Assert.Equal(1, await miss.ExecuteNonQueryAsync(ct));
+        }
+
+        var afterMissing = await InventoryNowAsync();
+        Assert.Equal(1, afterMissing.StaleRowCount);
+        Assert.Equal(afterRetiring.DroppedObjects.Count, afterMissing.DroppedObjects.Count);
+        Assert.DoesNotContain(afterMissing.DroppedObjects, d => d.ObjectName == missedHypertable);
+    }
+
+    /// <summary>
+    /// #3918: the sweep END TO END on a store that holds COMPRESSED data, on whatever TimescaleDB the rig runs
+    /// (CI's darling-pg job: the bundled version). One hypertable with three of its four one-day chunks
+    /// compressed, and a continuous aggregate over it with its materialization compressed, beside the product's
+    /// own hypertables. No policies anywhere, and a VACUUM before measuring, so nothing moves while the test
+    /// measures.
+    ///
+    /// <para><b>The load-bearing assertion is an EXACT partition identity.</b> The bytes the sweep put in its
+    /// <c>hypertable</c> and <c>continuous_aggregate</c> rows (TimescaleDB's own
+    /// <c>hypertable_detailed_size</c>: roots, chunks and compressed relations) must equal the bytes of exactly
+    /// the relations the census removes from its catch-all rows (the production fragments, evaluated here).
+    /// A compressed relation the census fails to remove is counted twice and makes the difference positive by
+    /// its size: the #3918 hazard on 2.29+, where compressed data is no longer a chunk catalog row. A relation
+    /// the census removes that no named row holds makes it negative. On 2.28.1 the identity pins the
+    /// <c>compress_relid</c> arm too, because the public <c>chunks</c> view hides compressed chunks there, so
+    /// the bundled version would double count them without it. Exact on seeded 2.28.1, fresh 2.30.1 and
+    /// upgraded 2.30.1 stores (measured).</para>
+    ///
+    /// <para>It also runs the MCP top-N read over the same census, raw and through its wrapper, because the
+    /// wrapper turns a failure into NULL and nothing else would notice: on 2.29+ before this fix it returned
+    /// NULL on every call and <c>largest_unenumerated</c> silently vanished from <c>get_store_metrics</c>.</para>
+    /// </summary>
+    [Fact]
+    public async Task Sweep_WithCompressedHypertableAndAggregate_AttributesEveryTimescaleByteExactlyOnce_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #3918 sweep test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        const string Table = "tick3918_compressed";
+        const string Aggregate = "tick3918_compressed_hourly";
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* The hypertable: four one-day chunks, each seed midday-anchored (#1972) so none straddles midnight. */
+        await ExecAsync(connection,
+            $"CREATE TABLE collect.{Table} (collection_time timestamp NOT NULL, server_id integer NOT NULL, value bigint)", ct);
+        await ExecAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{Table}", "collection_time"), ct);
+        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{Table}"), ct);
+        for (var day = 1; day <= 4; day++)
+        {
+            await SeedTickRowsAsync(connection, Table, daysBack: day, rows: 5_000, ct);
+        }
+
+        /* The aggregate over it, materialized by hand rather than by a refresh policy (a policy fires on
+           creation, #1788, and would move the materialization while the test measures it), then compressed. */
+        await ExecAsync(connection, $@"
+CREATE MATERIALIZED VIEW collect.{Aggregate} WITH (timescaledb.continuous) AS
+SELECT time_bucket(INTERVAL '1 hour', collection_time) AS bucket, server_id, count(*) AS samples, sum(value) AS total
+FROM collect.{Table}
+GROUP BY 1, 2
+WITH NO DATA", ct);
+        await ExecAsync(connection, $"CALL refresh_continuous_aggregate('collect.{Aggregate}', NULL, NULL)", ct);
+        await ExecAsync(connection, $"ALTER MATERIALIZED VIEW collect.{Aggregate} SET (timescaledb.compress = true)", ct);
+
+        /* The three OLDEST hypertable chunks, chosen by range rather than by age so the count cannot depend on
+           the hour the test runs, and every materialization chunk. */
+        await ExecAsync(connection, $@"
+SELECT count(compress_chunk(format('%I.%I', s.chunk_schema, s.chunk_name)::regclass))
+FROM (SELECT chunk_schema, chunk_name
+      FROM timescaledb_information.chunks
+      WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'
+      ORDER BY range_start
+      LIMIT 3) AS s", ct);
+        await ExecAsync(connection, $"SELECT count(compress_chunk(c)) FROM show_chunks('collect.{Aggregate}') AS c", ct);
+
+        /* Settle before measuring: a relation's first VACUUM adds free-space and visibility-map forks, which
+           pg_total_relation_size counts, so autovacuum must find nothing to do between the sweep and the check. */
+        await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
+
+        /* Precondition: compressed data on BOTH sides, through the public stats function rather than the
+           catalog column under test. */
+        long compressedRelationBytes;
+        await using (var precondition = new NpgsqlCommand($@"
+SELECT
+    (SELECT count(*) FROM chunk_compression_stats('collect.{Table}') WHERE compression_status = 'Compressed'),
+    (SELECT count(*)
+       FROM timescaledb_information.continuous_aggregates AS ca
+       CROSS JOIN LATERAL chunk_compression_stats(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass) AS s
+      WHERE ca.view_schema = 'collect' AND ca.view_name = '{Aggregate}' AND s.compression_status = 'Compressed'),
+    (SELECT coalesce(sum(pg_total_relation_size(cs.compress_relid)), 0)::bigint
+       FROM _timescaledb_catalog.compression_settings AS cs
+      WHERE cs.compress_relid IS NOT NULL)", connection))
+        {
+            await using var reader = await precondition.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal(3, reader.GetInt64(0));
+            Assert.True(reader.GetInt64(1) >= 1, "the aggregate's materialization holds no compressed chunk");
+            compressedRelationBytes = reader.GetInt64(2);
+            Assert.True(compressedRelationBytes > 0, "no compressed relation holds any bytes");
+        }
+
+        /* The sweep. On 2.29+ before #3918 this threw 42703 from the catch-all statement. */
+        var written = await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, null, null, ct);
+        Assert.True(written > 0, "the sweep wrote nothing");
+
+        await using (var identity = new NpgsqlCommand($@"
+WITH sweep AS (
+    SELECT max(metric_time) AS metric_time
+    FROM collect.store_metrics
+    WHERE object_kind = '{StoreSelfMetrics.StoreObjectKind}'
+),
+named AS (
+    SELECT coalesce(sum(m.total_bytes), 0)::bigint AS bytes
+    FROM collect.store_metrics AS m
+    JOIN sweep ON m.metric_time = sweep.metric_time
+    WHERE m.object_kind IN ('{StoreSelfMetrics.HypertableObjectKind}', '{StoreSelfMetrics.ContinuousAggregateObjectKind}')
+),
+removed AS (
+    SELECT coalesce(sum(pg_total_relation_size(c.oid)), 0)::bigint AS bytes, count(*) AS relations
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+    AND   NOT ({StoreSelfMetrics.TimescaleInventoriedPredicateSql})
+)
+SELECT named.bytes, removed.bytes, removed.relations
+FROM named, removed", connection))
+        {
+            await using var reader = await identity.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            var namedBytes = reader.GetInt64(0);
+            var removedBytes = reader.GetInt64(1);
+            var removedRelations = reader.GetInt64(2);
+
+            Assert.True(namedBytes > compressedRelationBytes, $"the TimescaleDB rows hold {namedBytes} bytes, no more than the compressed relations alone");
+            Assert.True(
+                namedBytes == removedBytes,
+                $"the hypertable and aggregate rows hold {namedBytes} bytes but the census removed {removedBytes} bytes "
+                + $"({removedRelations} relations) from its catch-all rows: a difference of {namedBytes - removedBytes}. "
+                + "Positive is bytes the catch-all counts a SECOND time (the #3918 shape: compressed relations, "
+                + $"{compressedRelationBytes} bytes here, that the census failed to remove); negative is bytes the "
+                + "census removed that no named row holds.");
+        }
+
+        /* The whole-store reconciliation through the real reader: one sweep, both catch-all rows, inside the bar. */
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var latest = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct);
+        /* #4619: one sweep, so no row is outside it and the existence check has nothing to ask. */
+        Assert.Empty(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.RowsOutsideTheSweep(latest));
+        var inventory = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeInventory(
+            latest, new Dictionary<(string ObjectKind, string ObjectName), bool?>());
+        Assert.NotNull(inventory);
+        Assert.Equal(0, inventory!.StaleRowCount);
+        Assert.Equal(0, inventory.UncheckedRowCount);
+        Assert.Empty(inventory.DroppedObjects);
+        Assert.True(inventory.CatchAllPresent, "a catch-all row is missing from the sweep");
+        Assert.True(inventory.Reconciled,
+            $"the inventory did not reconcile: database {inventory.DatabaseBytes}, attributed {inventory.AttributedBytes}, "
+            + $"residual {inventory.ResidualBytes}, bar {inventory.ToleranceBytes}");
+
+        /* The MCP top-N over the same census, raw first so a failure carries the server's own error, then
+           through the wrapper that turns one into NULL. */
+        await using (var topN = new NpgsqlCommand(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.LargestUnenumeratedSql, connection))
+        {
+            topN.Parameters.AddWithValue(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.LargestUnenumeratedLimit);
+            var relations = new List<string>();
+            await using var reader = await topN.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                relations.Add(reader.GetString(0));
+            }
+
+            Assert.InRange(relations.Count, 1, PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.LargestUnenumeratedLimit);
+            Assert.DoesNotContain(relations, r => r.StartsWith("_timescaledb_", StringComparison.Ordinal) || r.Contains(Table, StringComparison.Ordinal));
+        }
+
+        var logging = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(dataSource, ct);
+        Assert.NotNull(await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLargestUnenumeratedAsync(dataSource, logging, ct));
     }
 
     /* ---------------- #2136 synthetic scale test ---------------- */
@@ -422,7 +1351,7 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
                 $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
         }
 
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, null, null, ct);
 
         /* 10x: one closed chunk, 500k rows. */
         await SeedTickRowsAsync(connection, Table, daysBack: 8, rows: 500_000, ct);
@@ -440,7 +1369,7 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
                 $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
         }
 
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, null, null, ct);
 
         /* 1. The escalation is REAL WORK at two different scales — asserted on rows and chunks, which are
            exact, instead of on the two durations, which are a benchmark of somebody else's compression
@@ -705,6 +1634,15 @@ SELECT
             Outcomes.Add(outcome);
             return Task.CompletedTask;
         }
+
+        /* #3580: DeliverAndReportAsync is REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store
+           Parity), so every fake answers it by hand. This one reports nothing: null is "unreported", which the
+           two daily documents treat as delivered, exactly as every fire before #3580 was. */
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            await DeliverAsync(outcome, cancellationToken);
+            return null;
+        }
     }
 
     private sealed class CadenceFakeHistoryStore : IAlertHistoryStore
@@ -716,6 +1654,7 @@ SELECT
             Task.FromResult<DateTime?>(null);
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
     }
 
     private sealed class CadenceFakeSettings : IAlertEngineSettings
@@ -737,6 +1676,7 @@ SELECT
         public int BlockingCountThreshold { get; set; } = 1;
         public int BlockingWaitSecondsThreshold { get; set; }
         public int DeadlockCountThreshold { get; set; } = 1;
+        public DeadlockRateThresholds DeadlockRateThresholds => DeadlockRateThresholds.Default;
         public int PoisonWaitThresholdMs { get; set; } = 500;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30;
         public int LongRunningQueryMaxResults { get; set; } = 5;
@@ -745,12 +1685,16 @@ SELECT
         public bool LongRunningQueryExcludeBackups { get; set; } = true;
         public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
         public bool LongRunningQueryExcludeCdc { get; set; } = true;
+        /* #3653 (A5, Q5): the opt-out knob, empty in the fakes — every session evaluated; the hosts seed it, the engine does not. */
+        public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes { get; set; } = Array.Empty<string>();
+        public IReadOnlyList<string> LongRunningQueryExcludedLogins { get; set; } = Array.Empty<string>();
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
         public int DiskCriticalFreePercent { get; set; } = 3;
         public int DiskCriticalFreeGb { get; set; } = 2;
         public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int SelfDiskFreeWarnGb { get; set; } = 50;
         public int CollectionStaleMinutes { get; set; } = 30;
         public int CollectionFailureThreshold { get; set; } = 10;
         public int PvsThresholdPercent { get; set; } = 40;

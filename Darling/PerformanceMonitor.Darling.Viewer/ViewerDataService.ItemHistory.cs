@@ -182,8 +182,10 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// Every collected procedure_stats snapshot for one (database, schema, object) over the window — Lite's
     /// <c>GetProcedureStatsHistoryAsync</c> column list against the base <c>procedure_stats</c> table.
-    /// procedure_stats has no <c>sample_interval_seconds</c> column (unlike query_stats), so — exactly as Lite
-    /// does — the interval is derived per row from the gap to the previous collection via
+    /// procedure_stats carries <c>sample_interval_seconds</c> since V128 (#3540; query_stats always has), so
+    /// — exactly as Lite does — the row's STORED interval is shown where it has one (a 0 is the "Interval
+    /// (sec)" 0 the query-stats history has always shown for an unknowable row), and a pre-V128 row (NULL)
+    /// keeps the interval this read always derived from the gap to the previous collection via
     /// <c>LAG(collection_time)</c> (identical syntax in Postgres). $1 server_id, $2 database_name, $3
     /// schema_name, $4 object_name, $5 window start, $6 window end (naive UTC).
     /// </summary>
@@ -221,7 +223,7 @@ public sealed partial class ViewerDataService
             total_physical_reads,
             total_logical_writes,
             delta_spills,
-            CAST(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS bigint) AS sample_interval_seconds
+            COALESCE(sample_interval_seconds, CAST(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS bigint)) AS sample_interval_seconds
         FROM procedure_stats
         WHERE server_id = $1
         AND   database_name = $2

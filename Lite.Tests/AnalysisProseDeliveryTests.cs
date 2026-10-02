@@ -108,6 +108,7 @@ public class AnalysisProseDeliveryTests
             new AppLoggerAdapter<AnalysisNotificationService>());
 
         await notifier.NotifyAsync(new[] { Finding() });
+        await notifier.FlushPendingAsync();
 
         return Assert.Single(sender.Sent);
     }
@@ -228,6 +229,32 @@ public class AnalysisProseDeliveryTests
         Assert.NotNull(record.ContextJson);
     }
 
+    /// <summary>
+    /// #3916 pin 8: Lite raises no toast for an analysis finding (no tray sink is wired into
+    /// AnalysisNotificationService), so a finding with no channel configured is stored
+    /// <c>unconfigured</c>, not <c>tray</c> — which read "Shown" for a toast nobody saw — and the sender
+    /// reports it undelivered, so it cannot arm the #2054 hold.
+    /// </summary>
+    [Fact]
+    public async Task AnUnconfiguredAnalysisRow_IsNotStoredTray()
+    {
+        var alert = await ComposedAlertAsync();
+        var settings = new FixedThresholdSettings();
+        var store = new CapturingHistoryStore();
+        var email = new EmailAlertService(
+            settings, store,
+            new WebhookAlertService(settings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>()),
+            new AppLoggerAdapter<EmailAlertService>());
+
+        var delivery = await email.SendFindingAlertAsync(alert);
+
+        var record = Assert.Single(store.Records);
+        Assert.NotEqual(AlertDelivery.ChannelTray, record.Delivery.Channel);
+        Assert.Equal(AlertDelivery.ChannelNoneConfigured, record.Delivery.Channel);
+        Assert.NotNull(delivery);
+        Assert.False(delivery!.Sent);
+    }
+
     /* ─────────────── the other direction ─────────────── */
 
     /// <summary>
@@ -320,13 +347,22 @@ public class AnalysisProseDeliveryTests
     {
         public List<FindingAlert> Sent { get; } = new();
 
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) =>
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) =>
             Task.FromResult<DateTime?>(null);
 
-        public Task SendFindingAlertAsync(FindingAlert alert)
+        /// <summary>#3916: what the fake reports the row recorded. Null = not delivered.</summary>
+        public AlertDelivery? Delivery { get; set; }
+        public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
         {
             Sent.Add(alert);
-            return Task.CompletedTask;
+            return Task.FromResult<AlertDelivery?>(Delivery);
+        }
+        /// <summary>#3916: each over-the-cap summary, as the list of pages it named; returns <see cref="Delivery"/>.</summary>
+        public List<IReadOnlyList<FindingAlert>> Summaries { get; } = new();
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Summaries.Add(named);
+            return Task.FromResult<AlertDelivery?>(Delivery);
         }
     }
 
@@ -348,6 +384,7 @@ public class AnalysisProseDeliveryTests
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
     }
 
     /// <summary>
@@ -391,6 +428,7 @@ public class AnalysisProseDeliveryTests
 
         public double AnalysisNotifySeverity => NotifyThreshold;
         public int AnalysisNotifyCooldownMinutes => 360;
+        public int AnalysisPageCap => 10;
         public string TriageBaseUrl => "";
     }
 

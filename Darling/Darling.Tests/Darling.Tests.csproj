@@ -16,6 +16,9 @@
 
   <ItemGroup>
     <PackageReference Include="xunit.v3" />
+    <!-- #4128: a live HTTP proof of the web host's gates (Host-allowlist, network-mode token/CIDR) through
+         a real Kestrel TestServer pipeline, rather than the source-order pins above. -->
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
   </ItemGroup>
 
   <ItemGroup>
@@ -26,13 +29,36 @@
     <!-- SystemHealthParser (the code under test) lives in Common; reference it explicitly rather than
          leaning on the transitive Viewer/Service edge. -->
     <ProjectReference Include="..\..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
+    <!-- #3938: the shared analysis engine, referenced explicitly by the same convention as Common above.
+         Dozens of classes here test PerformanceMonitor.Analysis types directly; the edge used to arrive
+         only transitively through Darling.Analysis, so dropping that reference would have broken them
+         for a reason nothing in this file named. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.Analysis\PerformanceMonitor.Analysis.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- #3938: the cross-SKU source-scan pins of the get_collection_health parity families, compiled here
+         from Lite.Tests rather than copied. Every fact in that file reads both SKUs source text and needs
+         nothing from WPF, but Lite.Tests cannot build or run on a Mac, so while they lived only there a
+         Darling-side change that broke one went red for the first time in CI. One file, one authority,
+         no parity pin needed - the mirror image of the CSharpSourceWalker link in Lite.Tests.csproj. It
+         brings its Lite.Tests namespace with it and uses only the BCL, xunit and PerformanceMonitor.Alerting,
+         which both projects carry. -->
+    <Compile Include="..\..\Lite.Tests\CrossSkuSurfaceSourceTests.cs" Link="Linked\CrossSkuSurfaceSourceTests.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- system_health event samples for SystemHealthParser (one per feeder event; shapes per sp_HealthParser xpath). -->
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- real, scrubbed system_health event captures for SystemHealthParserRealEventTests -->
+    <None Include="Fixtures\SystemHealth\real\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- Deadlock graph parser/layout golden samples (real sql2025 captures + synthetic edge cases). -->
     <None Include="Fixtures\Deadlocks\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #4534: PerformanceStudio's own .sqlplan fixtures for the warning-origin decider, copied from its
+         public repo (table_variable_plan, convert_implicit_plan, udf_plan). Real captures rather than a
+         synthetic plan, so the "every operator warning knows its operator" pin runs against the same
+         shapes PerformanceStudio's own test relies on. -->
+    <None Include="Fixtures\OriginPlans\*.sqlplan" CopyToOutputDirectory="PreserveNewest" />
     <!-- #2538: a REAL auto_explain block, captured from a PostgreSQL container with auto_explain
          loaded. Real rather than hand-written because the parser's whole job is the log's exact
          shape - the tab-indented continuation, the %Q query id in the prefix, the JSON body - and a
@@ -74,5 +100,10 @@
          into the product — so the only thing that keeps them true as the catalog grows is parsing them
          back against it. Same Link+copy delivery as the workflows above. -->
     <None Include="..\README.md" Link="Fixtures\Darling-README.md" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #4322: the Linux compose file, copied beside the test binary so CiComposeWorkerSizingTests parses
+         the REAL file rather than a copy that can go stale. Its worker-sizing flags are a restatement of
+         TimescaleSupport.HypertableCount via the same formula BuildWorkerSizingConfAppend writes for the
+         managed Windows store, and compose's command: line cannot call into the product. -->
+    <None Include="..\compose\docker-compose.yml" Link="Fixtures\docker-compose.yml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

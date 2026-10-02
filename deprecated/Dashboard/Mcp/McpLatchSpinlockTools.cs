@@ -12,7 +12,7 @@ namespace PerformanceMonitorDashboard.Mcp;
 [McpServerToolType]
 public sealed class McpLatchSpinlockTools
 {
-    [McpServerTool(Name = "get_latch_stats"), Description("Gets top latch contention by class. Shows latch waits, wait time, and per-second rates. High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or FGCB_ADD_REMOVE indicates TempDB allocation contention.")]
+    [McpServerTool(Name = "get_latch_stats"), Description("Gets top latch contention by class. Shows latch waits, wait time, and per-second rates. ACCESS_METHODS_DATASET_PARENT synchronizes child dataset access to the parent dataset during parallel operations, and FGCB_ADD_REMOVE synchronizes filegroup add, drop, grow and shrink file operations.")]
     public static async Task<string> GetLatchStats(
         ServerManager serverManager,
         DatabaseServiceRegistry registry,

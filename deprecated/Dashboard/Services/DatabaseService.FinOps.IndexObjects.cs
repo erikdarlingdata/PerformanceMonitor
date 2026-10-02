@@ -251,7 +251,12 @@ WHERE ios.collection_time =
 )
 ORDER BY
     CASE WHEN ios.total_reads = 0 THEN 0 ELSE 1 END,
-    ios.reserved_mb DESC
+    ios.reserved_mb DESC,
+    ios.database_name,
+    ios.schema_name,
+    ios.table_name,
+    CASE WHEN ios.index_name IS NULL THEN 1 ELSE 0 END,
+    ios.index_name
 OPTION(MAXDOP 1, RECOMPILE);";
 
             using var command = new SqlCommand(query, connection);
@@ -783,6 +788,15 @@ namespace PerformanceMonitorDashboard.Models
         public string TableName { get; set; } = "";
         public string IndexName { get; set; } = "";
         public string IndexTypeDesc { get; set; } = "";
+
+        /// <summary>
+        /// <c>schema.table</c> for the Locking &amp; Contention grid's Table column (#3576, mirrored from Lite).
+        /// The bare <see cref="TableName"/> is ambiguous when two schemas hold a table of the same name; the
+        /// grid binds and filters on this one string instead. Falls back to the bare name when the schema is
+        /// empty.
+        /// </summary>
+        public string FullName => string.IsNullOrEmpty(SchemaName) ? TableName : $"{SchemaName}.{TableName}";
+
         public decimal ReservedMb { get; set; }
         public long TotalRows { get; set; }
         public long RowLockCount { get; set; }

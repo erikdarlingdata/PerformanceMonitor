@@ -433,6 +433,42 @@ public sealed class ViewerReadOnlyTests
 /// </summary>
 public sealed class ViewerSchemaVersionGateTests
 {
+    /// <summary>
+    /// The Collection Health tab reads the store's schema version once per session (#4767), not on every
+    /// refresh. The version probe is one round trip of about 130 EXISTS arms, and the tab refreshes every 30
+    /// seconds; the Query Store and trend reads already go through <c>_cachedStoreSchemaVersion</c>. There is
+    /// no seam that counts probe round trips without a live store, so this pins the call shape: every call
+    /// to <c>GetStoreSchemaVersionAsync</c> in the tab's read file is the cached-field form, which keeps
+    /// reading again only while the result is null.
+    /// </summary>
+    [Fact]
+    public void TheCollectionHealthTab_ReadsTheSchemaVersionThroughTheCachedField()
+    {
+        var path = Path.GetFullPath(Path.Combine(
+            Path.GetDirectoryName(ThisFile())!, "..", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectionHealth.cs"));
+        var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
+
+        var searchFrom = 0;
+        var calls = 0;
+        while (true)
+        {
+            var at = code.IndexOf("GetStoreSchemaVersionAsync(", searchFrom, StringComparison.Ordinal);
+            if (at < 0)
+            {
+                break;
+            }
+
+            calls++;
+            var before = code[Math.Max(0, at - 80)..at];
+            Assert.EndsWith("_cachedStoreSchemaVersion ??= await ", before.TrimEnd() + " ", StringComparison.Ordinal);
+            searchFrom = at + 1;
+        }
+
+        Assert.True(calls > 0, "the tab no longer reads the schema version; retire this pin with the read");
+    }
+
+    private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
+
     [Fact]
     public void StoreSchemaProbeSql_ProbesInformationSchema_ForTheV17ToV25Sentinels()
     {
@@ -897,9 +933,9 @@ public sealed class ViewerConnectionTimeoutTests
         Assert.Equal(5641, builder.Port);
         Assert.Equal("darling", builder.Database);
         /* Search Path is the load-bearing one: it resolves the bare table names to the collect/config schemas
-           on every connection, so if the base DbConnectionStringBuilder round-trip ever mangled it, every
-           managed-path query would silently break. Pin that it survives verbatim (the reason we detect + emit
-           via the base builder rather than NpgsqlConnectionStringBuilder). */
+           on every connection, so a query would silently break if this ever went back to emitting through a
+           builder round trip instead of appending to the caller's own string (round-1 review on #4285's PR).
+           Pin that it survives verbatim. */
         Assert.Equal("collect,config,public", builder.SearchPath);
     }
 

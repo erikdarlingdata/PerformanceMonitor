@@ -424,6 +424,12 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
            expression returns bigint, and a module-grain plan is measured in megabytes on the tail this
            exists to describe. */
         new CollectorColumn("query_plan_xml_bytes", CollectorColumnType.BigInt),
+        /* Appended (Darling V128 / Lite v61, #3540): the measured seconds the row's seven deltas accrued
+           over, or 0 when no delta was knowable. Appended at the END because both stores' writers are
+           positional — the same rule GoldenCollectorSchema's header states for every column a numbered
+           migration adds by ALTER TABLE. The same integer perfmon_stats and query_stats have carried from
+           the start and the four V127 families gained, so one NULLIF idiom reads all ten. */
+        new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -478,15 +484,33 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
         /* Delta key: plan_handle to prevent cross-contamination when multiple plans exist for the
-           same object; the db.schema.object fallback and the seven group names are the parity contract. */
+           same object; the db.schema.object fallback and the seven group names are the parity contract.
+
+           The interval is stored beside the deltas (#3540, Darling V128 / Lite v61). The calculator
+           reports (delta 0, interval 0) when no delta is knowable — first sighting, counter reset, a gap
+           past the policy — and (0, n) when the interval was genuinely idle, and that pairing is the ONLY
+           way a reader can tell the two apart. This collector took the bare long and discarded the
+           interval at the write, so a restart's fabricated zero survived as a measured one and the
+           procedure duration trend LAG-divided it into a confident 0.00 ms/sec. This family also has the
+           highest first-sighting rate of the ten: a TOP (150) that churns readmits plans that fell out,
+           and every readmission is a first sighting whose 0 used to read as "ran zero times".
+
+           One interval per ROW, the minimum over the row's seven groups — the V127 rule
+           (WaitStatsCollector). The groups share a key and a collection time, so first-sighting,
+           gap-policy and seeding decisions are identical across them and the intervals agree in every
+           case but an independent single-counter reset, which the module DMVs never do (a plan eviction
+           resets all seven together). Taking the minimum makes the stored pair mean "every delta in this
+           row is knowable", so a reader never divides a reset counter's 0 by a sibling's real interval
+           and reads it as idle. */
         var deltaKey = row.PlanHandle ?? $"{row.DatabaseName}.{row.SchemaName}.{row.ObjectName}";
-        var deltaExec = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_exec", deltaKey, row.ExecutionCount, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWorker = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_worker", deltaKey, row.TotalWorkerTime, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaElapsed = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_elapsed", deltaKey, row.TotalElapsedTime, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaReads = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_reads", deltaKey, row.TotalLogicalReads, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWrites = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_writes", deltaKey, row.TotalLogicalWrites, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaPhysReads = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_phys_reads", deltaKey, row.TotalPhysicalReads, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaSpills = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_spills", deltaKey, row.TotalSpills, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaExec = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_exec", deltaKey, row.ExecutionCount, out var execInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWorker = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_worker", deltaKey, row.TotalWorkerTime, out var workerInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaElapsed = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_elapsed", deltaKey, row.TotalElapsedTime, out var elapsedInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_reads", deltaKey, row.TotalLogicalReads, out var readsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWrites = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_writes", deltaKey, row.TotalLogicalWrites, out var writesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaPhysReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_phys_reads", deltaKey, row.TotalPhysicalReads, out var physReadsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSpills = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_spills", deltaKey, row.TotalSpills, out var spillsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var sampleIntervalSeconds = Math.Min(execInterval, Math.Min(workerInterval, Math.Min(elapsedInterval, Math.Min(readsInterval, Math.Min(writesInterval, Math.Min(physReadsInterval, spillsInterval))))));
 
         writer
             .Value(row.DatabaseName)
@@ -524,7 +548,8 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
             .Value(deltaPhysReads)
             .Value(deltaSpills)
             .Value(row.QueryPlanXml)           /* null unless CapturePlanXml captured it (Darling) */
-            .Value(row.QueryPlanXmlBytes);     /* #3392: measured size, never gated by the cap */
+            .Value(row.QueryPlanXmlBytes)      /* #3392: measured size, never gated by the cap */
+            .Value(sampleIntervalSeconds);     /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 
     /// <summary>

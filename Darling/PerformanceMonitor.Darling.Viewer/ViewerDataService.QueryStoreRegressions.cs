@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -71,10 +72,21 @@ public sealed class ViewerQueryStoreRegressionRow
 public sealed partial class ViewerDataService
 {
     /// <summary>
+    /// The baseline's lookback (#4217, the same bound #4195 gave the MCP tool and Lite's copy of this same
+    /// read): a fixed 7 days ending at the recent window's start, so the comparison period stops growing with
+    /// retention. This file cannot reach <c>DarlingQueryStoreRegressionReader.BaselineLookbackDays</c> (the MCP
+    /// reader lives in a project the viewer does not reference) or Lite's own copy (a separate app), so it
+    /// keeps its own constant of the same value, same as those two already keep independent copies of each
+    /// other.
+    /// </summary>
+    public const int BaselineLookbackDays = 7;
+
+    /// <summary>
     /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c>
     /// inline TVF ported to Postgres against Darling's <c>query_store_stats</c> store. Two windowed CTEs over
-    /// the SAME base table: BASELINE = every capture BEFORE the window start; RECENT = the [start, end]
-    /// window. Each averages the per-interval µs metrics to ms (reads stay raw pages), SUMs execution_count,
+    /// the SAME base table: BASELINE = the fixed <see cref="BaselineLookbackDays"/>-day window ending at the
+    /// window start; RECENT = the [start, end] window. Each averages the per-interval µs metrics to ms (reads
+    /// stay raw pages), SUMs execution_count,
     /// and COUNTs DISTINCT plan_id; the outer projection joins them per (database, query_id), computes the
     /// duration / CPU / IO regression percents, the execution-count-weighted <c>additional_duration_ms</c>
     /// (extra total time = per-exec delta × recent exec count), and a DURATION-driven severity band, keeping
@@ -92,9 +104,11 @@ public sealed partial class ViewerDataService
     /// <c>query_sql_text</c>.
     /// (3) The stale INTENT comment on the Dashboard's C# caller (bounded/mirrored baseline, weighted averages,
     /// multi-metric, absolute minimums) does NOT match what the TVF actually runs — this ports the ACTUAL TVF
-    /// (unbounded baseline, plain AVG, CPU-only > 25% gate, no minimums), which is what the Dashboard grid shows.</para>
+    /// (plain AVG, CPU-only > 25% gate, no minimums), which is what the Dashboard grid shows, with the baseline
+    /// bounded per #4217 (see below) since the TVF's own unbounded baseline is not worth reproducing faithfully.</para>
     ///
-    /// <para>$1 server_id, $2 window start (baseline is &lt; $2), $3 window end, $4 database filter (text[]).</para>
+    /// <para>$1 server_id, $2 window start (baseline is &lt; $2), $3 window end, $4 database filter (text[]),
+    /// $5 baseline start (window start minus <see cref="BaselineLookbackDays"/>).</para>
     /// </summary>
     public const string QueryStoreRegressionsSql = """
         WITH deduped_baseline AS (
@@ -103,9 +117,10 @@ public sealed partial class ViewerDataService
                (same first_execution_time) is stored repeatedly with a growing execution_count. Keep the
                LATEST snapshot per interval before aggregating.
 
-               This read is especially exposed: the baseline arm is UNBOUNDED (collection_time < $2,
-               potentially months) while the recent arm is a short window, so the two arms have
-               systematically different re-collection density per interval. Un-deduped, that alone moves
+               This read is especially exposed: the baseline arm spans <see cref="BaselineLookbackDays"/> days
+               (collection_time >= $5 AND < $2 — #4217; before that fix it was UNBOUNDED, collection_time < $2
+               with no lower bound, potentially months) while the recent arm is a short window, so the two arms
+               have systematically different re-collection density per interval. Un-deduped, that alone moves
                the AVG(avg_*) values the regression percent is computed from, and the > 25% CPU gate —
                manufacturing and hiding regressions in a direction that has nothing to do with the query.
                It also multiplies exec_count, which feeds additional_duration_ms, the sort key. */
@@ -124,6 +139,7 @@ public sealed partial class ViewerDataService
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
+            AND   collection_time >= $5
             AND   collection_time < $2
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
@@ -221,18 +237,26 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// The Query Store regressions for one server over the RECENT window [<paramref name="startUtc"/>,
-    /// <paramref name="endUtc"/>] vs. the baseline before it, ranked by execution-count-weighted extra
-    /// duration descending (the TVF's ORDER BY; the grid then default-sorts by duration % like the Dashboard).
+    /// <paramref name="endUtc"/>] vs. the fixed <see cref="BaselineLookbackDays"/>-day baseline ending at
+    /// <paramref name="startUtc"/> (#4217), ranked by execution-count-weighted extra duration descending (the
+    /// TVF's ORDER BY; the grid then default-sorts by duration % like the Dashboard).
     /// </summary>
     public async Task<List<ViewerQueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<ViewerQueryStoreRegressionRow>();
 
+        // #4217: the baseline's lower bound, computed here (not as a SQL interval) so the bound stays a plain
+        // timestamp parameter — the same reason DarlingQueryStoreRegressionReader takes it as a parameter
+        // rather than computing it inside the statement (an in-statement interval costs TimescaleDB its
+        // plan-time chunk exclusion).
+        var baselineStartUtc = startUtc.AddDays(-BaselineLookbackDays);
+
         await using var command = _dataSource.CreateCommand(QueryStoreRegressionsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStartUtc, DateTimeKind.Unspecified) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

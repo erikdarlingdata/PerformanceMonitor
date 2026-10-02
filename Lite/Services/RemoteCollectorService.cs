@@ -59,16 +59,34 @@ public class CollectorHealthEntry
 /// Thrown when an Extended Events session required by a collector cannot
 /// be created or started. Raised before the collect query runs so a missing
 /// session can never be masked by a zero-row "successful" read (issue #1086).
+/// The blocked process, deadlock and long-query ring-buffer READS raise it too, through
+/// <see cref="ForFailedRead"/>, when the server refuses the read or cannot find
+/// the session (#4731): the same zero-row "success", reached from the other side.
 /// </summary>
 public class XeSessionEnsureException : Exception
 {
     public string SessionKind { get; }
 
     public XeSessionEnsureException(string sessionKind, SqlException inner)
-        : base($"Failed to ensure {sessionKind} XE session: {inner.Message}", inner)
+        : this(sessionKind, inner, $"Failed to ensure {sessionKind} XE session: {inner.Message}")
+    {
+    }
+
+    private XeSessionEnsureException(string sessionKind, SqlException inner, string message)
+        : base(message, inner)
     {
         SessionKind = sessionKind;
     }
+
+    /// <summary>
+    /// The same failure met on the ring-buffer READ instead of the ensure (#4731): the session exists or was
+    /// ensured, but the server refused this principal's read of it or could not find it. The type and the inner
+    /// error are what <c>RunCollectorAsync</c> classifies on (PERMISSIONS or ERROR, with the XE session flagged
+    /// unavailable), so this is the one the read arms raise; only the message differs, so a reader of the
+    /// collection log is told the READ failed and not the ensure.
+    /// </summary>
+    public static XeSessionEnsureException ForFailedRead(string sessionKind, SqlException inner)
+        => new(sessionKind, inner, $"Failed to read {sessionKind} XE session: {inner.Message}");
 
     public new SqlException InnerException => (SqlException)base.InnerException!;
 }
@@ -99,6 +117,12 @@ public class CollectorHealthSummary
 public partial class RemoteCollectorService
 {
     private readonly DuckDbInitializer _duckDb;
+
+    /// <summary>
+    /// The archive-view answers to the watermark reads, per archive generation. See
+    /// <see cref="ArchiveWatermarkCache"/> and <see cref="ReadArchiveViewAsync"/>.
+    /// </summary>
+    private readonly ArchiveWatermarkCache _archiveWatermarks = new();
     private readonly ServerManager _serverManager;
     private readonly ScheduleManager _scheduleManager;
     private readonly ILogger<RemoteCollectorService>? _logger;
@@ -106,9 +130,12 @@ public partial class RemoteCollectorService
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
     /// <summary>
-    /// Limits how many SQL connections are <em>opened</em> at once — the semaphore is released
-    /// when OpenAsync returns, not when the connection is disposed — smoothing the login storm
-    /// when many servers are polled together. It does not cap the number of open connections.
+    /// Limits how many SQL connections are <em>opened</em> at once, smoothing the login storm when many
+    /// servers are polled together. A slot is held for one connect attempt - from the top of the attempt,
+    /// through any sign-in token it acquires, until OpenAsync returns or fails - and is released then, not
+    /// when the connection is later disposed. It is never held across the backoff RetryHelper waits out
+    /// between attempts (#4722), so a server that is down cannot sit on a slot while it waits to be
+    /// retried. It does not cap the number of open connections.
     /// </summary>
     private static readonly SemaphoreSlim s_connectionThrottle = new(7, 7);
 
@@ -406,14 +433,68 @@ public partial class RemoteCollectorService
         }
     }
 
+    /* The database state the last "paused" or "resumes" line was written for, so each change logs one line however
+       many runs skip. Read and written only under _localDatabaseStateLock. */
+    private readonly object _localDatabaseStateLock = new();
+    private LocalDatabaseState _loggedLocalDatabaseState = LocalDatabaseState.Healthy;
+
+    /* Test seam: runs in LocalDatabaseIsDown between its health read and its compare, inside its lock. */
+    internal Action? AfterLocalDatabaseHealthReadForTests { get; set; }
+
+    /// <summary>
+    /// True while Lite's local database is down after a fatal error: reopening, or failed for good. Collector runs,
+    /// the Query Store backfill and the collection loop's housekeeping skip meanwhile. A run on a database that a
+    /// fatal error invalidated reads from its server and then cannot store anything, and its connection would keep
+    /// the invalidated database alive and make the reopen fail (<see cref="DuckDbInitializer.ReportFailure"/>).
+    /// Logs one line when the state changes, not one per skipped run.
+    ///
+    /// <para>The health read, the compare and the line are one step under a lock. Otherwise a caller that read the
+    /// state before a change and compared after it would log the change backwards ("paused" after "resumes"), and the
+    /// next caller would log "resumes" a second time.</para>
+    /// </summary>
+    internal bool LocalDatabaseIsDown()
+    {
+        lock (_localDatabaseStateLock)
+        {
+            var health = _duckDb.LocalDatabaseHealth;
+            AfterLocalDatabaseHealthReadForTests?.Invoke();
+
+            if (_loggedLocalDatabaseState != health.State)
+            {
+                _loggedLocalDatabaseState = health.State;
+
+                if (health.CollectionStopped)
+                {
+                    _logger?.LogWarning("Collection is paused. {Status}", health.StatusLine);
+                }
+                else
+                {
+                    _logger?.LogInformation("Lite's local database is back, so collection resumes");
+                }
+            }
+
+            return health.CollectionStopped;
+        }
+    }
+
     /// <summary>
     /// Runs all due collectors for all enabled servers.
     /// </summary>
-    public async Task RunDueCollectorsAsync(CancellationToken cancellationToken = default)
+    public Task RunDueCollectorsAsync(CancellationToken cancellationToken = default)
+        => RunDueCollectorsAsync(DateTime.UtcNow, cancellationToken);
+
+    /// <summary>Runs the collectors due at <paramref name="cycleStartUtc"/>, the logical time of this cycle on the
+    /// fixed collection grid (#4640). Each run is recorded at that time, so the next due check compares grid times.</summary>
+    public async Task RunDueCollectorsAsync(DateTime cycleStartUtc, CancellationToken cancellationToken)
     {
         /* Registered for the whole sweep, including the collection_log write at the end of each collector -
            that final write is the one that failed in the field when a reset landed mid-collection (#2594). */
         using var collectionScope = await CollectionResetGate.BeginCollectionAsync(cancellationToken);
+
+        if (LocalDatabaseIsDown())
+        {
+            return;
+        }
 
         var enabledServers = _serverManager.GetEnabledServers();
 
@@ -460,14 +541,21 @@ public partial class RemoteCollectorService
                changed (state-tracked); creates on enable, drops on disable. */
             await ReconcileLongQueryCompletionsXeSessionAsync(server, cancellationToken);
 
-            var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id);
+            var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id, cycleStartUtc);
             foreach (var collector in dueCollectors)
             {
-                await RunCollectorAsync(server, collector.Name, cancellationToken);
+                await RunCollectorAsync(server, collector.Name, scheduledAtUtc: cycleStartUtc, cancellationToken);
             }
         }, cancellationToken));
 
         await Task.WhenAll(serverTasks);
+
+        /* A fatal error during the round leaves nothing to checkpoint: the database waits for its reopen, which
+           runs once this round's registration above is released. */
+        if (_duckDb.LocalDatabaseHealth.CollectionStopped)
+        {
+            return;
+        }
 
         /* Run CHECKPOINT here after all collector connections are closed.
            Write lock ensures no UI readers have stale file offsets when
@@ -498,16 +586,14 @@ public partial class RemoteCollectorService
            collector for the server, which is how a 55-second index_object_stats came to straddle a reset. */
         using var collectionScope = await CollectionResetGate.BeginCollectionAsync(cancellationToken);
 
+        if (LocalDatabaseIsDown())
+        {
+            return;
+        }
+
         var enabledSchedules = _scheduleManager.GetSchedulesForServer(server.Id)
             .Where(s => s.Enabled)
             .ToList();
-
-        /* XE session setup happens inside RunCollectorAsync so the background
-           collection loop also ensures/retries it, not just tab-open (#1086) */
-        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
-
-        /* Persist edition/version to DuckDB for the analysis engine */
-        await PersistServerMetadataAsync(server, serverStatus);
 
         AppLogger.Info("Collector", $"Running {enabledSchedules.Count} collectors for '{server.DisplayName}' (serverId={GetServerId(server)}, initial load)");
 
@@ -532,8 +618,20 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Runs a specific collector for a specific server.
     /// </summary>
-    public async Task RunCollectorAsync(ServerConnection server, string collectorName, CancellationToken cancellationToken = default)
+    public Task RunCollectorAsync(ServerConnection server, string collectorName, CancellationToken cancellationToken = default)
+        => RunCollectorAsync(server, collectorName, scheduledAtUtc: null, cancellationToken);
+
+    /// <summary>Runs one collector; <paramref name="scheduledAtUtc"/> is the logical cycle time the run is recorded
+    /// at (#4640), or null to record the time the run started.</summary>
+    public async Task RunCollectorAsync(ServerConnection server, string collectorName, DateTime? scheduledAtUtc, CancellationToken cancellationToken)
     {
+        /* Every way in reaches here, so a run that starts while the database is down skips, writes no
+           collection_log row and stays due. */
+        if (LocalDatabaseIsDown())
+        {
+            return;
+        }
+
         var startTime = DateTime.UtcNow;
         var status = "SUCCESS";
         string? errorMessage = null;
@@ -662,7 +760,28 @@ public partial class RemoteCollectorService
                 _ => throw new ArgumentException($"Unknown collector: {collectorName}")
             };
 
-            _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, startTime);
+            _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
+
+            /* #3653 A5: the identity-epoch account, if this run's definition saw one — the twin of the drain
+               in DarlingWorker.RunOneAsync, for the same reason: the definition composed the sentence (old
+               and new start time, old and new @@SERVERNAME, what was forgotten) and has no logger; this is
+               the host loop that does. Info, once, beside the run that observed it; the run's collection_log
+               row carries identity_epoch_changes=1 as the marker in the store. Drained on every run so a
+               carrier that observed and then failed at its write still gets its sentence logged by the next
+               successful run on the server. */
+            foreach (var discontinuity in _deltaCalculator.DrainDiscontinuities(GetServerId(server)))
+            {
+                AppLogger.Info("Collector", $"  [{server.DisplayName}] {discontinuity} (#3653 A5; drained after {collectorName})");
+            }
+
+            /* #4428: the wait-stats-clear account, queued by WaitStatsCollector.ReadAsync when it detects a
+               server-wide DBCC SQLPERF(..., CLEAR)-shaped pass — drained the same way as the identity-epoch
+               discontinuities above, but already throttled to once per server per day by the calculator, so
+               no collector-name framing is added here. */
+            foreach (var clearWarning in _deltaCalculator.DrainWaitStatsClearWarnings(GetServerId(server)))
+            {
+                AppLogger.Info("Collector", $"  [{server.DisplayName}] {clearWarning}");
+            }
 
             /* Annotate a successful-but-empty run (#1837): errorMessage is provably null here — only the
                catches below assign it — so this carries the runner's note (an enumeration that listed
@@ -782,6 +901,10 @@ public partial class RemoteCollectorService
             errorMessage = ex.Message;
             AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.GetType().Name}: {ex.Message}");
             AppLogger.Error("Collector", $"Collector '{collectorName}' failed for server '{server.DisplayName}'", ex);
+
+            /* A fatal DuckDB error invalidates the whole local database, and every later write fails until it is
+               reopened. This starts the reopen; any other error is left alone. */
+            _duckDb.ReportFailure(ex);
         }
 
         // Track collector health
@@ -789,40 +912,6 @@ public partial class RemoteCollectorService
 
         // Log the collection attempt
         await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout);
-    }
-
-    /// <summary>
-    /// Persists SQL Server edition and major version to the servers table.
-    /// Called once per collection cycle so the analysis engine can provide
-    /// edition-specific recommendations (e.g., memory caps for Standard edition).
-    /// </summary>
-    private async Task PersistServerMetadataAsync(ServerConnection server, ServerConnectionStatus status)
-    {
-        if (status.SqlEngineEdition == 0 && status.SqlMajorVersion == 0) return;
-
-        try
-        {
-            var serverId = GetServerId(server);
-            using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
-
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
-UPDATE servers
-SET sql_engine_edition = $1,
-    sql_major_version = $2
-WHERE server_id = $3";
-
-            cmd.Parameters.Add(new DuckDBParameter { Value = status.SqlEngineEdition });
-            cmd.Parameters.Add(new DuckDBParameter { Value = status.SqlMajorVersion });
-            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-
-            await cmd.ExecuteNonQueryAsync();
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("Collector", $"Failed to persist server metadata for '{server.DisplayName}': {ex.Message}");
-        }
     }
 
     /// <summary>
@@ -834,6 +923,11 @@ WHERE server_id = $3";
         {
             var durationMs = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
 
+            /* Read lock (#4343): a plain append of a new row with a generated id cannot collide with
+               another writer (DuckDbInitializer's own rule), but this runs every collection cycle for
+               every collector, so with the sentinel live an unlocked connection can attach to an instance
+               ResetDatabaseAsync is tearing down mid-reset rather than merely reading stale data. */
+            using var readLock = _duckDb.AcquireReadLock();
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync();
 
@@ -873,6 +967,10 @@ WHERE server_id = $3";
         }
         catch (Exception ex)
         {
+            /* Every collector run ends here, so this is where a fatal DuckDB error is seen even when the collector
+               itself absorbed its own write failure. */
+            _duckDb.ReportFailure(ex);
+
             _logInsertFailures++;
 
             if (_logInsertFailures <= 3)
@@ -1050,7 +1148,7 @@ WHERE server_id = $3";
                 return false;
             }
 
-            if (DateTime.UtcNow - deniedAt < AzureMasterRecheckInterval)
+            if (!CollectorCadence.IntervalElapsed(deniedAt, DateTime.UtcNow, AzureMasterRecheckInterval))
             {
                 return true;
             }
@@ -1247,11 +1345,7 @@ WHERE server_id = $3";
                 }
             }
 
-            // Now acquire connection throttle
-            await s_connectionThrottle.WaitAsync(cancellationToken);
-            try
-            {
-                var connectionString = _serverManager.CredentialResolver.GetConnectionString(server);
+            var connectionString = _serverManager.CredentialResolver.GetConnectionString(server);
 
             var builder = new SqlConnectionStringBuilder(connectionString)
             {
@@ -1260,27 +1354,34 @@ WHERE server_id = $3";
 
             var connStr = builder.ConnectionString;
 
-                return await RetryHelper.ExecuteWithRetryAsync(async () =>
+            /* The throttle is taken inside this call, once per attempt, so a server that is down holds a
+               slot for one connect timeout at a time and none across the backoff between attempts
+               (#4722). The interactive sign-in lock above stays outer and first, and the attempt body -
+               the device-code prompt and the open - stays inside the throttle, so a slot is already held
+               when a window shows. */
+            return await ExecuteThrottledWithRetryAsync(s_connectionThrottle, async () =>
+            {
+                /* Inside the retry lambda, not outside it. A retried open needs a FRESH code -
+                   the previous one may already be spent or expired - and disposing the previous
+                   attempt is what closes the window showing it. Null for every mode but device
+                   code. Linked so either side can end the wait: the collector's own token on
+                   shutdown, the prompt window's Cancel when the user gives up. Which of the two
+                   fired is read back below, because they mean different things. */
+                using var deviceCode = EntraDeviceCodeAuth.Begin(builder);
+                using var openCancellation = deviceCode is null
+                    ? null
+                    : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deviceCode.Token);
+
+                /* Created after the prompt starts, so a Begin that throws leaves no connection behind. */
+                var connection = new SqlConnection(connStr);
+                try
                 {
-                    var connection = new SqlConnection(connStr);
-
-                    /* Inside the retry lambda, not outside it. A retried open needs a FRESH code -
-                       the previous one may already be spent or expired - and disposing the previous
-                       attempt is what closes the window showing it. Null for every mode but device
-                       code. Linked so either side can end the wait: the collector's own token on
-                       shutdown, the prompt window's Cancel when the user gives up. Which of the two
-                       fired is read back below, because they mean different things. */
-                    using var deviceCode = EntraDeviceCodeAuth.Begin(builder);
-                    using var openCancellation = deviceCode is null
-                        ? null
-                        : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deviceCode.Token);
-
-                    try
-                    {
-                        await connection.OpenAsync(openCancellation?.Token ?? cancellationToken);
-                        return connection;
-                    }
-                    catch (Exception ex) when (isInteractiveServer)
+                    await connection.OpenAsync(openCancellation?.Token ?? cancellationToken);
+                    return connection;
+                }
+                catch (Exception ex)
+                {
+                    if (isInteractiveServer)
                     {
                         /* Mark a user-declined sign-in immediately, so the other connections queued
                            behind the lock abort instead of each raising their own prompt.
@@ -1304,14 +1405,16 @@ WHERE server_id = $3";
                             serverStatus.UserCancelledMfa = true;
                             AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
                         }
-                        throw;
                     }
-                }, _logger, $"Connect to {server.DisplayName}", cancellationToken: cancellationToken);
-            }
-            finally
-            {
-                s_connectionThrottle.Release();
-            }
+
+                    /* Every attempt builds a connection of its own, so a failed one is disposed here instead
+                       of being left to the finalizer, once per attempt: up to four per collector per cycle
+                       against a server that is down. Success returns the open connection to the caller
+                       undisposed. */
+                    connection.Dispose();
+                    throw;
+                }
+            }, _logger, $"Connect to {server.DisplayName}", cancellationToken);
         }
         finally
         {
@@ -1321,6 +1424,35 @@ WHERE server_id = $3";
                 s_mfaAuthLock.Release();
             }
         }
+    }
+
+    /// <summary>
+    /// Runs one connect operation under <see cref="RetryHelper"/>, holding <paramref name="throttle"/> for
+    /// each attempt and for nothing else: a slot is taken at the top of every attempt and given back in a
+    /// <c>finally</c> when that attempt returns or fails, so the backoff <see cref="RetryHelper"/> waits out
+    /// between attempts never holds one (#4722). A wait for a slot that is cancelled hands nothing back,
+    /// because the slot was never held. Split out of <see cref="CreateConnectionAsync"/> so the throttle can
+    /// be exercised against a semaphore of a test's own, without a server.
+    /// </summary>
+    internal static async Task<T> ExecuteThrottledWithRetryAsync<T>(
+        SemaphoreSlim throttle,
+        Func<Task<T>> attempt,
+        ILogger? logger,
+        string operationName,
+        CancellationToken cancellationToken)
+    {
+        return await RetryHelper.ExecuteWithRetryAsync<T>(async () =>
+        {
+            await throttle.WaitAsync(cancellationToken);
+            try
+            {
+                return await attempt();
+            }
+            finally
+            {
+                throttle.Release();
+            }
+        }, logger, operationName, cancellationToken: cancellationToken);
     }
 
     /// <summary>
@@ -1387,25 +1519,142 @@ WHERE server_id = $3";
     /// so there is no ceiling to exceed and nothing to cancel. Confirm that default still holds before
     /// concluding from this comment; it is what the whole argument rests on.</para>
     /// </summary>
+    /// <remarks>
+    /// The live SQL runs every cycle, exactly as above. The archive's maximum (the same statement on
+    /// <c>v_{table}</c>, cached per archive generation) joins it and the GREATER of the two is returned, null
+    /// counting as absent: a hole fill or a late row can leave the live maximum non-NULL but older than what the
+    /// archive-and-reset moved into Parquet. See <see cref="ReadArchiveViewAsync"/> for why that is exact.
+    /// </remarks>
     protected async Task<DateTime?> GetLastCollectedTimeAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken)
     {
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
             cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
-                return dt;
+            var live = result is DateTime dt ? dt : (DateTime?)null;
+
+            // The archive's maximum (cached per generation) always joins the live one: a hole fill or a late
+            // row can leave live non-null but OLDER than what the reset moved into Parquet.
+            var archived = await ReadArchiveViewAsync(conn,
+                $"time|{tableName}|{columnName}|{serverId}",
+                $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
+                [serverId], cancellationToken);
+            return GreaterOf(live, archived as DateTime?);
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* If DuckDB query fails, caller uses fallback window */
+            /* If DuckDB query fails, caller uses fallback window. A cancelled token must propagate
+               instead of being read as "query failed, use the fallback window" — the caller cannot tell
+               a real shutdown apart from an ordinary failure otherwise. */
+            LogWatermarkReadFailure("Watermark read", tableName, serverId, ex);
         }
         return null;
+    }
+
+    /// <summary>
+    /// One WARN for a watermark read that failed. The read still returns its "no watermark" value, so the
+    /// collector reads its fallback window this cycle and can store again events it already holds. The line
+    /// names the read, the table, the server and the exception type, so that cycle can be traced in the log.
+    /// The reads take only the server's id, so its display name comes from a scan of the server list; the id
+    /// stands in when no server matches.
+    /// </summary>
+    private void LogWatermarkReadFailure(string read, string tableName, int serverId, Exception ex)
+    {
+        var server = $"server_id {serverId}";
+        try
+        {
+            foreach (var candidate in _serverManager?.GetAllServers() ?? [])
+            {
+                if (GetServerId(candidate) == serverId)
+                {
+                    server = candidate.DisplayName;
+                    break;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            /* The display name is a convenience: the id above still names the server. */
+        }
+
+        AppLogger.Warn("Watermark", $"[{server}] {read} on {tableName} failed ({ex.GetType().Name}); this cycle runs "
+            + $"without a watermark and reads the collector's fallback window. {ex.Message}");
+    }
+
+    /// <summary>
+    /// The watermark read for a definition that declares a UTC twin beside its watermark column (#3778):
+    /// <c>MAX(utcColumnName)</c> and <c>MAX(columnName)</c> in one round trip, returning the twin's value with
+    /// <c>FromUtcColumn = true</c> when the store holds at least one row carrying it, else the declared column's
+    /// value with <c>false</c>, else <c>(null, false)</c> — the first-run fallback, exactly as
+    /// <see cref="GetLastCollectedTimeAsync"/> signals it. The runner puts the pair on
+    /// <see cref="PerformanceMonitor.Collectors.CollectorContext.Watermark"/> and
+    /// <see cref="PerformanceMonitor.Collectors.CollectorContext.WatermarkFromUtcColumn"/>, and the definition's
+    /// dedup compares each row IN THAT FRAME — the CPU collector's UTC twin against a UTC watermark, its local
+    /// stamp against a local one — which is what lets the autumn fall-back's repeated local hour land instead
+    /// of being dropped as already collected. Only <c>cpu_utilization</c> declares a twin today; every other
+    /// definition still goes through <see cref="GetLastCollectedTimeAsync"/> and its unchanged SQL. The
+    /// Darling twin is <c>DarlingCollectorRunner.GetLastCollectedTimeWithFrameAsync</c>.
+    ///
+    /// <para>The twin wins whenever it exists, without comparing the two maxima: it is NULL on every row written
+    /// before Lite v63 and non-null on every row the collector has written since, so once any post-rung row
+    /// exists the newest instant is a post-rung one. Comparing the two maxima to decide would itself be the
+    /// cross-frame comparison this read exists to avoid. Both values come from ONE scan of the same rows, so
+    /// "the twin is NULL, use the local stamp" is a statement about the store and not about a race between
+    /// two reads.</para>
+    ///
+    /// <para>The pair is also read from <c>v_{table}</c> with the same SQL (cached per archive generation, see
+    /// <see cref="ReadArchiveViewAsync"/>) and combined column by column: each column is the greater of its live
+    /// and archived maximum, then the rule above picks the frame. An archive-and-reset therefore does not return
+    /// the first-run fallback, and an older live row does not hide a newer archived instant.</para>
+    /// </summary>
+    protected async Task<(DateTime? Value, bool FromUtcColumn)> GetLastCollectedTimeWithFrameAsync(
+        int serverId, string tableName, string columnName, string utcColumnName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            DateTime? liveUtc = null, liveLocal = null;
+            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            {
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    liveUtc = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                    liveLocal = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                }
+            }
+
+            // The archive's pair (cached per generation) joins the live pair column by column.
+            var archived = await ReadArchiveViewAsync(conn,
+                $"frame|{tableName}|{columnName}|{utcColumnName}|{serverId}",
+                $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
+                [serverId], cancellationToken, readRow: ReadDatePair);
+            var (archivedUtc, archivedLocal) = archived is ValueTuple<DateTime?, DateTime?> pair ? pair : (null, null);
+
+            var utc = GreaterOf(liveUtc, archivedUtc);
+            if (utc is DateTime utcValue)
+                return (utcValue, true);
+            if (GreaterOf(liveLocal, archivedLocal) is DateTime localValue)
+                return (localValue, false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* If DuckDB query fails, caller uses fallback window — the sibling's contract. */
+            LogWatermarkReadFailure("Watermark read with its UTC twin", tableName, serverId, ex);
+        }
+        return (null, false);
     }
 
     /// <summary>
@@ -1423,6 +1672,17 @@ WHERE server_id = $3";
     /// Darling twin's larger store, and the same shape here. DuckDB does not partition the way the
     /// Postgres store's hypertables do, so the win is min-max index pruning and a smaller scan rather
     /// than chunk exclusion, but the predicate is the same and so is the argument for it.</para>
+    ///
+    /// <para>The floor is a SEMANTIC bound, not only a performance one: #2344's contract is that a database with
+    /// no row newer than the floor reads NULL. The callers act on the raw value (a clamp warning and a recorded
+    /// backfill hole whenever it differs from the clamped one), so an idle database must not return an old
+    /// non-NULL value every cycle. The live read keeps the bound. The archive side first reads the cached
+    /// unbounded per-database maximum A over <c>v_{table}</c> (one entry per (server, database) and archive
+    /// generation; a floor in the key would grow the cache without bound). With no floor, or A above the floor,
+    /// the GREATER of the live and A is returned, which is exact: the row reaching A has collection_time at or
+    /// above last_execution_time = A, which is above the floor. When A is at or below the floor, or absent, the
+    /// floored view SQL runs uncached and its result competes with the live one, which is exactly the floored
+    /// answer over live and archived rows.</para>
     /// </summary>
     protected async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
@@ -1430,6 +1690,8 @@ WHERE server_id = $3";
     {
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -1444,12 +1706,33 @@ WHERE server_id = $3";
             }
 
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
-                return dt;
+            var live = result is DateTime dt ? dt : (DateTime?)null;
+
+            // The archive side: the cached unbounded per-database maximum A, one entry per (server, database)
+            // however the floor moves. A above the floor (or no floor) is exact for the floored question too:
+            // the row that reaches A has collection_time >= last_execution_time = A > floor, so the floored
+            // MAX is A. A at or below the floor (or no archive value) means the floored answer over live ∪
+            // archive is NULL or no better than the live floored read, so run the floored view SQL uncached.
+            var archived = await ReadArchiveViewAsync(conn,
+                $"db|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
+                $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
+                [serverId, databaseName], cancellationToken) as DateTime?;
+            if (collectedSince is DateTime since && (archived is null || archived.Value <= since))
+            {
+                using var floored = conn.CreateCommand();
+                floored.CommandText = $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
+                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = since });
+                var flooredResult = await floored.ExecuteScalarAsync(cancellationToken);
+                archived = flooredResult is DateTime fdt ? fdt : null;
+            }
+            return GreaterOf(live, archived);
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* If DuckDB query fails, caller uses fallback window */
+            LogWatermarkReadFailure($"Watermark read for database {databaseName}", tableName, serverId, ex);
         }
         return null;
     }
@@ -1459,24 +1742,59 @@ WHERE server_id = $3";
     /// collection — the numeric twin of <see cref="GetLastCollectedTimeAsync"/> (job_history dedups on
     /// <c>instance_id</c>, sysjobhistory's IDENTITY bigint). Returns null on first run or if the query
     /// fails (caller uses its documented first-run/fallback path).
+    ///
+    /// <para><b>#4487: the newest BATCH's max, not the all-time max.</b> An all-time <c>MAX(instance_id)</c>
+    /// survives an identity reseed (or an msdb restore, or a failover to a replica whose msdb carries a
+    /// lower identity — the cause is not distinguishable from the rows alone) at whatever value the OLD
+    /// epoch left behind, which sits above every id the new epoch will ever produce. The target's own max
+    /// then never matches <c>jh.instance_id &gt; @last_instance_id</c> again, and the collector's bounded
+    /// 24h regressed-arm re-read runs every cycle instead of the one time its own doc comment promises.
+    /// Scoping the max to the newest <c>collection_time</c> for this server fixes that: the run right after
+    /// a reseed stores the new epoch's ids, so the very next run's newest batch is that epoch's own max.</para>
+    ///
+    /// <para>Both sides report their newest batch's time with its max id: the live table every cycle, and
+    /// <c>v_{table}</c> (newest-batch subquery included) cached per archive generation (see
+    /// <see cref="ReadArchiveViewAsync"/>). The id comes from whichever side holds the later batch, live winning
+    /// a tie, so a live row in an older batch cannot hide the archive's newest batch.</para>
     /// </summary>
     protected async Task<long?> GetLastCollectedInstanceIdAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken)
     {
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+            cmd.CommandText = $"SELECT collection_time, MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
+                + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1) GROUP BY collection_time";
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is not null && result != DBNull.Value)
-                return Convert.ToInt64(result);
+            (DateTime BatchTime, long Id)? live = null;
+            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            {
+                if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1))
+                    live = (reader.GetDateTime(0), Convert.ToInt64(reader.GetValue(1)));
+            }
+
+            // The archive's newest batch (cached per generation) competes with the live one on batch time.
+            var archivedRow = await ReadArchiveViewAsync(conn,
+                $"id|{tableName}|{columnName}|{serverId}",
+                $"SELECT collection_time, MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 "
+                    + $"AND collection_time = (SELECT MAX(collection_time) FROM v_{tableName} WHERE server_id = $1) GROUP BY collection_time",
+                [serverId], cancellationToken, readRow: ReadBatchRow);
+            (DateTime BatchTime, long Id)? archived = archivedRow is ValueTuple<DateTime, long> row ? row : null;
+
+            if (live is null)
+                return archived?.Id;
+            if (archived is null)
+                return live.Value.Id;
+            return archived.Value.BatchTime > live.Value.BatchTime ? archived.Value.Id : live.Value.Id;
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* If DuckDB query fails, caller uses fallback window */
+            LogWatermarkReadFailure("Instance-id watermark read", tableName, serverId, ex);
         }
         return null;
     }
@@ -1486,11 +1804,18 @@ WHERE server_id = $3";
     /// before" signal (see <see cref="PerformanceMonitor.Collectors.CollectorContext.HasCollectedBefore"/>),
     /// consulted only when the watermark is null. Returns false on any failure, which errs toward the
     /// all-history first run (correct for a genuinely fresh store).
+    ///
+    /// <para>Live first; when the live count is 0 the same count runs against <c>v_collection_log</c>, because
+    /// the archive-and-reset moves the log into Parquet with everything else (see
+    /// <see cref="ReadArchiveViewAsync"/>). A store that was reset therefore still reports that the collector
+    /// has run before.</para>
     /// </summary>
     protected async Task<bool> HasPriorCollectorSuccessAsync(int serverId, string collectorName, CancellationToken cancellationToken)
     {
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -1498,14 +1823,82 @@ WHERE server_id = $3";
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collectorName });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            return result is not null && result != DBNull.Value && Convert.ToInt64(result) > 0;
+            if (result is not null && result != DBNull.Value && Convert.ToInt64(result) > 0)
+                return true;
+
+            // No SUCCESS row in the live log: the reset archives collection_log too, so ask its view.
+            var archived = await ReadArchiveViewAsync(conn,
+                $"success|{serverId}|{collectorName}",
+                "SELECT COUNT(*) FROM v_collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS'",
+                [serverId, collectorName], cancellationToken);
+            return archived is not null && Convert.ToInt64(archived) > 0;
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* Fail toward first-run (all-history) — matches a fresh store with no log yet. */
             return false;
         }
     }
+
+    /// <summary>
+    /// Runs a watermark read's SQL against the archive view <c>v_{table}</c> and caches the answer, so the
+    /// live read can be combined with what the archive-and-reset moved into Parquet: the greater maximum for a
+    /// high-water mark, the lesser minimum for a floor, the live count first for a count. Used by the
+    /// watermark reads on this class and by the Query Store backfill's stored-floor read.
+    ///
+    /// <para><b>Why:</b> the 512 MB archive-and-reset exports every archivable table to Parquet and
+    /// recreates an empty live database, so a live-only read forgets everything the store ever held and the
+    /// collector re-reads its fallback window (or all history) and stores already-archived events again.
+    /// The view is the live table <c>UNION ALL BY NAME</c> the Parquet files.</para>
+    ///
+    /// <para><b>Why it is exact:</b> the reset exports <c>SELECT *</c>, so the view's maximum equals the
+    /// maximum from before the reset. The live side is read every cycle and the cached archive value joins it
+    /// (greater of two maxima, lesser of two minima). Within one generation live rows only grow, because any
+    /// removal bumps the generation, so combining the live value now with the view's value at fill time equals
+    /// combining it with the archive's value now.</para>
+    ///
+    /// <para><b>The generation rule:</b> the answer is cached per archive generation
+    /// (<see cref="DuckDbInitializer.ArchiveViewGeneration"/>), including a null answer, so the Parquet files
+    /// are not scanned every cycle. Callers key it by the read's identity, never by a moving bound, so the
+    /// cache stays bounded. The generation is sampled before the view is
+    /// queried. The caller holds the read lock and passes its open connection. <paramref name="readRow"/>
+    /// turns the first row of a multi-column read into the cached value.</para>
+    /// </summary>
+    private async Task<object?> ReadArchiveViewAsync(
+        DuckDB.NET.Data.DuckDBConnection conn, string cacheKey, string viewSql, object[] parameters,
+        CancellationToken cancellationToken, Func<System.Data.Common.DbDataReader, object?>? readRow = null)
+    {
+        var generation = _duckDb.ArchiveViewGeneration;
+        return await _archiveWatermarks.GetOrReadAsync(cacheKey, generation, async () =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = viewSql;
+            foreach (var value in parameters)
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = value });
+            if (readRow is not null)
+            {
+                // A multi-column read: the delegate turns the first row (or none) into the cached value.
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                return await reader.ReadAsync(cancellationToken) ? readRow(reader) : null;
+            }
+
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            return result == DBNull.Value ? null : result;
+        });
+    }
+
+    /// <summary>Row shape for the two-column twin read: (UTC twin maximum, declared column maximum), either may be null.</summary>
+    private static object? ReadDatePair(System.Data.Common.DbDataReader reader) =>
+        (reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0),
+         reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1));
+
+    /// <summary>Row shape for the newest-batch read: (batch time, the batch's maximum id), or null when either is NULL.</summary>
+    private static object? ReadBatchRow(System.Data.Common.DbDataReader reader) =>
+        reader.IsDBNull(0) || reader.IsDBNull(1) ? null : (reader.GetDateTime(0), Convert.ToInt64(reader.GetValue(1)));
+
+    /// <summary>The later of two optional instants, treating null as absent.</summary>
+    private static DateTime? GreaterOf(DateTime? a, DateTime? b) =>
+        a is null ? b : b is null ? a : (a.Value >= b.Value ? a : b);
 
     /// <summary>
     /// The stored per-server state for one collector's declared keys (#1962) — the sibling of
@@ -1521,6 +1914,8 @@ WHERE server_id = $3";
         var state = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -1560,6 +1955,11 @@ WHERE server_id = $3";
 
         try
         {
+            /* Write lock (#4343): INSERT OR REPLACE is an upsert, which can collide with another writer of
+               the same key (DuckDbInitializer's own rule). No cancelable write-lock overload exists, so
+               this blocks like the class's other non-UI, best-effort writers — the whole call is already
+               caught and logged as non-fatal below. */
+            using var writeLock = _duckDb.AcquireWriteLock();
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             foreach (var entry in state)

@@ -8,8 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
@@ -67,6 +69,7 @@ public sealed class PgFactCollectorTests
         "CollectMemoryFactsAsync",
         "CollectMemoryGrantFactsAsync",
         "CollectMemoryPressureEventFactsAsync",
+        "CollectObservedCoverageAsync",
         "CollectParameterSensitivityFactsAsync",
         "CollectPerfmonFactsAsync",
         "CollectPlanAdvisoryFactsAsync",
@@ -106,10 +109,107 @@ public sealed class PgFactCollectorTests
     [Fact]
     public void AllSql_CoversEveryQuery_OnePerCollectMethodPlusTheDmvFallback()
     {
-        /* 31 collect methods, one query each, plus the DMV-snapshot fallback the blocking-chain
-           method appends through PgBlockingPairRowQuery. */
-        Assert.Equal(LiteCollectMethodSurface.Length + 1, PgFactCollector.AllSql.Count);
+        /* 32 collect methods (31 fact readers plus the #3538 coverage witness), one query each, plus
+           the DMV-snapshot fallback the blocking-chain method appends through PgBlockingPairRowQuery, plus
+           PLAN_REGRESSION's #3953 table twin: the plan-regression method runs one of two reads per server,
+           and Lite has no store for the second (its DuckDB keeps no latest-snapshot interval table). */
+        Assert.Equal(LiteCollectMethodSurface.Length + 2, PgFactCollector.AllSql.Count);
+        Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);
         Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotSql, PgFactCollector.AllSql);
+        Assert.Contains(PgFactCollector.CoverageSql, PgFactCollector.AllSql);
+    }
+
+    /* ---------------- #3538 A2: the coverage witness ---------------- */
+
+    /// <summary>
+    /// #3538 A2: the coverage witness reads the SAME series the wait fractions are summed from, finds
+    /// the first in-window row's predecessor by scanning one gap policy back ($4) and clips its
+    /// interval to the window, and credits an interval past the policy ($5, bound — never a literal, so
+    /// it cannot drift from the calculator that discarded the delta) as zero. Pinned on the text
+    /// because each of those is a behaviour a well-meaning simplification would remove: drop the
+    /// lookback and every window under-credits one cadence; inline 3600 and the next policy change
+    /// deflates rates again; drop the policy branch and a three-hour outage credits an hour of
+    /// observation to a delta the calculator threw away.
+    /// </summary>
+    [Fact]
+    public void CoverageSql_ReadsTheWaitSeries_LooksBackOnePolicy_ClipsToTheWindow_AndDiscardsPastThePolicy()
+    {
+        var sql = PgFactCollector.CoverageSql;
+
+        Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT DISTINCT collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
+
+        /* The lookback bound and the policy are PARAMETERS. */
+        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
+        Assert.Contains("> $5 THEN 0", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("3600", sql, StringComparison.Ordinal);
+
+        /* Clipped to the window start, so observed time can never exceed the nominal window. */
+        Assert.Contains("GREATEST(previous_time, $2)", sql, StringComparison.Ordinal);
+
+        /* The edge columns the C# finishes the lead-in and tail gaps from. */
+        Assert.Contains("AS orphan_count", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time) AS first_sample", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time) AS last_sample", sql, StringComparison.Ordinal);
+
+        /* Byte-identical to Lite's inline text — the two collectors are a method-for-method port and
+           the shared dialect is the whole reason this query could be written once. */
+        var lite = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Analysis", "DuckDbFactCollector.Waits.cs"));
+        Assert.Contains(sql.Trim(), lite, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The three rate-fact sites divide by the OBSERVED duration and bail on an unobserved window, in
+    /// both SKUs — a wait fact emitted against the nominal window on either side would silently
+    /// re-open the defect for that SKU only, and the census above cannot see a divisor.
+    /// </summary>
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Analysis/PgFactCollector.Waits.cs")]
+    [InlineData("Lite/Analysis/DuckDbFactCollector.Waits.cs")]
+    public void RateFacts_DivideByObservedDuration_AndBailWhenUnobserved(string relativePath)
+    {
+        var source = File.ReadAllText(Path.Combine(RepoRoot(), relativePath));
+
+        Assert.Contains("waitTimeMs / context.ObservedDurationMs", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("waitTimeMs / context.PeriodDurationMs", source, StringComparison.Ordinal);
+        Assert.Equal(2, CountOf(source, "var observedHours = context.ObservedDurationMs / 3_600_000.0;"));
+        Assert.Equal(3, CountOf(source, "if (context.ObservedDurationMs <= 0) return;"));
+
+        /* Every use of the nominal window left in the file is a metadata statement of what was asked
+           for, never a divisor. */
+        foreach (var line in source.Split('\n').Where(l => l.Contains("context.PeriodDurationMs", StringComparison.Ordinal)))
+        {
+            Assert.True(
+                line.Contains("[\"period_duration_ms\"]", StringComparison.Ordinal)
+                    || line.Contains("var periodHours = ", StringComparison.Ordinal)
+                    || line.Contains("var nominalMs = ", StringComparison.Ordinal),
+                $"{relativePath} still uses the nominal window somewhere other than metadata: {line.Trim()}");
+        }
+    }
+
+    private static int CountOf(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+            count++;
+        return count;
+    }
+
+    /* The house idiom for source-anchored pins (AnalysisPassCommandTimeoutTests et al.): walk up from
+       THIS file, so the pin reads the tree it was compiled from rather than wherever the binary runs. */
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null
+               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
+               && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 
     [Fact]
@@ -146,11 +246,15 @@ public sealed class PgFactCollectorTests
         /* any_value() is standard SQL:2023, in Postgres since 16 (product minimum PG is 17).
            It is deliberate in the plan-regression aggregation and nowhere else. */
         Assert.Contains("any_value(query_plan_hash)", PgFactCollector.PlanRegressionSql, StringComparison.Ordinal);
+        Assert.Contains("any_value(query_plan_hash)", PgFactCollector.PlanRegressionTableSql, StringComparison.Ordinal);
         foreach (var sql in PgFactCollector.AllSql)
         {
             if (sql.Contains("any_value", StringComparison.OrdinalIgnoreCase))
             {
-                Assert.Equal(PgFactCollector.PlanRegressionSql, sql);
+                /* The two PLAN_REGRESSION reads (#3953: raw, and its interval-table twin), and nothing else. */
+                Assert.True(
+                    sql == PgFactCollector.PlanRegressionSql || sql == PgFactCollector.PlanRegressionTableSql,
+                    "any_value() outside the PLAN_REGRESSION reads:\n" + sql);
             }
         }
     }
@@ -192,8 +296,13 @@ public sealed class PgFactCollectorTests
             foreach (Match m in Regex.Matches(scanSql, @"\b(?:FROM|JOIN)\s+(\w+)", RegexOptions.IgnoreCase))
             {
                 var target = m.Groups[1].Value;
+
+                /* #3953: the latest-snapshot interval table is the one non-collector relation a fact reads,
+                   sourced from its Storage class rather than restated, as #2150 did for query_store_text in
+                   the drill-down guard. */
                 Assert.True(
-                    views.Contains(target) || tables.Contains(target) || ctes.Contains(target),
+                    views.Contains(target) || tables.Contains(target) || ctes.Contains(target)
+                        || target == QueryStoreIntervalLatest.TableName,
                     $"FROM/JOIN target '{target}' resolves to no V4 view, collector table, or CTE in:\n{sql}");
             }
         }
@@ -247,21 +356,34 @@ public sealed class PgFactCollectorTests
             /* Plant the two representative collectors' inputs:
                1. wait_stats — a wait with delta_wait_time_ms > 0 (the WaitStatsSql emission
                   gate) that is neither LCK_M_* nor CX* so the shared grouping helpers no-op:
-                  900,000 ms over a 3,600,000 ms window = 0.25 fraction, 3,000 tasks = 300 ms avg. */
-            using (var plant = new NpgsqlCommand(@"
+                  900,000 ms over a 3,600,000 ms window = 0.25 fraction, 3,000 tasks = 300 ms avg.
+
+                  Two rows, not one (#3538 A2): a baseline reading at the window start with no
+                  knowable delta, and the delta row at the window end whose change accrued over the
+                  hour between them. The fraction now divides by the OBSERVED collection time — the
+                  interval between consecutive readings — and a lone delta row with nothing before it
+                  observes no time at all (the calculator's first sighting), so the single-row fixture
+                  this used to plant would correctly yield no wait fact. The series covers the window
+                  exactly, so the 0.25 the scenario documents is unchanged. */
+            foreach (var (time, deltaTasks, deltaWaitMs, deltaSignalMs) in new[]
+            {
+                (windowStart, 0L, 0L, 0L),
+                (windowEnd, 3000L, 900000L, 100000L)
+            })
+            {
+                using var plant = new NpgsqlCommand(@"
 INSERT INTO wait_stats
     (collection_id, collection_time, server_id, server_name,
      wait_type, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection))
-            {
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
                 plant.Parameters.AddWithValue(CollectionIdGenerator.Next());
-                plant.Parameters.AddWithValue(sampleTime);
+                plant.Parameters.AddWithValue(time);
                 plant.Parameters.AddWithValue(TestServerId);
                 plant.Parameters.AddWithValue(TestServerName);
                 plant.Parameters.AddWithValue("SOS_SCHEDULER_YIELD");
-                plant.Parameters.AddWithValue(3000L);
-                plant.Parameters.AddWithValue(900000L);
-                plant.Parameters.AddWithValue(100000L);
+                plant.Parameters.AddWithValue(deltaTasks);
+                plant.Parameters.AddWithValue(deltaWaitMs);
+                plant.Parameters.AddWithValue(deltaSignalMs);
                 await plant.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
             }
 
@@ -305,6 +427,16 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
             Assert.Equal(800000, wait.Metadata["resource_wait_time_ms"]);
             Assert.Equal(300.0, wait.Metadata["avg_ms_per_wait"], precision: 10);
 
+            /* #3538 A2: the series covered the window exactly, so coverage is full, the wait fact
+               carries a coverage_fraction of 1, and no COLLECTION_GAP fact is emitted. */
+            Assert.NotNull(context.Coverage);
+            Assert.Equal(1.0, context.Coverage!.Fraction, precision: 6);
+            Assert.False(context.Coverage.IsPartial);
+            Assert.Equal(2, context.Coverage.SampleCount);
+            Assert.Equal(1.0, wait.Metadata["coverage_fraction"], precision: 6);
+            Assert.Equal(3_600_000, wait.Metadata["period_duration_ms"]);
+            Assert.DoesNotContain(facts, f => f.Key == WindowCoverage.FactKey);
+
             /* The CPU fact: Value = average SQL CPU %, and no spurious CPU_SPIKE. */
             var cpu = Assert.Single(facts, f => f.Source == "cpu");
             Assert.Equal("CPU_SQL_PERCENT", cpu.Key);
@@ -331,6 +463,8 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
                 ServerUtcOffset = TimeSpan.Zero
             };
             Assert.Empty(await collector.CollectFactsAsync(emptyContext));
+            Assert.NotNull(emptyContext.Coverage);
+            Assert.False(emptyContext.Coverage!.IsObserved);
 
             bodySucceeded = true;
         }
@@ -338,6 +472,289 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteTestRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /* ---------------- #3527: perfmon facts are per-second rates ---------------- */
+
+    /// <summary>
+    /// #3527: delta_cntr_value spans one COLLECTION INTERVAL, not one second — read raw, the
+    /// PERFMON_*_SEC facts overstate by the cadence (60x at 60s, 300x at 5min). The query must
+    /// select the row's measured sample_interval_seconds (#2234) for the division and filter
+    /// interval &lt;= 0 rows (no delta was knowable: first sighting, reset, gap) so rn = 1 lands on
+    /// the newest row a rate can honestly be derived from.
+    /// </summary>
+    [Fact]
+    public void PerfmonSql_SelectsTheMeasuredInterval_AndFiltersUnknowableRows()
+    {
+        var sql = PgFactCollector.PerfmonSql;
+
+        Assert.Contains("delta_cntr_value, sample_interval_seconds", sql, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds > 0", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3527 live fixture: a 'Batch Requests/sec' row with delta 6000 over a measured 60s interval
+    /// must emit PERFMON_BATCH_REQ_SEC = 100 (not 6000), with the raw delta and the divisor in the
+    /// metadata. A NEWER interval-0 row (unknowable delta) must be skipped — the fact still comes
+    /// from the older usable row — and a counter with ONLY interval-0 rows emits no fact at all,
+    /// never a fact of 0.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_PerfmonFacts_DivideDeltaByMeasuredInterval_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live perfmon fact test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int perfmonServerId = TestServerId - 2; // own id — this test cleans its own rows
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM perfmon_stats WHERE server_id = {perfmonServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var collector = new PgFactCollector(postgres);
+
+        var bodySucceeded = false;
+        try
+        {
+            var windowEnd = TruncateToSeconds(DateTime.UtcNow);
+            var windowStart = windowEnd.AddHours(-1);
+
+            async Task PlantAsync(long id, DateTime time, string counter, long delta, int intervalSeconds)
+            {
+                using var plant = new NpgsqlCommand(@"
+INSERT INTO perfmon_stats
+    (collection_id, collection_time, server_id, server_name,
+     object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
+                plant.Parameters.AddWithValue(id);
+                plant.Parameters.AddWithValue(time);
+                plant.Parameters.AddWithValue(perfmonServerId);
+                plant.Parameters.AddWithValue("perfmon-per-second-e2e");
+                plant.Parameters.AddWithValue("SQLServer:SQL Statistics");
+                plant.Parameters.AddWithValue(counter);
+                plant.Parameters.AddWithValue("");
+                plant.Parameters.AddWithValue(delta * 2);
+                plant.Parameters.AddWithValue(delta);
+                plant.Parameters.AddWithValue(intervalSeconds);
+                await plant.ExecuteNonQueryAsync(ct);
+            }
+
+            /* Batch requests: an older USABLE row (delta 6000 / 60s = 100/sec), then a NEWER
+               interval-0 row that must not become the fact. */
+            await PlantAsync(1, windowStart.AddMinutes(20), "Batch Requests/sec", 6000, 60);
+            await PlantAsync(2, windowStart.AddMinutes(25), "Batch Requests/sec", 0, 0);
+
+            /* Compilations: one usable row, 300 / 60s = 5/sec. */
+            await PlantAsync(3, windowStart.AddMinutes(20), "SQL Compilations/sec", 300, 60);
+
+            /* Re-compilations: ONLY an interval-0 row — no rate is knowable, so no fact. */
+            await PlantAsync(4, windowStart.AddMinutes(20), "SQL Re-Compilations/sec", 0, 0);
+
+            var context = new AnalysisContext
+            {
+                ServerId = perfmonServerId,
+                ServerName = "perfmon-per-second-e2e",
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            var facts = await collector.CollectFactsAsync(context);
+
+            var batch = Assert.Single(facts, f => f.Key == "PERFMON_BATCH_REQ_SEC");
+            Assert.Equal(100.0, batch.Value, precision: 10);
+            Assert.Equal(6000, batch.Metadata["delta_cntr_value"]);
+            Assert.Equal(60, batch.Metadata["sample_interval_seconds"]);
+
+            var compilations = Assert.Single(facts, f => f.Key == "PERFMON_COMPILATIONS_SEC");
+            Assert.Equal(5.0, compilations.Value, precision: 10);
+
+            Assert.DoesNotContain(facts, f => f.Key == "PERFMON_RECOMPILATIONS_SEC");
+            Assert.Equal(2, facts.Count);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand(
+                    $"DELETE FROM perfmon_stats WHERE server_id = {perfmonServerId};", cleanup);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /* ---------------- #3653: RUNNING_JOBS names the job ---------------- */
+
+    /// <summary>
+    /// #3653 (A9): the RUNNING_JOBS aggregate names ONE job — the one furthest past its own history among
+    /// the rows that were RUNNING LONG — and the emission carries it on <c>Fact.ObjectName</c>, never in the
+    /// doubles-only metadata. Pinned on the text because each clause is a behaviour a simplification would
+    /// remove: drop the FILTER and the longest merely-running job is named; put duration before percent and
+    /// a slow-but-normal job outranks a fast one at 4× its average; drop the job_name tail and two equal rows
+    /// pick nondeterministically, rewriting the frozen finding text between passes over the same window.
+    /// Both SKUs: Lite's inline query carries the clause verbatim and maps the same ordinal to the same
+    /// slot, so a change to one side fails here before the parity review has to find it.
+    /// </summary>
+    [Fact]
+    public void RunningJobsSql_NamesTheJobFurthestPastItsOwnHistory_AmongLongRowsOnly_OnObjectName_BothSkus()
+    {
+        var sql = PgFactCollector.RunningJobsSql;
+
+        const string clause =
+            "(ARRAY_AGG(job_name ORDER BY percent_of_average DESC NULLS LAST, current_duration_seconds DESC, job_name)";
+        Assert.Contains(clause, sql, StringComparison.Ordinal);
+        Assert.Contains("FILTER (WHERE is_running_long))[1] AS worst_long_job_name", sql, StringComparison.Ordinal);
+
+        /* The four pre-existing columns keep their positions (the C# reads ordinals 0–3 as before) and the
+           name is the FIFTH — the C# reads ordinal 4. */
+        var columns = Regex.Matches(sql, @"\bAS\s+(\w+)", RegexOptions.IgnoreCase).Select(m => m.Groups[1].Value).ToArray();
+        Assert.Equal(
+            new[] { "running_count", "running_long_count", "max_percent_of_avg", "max_duration_seconds", "worst_long_job_name" },
+            columns);
+
+        /* Any_value would be the wrong tool here twice over: it is unordered, and the dialect pin above
+           confines it to the plan-regression query. */
+        Assert.DoesNotContain("any_value", sql, StringComparison.OrdinalIgnoreCase);
+
+        foreach (var relativePath in new[]
+        {
+            "Darling/PerformanceMonitor.Darling.Analysis/PgFactCollector.Activity.cs",
+            "Lite/Analysis/DuckDbFactCollector.Activity.cs"
+        })
+        {
+            var source = File.ReadAllText(Path.Combine(RepoRoot(), relativePath));
+            Assert.Contains(clause, source, StringComparison.Ordinal);
+            Assert.Contains("FILTER (WHERE is_running_long))[1] AS worst_long_job_name", source, StringComparison.Ordinal);
+
+            /* The ordinal-4 read keeps NULL as null (not ""), and the value lands on ObjectName. */
+            Assert.Contains("var worstLongJobName = reader.IsDBNull(4) ? null : reader.GetString(4);", source, StringComparison.Ordinal);
+            Assert.Contains("ObjectName = worstLongJobName,", source, StringComparison.Ordinal);
+
+            /* Never into Metadata: the dictionary is Dictionary<string, double>, so a string there would not
+               compile — this guards the next-cheapest drift, a numeric "has_name" stand-in that a reader would
+               then have to reverse-map. The RUNNING_JOBS metadata block stays the four figures. */
+            var emission = source.IndexOf("Key = \"RUNNING_JOBS\",", StringComparison.Ordinal);
+            Assert.True(emission >= 0, $"{relativePath}: RUNNING_JOBS emission not found");
+            var block = source[emission..source.IndexOf("});", emission, StringComparison.Ordinal)];
+            var metadataKeys = Regex.Matches(block, @"\[""(\w+)""\]\s*=").Select(m => m.Groups[1].Value).ToArray();
+            Assert.Equal(new[] { "running_count", "running_long_count", "max_percent_of_average", "max_duration_seconds" }, metadataKeys);
+        }
+    }
+
+    /// <summary>
+    /// #3653 live fixture: three running_jobs rows at one tick — two running long (400% at 7,200 s and 250%
+    /// at 9,000 s) and one not (the longest runtime and the highest percent of the three, so a dropped
+    /// FILTER would name it) — must emit RUNNING_JOBS with the 400% job on ObjectName, the running-long
+    /// count as the value, and the pre-#3653 per-row counts and window maxima untouched beside it. A second
+    /// tick where nothing runs long must emit the fact with a NULL name, not an empty string and not the
+    /// longest job present.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_RunningJobs_NamesTheWorstLongJob_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live running-jobs fact test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int jobsServerId = TestServerId - 3; // own id — this test cleans its own rows
+        const int quietServerId = TestServerId - 4;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM running_jobs WHERE server_id IN ({jobsServerId}, {quietServerId});", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var collector = new PgFactCollector(postgres);
+
+        var bodySucceeded = false;
+        try
+        {
+            var windowEnd = TruncateToSeconds(DateTime.UtcNow);
+            var windowStart = windowEnd.AddHours(-1);
+            var tick = windowStart.AddMinutes(30);
+
+            async Task PlantAsync(int serverId, string jobName, long currentSeconds, bool isLong, decimal? percentOfAverage)
+            {
+                /* avg/p95 derived so is_running_long agrees with the collector's own definition (current > p95
+                   when long); percent_of_average is stored verbatim because the ORDER BY reads the column. */
+                using var plant = new NpgsqlCommand(@"
+INSERT INTO running_jobs
+    (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time,
+     current_duration_seconds, avg_duration_seconds, p95_duration_seconds, successful_run_count,
+     is_running_long, percent_of_average)
+VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)", connection);
+                plant.Parameters.AddWithValue(tick);
+                plant.Parameters.AddWithValue(serverId);
+                plant.Parameters.AddWithValue("running-jobs-name-e2e");
+                plant.Parameters.AddWithValue(jobName);
+                plant.Parameters.AddWithValue(Guid.NewGuid().ToString());
+                plant.Parameters.AddWithValue(tick.AddSeconds(-currentSeconds));
+                plant.Parameters.AddWithValue(currentSeconds);
+                plant.Parameters.AddWithValue(isLong ? currentSeconds / 3 : currentSeconds);
+                plant.Parameters.AddWithValue(isLong ? currentSeconds / 2 : currentSeconds * 2);
+                plant.Parameters.AddWithValue(isLong);
+                plant.Parameters.AddWithValue((object?)percentOfAverage ?? DBNull.Value);
+                await plant.ExecuteNonQueryAsync(ct);
+            }
+
+            await PlantAsync(jobsServerId, "Weekly CHECKDB", 9_000, isLong: true, percentOfAverage: 250.0m);
+            await PlantAsync(jobsServerId, "Nightly Index Maintenance", 7_200, isLong: true, percentOfAverage: 400.0m);
+            await PlantAsync(jobsServerId, "Long Steady ETL", 99_999, isLong: false, percentOfAverage: 900.0m);
+
+            await PlantAsync(quietServerId, "Log Backup", 300, isLong: false, percentOfAverage: 100.0m);
+            await PlantAsync(quietServerId, "Long Steady ETL", 99_999, isLong: false, percentOfAverage: null);
+
+            AnalysisContext Context(int serverId) => new()
+            {
+                ServerId = serverId,
+                ServerName = "running-jobs-name-e2e",
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            var jobs = Assert.Single(await collector.CollectFactsAsync(Context(jobsServerId)), f => f.Key == "RUNNING_JOBS");
+            Assert.Equal("Nightly Index Maintenance", jobs.ObjectName);
+            Assert.Equal(2, jobs.Value);
+            Assert.Equal(3, jobs.Metadata["running_count"]);
+            Assert.Equal(2, jobs.Metadata["running_long_count"]);
+            Assert.Equal(900, jobs.Metadata["max_percent_of_average"]);
+            Assert.Equal(99_999, jobs.Metadata["max_duration_seconds"]);
+
+            var quiet = Assert.Single(await collector.CollectFactsAsync(Context(quietServerId)), f => f.Key == "RUNNING_JOBS");
+            Assert.Null(quiet.ObjectName);
+            Assert.Equal(0, quiet.Value);
+            Assert.Equal(2, quiet.Metadata["running_count"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand(
+                    $"DELETE FROM running_jobs WHERE server_id IN ({jobsServerId}, {quietServerId});", cleanup);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
         }
     }
 

@@ -45,7 +45,13 @@ namespace PerformanceMonitorDashboard.Services
             ps.cntr_type,
             ps.cntr_value_delta,
             ps.sample_interval_seconds,
-            ps.cntr_value_per_second
+            /* #3653 (#3540 A11): the table's computed cntr_value_per_second is bigint / integer, and T-SQL
+               truncates integer division — 59 batch requests over a 60-second interval read as 0/sec, and
+               every counter under one-per-second rendered as a flat zero. Recomputed here on the read so the
+               grids and MCP payloads see the real rate; the schema column is left as it is. */
+            cntr_value_per_second =
+                ps.cntr_value_delta * 1.0 /
+                    NULLIF(ps.sample_interval_seconds, 0)
         FROM collect.perfmon_stats AS ps
         {dateFilter}
         ORDER BY
@@ -81,7 +87,7 @@ namespace PerformanceMonitorDashboard.Services
                             CntrType = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                             CntrValueDelta = reader.IsDBNull(8) ? null : reader.GetInt64(8),
                             SampleIntervalSeconds = reader.IsDBNull(9) ? null : reader.GetInt32(9),
-                            CntrValuePerSecond = reader.IsDBNull(10) ? null : reader.GetInt64(10)
+                            CntrValuePerSecond = reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10), CultureInfo.InvariantCulture)
                         });
                     }
         
@@ -123,7 +129,13 @@ namespace PerformanceMonitorDashboard.Services
             ps.cntr_type,
             ps.cntr_value_delta,
             ps.sample_interval_seconds,
-            ps.cntr_value_per_second
+            /* #3653 (#3540 A11): the table's computed cntr_value_per_second is bigint / integer, and T-SQL
+               truncates integer division — 59 batch requests over a 60-second interval read as 0/sec, and
+               every counter under one-per-second rendered as a flat zero. Recomputed here on the read so the
+               grids and MCP payloads see the real rate; the schema column is left as it is. */
+            cntr_value_per_second =
+                ps.cntr_value_delta * 1.0 /
+                    NULLIF(ps.sample_interval_seconds, 0)
         FROM collect.perfmon_stats AS ps
         {dateFilter}
         AND   ps.counter_name IN ({string.Join(", ", counterParams)})
@@ -163,7 +175,7 @@ namespace PerformanceMonitorDashboard.Services
                     CntrType = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                     CntrValueDelta = reader.IsDBNull(8) ? null : reader.GetInt64(8),
                     SampleIntervalSeconds = reader.IsDBNull(9) ? null : reader.GetInt32(9),
-                    CntrValuePerSecond = reader.IsDBNull(10) ? null : reader.GetInt64(10)
+                    CntrValuePerSecond = reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10), CultureInfo.InvariantCulture)
                 });
             }
 

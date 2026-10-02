@@ -135,7 +135,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData("get_perfmon_stats", "server_name,counter_name,instance_name")]
     [InlineData("get_top_queries_by_cpu", "server_name,hours_back,top,database_name,parallel_only,min_dop,as_of")]
     [InlineData("get_top_procedures_by_cpu", "server_name,hours_back,top,database_name,as_of")]
-    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of")]
+    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of,execution_type,module_name")]
     [InlineData("get_collection_health", "server_name")]
     /* #3287 gave this read two filters, on BOTH SKUs and in the same relative order, so it joins the theory
        rather than sitting outside it. The two are LAST because as_of and collector_name are both `string?`:
@@ -240,15 +240,16 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     /// <summary>
     /// <c>get_collection_log</c>'s parameter list, held identical across every surface that writes it down.
     ///
-    /// <para>Five places name these parameters: Darling's signature, Lite's signature, the two quick-reference
-    /// instruction tables (byte-identical rows on both SKUs), and the <c>/api/catalog</c> descriptor. #3287
-    /// added two filters to the first two and review found the other three stale — and nothing caught it,
-    /// because the new parameters are OPTIONAL and no shipped caller sends them, so every existing pin stayed
-    /// green. That is the same shape as the defect being fixed: a surface advertising a parameter list that no
-    /// longer matches what the read accepts, with no way for a consumer to discover the difference.</para>
+    /// <para>Three places name these parameters: Darling's signature, Lite's signature, and the
+    /// <c>/api/catalog</c> descriptor — down from five once #3898 Phase 2 (D5) retired the two quick-reference
+    /// instruction tables that used to carry byte-identical rows on both SKUs. #3287 added two filters to the
+    /// first two and review found the other three stale — and nothing caught it, because the new parameters
+    /// are OPTIONAL and no shipped caller sends them, so every existing pin stayed green. That is the same
+    /// shape as the defect being fixed: a surface advertising a parameter list that no longer matches what the
+    /// read accepts, with no way for a consumer to discover the difference.</para>
     ///
     /// <para>So the list is derived from the signature and compared, rather than each surface being spot-checked
-    /// for the two names this change happened to add. A third filter added to the tool and not to the tables
+    /// for the two names this change happened to add. A third filter added to the tool and not to the catalog
     /// reds this.</para>
     ///
     /// <para>The catalog is asserted by CONTAINMENT rather than equality, because it names parameters as they
@@ -262,22 +263,9 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 
         Assert.Equal(reflected, LiteMcpParamNames("get_collection_log", "GetCollectionLog"));
 
-        /* The tables render the list as backticked names joined by ", " — the shape every other row uses. */
-        var expectedCell = string.Join(", ", reflected.Select(n => $"`{n}`"));
-
-        var liteInstructions = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpInstructions.cs"));
-        foreach (var (surface, text) in new[]
-                 {
-                     ("Darling's instruction table", DarlingMcpInstructions.Text),
-                     ("Lite's instruction table", liteInstructions),
-                 })
-        {
-            Assert.Equal(expectedCell, CollectionLogInstructionCell(surface, text));
-        }
-
         var catalog = DarlingWebEndpoints.CatalogDescriptors["get_collection_log"].Params;
 
-        foreach (var filter in new[] { "collector_name", "min_duration_ms" })
+        foreach (var filter in new[] { "collector_name", "min_duration_ms", "status" })
         {
             Assert.Contains(filter, catalog.Select(p => p.Name));
         }
@@ -430,23 +418,6 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         return source[at..end];
     }
 
-    /// <summary>The "Key Parameters" cell of the <c>get_collection_log</c> row in a quick-reference table.</summary>
-    private static string CollectionLogInstructionCell(string surface, string text)
-    {
-        var row = text
-            .Split('\n')
-            .SingleOrDefault(l => l.TrimStart().StartsWith("| `get_collection_log` |", StringComparison.Ordinal));
-
-        Assert.True(row is not null, $"{surface} has no `get_collection_log` row — this pin needs re-anchoring.");
-
-        /* Four cells between five pipes, so the parameter list is the last populated one. The row is a single
-           line by convention and its prose carries no pipe, which is what makes this safe. */
-        var cells = row!.TrimEnd('\r').Split('|');
-        Assert.True(cells.Length >= 4, $"{surface}'s `get_collection_log` row is not a four-cell row.");
-
-        return cells[^2].Trim();
-    }
-
     /// <summary>The advertised MCP parameter names of one Lite tool, in declaration order, read out of Lite's
     /// own source — Darling.Tests holds no ProjectReference to Lite, and reading Lite .cs across the seam is
     /// the pattern #2839 established for exactly this.</summary>
@@ -554,8 +525,17 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("SUM(delta_wait_time_ms)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_signal_wait_time_ms)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_waiting_tasks)", sql, StringComparison.Ordinal);
+        /* #4884: a wait stored with and without its trailing space is one row under the clean name. The deltas
+           sum per stored name first (the bare GROUP BY), then the spellings merge on rtrim, once per group. */
         Assert.Contains("GROUP BY wait_type", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(delta_wait_time_ms) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains(") AS per_spelling", sql, StringComparison.Ordinal);
+        Assert.Contains("rtrim(wait_type) AS wait_type", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY rtrim(wait_type)", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY SUM(wait_time_ms) DESC", sql, StringComparison.Ordinal);
+        /* #3541 A3: the cap is the caller's ($4), not the 50 that sat under a limit the tool accepts up to
+           1,000 — the shape DarlingPgWaitReader already fixed for the PostgreSQL twin. */
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 50", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -563,9 +543,17 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     {
         var sql = DarlingDataReader.WaitTrendSql;
         Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("wait_type = $2", sql, StringComparison.Ordinal);
+        /* #4884: the lookup takes either stored spelling and keeps the column bare. */
+        Assert.Contains("wait_type IN ($2, $2 || ' ')", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("rtrim(wait_type) =", sql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("wait_time_ms_per_second", sql, StringComparison.Ordinal);
+        /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
+           pre-V127 rows; no ELSE 0 on the rate, so an unknowable interval reads NULL and never 0.00. */
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0 END", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -592,6 +580,22 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("delta_stall_write_ms", sql, StringComparison.Ordinal);
         Assert.Contains("delta_reads", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        /* #3540: the interval rides along so the tool can report latency as null on the unknowable marker. */
+        Assert.Contains("sample_interval_seconds", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3540: a file whose latest row is the calculator's unknowable marker (stored interval 0) reports
+    /// null latencies, not "0.00 ms"; a pre-V127 row (NULL interval) and a measured row keep the stall/op reading.</summary>
+    [Fact]
+    public void FileIoRow_ReportsUnknowable_OnlyForAStoredZeroInterval()
+    {
+        static DarlingDataReader.FileIoRow Row(int? interval) => new(
+            "AppDb", "AppDb_data", "ROWS", "D:\\AppDb.mdf", 100, DeltaReads: 0, DeltaWrites: 0, DeltaReadBytes: 0,
+            DeltaWriteBytes: 0, DeltaStallReadMs: 0, DeltaStallWriteMs: 0, SampleIntervalSeconds: interval);
+
+        Assert.True(Row(0).IsUnknowable);
+        Assert.False(Row(null).IsUnknowable);
+        Assert.False(Row(60).IsUnknowable);
     }
 
     [Fact]
@@ -612,6 +616,12 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("cntr_value", sql, StringComparison.Ordinal);
         Assert.Contains("delta_cntr_value", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+
+        /* The interval a rate row's per_second divides by, selected LAST (ordinal 6, after cntr_type) because the
+           reader reads by ordinal. */
+        var interval = sql.IndexOf("sample_interval_seconds", StringComparison.Ordinal);
+        Assert.True(interval > sql.IndexOf("cntr_type", StringComparison.Ordinal), "sample_interval_seconds must follow cntr_type");
+        Assert.True(interval < sql.IndexOf("FROM v_perfmon_stats", StringComparison.Ordinal), "sample_interval_seconds must be a selected column");
     }
 
     [Fact]
@@ -648,7 +658,28 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_name, schema_name, object_name, object_type", sql, StringComparison.Ordinal);
         Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_elapsed_time) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+    }
+
+    /* #3523: every by-CPU read RANKED by summed elapsed time — on a wait-bound server the real CPU
+       consumers could be absent from the page entirely, and attributed_cpu_ratio then read as "hidden
+       CPU" when it meant "wrong sort key". Both the ranking cut (the CTE's ORDER BY ... LIMIT) and the
+       post-WAITFOR-trim final ordering must key on CPU; the viewer's Duration grids keep their elapsed
+       ranking by design and are pinned separately in ViewerQueriesTests. */
+    [Theory]
+    [InlineData(nameof(DarlingDataReader.TopQueriesSql))]
+    [InlineData(nameof(DarlingDataReader.TopQueriesByHostObjectSql))]
+    [InlineData(nameof(DarlingDataReader.TopProceduresSql))]
+    public void ByCpuReads_RankByWorkerTime_NeverElapsed(string sqlName)
+    {
+        var sql = SqlByName(sqlName);
+        Assert.Contains("ORDER BY SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(delta_elapsed_time) DESC", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("total_elapsed_us DESC", sql, StringComparison.Ordinal);
+        if (sqlName != nameof(DarlingDataReader.TopProceduresSql))
+        {
+            Assert.Contains("ORDER BY r.total_cpu_us DESC", sql, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -659,9 +690,39 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("AVG(CAST(avg_duration_us AS double precision))", sql, StringComparison.Ordinal);
         /* replica_role is a grouping key: an AG's shared Query Store (2022+) would otherwise report
            primary and secondary workload blended into one row. */
-        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, replica_role", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
         Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
+        Assert.Contains("$6::text IS NULL OR execution_type_desc = $6", sql, StringComparison.Ordinal);
+        Assert.Contains("r.execution_type_desc", sql, StringComparison.Ordinal);
+        Assert.Contains("$7::text IS NULL OR module_name = $7", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(module_name) AS module_name", sql, StringComparison.Ordinal);
+        Assert.Contains("r.module_name", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(execution_count)", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStoreSql_AppliesModuleFilterAfterDedupAndBeforeRankingLimit()
+    {
+        var sql = DarlingDataReader.QueryStoreTopSql;
+        var rankedCte = sql.IndexOf("ranked AS", StringComparison.Ordinal);
+        var dedupSurvivor = sql.IndexOf("WHERE rn = 1", rankedCte, StringComparison.Ordinal);
+        var moduleFilter = sql.IndexOf("$7::text IS NULL OR module_name = $7", StringComparison.Ordinal);
+        var firstLimit = sql.IndexOf("LIMIT $4 + 5", StringComparison.Ordinal);
+
+        Assert.True(dedupSurvivor > rankedCte && moduleFilter > dedupSurvivor,
+            "module_name must filter only the latest cumulative interval snapshots");
+        Assert.True(moduleFilter < firstLimit,
+            "the deduped, filtered population must be ranked before the result cap");
+    }
+
+    [Fact]
+    public void QueryStoreWindowFloor_RemainsACheapUnfilteredRetentionProbe()
+    {
+        var sql = DarlingDataReader.QueryStoreWindowFloorSql;
+        Assert.Contains("SELECT MIN(collection_time)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("module_name", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("database_name", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -687,7 +748,11 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var sql = DarlingDataReader.ServerListSql;
         Assert.Contains("FROM servers", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(cl.collection_time)", sql, StringComparison.Ordinal);       /* freshness source */
+        /* #3976: a per-server LATERAL probe, not a correlated MAX(collection_time) — same freshness source,
+           a plan TimescaleDB can stop at the newest chunk with a row instead of planning every retained one. */
+        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY cl.collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_collection_log cl", sql, StringComparison.Ordinal);
     }
 
@@ -727,6 +792,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingDataReader.TempDbTrendSql))]
     [InlineData(nameof(DarlingDataReader.LatestPerfmonStatsSql))]
     [InlineData(nameof(DarlingDataReader.TopQueriesSql))]
+    [InlineData(nameof(DarlingDataReader.TopQueriesByHostObjectSql))]
     [InlineData(nameof(DarlingDataReader.TopProceduresSql))]
     [InlineData(nameof(DarlingDataReader.QueryStoreTopSql))]
     [InlineData(nameof(DarlingDataReader.ServerListSql))]
@@ -757,6 +823,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         nameof(DarlingDataReader.TempDbTrendSql) => DarlingDataReader.TempDbTrendSql,
         nameof(DarlingDataReader.LatestPerfmonStatsSql) => DarlingDataReader.LatestPerfmonStatsSql,
         nameof(DarlingDataReader.TopQueriesSql) => DarlingDataReader.TopQueriesSql,
+        nameof(DarlingDataReader.TopQueriesByHostObjectSql) => DarlingDataReader.TopQueriesByHostObjectSql,
         nameof(DarlingDataReader.TopProceduresSql) => DarlingDataReader.TopProceduresSql,
         nameof(DarlingDataReader.QueryStoreTopSql) => DarlingDataReader.QueryStoreTopSql,
         nameof(DarlingDataReader.ServerListSql) => DarlingDataReader.ServerListSql,
@@ -957,7 +1024,9 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
             AssertServerEnvelope(await DarlingMcpDataTools.GetWaitTypes(postgres, ServerName), "wait_types");
             AssertServerEnvelope(await DarlingMcpDataTools.GetMemoryStats(postgres, ServerName), "buffer_pool_mb");
             AssertServerEnvelope(await DarlingMcpDataTools.GetMemoryClerks(postgres, ServerName), "clerks");
-            AssertServerEnvelope(await DarlingMcpDataTools.GetFileIoStats(postgres, ServerName), "files");
+            var fileIo = await DarlingMcpDataTools.GetFileIoStats(postgres, ServerName);
+            AssertServerEnvelope(fileIo, "files");
+            AssertFileSizes(fileIo);
             AssertServerEnvelope(await DarlingMcpDataTools.GetTempDbTrend(postgres, ServerName), "trend");
             AssertServerEnvelope(await DarlingMcpDataTools.GetPerfmonStats(postgres, ServerName), "counters");
 
@@ -967,6 +1036,7 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
             Assert.Contains("0xE2EDATAHASH", q, StringComparison.Ordinal);   /* the planted query surfaced */
             AssertServerEnvelope(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName), "procedures");
             AssertServerEnvelope(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName), "queries");
+            await AssertQueryStoreOutcomesAsync(postgres, cs!, ct);
 
             /* database_name filter narrows without erroring. */
             AssertServerEnvelope(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 24, 20, Db), "queries");
@@ -983,7 +1053,8 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
 
             /* ---- server resolution flows through: an unknown name returns the listing error. */
             var unknown = await DarlingMcpDataTools.GetMemoryStats(postgres, "darling-no-such-server");
-            Assert.StartsWith("Could not resolve server.", unknown, StringComparison.Ordinal);
+            Assert.True(McpHelpers.IsRefusalEnvelope(unknown), unknown);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(unknown), StringComparison.Ordinal);
 
             /* ---- an EMPTY store for a tool returns the #1224 miss, not a throw. */
             await DeleteRowsAsync(connection, ct, keepServer: true);
@@ -1000,7 +1071,7 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
 
     private static void AssertServerEnvelope(string json, string expectedKey)
     {
-        Assert.False(json.StartsWith("Error during", StringComparison.Ordinal), $"tool returned an error: {json}");
+        Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         Assert.Equal(ServerName, root.GetProperty("server").GetString());
@@ -1053,9 +1124,35 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", ct, CollectionIdGenerator.Next
         await Exec(c, @"INSERT INTO memory_clerks (collection_id, collection_time, server_id, server_name, clerk_type, memory_mb)
 VALUES ($1,$2,$3,$4,$5,$6)", ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, "MEMORYCLERK_SQLBUFFERPOOL", 40000m);
 
-    private static async Task PlantFileIoAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct) =>
+    /* A data file with a size, and the log file of an Azure SQL Database Hyperscale database, which the collector
+       stores with NO size (a NULL size_mb). The NULL is written as SQL text, so no parameter type is inferred. */
+    private static async Task PlantFileIoAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct)
+    {
         await Exec(c, @"INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)", ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, Db, "StackOverflow.mdf", "ROWS", "D:\\data\\so.mdf", 100000m, 500L, 200L, 4096000L, 1024000L, 2500L, 400L);
+        await Exec(c, @"INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11,$12,$13,$14)", ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, Db, "StackOverflow_log", "LOG", "D:\\logs\\so_log.ldf", 20L, 300L, 81920L, 1228800L, 40L, 90L);
+    }
+
+    /// <summary>
+    /// The C# read of a NULL <c>size_mb</c>, end to end against the store: the Hyperscale log row reports
+    /// <c>size_mb</c> as null beside the shared <see cref="FileIoStatsCollector.NoSizeLabel"/>, and the data file
+    /// in the same snapshot keeps its size and a null note. <c>FileIoHyperscaleLogSizeTests</c> pins the statement
+    /// and the row projection without a store.
+    /// </summary>
+    private static void AssertFileSizes(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var files = doc.RootElement.GetProperty("files").EnumerateArray().ToArray();
+
+        var log = Assert.Single(files, f => f.GetProperty("file_type").GetString() == "LOG");
+        Assert.Equal(JsonValueKind.Null, log.GetProperty("size_mb").ValueKind);
+        Assert.Equal(FileIoStatsCollector.NoSizeLabel, log.GetProperty("size_note").GetString());
+
+        var data = Assert.Single(files, f => f.GetProperty("file_type").GetString() == "ROWS");
+        Assert.Equal(100000.0, data.GetProperty("size_mb").GetDouble());
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("size_note").ValueKind);
+    }
 
     private static async Task PlantTempDbAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct) =>
         await Exec(c, @"INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb, total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
@@ -1083,11 +1180,65 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
                 dc, dc * 1000L, dc * 2000L, dc * 400L, 0L, dc * 4L, 0L, 900L, 1200L, 1800L, 2400L);
     }
 
-    private static async Task PlantQueryStoreAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct) =>
-        await Exec(c, @"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, query_hash, query_plan_hash, query_text, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, min_dop, max_dop, last_execution_time)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
-            ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, Db, 42L, 7L, "0xE2EDATAHASH", "0xPLANHASH", "SELECT * FROM Users",
-            100L, 5000L, 4000L, 800L, 0L, 40L, 250L, 1L, 4L, Naive(t));
+    /* Two outcomes of ONE plan in ONE collection, the way Query Store writes them: a runtime-stats row per
+       (plan, interval, execution type). The Aborted row is what AssertQueryStoreOutcomesAsync splits out. */
+    private static async Task PlantQueryStoreAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct)
+    {
+        await PlantQueryStoreOutcomeAsync(c, t, "Regular", 100L, 5000L, ct);
+        await PlantQueryStoreOutcomeAsync(c, t, "Aborted", 3L, 30_000_000L, ct);
+    }
+
+    private static async Task PlantQueryStoreOutcomeAsync(NpgsqlConnection c, DateTime t, string executionType, long executionCount, long avgDurationUs, System.Threading.CancellationToken ct) =>
+        await Exec(c, @"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, query_hash, query_plan_hash, query_text, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, min_dop, max_dop, last_execution_time)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+            ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, Db, 42L, 7L, executionType, "0xE2EDATAHASH", "0xPLANHASH", "SELECT * FROM Users",
+            executionCount, avgDurationUs, 4000L, 800L, 0L, 40L, 250L, 1L, 4L, Naive(t));
+
+    /// <summary>
+    /// get_query_store_top's execution outcomes, against the two planted rows of plan 7: unfiltered it returns
+    /// one row per outcome (not one blended "Regular" row of 103); a filter in any case returns that outcome
+    /// alone; a filter that matches nothing while the unfiltered read has rows is <c>empty</c>, not the
+    /// "Query Store may not be enabled" fallback; an unknown outcome is refused by name. The viewer's grid twins
+    /// the read and splits the same way.
+    /// </summary>
+    private static async Task AssertQueryStoreOutcomesAsync(NpgsqlDataSource postgres, string cs, System.Threading.CancellationToken ct)
+    {
+        static (string?, long)[] Outcomes(JsonElement queries) => queries.EnumerateArray()
+            .Where(r => r.GetProperty("query_id").GetInt64() == 42)
+            .Select(r => (r.GetProperty("execution_type").GetString(), r.GetProperty("execution_count").GetInt64()))
+            .OrderBy(x => x.Item1, StringComparer.Ordinal)
+            .ToArray();
+
+        using (var all = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName)))
+        {
+            Assert.Equal(new (string?, long)[] { ("Aborted", 3L), ("Regular", 100L) }, Outcomes(all.RootElement.GetProperty("queries")));
+            /* No interval-table coverage on this store, so the raw tier served. */
+            Assert.Equal("raw", all.RootElement.GetProperty("history_source").GetString());
+        }
+
+        using (var aborted = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, execution_type: "aborted")))
+            Assert.Equal(new (string?, long)[] { ("Aborted", 3L) }, Outcomes(aborted.RootElement.GetProperty("queries")));
+
+        using (var none = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, execution_type: "Exception")))
+        {
+            Assert.Equal("empty", none.RootElement.GetProperty("status").GetString());
+            Assert.Contains("No Exception executions", none.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }
+
+        using (var bad = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, execution_type: "Timeout")))
+        {
+            Assert.Equal("invalid", bad.RootElement.GetProperty("status").GetString());
+            Assert.Equal("execution_type", bad.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        }
+
+        await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(cs);
+        var grid = (await viewer.GetQueryStoreTopQueriesAsync(ServerId, Naive(DateTime.UtcNow.AddHours(-24)), Naive(DateTime.UtcNow.AddMinutes(5)), cancellationToken: ct))
+            .Where(r => r.QueryId == 42)
+            .Select(r => (r.ExecutionTypeDesc, r.TotalExecutions))
+            .OrderBy(x => x.ExecutionTypeDesc, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(new[] { ("Aborted", 3L), ("Regular", 100L) }, grid);
+    }
 
     private static async Task PlantServerPropertiesAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct) =>
         await Exec(c, @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb, socket_count, cores_per_socket, is_hadr_enabled, is_clustered)

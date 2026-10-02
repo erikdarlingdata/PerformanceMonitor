@@ -167,10 +167,13 @@ public sealed class AnalysisShutdownResidueTests
         var baseline = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs"));
         Assert.Equal(1, Count(baseline, "when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))"));
 
-        /* The finding store: only its two PASS methods run under the worker's token; its read-back
-           surfaces serve other lifetimes and are deliberately untouched. */
+        /* The finding store: only its PASS methods run under the worker's token; its read-back surfaces serve
+           other lifetimes and are deliberately untouched. Three since #3653 item 3: the mute filter, the batch
+           insert, and the recurrence labeler's prior-weeks read (GetPriorOccurrencesAsync), which runs on the
+           pass between the fold and the mute filter and degrades to an empty read on a fault — but not on an
+           abandonment, which is exactly what this filter distinguishes. */
         var findingStore = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgFindingStore.cs"));
-        Assert.Equal(2, Count(findingStore, contextFilter));
+        Assert.Equal(3, Count(findingStore, contextFilter));
 
         /* The drill-down: one per-finding catch, plus the between-findings abandon point. */
         var drillDown = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgDrillDownCollector.cs"));

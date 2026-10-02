@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -89,12 +89,22 @@ public class BaselineSupplyTests
     [Fact]
     public void SharedSourceFamilies_ShareTheirRowLevelFilters_OrTheAggregateCannotServeBoth()
     {
-        /* wait_stats: both families filter on non-negative deltas and nothing else. */
+        /* wait_stats: both families filter on non-negative deltas and on the collector's knowability verdict
+           (#3653: sample_interval_seconds IS DISTINCT FROM 0), and nothing else. Both the successor supply
+           and the legacy one they still fall back to are shared the same way. */
         var waitStats = PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!;
         var waitRate = PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!;
-        Assert.Contains("FROM wait_stats_baseline", waitStats, StringComparison.Ordinal);
-        Assert.Contains("FROM wait_stats_baseline", waitRate, StringComparison.Ordinal);
-        Assert.Contains("delta_wait_time_ms >= 0", TimescaleSupport.CreateWaitStatsBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("FROM wait_stats_interval_baseline", waitStats, StringComparison.Ordinal);
+        Assert.Contains("FROM wait_stats_interval_baseline", waitRate, StringComparison.Ordinal);
+        Assert.Contains("delta_wait_time_ms >= 0", TimescaleSupport.CreateWaitStatsIntervalBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", TimescaleSupport.CreateWaitStatsIntervalBaselineSql, StringComparison.Ordinal);
+
+        var legacyWaitStats = PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!;
+        var legacyWaitRate = PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!;
+        Assert.Contains("FROM wait_stats_baseline", legacyWaitStats, StringComparison.Ordinal);
+        Assert.Contains("FROM wait_stats_baseline", legacyWaitRate, StringComparison.Ordinal);
+        Assert.Contains("delta_wait_time_ms >= 0", TimescaleSupport.LegacyCreateWaitStatsBaselineSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("sample_interval_seconds", TimescaleSupport.LegacyCreateWaitStatsBaselineSql, StringComparison.Ordinal);
 
         /* blocked_process_reports: neither family filters, so the shared aggregate carries no WHERE at all.
            A WHERE appearing here later means one family narrowed the other's supply. */
@@ -191,14 +201,150 @@ public class BaselineSupplyTests
     /// these collectors is user-editable, so a defaults pin alone leaves a deployed store able to
     /// silently shorten the CPU/I-O baseline supply. DarlingRetention floors the purge horizon for
     /// exactly the raw-reading baseline families at the baseline window — this pins the set's
-    /// membership to the provider's raw-reading arms so neither side can drift alone.
+    /// membership to the provider's raw-reading arms so neither side can drift alone. Since #3691 the
+    /// PostgreSQL-target provider's raw sources are members too (the #1757 shape, PG edition): they have
+    /// no rollup at all, so their user-editable schedule default was the only thing covering the window.
+    /// Four v1 sources, plus the three v2 arms' tables (<c>pg_replication_stats</c> since lane 12; <c>pg_io_stats</c>
+    /// and <c>pg_write_stats</c> since the #3691 between-waves batch, lanes 11 and 15 having reported theirs as out
+    /// of their files; <c>pg_blocking_edges</c> since lane 17, whose <c>pg_blocked_sessions</c> arm reads it;
+    /// <c>pg_wait_sampling</c> since lane 24, whose <c>pg_sampled_wait_ms_per_sec</c> arm reads it;
+    /// <c>pg_kernel_stats</c> since lane 28, whose <c>pg_cpu_burn_cores</c> arm reads it;
+    /// <c>pg_database_size_stats</c> since lane 38, whose <c>pg_database_growth_bytes_per_day</c> arm reads it). The
+    /// count is the SQL Server pair plus whatever the provider reads — the PostgreSQL half is derived
+    /// (<see cref="PgTargetBaselineSources"/>), so a new arm moves this pin by itself. Membership is by COLLECTOR
+    /// name (the purge resolves a schedule row, not a table), so each derived table is mapped to its collector through
+    /// the catalog before the lookup — <c>pg_blocking_edges</c> is the one member whose two names differ.
     /// </summary>
     [Fact]
     public void BaselineServingRawCollectors_MatchTheRawReadingArms()
     {
-        Assert.Equal(2, DarlingRetention.BaselineServingRawCollectors.Count);
+        var pgSources = PgTargetBaselineSources();
+        Assert.Equal(12, pgSources.Count);  /* the four v1 tables + pg_replication_stats + pg_io_stats + pg_write_stats + pg_blocking_edges (lane 17) + pg_wait_sampling (lane 24) + pg_statement_stats (lane 27) + pg_kernel_stats (lane 28) + pg_database_size_stats (lane 38) */
+        Assert.Equal(2 + pgSources.Count, DarlingRetention.BaselineServingRawCollectors.Count);
         Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
         Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
+        foreach (var table in pgSources)
+        {
+            Assert.Contains(CollectorNameFor(table), DarlingRetention.BaselineServingRawCollectors);
+        }
+
+        /* Every member is a real collector with a schedule row — a misspelt member would floor nothing and the
+           purge would never notice, because Contains() on a name no collector carries is simply false. */
+        foreach (var member in DarlingRetention.BaselineServingRawCollectors)
+        {
+            Assert.True(CollectorScheduleDefaults.All.ContainsKey(member), $"{member} is floored but is not a scheduled collector");
+        }
+    }
+
+    /// <summary>
+    /// The <c>pg_*</c> hypertables <c>PgTargetBaselineProvider</c> reads directly — DERIVED from the provider's own
+    /// query text for every <c>MetricNames.Pg*</c> constant (reflection over the registry, so a metric declared
+    /// tomorrow is in the sweep the day it is declared), every <c>FROM pg_&lt;table&gt;</c> the arm names. Not a
+    /// hand list: the #3691 between-waves batch found two arms (lanes 11 and 15) whose tables a hand list had
+    /// missed, and the next lane cannot miss one this way — an arm reading a table the floor lacks fails
+    /// <see cref="BaselineServingRawCollectors_MatchTheRawReadingArms"/> by construction. A metric whose arm is
+    /// still a stub (null) contributes nothing, which is right: nothing is read, so nothing needs a floor. Both arms
+    /// of the seam are swept (#3691 lane 33): the unkeyed map AND the keyed map behind <c>ResolveKeyedBaselineQuery</c>
+    /// — a keyed arm is a 30-day scan of its table like any other, and a keyed-only metric (<c>pg_statement_share</c>)
+    /// would otherwise read a table the derivation never saw.
+    /// </summary>
+    private static System.Collections.Generic.List<string> PgTargetBaselineSources()
+    {
+        var pgNames = typeof(MetricNames).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.StartsWith("Pg", StringComparison.Ordinal))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToList();
+        Assert.True(pgNames.Count >= 9, "the MetricNames PostgreSQL registry sweep found too few names");
+
+        var tablesRead = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in pgNames)
+        {
+            foreach (var sql in new[] { PgTargetBaselineProvider.GetPgTargetBaselineQuery(name), PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(name) })
+            {
+                if (sql is null) continue;   /* a stub arm, or a metric with no shape in this arm of the seam, reads nothing */
+                foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(sql, @"\bFROM\s+(pg_\w+)"))
+                {
+                    tablesRead.Add(m.Groups[1].Value);
+                }
+            }
+        }
+
+        return tablesRead.OrderBy(t => t, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>The keyed half of the derivation is not vacuous (#3691 lane 33): the two statement arms read
+    /// <c>pg_statement_stats</c>, which is floored — a keyed-only metric's table reaches the floor set through this
+    /// sweep and no other.</summary>
+    [Fact]
+    public void TheKeyedArms_ReadAFlooredTable_AndTheDerivationSweepsThem()
+    {
+        foreach (var metric in new[] { MetricNames.PgStatementShare, MetricNames.PgStatementMeanMs })
+        {
+            var keyed = PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(metric);
+            Assert.NotNull(keyed);
+            Assert.Contains("FROM pg_statement_stats", keyed, StringComparison.Ordinal);
+        }
+        Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgStatementShare));
+        Assert.Contains(CollectorNameFor("pg_statement_stats"), DarlingRetention.BaselineServingRawCollectors);
+        Assert.Contains("pg_statement_stats", PgTargetBaselineSources());
+    }
+
+    /// <summary>The purge floors by COLLECTOR name (<c>CollectorScheduleDefaults</c> keys), the derivation yields TABLE
+    /// names; for every member but <c>pg_blocking</c> / <c>pg_blocking_edges</c> the two are the same string. Resolved
+    /// through the catalog so the test drives the seam with the name the purge actually passes.</summary>
+    private static string CollectorNameFor(string table) =>
+        CollectorCatalog.All.Single(c => c.TargetTable == table).Name;
+
+    /// <summary>The derivation itself, pinned: the ten tables the arms read today, by name, so a table quietly
+    /// leaving an arm (or a regex that stopped matching) is a visible change and not a smaller floor.</summary>
+    [Fact]
+    public void PgTargetBaselineProvider_ReadsExactlyTheFlooredPgSources()
+    {
+        Assert.Equal(
+            new[] { "pg_blocking_edges", "pg_cpu_utilization", "pg_database_size_stats", "pg_database_stats", "pg_io_stats", "pg_kernel_stats", "pg_replication_stats", "pg_session_states", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "pg_write_stats" },
+            PgTargetBaselineSources());
+        /* Lane 17's arm reads the log for its zero samples too; the log is not a collector table and needs no floor of
+           this kind (DarlingRetentionHorizons.CollectionLogRetentionDays, twice the base, already covers the window). */
+        Assert.Contains("FROM collection_log", PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgBlockedSessions)!, StringComparison.Ordinal);
+        Assert.True(DarlingRetentionHorizons.CollectionLogRetentionDays >= BaselineMath.BaselineWindowDays);
+        /* Every derived table is a real collector table (the regex cannot admit a CTE named pg_something). */
+        Assert.All(PgTargetBaselineSources(), t => Assert.True(CollectorCatalog.All.Any(c => c.TargetTable == t), $"{t} is not a collector table"));
+    }
+
+    /// <summary>
+    /// The purge SEAM, driven the way an operator drives it (#3691): a schedule shortened to 7 days yields the
+    /// baseline-window horizon for every baseline-serving collector — the SQL Server pair (#1757) and the
+    /// PostgreSQL nine the provider's arms read — and yields 7 for a collector that serves no baseline, so the floor is a floor and not a
+    /// blanket. A setting ABOVE the window is honoured as given (the floor never shortens), and the destructive
+    /// sink's one-day clamp still runs first, so a 0 becomes 1 for an unfloored table and 30 for a floored one.
+    /// </summary>
+    [Fact]
+    public void EffectivePurgeRetentionDays_FloorsEveryBaselineServingCollectorAtTheWindow_AndNothingElse()
+    {
+        const int shortened = 7;
+        Assert.True(shortened < BaselineMath.BaselineWindowDays);
+
+        foreach (var collector in DarlingRetention.BaselineServingRawCollectors)
+        {
+            Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays(collector, shortened));
+            Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays(collector, 0));
+            Assert.Equal(90, DarlingRetention.EffectivePurgeRetentionDays(collector, 90));
+        }
+
+        foreach (var table in PgTargetBaselineSources())
+        {
+            Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays(CollectorNameFor(table), shortened));
+        }
+        /* The one name split: the purge knows the collector, and the table alone would floor nothing. */
+        Assert.Equal("pg_blocking", CollectorNameFor("pg_blocking_edges"));
+        Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays("pg_blocking", shortened));
+
+        /* Not baseline-serving: the operator's number stands, clamped at one. */
+        Assert.Equal(shortened, DarlingRetention.EffectivePurgeRetentionDays("deadlocks", shortened));
+        /* pg_lock_stats, not pg_blocking: the latter joined the floored set with lane 17's pg_blocked_sessions arm. */
+        Assert.Equal(shortened, DarlingRetention.EffectivePurgeRetentionDays("pg_lock_stats", shortened));
+        Assert.Equal(1, DarlingRetention.EffectivePurgeRetentionDays("deadlocks", 0));
+        Assert.Equal(1, DarlingRetention.EffectivePurgeRetentionDays("deadlocks", -5));
     }
 
     /// <summary>
@@ -211,15 +357,15 @@ public class BaselineSupplyTests
     [Fact]
     public void RefreshSql_BindsAndCastsItsBounds_BecauseTheParametersArePolymorphic()
     {
-        var plain = TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.PerfmonBaselineView);
+        var plain = TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.PerfmonIntervalBaselineView);
         Assert.Contains("$1::timestamp", plain, StringComparison.Ordinal);
         Assert.Contains("NULL::timestamp", plain, StringComparison.Ordinal);
-        Assert.Contains("'collect.perfmon_baseline'::regclass", plain, StringComparison.Ordinal);
+        Assert.Contains("'collect.perfmon_interval_baseline'::regclass", plain, StringComparison.Ordinal);
         Assert.DoesNotContain("buckets_per_batch", plain, StringComparison.Ordinal);
 
         /* force is the 4th positional argument, and only ever set deliberately. */
         Assert.EndsWith("NULL::timestamp)", plain, StringComparison.Ordinal);
-        var forced = TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.PerfmonBaselineView, force: true);
+        var forced = TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.PerfmonIntervalBaselineView, force: true);
         Assert.EndsWith("NULL::timestamp, true)", forced, StringComparison.Ordinal);
     }
 
@@ -273,10 +419,239 @@ public class BaselineSupplyTests
             Assert.Contains("FROM collect." + TimescaleSupport.SourceTableFor(view), fallback, StringComparison.Ordinal);
         }
 
-        /* Row-level filters are part of the statistic, so they must survive too. */
+        /* Row-level filters are part of the statistic, so they must survive too — the interval filter and the
+           carried interval column included (#3653), or the plain-PostgreSQL store would sum the restart zero
+           its TimescaleDB twin no longer does. */
         var waits = TimescaleSupport.CreateBaselineFallbackViewSql(
-            TimescaleSupport.WaitStatsBaselineView, TimescaleSupport.CreateWaitStatsBaselineSql);
+            TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.CreateWaitStatsIntervalBaselineSql);
         Assert.Contains("delta_wait_time_ms >= 0", waits, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", waits, StringComparison.Ordinal);
+        Assert.Contains("max(sample_interval_seconds) AS sample_interval_seconds", waits, StringComparison.Ordinal);
+
+        /* The legacy pair still derives (the live retirement test builds its plain-view fixture from it). */
+        var legacyWaits = TimescaleSupport.CreateBaselineFallbackViewSql(
+            TimescaleSupport.LegacyWaitStatsBaselineView, TimescaleSupport.LegacyCreateWaitStatsBaselineSql);
+        Assert.StartsWith("CREATE OR REPLACE VIEW collect.wait_stats_baseline AS", legacyWaits, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #3653 A6/A10: the interval-honest supplies and the supersession ---------------- */
+
+    /// <summary>
+    /// THE CONTAMINATION FILTER, baked in (#3653 A6). Each interval-honest supply drops the rows the collector
+    /// marked unknowable (<c>sample_interval_seconds = 0</c>: first sighting, counter reset — a restart — or a
+    /// gap past the policy) BEFORE the per-collection sum, so a restart collection produces no row rather than
+    /// a zero that reads as a quiet sample; and each carries the collection's measured interval so the provider
+    /// divides by what was measured instead of deriving a gap. <c>IS DISTINCT FROM 0</c> rather than
+    /// <c>&gt; 0</c> on purpose: the three-state rule keeps NULL (pre-column) rows, for which the provider's
+    /// magnitude heuristic remains the guard.
+    /// </summary>
+    [Fact]
+    public void IntervalHonestSupplies_DropUnknowableRows_AndCarryTheMeasuredInterval()
+    {
+        foreach (var createSql in new[] { TimescaleSupport.CreatePerfmonIntervalBaselineSql, TimescaleSupport.CreateWaitStatsIntervalBaselineSql })
+        {
+            Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", createSql, StringComparison.Ordinal);
+            Assert.Contains("max(sample_interval_seconds) AS sample_interval_seconds", createSql, StringComparison.Ordinal);
+            Assert.DoesNotContain("sample_interval_seconds > 0", createSql, StringComparison.Ordinal);
+        }
+
+        /* The legacy texts are the record of the defect: no filter, no column. Retained verbatim so the live
+           retirement test can build the fleet's real shape and prove the restart row is in the old sum and out
+           of the new. */
+        foreach (var legacy in new[] { TimescaleSupport.LegacyCreatePerfmonBaselineSql, TimescaleSupport.LegacyCreateWaitStatsBaselineSql })
+        {
+            Assert.DoesNotContain("sample_interval_seconds", legacy, StringComparison.Ordinal);
+        }
+
+        /* Registered under the successor names; the legacy names are registered NOWHERE the ensure sweep reads. */
+        var registered = TimescaleSupport.BaselineAggregates.Select(a => a.View).ToArray();
+        Assert.Contains(TimescaleSupport.PerfmonIntervalBaselineView, registered);
+        Assert.Contains(TimescaleSupport.WaitStatsIntervalBaselineView, registered);
+        Assert.DoesNotContain(TimescaleSupport.LegacyPerfmonBaselineView, registered);
+        Assert.DoesNotContain(TimescaleSupport.LegacyWaitStatsBaselineView, registered);
+        Assert.Equal(TimescaleSupport.CreatePerfmonIntervalBaselineSql,
+            TimescaleSupport.BaselineAggregates.Single(a => a.View == TimescaleSupport.PerfmonIntervalBaselineView).CreateSql);
+        Assert.Equal(TimescaleSupport.CreateWaitStatsIntervalBaselineSql,
+            TimescaleSupport.BaselineAggregates.Single(a => a.View == TimescaleSupport.WaitStatsIntervalBaselineView).CreateSql);
+
+        /* Both pairs resolve to their raw table, so the backfill probe and the retirement fixture share one map. */
+        Assert.Equal("perfmon_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.PerfmonIntervalBaselineView));
+        Assert.Equal("wait_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.WaitStatsIntervalBaselineView));
+        Assert.Equal("perfmon_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.LegacyPerfmonBaselineView));
+        Assert.Equal("wait_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.LegacyWaitStatsBaselineView));
+    }
+
+    /// <summary>
+    /// The successors REPLACED the legacy pair in the registry rather than joining it — the count is still
+    /// seven and the pair holds the first two positions — because <c>HourlyRefreshPhaseOrder</c>,
+    /// <c>AggregateCompressionTargets</c> and <c>RetentionPolicies</c> derive from that list by position and
+    /// count. An append would have widened the light band by two minutes and dropped the heaviest refresh's
+    /// watch line from 1,050 s to 950 s against its 896 s ceiling (the arithmetic is on
+    /// <c>SupersededBaselineRelations</c>); this pin names the reason.
+    ///
+    /// <para><b>The grid DID move at #3653 (Q12), and not because of this pair.</b> The three interval-honest
+    /// HOURLY successors were appended to <c>HourlyAggregates</c> behind the legacy trio (the daily tier was
+    /// still hierarchical from it) and the grid re-derived by its own method: sixteen policies, the heaviest
+    /// at :18, the watch line at 900 s. The two bounded hourly successors were dealt into the bounded class
+    /// ahead of the baselines, so this pair's minutes moved 3→6 and 5→7.</para>
+    ///
+    /// <para><b>And it moved BACK at #3653 (LC), again not because of this pair.</b> The freeze gave the daily
+    /// tier its own interval-honest successors (A6 LB) and moved the legacy trio off the grid entirely, into
+    /// <c>FrozenRollupAggregates</c>, with their hourly successors taking the three positions the legacy trio
+    /// held rather than staying appended behind it — thirteen policies again, the heaviest back at :15, the
+    /// watch line back at 1,050 s, and this pair's minutes back at 3 and 5. The converge re-phases every moved
+    /// policy once, on the first start of each build. What this pin holds throughout is the baseline half:
+    /// seven members, the pair in front, and the baseline pair adding NOTHING to the count the grid derives
+    /// from. The grid's own figures are pinned with their derivation in TimescaleSupportTests
+    /// (<c>CompressionPhaseGrid_ClearsEveryRefreshSlotsGuardBand_AndTheHeaviestRefreshsSlotWhole</c> and
+    /// <c>TheRefreshGridIsUnchanged_AndTheCompressionGridsOneInputFromItIsPinned</c>), not restated here.</para>
+    /// </summary>
+    [Fact]
+    public void Successors_TookTheLegacyPositions_SoThePhaseGridDidNotMove()
+    {
+        Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
+        Assert.Equal(TimescaleSupport.PerfmonIntervalBaselineView, TimescaleSupport.BaselineAggregates[0].View);
+        Assert.Equal(TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.BaselineAggregates[1].View);
+
+        /* The order's count is the hourly registry plus the seven baselines — 6 + 7 = 13 since #3653's LC
+           freeze (was 9 + 7 = 16 during Q12) — and the baseline pair contributes exactly its two positions to
+           it, no more. */
+        Assert.Equal(TimescaleSupport.HourlyAggregates.Length + 7, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(13, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(3, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
+        Assert.Equal(5, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsIntervalBaselineView));
+        Assert.Equal(15, TimescaleSupport.HeaviestRefreshStartMinute);
+        Assert.Equal(1050, TimescaleSupport.RefreshSlotWarningSeconds);
+    }
+
+    /// <summary>
+    /// The supersession list is disjoint from both the living registry and the on-sight retirement list: a
+    /// legacy name in <c>BaselineAggregates</c> would be re-created by the ensure sweep after every drop; one in
+    /// <c>RetiredBaselineRelations</c> would be dropped on sight and forfeit the 35-day history the condition
+    /// exists to protect. Each successor is registered, each legacy is not, and the provider's per-metric map
+    /// agrees with the storage list pair for pair.
+    /// </summary>
+    [Fact]
+    public void SupersededRelations_AreNeitherLiving_NorRetiredOnSight_AndTheProviderMapAgrees()
+    {
+        var living = TimescaleSupport.BaselineAggregates.Select(a => a.View).ToHashSet(StringComparer.Ordinal);
+        var retired = TimescaleSupport.RetiredBaselineRelations.ToHashSet(StringComparer.Ordinal);
+
+        Assert.Equal(2, TimescaleSupport.SupersededBaselineRelations.Length);
+        foreach (var (legacy, successor) in TimescaleSupport.SupersededBaselineRelations)
+        {
+            Assert.DoesNotContain(legacy, living);
+            Assert.DoesNotContain(legacy, retired);
+            Assert.Contains(successor, living);
+            Assert.DoesNotContain(successor, retired);
+            Assert.NotEqual(legacy, successor);
+        }
+
+        var pairs = TimescaleSupport.SupersededBaselineRelations.ToHashSet();
+        Assert.Contains(PgBaselineProvider.SupersededSupplyFor(MetricNames.BatchRequests)!.Value, pairs);
+        Assert.Contains(PgBaselineProvider.SupersededSupplyFor(MetricNames.WaitStats)!.Value, pairs);
+        Assert.Contains(PgBaselineProvider.SupersededSupplyFor(MetricNames.WaitMsPerSec)!.Value, pairs);
+        foreach (var untouched in new[]
+        {
+            MetricNames.Cpu, MetricNames.SessionCount, MetricNames.QueryDuration, MetricNames.IoLatency,
+            MetricNames.Blocking, MetricNames.Deadlock, MetricNames.Memory, MetricNames.BlockingPerMinute,
+        })
+        {
+            Assert.Null(PgBaselineProvider.SupersededSupplyFor(untouched));
+            Assert.Null(PgBaselineProvider.GetLegacyBaselineQuery(untouched));
+        }
+    }
+
+    /// <summary>
+    /// THE RETIREMENT CONDITION walked across time (#3653): a legacy continuous aggregate WITH ROWS releases only
+    /// once the successor's oldest bucket reaches the tier horizon; an empty successor never releases it; a legacy
+    /// plain view releases at once. Day 0 after a backfill from a 30-day raw horizon is the case the brief asked to
+    /// see evaluate FALSE; day 5 is where it turns. Every call here passes <c>legacyHoldsRows: true</c> — the
+    /// empty-legacy short-circuit is <see cref="RetirementCondition_EmptyLegacyAggregateDropsOnSight_RegardlessOfSuccessor"/>.
+    /// </summary>
+    [Fact]
+    public void RetirementCondition_HoldsOnlyOnceTheSuccessorCoversTheTier()
+    {
+        var firstStart = new DateTime(2026, 9, 20, 4, 0, 0, DateTimeKind.Unspecified);
+        var successorOldest = firstStart.AddDays(-30); // backfilled from raw's default 30-day horizon
+
+        Assert.False(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, successorOldest, firstStart));
+        Assert.False(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, successorOldest, firstStart.AddDays(4).AddHours(23)));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, successorOldest, firstStart.AddDays(5)));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, successorOldest, firstStart.AddDays(40)));
+
+        /* Exactly on the horizon counts as coverage (<=). */
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, firstStart - TimescaleSupport.BaselineRetentionSpan, firstStart));
+
+        /* An un-backfilled successor covers nothing, whatever the clock says. */
+        Assert.False(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, null, firstStart.AddDays(400)));
+
+        /* A legacy PLAIN VIEW has nothing of its own to lose: drops as soon as a successor exists, whether or
+           not it "holds rows" is even asked (it never is, in JudgeSupersededBaselineRelationAsync, but the pure
+           predicate must not depend on that arg for this branch either). */
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(false, true, null, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(false, true, successorOldest, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(false, false, null, firstStart));
+    }
+
+    /// <summary>
+    /// THE #4289 SHORT-CIRCUIT, pure: a legacy CONTINUOUS AGGREGATE that holds no rows of its own drops on
+    /// sight, whatever the successor holds — an empty successor, a short one, or one that fully covers the tier
+    /// all give the same verdict, because an empty legacy aggregate has no history to protect regardless. Same
+    /// clock and successor-oldest fixtures as <see cref="RetirementCondition_HoldsOnlyOnceTheSuccessorCoversTheTier"/>,
+    /// with <c>legacyHoldsRows: false</c> flipping every one of them to Drop.
+    /// </summary>
+    [Fact]
+    public void RetirementCondition_EmptyLegacyAggregateDropsOnSight_RegardlessOfSuccessor()
+    {
+        var firstStart = new DateTime(2026, 9, 20, 4, 0, 0, DateTimeKind.Unspecified);
+        var successorOldest = firstStart.AddDays(-30);
+
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, false, null, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, false, successorOldest, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, false, firstStart - TimescaleSupport.BaselineRetentionSpan, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, false, null, firstStart.AddDays(400)));
+    }
+
+    /// <summary>
+    /// THE SUPPLY RULE walked across the states a store passes through (#3653): fresh store (no legacy) →
+    /// successor; day 0 after upgrade (legacy 35 days deep, successor 30) → legacy; a day later, once the
+    /// successor reaches the window's start → successor, even though the legacy still reaches further back
+    /// than the window; a server registered after the upgrade (both relations equally shallow) → successor;
+    /// an un-backfilled successor → legacy; an empty legacy → successor.
+    /// </summary>
+    [Fact]
+    public void SupplyRule_PrefersTheSuccessor_ExactlyWhenItReachesAsFarAsTheLegacyCanContribute()
+    {
+        var analysisTime = new DateTime(2026, 9, 20, 4, 0, 0, DateTimeKind.Unspecified);
+        var windowStart = analysisTime.AddDays(-BaselineMath.BaselineWindowDays);
+        var legacyOldest = analysisTime.AddDays(-35);
+
+        /* Fresh store, or already retired. */
+        Assert.True(PgBaselineProvider.PrefersSuccessor(false, null, null, windowStart));
+        Assert.True(PgBaselineProvider.PrefersSuccessor(false, null, analysisTime.AddDays(-2), windowStart));
+
+        /* Day 0: the successor was backfilled from a raw horizon that stops one day short of the window. */
+        Assert.False(PgBaselineProvider.PrefersSuccessor(true, legacyOldest, analysisTime.AddDays(-29), windowStart));
+
+        /* Day 1: the successor reaches the window's start; the legacy's extra five days are never read. */
+        Assert.True(PgBaselineProvider.PrefersSuccessor(true, legacyOldest, windowStart, windowStart));
+        Assert.True(PgBaselineProvider.PrefersSuccessor(true, legacyOldest, analysisTime.AddDays(-31), windowStart));
+
+        /* A server registered three days ago: both relations start three days ago — no reason to read the
+           contaminated one. */
+        var threeDaysAgo = analysisTime.AddDays(-3);
+        Assert.True(PgBaselineProvider.PrefersSuccessor(true, threeDaysAgo, threeDaysAgo, windowStart));
+        /* …but if the successor is one bucket shallower than the legacy for that server, the legacy has a row
+           the successor lacks. */
+        Assert.False(PgBaselineProvider.PrefersSuccessor(true, threeDaysAgo, threeDaysAgo.AddHours(1), windowStart));
+
+        /* Created but not yet backfilled: never preferred while the legacy has rows. */
+        Assert.False(PgBaselineProvider.PrefersSuccessor(true, legacyOldest, null, windowStart));
+
+        /* A legacy relation with no rows for this server cannot contribute anything. */
+        Assert.True(PgBaselineProvider.PrefersSuccessor(true, null, null, windowStart));
+        Assert.True(PgBaselineProvider.PrefersSuccessor(true, null, threeDaysAgo, windowStart));
     }
 
     /// <summary>
@@ -289,7 +664,7 @@ public class BaselineSupplyTests
     [Fact]
     public void DroppingAFallbackView_RefusesToTouchAContinuousAggregate_AndSurvivesWithoutTheExtension()
     {
-        var sql = TimescaleSupport.DropBaselineFallbackViewSql(TimescaleSupport.WaitStatsBaselineView);
+        var sql = TimescaleSupport.DropBaselineFallbackViewSql(TimescaleSupport.WaitStatsIntervalBaselineView);
 
         Assert.Contains("continuous_aggregates", sql, StringComparison.Ordinal);
         Assert.Contains("relkind = 'v'", sql, StringComparison.Ordinal);
@@ -332,6 +707,33 @@ public class BaselineSupplyTests
     }
 
     /// <summary>
+    /// #3653: coverage is read OFF THE MATERIALIZATION when there is one. Through the real-time view a
+    /// <c>WITH NO DATA</c> aggregate reports raw's whole reach (watermark <c>-infinity</c>, measured on the
+    /// 2.28.1 rig), so the gate above never fires on the start that created the aggregate and the history goes
+    /// invisible one policy refresh later, until the next start. The materialization-hypertable form is what
+    /// <c>BackfillBaselineAggregatesAsync</c> runs on a TimescaleDB store; the view form remains for plain views.
+    /// Everything else about the probe — source, clamp, bound horizon — is identical between the two.
+    /// </summary>
+    [Fact]
+    public void BackfillGate_ReadsCoverageOffTheMaterialization_NotThroughTheRealTimeView()
+    {
+        var view = TimescaleSupport.WaitStatsIntervalBaselineView;
+        var source = TimescaleSupport.SourceTableFor(view);
+        var throughView = TimescaleSupport.BaselineBackfillProbeSql(view, source);
+        var offMaterialization = TimescaleSupport.BaselineBackfillProbeSql(view, source, ("_timescaledb_internal", "_materialized_hypertable_353"));
+
+        Assert.Contains($"(SELECT min(bucket) FROM collect.{view}) AS coverage_oldest", throughView, StringComparison.Ordinal);
+        Assert.Contains("(SELECT min(bucket) FROM \"_timescaledb_internal\".\"_materialized_hypertable_353\") AS coverage_oldest", offMaterialization, StringComparison.Ordinal);
+        Assert.DoesNotContain($"FROM collect.{view}", offMaterialization, StringComparison.Ordinal);
+
+        /* Same probe otherwise: source and need are read identically, the horizon stays bound. */
+        Assert.Equal(
+            throughView.Replace($"collect.{view}", "<coverage>", StringComparison.Ordinal),
+            offMaterialization.Replace("\"_timescaledb_internal\".\"_materialized_hypertable_353\"", "<coverage>", StringComparison.Ordinal));
+        Assert.Equal(throughView, TimescaleSupport.BaselineBackfillProbeSql(view, source, materialization: null));
+    }
+
+    /// <summary>
     /// MUTATION CHECK for the plain-PostgreSQL / partial-build gap. The provider reads these relations by
     /// name and its catch swallows the 42P01, so a missing one is a family that silently returns nothing —
     /// no error surfaced, thresholds worthless, which is #1757's own failure shape delivered to a store that
@@ -347,12 +749,21 @@ public class BaselineSupplyTests
     {
         var worker = ReadWorkerSource();
 
+        /* #3817 moved this call into the shared convergence list both the start path and the hourly
+           store-maintenance tick walk, so the worker names it once as a LIST STEP and once as the ungated
+           SEGMENT that runs it. The mutation check the summary above promises still bites: delete the step
+           from the list and the first assertion reds; move the segment call inside the TimescaleDB gate and
+           the position assertion reds. The reachability property is asserted on the segment call, because
+           that is what decides which paths run it.
+           The hourly half is a strict addition to this guarantee, not a replacement — a relation that goes
+           missing while the service runs is now filled within the hour instead of at the next restart — and
+           it is pinned in StoreObjectConvergenceTests. */
         Assert.Contains("TimescaleSupport.EnsureBaselineFallbackViewsAsync(", worker, StringComparison.Ordinal);
 
-        /* Not inside `if (_timescaleAvailable)` and not inside its negation — the call site must be reachable
-           on every path. Checked by position: it has to sit AFTER the TimescaleDB block's catch, which is the
-           only place all three gap routes have converged. */
-        var callAt = worker.IndexOf("TimescaleSupport.EnsureBaselineFallbackViewsAsync(", StringComparison.Ordinal);
+        /* Not inside `if (_timescaleAvailable)` and not inside its negation — the segment that runs it must be
+           reachable on every path. Checked by position: it has to sit AFTER the TimescaleDB block's catch,
+           which is the only place all three gap routes have converged. */
+        var callAt = worker.IndexOf("StoreObjectConvergenceStage.Ungated, startupConvergence, stoppingToken);", StringComparison.Ordinal);
         var plainModeAt = worker.IndexOf("continuing in plain-PostgreSQL mode", StringComparison.Ordinal);
         Assert.True(plainModeAt > 0 && callAt > plainModeAt,
             "the fallback must run after the TimescaleDB block, on every path — not inside it");
@@ -363,7 +774,7 @@ public class BaselineSupplyTests
 
         /* The probe is what makes running it everywhere safe: a continuous aggregate is also a relkind='v'
            view, so an unconditional CREATE OR REPLACE VIEW by these names would destroy a materialization. */
-        Assert.Contains("to_regclass", TimescaleSupport.BaselineRelationExistsSql(TimescaleSupport.PerfmonBaselineView), StringComparison.Ordinal);
+        Assert.Contains("to_regclass", TimescaleSupport.BaselineRelationExistsSql(TimescaleSupport.PerfmonIntervalBaselineView), StringComparison.Ordinal);
     }
 
     private static string ReadWorkerSource([CallerFilePath] string thisFile = "")

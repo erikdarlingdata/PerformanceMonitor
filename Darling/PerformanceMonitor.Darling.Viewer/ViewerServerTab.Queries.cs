@@ -10,15 +10,19 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading.Tasks;
+using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
-/// The Queries inner tab's sub-tab dispatch — the seven-sub-tab group matching Lite's
-/// <c>QueriesSubTabControl</c> exactly: Performance Trends and Active Queries (W1f-2), the Top Queries /
-/// Top Procedures / Query Store grids (W1f-1), Plan Corrections (#1952), then Query Heatmap last (W1f-2).
+/// The Queries inner tab's sub-tab dispatch — TEN sub-tabs, counted off <c>QueriesSubTabControl</c> in
+/// <c>ViewerServerTab.xaml</c> and matching the index constants below one for one. Seven are Lite's:
+/// Performance Trends and Active Queries (W1f-2), the Top Queries / Top Procedures / Query Store grids
+/// (W1f-1), Plan Corrections (#1952), and Query Heatmap last (W1f-2). Three are Darling-only — the LIVE
+/// Current Active Queries tab, Query Store Regressions (Dashboard parity) and Query Store Clutter (#3797).
 /// Copied from Lite's <c>ServerTab</c> (Refresh / Slicers / Grids partials) with reads rewired to the
 /// <see cref="ViewerDataService"/> Postgres reads. A sub-tab switch reloads through the shell's
 /// overlap-guarded <see cref="RefreshActiveInnerTabAsync"/> (the Queries tab is the active inner tab
@@ -36,11 +40,12 @@ public partial class ViewerServerTab
 {
     /* Queries sub-tab order — matches Lite's QueriesSubTabControl (W1f-2), keeping Query Heatmap last, the
        Darling-only LIVE "Current Active Queries" tab inserted right after the stored "Active Queries" tab,
-       and the Query Store Regressions grid (Dashboard parity) inserted right after Query Store — matching
-       the Dashboard's Query Store → Query Store Regressions adjacency: Performance Trends, Active Queries,
-       Current Active Queries (live), the three grids, Query Store Regressions, Plan Corrections, Query
-       Heatmap. Every reference below uses the NAMED constant, so inserting a tab only shifts these values —
-       no literal-index caller needs touching. */
+       the Query Store Regressions grid (Dashboard parity) inserted right after Query Store — matching
+       the Dashboard's Query Store → Query Store Regressions adjacency — and the Darling-only Query Store
+       Clutter grid (#3797) after that: Performance Trends, Active Queries, Current Active Queries (live),
+       the three grids, Query Store Regressions, Query Store Clutter, Plan Corrections, Query Heatmap. Every
+       reference below uses the NAMED constant, so inserting a tab only shifts these values — no
+       literal-index caller needs touching. */
     private const int PerformanceTrendsSubTabIndex = 0;
     private const int ActiveQueriesSubTabIndex = 1;
     private const int CurrentActiveQueriesSubTabIndex = 2;
@@ -48,8 +53,12 @@ public partial class ViewerServerTab
     private const int TopProceduresSubTabIndex = 4;
     private const int QueryStoreSubTabIndex = 5;
     private const int QueryStoreRegressionsSubTabIndex = 6;
-    private const int PlanCorrectionsSubTabIndex = 7;
-    private const int QueryHeatmapSubTabIndex = 8;
+    /* #3797, inserted after Query Store Regressions: the per-database clutter view answers the question the
+       two Query Store grids above raise, and it is Darling-only for now — Lite has every input and no port
+       (CrossAppMcpToolInventoryPinTests.KnownLiteMissingMcpTools carries the port, written out). */
+    private const int QueryStoreClutterSubTabIndex = 7;
+    private const int PlanCorrectionsSubTabIndex = 8;
+    private const int QueryHeatmapSubTabIndex = 9;
 
     private string _queryStatsSlicerMetric = "TotalCpu";
     private List<TimeSliceBucket>? _queryStatsSlicerData;
@@ -146,6 +155,9 @@ public partial class ViewerServerTab
             case QueryStoreRegressionsSubTabIndex:
                 await LoadQueryStoreRegressionsAsync(startUtc, endUtc);
                 break;
+            case QueryStoreClutterSubTabIndex:
+                await LoadQueryStoreClutterAsync(startUtc, endUtc);
+                break;
             case PlanCorrectionsSubTabIndex:
                 await LoadPlanCorrectionsAsync(startUtc, endUtc);
                 break;
@@ -161,29 +173,108 @@ public partial class ViewerServerTab
 
     private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc)
     {
-        var rows = await _dataService.GetTopQueriesByCpuAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
+        var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        /* #4231 stage 3: an hourly-routed page holds no per-caller detail (see
+           ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
+           tier disclosure are independent facts, so both may show at once (a window aged past raw AND
+           routed to hourly). */
+        UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
         await LoadQueryStatsSlicerAsync(startUtc, endUtc);
         await RefreshQueryStatsComparisonAsync(startUtc, endUtc);
     }
 
+    /// <summary>#4231 stage 3: the Queries-tab grid header's hourly-routing disclosure — appended to the
+    /// existing "Showing since" banner (#4278) rather than a new widget, per the lane's ruling.</summary>
+    private const string HourlyTierSuffix = " — aggregated hourly, per-caller detail unavailable";
+
     private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
     {
-        var rows = await _dataService.GetTopProceduresByCpuAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
+        var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _procStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
+           banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
+        UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
         await LoadProcStatsSlicerAsync(startUtc, endUtc);
         await RefreshProcStatsComparisonAsync(startUtc, endUtc);
     }
 
     private async Task LoadQueryStoreAsync(DateTime startUtc, DateTime endUtc)
     {
-        var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, startUtc, endUtc);
+        /* #3953 clause 4: only a genuine custom range is a literal end the gate must honor against
+           applied_through. A preset's endUtc is GetWindowUtc()'s own DateTime.UtcNow (the viewer's clock, not
+           the store's), so passing it as a literal here would send a slow-clocked viewer to raw on every
+           ordinary read (M1) — null tells the gate this end is open. */
+        var (rows, widePlan) = await _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
         _queryStoreFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+        UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan);
         await LoadQueryStoreSlicerAsync(startUtc, endUtc);
         await RefreshQueryStoreComparisonAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// #4231: the Queries-tab grid header's disclosure — "Showing since &lt;effective start&gt;" when
+    /// <paramref name="floor"/> sits past <see cref="RawWindowFloor.IsTruncated"/>'s slack after
+    /// <paramref name="requestedStartUtc"/>, collapsed otherwise. The chart-title idiom
+    /// (<see cref="DescribeTrendCoverage"/>) states the same fact on Performance Trends; this is its grid-header
+    /// form, in <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>'s <c>yyyy-MM-dd HH:mm</c>, the format
+    /// every trend chart title already uses for a head timestamp.
+    /// </summary>
+    internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
+        QueryStoreIntervalWide.WideReadPlan? widePlan = null)
+    {
+        /* #4689: when the interval table served, the rows start at the plan's EffectiveStart, not at raw's
+           floor. The banner names that start and the bound that set it; the slicer still reads raw, so a
+           truncated raw floor is named beside it. The raw route's banner below is unchanged. */
+        if (widePlan?.EffectiveStart is DateTime wideStart)
+        {
+            var wideTruncated = RawWindowFloor.IsTruncated(wideStart, requestedStartUtc);
+            /* The slicer and comparison read raw whatever tier served the grid, so a truncated raw floor is
+               named whether or not the grid itself was cut. */
+            var slicerTruncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
+            if (wideTruncated || slicerTruncated || !string.IsNullOrEmpty(tierSuffix))
+            {
+                var slicerSince = slicerTruncated
+                    ? ViewerTimeHelper.FormatForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc), "yyyy-MM-dd HH:mm")
+                    : null;
+                var text = wideTruncated
+                    ? $"Showing since {ViewerTimeHelper.FormatForDisplay(wideStart, "yyyy-MM-dd HH:mm")}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
+                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}")
+                    : slicerSince is null
+                        ? $"Showing {ViewerTimeHelper.FormatForDisplay(requestedStartUtc, "yyyy-MM-dd HH:mm")}"
+                        : $"Slicer since {slicerSince} (the grid shows the full window)";
+
+                banner.Text = text + tierSuffix;
+                banner.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                banner.Visibility = Visibility.Collapsed;
+            }
+
+            return;
+        }
+
+        var truncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
+        /* #4231 stage 3: the raw-floor truncation and the hourly-tier suffix are independent facts (a window
+           can be BOTH aged past raw's floor and routed to the hourly rollup) — so the banner shows whenever
+           either is true, not only when the raw floor was cut. */
+        if (!truncated && string.IsNullOrEmpty(tierSuffix))
+        {
+            banner.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        banner.Text = truncated
+            ? $"Showing since {ViewerTimeHelper.FormatForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc), "yyyy-MM-dd HH:mm")}{tierSuffix}"
+            : $"Showing {ViewerTimeHelper.FormatForDisplay(requestedStartUtc, "yyyy-MM-dd HH:mm")}{tierSuffix}";
+        banner.Visibility = Visibility.Visible;
     }
 
     /// <summary>
@@ -230,8 +321,10 @@ public partial class ViewerServerTab
     {
         try
         {
-            var rows = await _dataService.GetTopQueriesByCpuAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
+            var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _queryStatsFilterMgr!.UpdateData(rows);
+            UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -253,8 +346,10 @@ public partial class ViewerServerTab
     {
         try
         {
-            var rows = await _dataService.GetTopProceduresByCpuAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
+            var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _procStatsFilterMgr!.UpdateData(rows);
+            UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -276,8 +371,11 @@ public partial class ViewerServerTab
     {
         try
         {
-            var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
+            /* #3953 clause 4: a slicer selection is always a literal, user-drawn sub-range, never a preset. */
+            var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc);
             _queryStoreFilterMgr!.UpdateData(rows);
+            UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, e.StartUtc);
             await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -328,6 +426,10 @@ public partial class ViewerServerTab
         }
 
         QueryStatsSlicer.UpdateMetric(label);
+
+        // Re-compute overlay with new metric if a row is selected
+        if (QueryStatsGrid.SelectedItem != null)
+            QueryStatsGrid_SelectionChanged(QueryStatsGrid, null!);
     }
 
     /// <summary>Sorting the Top Procedures grid swaps the slicer's aggregate curve to match the sorted column.</summary>
@@ -344,7 +446,10 @@ public partial class ViewerServerTab
             "AvgElapsedMs" => ("AvgElapsed", "Avg Duration (ms)"),
             "TotalLogicalReads" or "AvgReads" => ("TotalReads", "Total Reads"),
             "TotalLogicalWrites" => ("TotalWrites", "Total Writes"),
-            "TotalPhysicalReads" => ("TotalReads", "Total Physical Reads"),
+            /* #3556's Darling half: the #3547 bug one grid over — this arm mapped the physical sort to the
+               LOGICAL series under a physical label. The shared slicer reader has always mapped ordinal 6's
+               total_physical_reads into TotalPhysicalReads; only this handler pointed at the wrong series. */
+            "TotalPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
             _ => ("TotalCpu", "Total CPU (ms)"),
         };
 
@@ -362,11 +467,15 @@ public partial class ViewerServerTab
                 "AvgElapsed" => bucket.TotalElapsed / n,
                 "TotalReads" => bucket.TotalReads,
                 "TotalWrites" => bucket.TotalWrites,
+                "TotalPhysReads" => bucket.TotalPhysicalReads,
                 _ => bucket.TotalCpu,
             };
         }
 
         ProcStatsSlicer.UpdateMetric(label);
+
+        if (ProcedureStatsGrid.SelectedItem != null)
+            ProcedureStatsGrid_SelectionChanged(ProcedureStatsGrid, null!);
     }
 
     /// <summary>Sorting the Query Store grid swaps the slicer's aggregate curve to match the sorted column.</summary>
@@ -381,9 +490,14 @@ public partial class ViewerServerTab
             "AvgCpuTimeMs" => ("AvgCpu", "Avg CPU (ms)"),
             "TotalDurationMs" => ("TotalElapsed", "Total Duration (ms)"),
             "AvgDurationMs" => ("AvgElapsed", "Avg Duration (ms)"),
-            "AvgLogicalReads" => ("TotalReads", "Avg Reads"),
-            "AvgLogicalWrites" => ("TotalWrites", "Avg Writes"),
-            "AvgPhysicalReads" => ("TotalReads", "Avg Physical Reads"),
+            /* #3556: the plotted bucket values are execution-weighted slice TOTALS, so the old "Avg"
+               labels under-claimed what the bars showed. Total labels, matching the physical arm below. */
+            "AvgLogicalReads" => ("TotalReads", "Total Reads"),
+            "AvgLogicalWrites" => ("TotalWrites", "Total Writes"),
+            /* #3547's Darling half: this arm still mapped physical to the LOGICAL series under a physical
+               label — the swap Lite fixed in #3550, never ported here. The reader side needed nothing: the
+               slicer SQL computes total_physical_reads and the shared reader maps it. */
+            "AvgPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
             "TotalExecutions" => ("Sessions", "Executions"),
             _ => ("TotalCpu", "Total CPU (ms)"),
         };
@@ -402,12 +516,16 @@ public partial class ViewerServerTab
                 "AvgElapsed" => bucket.TotalElapsed / n,
                 "TotalReads" => bucket.TotalReads,
                 "TotalWrites" => bucket.TotalWrites,
+                "TotalPhysReads" => bucket.TotalPhysicalReads,
                 "Sessions" => bucket.SessionCount,
                 _ => bucket.TotalCpu,
             };
         }
 
         QueryStoreSlicer.UpdateMetric(label);
+
+        if (QueryStoreGrid.SelectedItem != null)
+            QueryStoreGrid_SelectionChanged(QueryStoreGrid, null!);
     }
 
     /// <summary>The sorted column's member path (SortMemberPath, else the bound Binding path) — Lite's fallback.</summary>

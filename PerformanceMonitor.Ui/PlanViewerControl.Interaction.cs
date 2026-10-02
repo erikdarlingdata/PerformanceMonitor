@@ -11,6 +11,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Ui;
@@ -54,6 +55,50 @@ public partial class PlanViewerControl
         ShowPropertiesPanel(node);
     }
 
+    /// <summary>
+    /// Selects the operator with <paramref name="nodeId"/> and scrolls it into view, so a warning
+    /// header's link can take you to where it came from (#4534). Returns false when the plan has no
+    /// such operator, which is what keeps a stale or wrong origin from silently scrolling somewhere
+    /// arbitrary.
+    /// </summary>
+    private bool TryNavigateToNode(int nodeId)
+    {
+        foreach (var child in PlanCanvas.Children)
+        {
+            if (child is not Border border || border.Tag is not PlanNode node || node.NodeId != nodeId)
+                continue;
+
+            SelectNode(border, node);
+            // Defer the scroll to Loaded priority, same as ZoomToMinimapNode (#4622): SelectNode opens
+            // the properties panel when it wasn't already open, narrowing PlanScrollViewer by roughly
+            // 400px, so scrolling right here would center against the pre-panel viewport and land the
+            // node off to one side instead (#4641). ScrollNodeIntoView reads the viewport itself, so
+            // deferring the call is the only change needed.
+            Dispatcher.BeginInvoke(new Action(() => ScrollNodeIntoView(node)), DispatcherPriority.Loaded);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Centres the operator in the viewport. Node coordinates are unscaled layout positions, so they
+    /// are multiplied by the zoom level to get canvas pixels; the offset is then clamped, because
+    /// asking a ScrollViewer for a negative offset on a plan smaller than the viewport just leaves
+    /// it where it was and looks like the navigation did nothing.
+    /// </summary>
+    private void ScrollNodeIntoView(PlanNode node)
+    {
+        var targetX = node.X * _zoomLevel - (PlanScrollViewer.ViewportWidth / 2);
+        var targetY = node.Y * _zoomLevel - (PlanScrollViewer.ViewportHeight / 2);
+
+        var maxX = Math.Max(0, PlanScrollViewer.ExtentWidth - PlanScrollViewer.ViewportWidth);
+        var maxY = Math.Max(0, PlanScrollViewer.ExtentHeight - PlanScrollViewer.ViewportHeight);
+
+        PlanScrollViewer.ScrollToHorizontalOffset(Math.Clamp(targetX, 0, maxX));
+        PlanScrollViewer.ScrollToVerticalOffset(Math.Clamp(targetY, 0, maxY));
+    }
+
     private ContextMenu BuildNodeContextMenu(PlanNode node)
     {
         var menu = new ContextMenu();
@@ -76,27 +121,27 @@ public partial class PlanViewerControl
         menu.Items.Add(new Separator());
 
         var copyOpItem = new MenuItem { Header = "Copy Operator Name" };
-        copyOpItem.Click += (_, _) => Clipboard.SetDataObject(node.PhysicalOp, false);
+        copyOpItem.Click += (_, _) => ClipboardText.TrySetText(node.PhysicalOp);
         menu.Items.Add(copyOpItem);
 
         if (!string.IsNullOrEmpty(node.FullObjectName))
         {
             var copyObjItem = new MenuItem { Header = "Copy Object Name" };
-            copyObjItem.Click += (_, _) => Clipboard.SetDataObject(node.FullObjectName, false);
+            copyObjItem.Click += (_, _) => ClipboardText.TrySetText(node.FullObjectName);
             menu.Items.Add(copyObjItem);
         }
 
         if (!string.IsNullOrEmpty(node.Predicate))
         {
             var copyPredItem = new MenuItem { Header = "Copy Predicate" };
-            copyPredItem.Click += (_, _) => Clipboard.SetDataObject(node.Predicate, false);
+            copyPredItem.Click += (_, _) => ClipboardText.TrySetText(node.Predicate);
             menu.Items.Add(copyPredItem);
         }
 
         if (!string.IsNullOrEmpty(node.SeekPredicates))
         {
             var copySeekItem = new MenuItem { Header = "Copy Seek Predicate" };
-            copySeekItem.Click += (_, _) => Clipboard.SetDataObject(node.SeekPredicates, false);
+            copySeekItem.Click += (_, _) => ClipboardText.TrySetText(node.SeekPredicates);
             menu.Items.Add(copySeekItem);
         }
 
@@ -128,6 +173,7 @@ public partial class PlanViewerControl
         ZoomTransform.ScaleX = _zoomLevel;
         ZoomTransform.ScaleY = _zoomLevel;
         ZoomLevelText.Text = $"{(int)(_zoomLevel * 100)}%";
+        UpdateMinimapViewportBox();
     }
 
     private void PlanScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)

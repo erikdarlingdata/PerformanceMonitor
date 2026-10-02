@@ -97,7 +97,7 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// list missed, not a member of this regime. <c>ReadStoreSizeBytesAsync</c> runs on the disk-check
     /// cadence. <c>RunTestHypotheticalIndexAsync</c> / <c>RunExecuteActualPlanAsync</c> and
     /// <c>DarlingCommandExecutor</c> are the command plane, with a 5-minute claim lease and no heartbeat.
-    /// <c>DarlingDeltaCalculator</c>'s four seeds and <c>StoreConfigProvider</c>'s seven seeding sites run
+    /// <c>DarlingDeltaCalculator</c>'s seeds (ten since #3540 A4) and <c>StoreConfigProvider</c>'s seven seeding sites run
     /// ONCE at startup. <c>StoreConfigProvider.ReadConfigVersionAsync</c> is the 15 s reload beacon and is
     /// the closest call of all — it runs on the sweep's own tick — but it runs on the SERIAL loop thread
     /// ahead of every launch, so its blast radius is the whole fleet and its floor is a single-row lookup
@@ -165,8 +165,10 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// </summary>
     private const int ExpectedSweepCommandSites = 13;
 
-    /// <summary>The four COPY writers, counted for the same reason.</summary>
-    private const int ExpectedCopyWriterSites = 4;
+    /// <summary>The five COPY writers, counted for the same reason. Five since #3601: RdsLogEventIngestor is
+    /// RdsDeadlockIngestor's write over the log-event definition, and it was looked at by a person — the same
+    /// shared start deadline, the same sweep constant on the importer, the same phase stamp.</summary>
+    private const int ExpectedCopyWriterSites = 5;
 
     /// <summary>
     /// Every command shape the landed pins know about, with the type name allowed to carry its namespace:

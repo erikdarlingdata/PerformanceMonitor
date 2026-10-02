@@ -7,9 +7,14 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -51,7 +56,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     }
 
     [Fact]
-    public void ParamContract_DaysBackOnly_Default30_CeilingIsTheSweepsRetention()
+    public void ParamContract_DaysBackKindNameLimit_NoServerName_CeilingIsTheSweepsRetention()
     {
         var method = ToolMethods().Single();
         var mcpParams = method.GetParameters()
@@ -59,9 +64,15 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             .Select(p => (p.Name, p.HasDefaultValue, p.DefaultValue))
             .ToArray();
 
-        /* Deliberately NO server_name: the store is the subject, not a monitored server. */
-        Assert.Equal(new[] { "days_back" }, mcpParams.Select(p => p.Name).ToArray());
-        Assert.Equal(30, mcpParams.Single().DefaultValue);
+        /* Deliberately NO server_name: the store is the subject, not a monitored server. #3903 added the two
+           filters and the list bound; each is optional, so a caller sending only days_back — every caller before
+           #3903 — gets the summary, whose lists say what bounded them. */
+        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit" }, mcpParams.Select(p => p.Name).ToArray());
+        Assert.All(mcpParams, p => Assert.True(p.HasDefaultValue, $"{p.Name} must stay optional"));
+        Assert.Equal(30, mcpParams[0].DefaultValue);
+        Assert.Null(mcpParams[1].DefaultValue);
+        Assert.Null(mcpParams[2].DefaultValue);
+        Assert.Equal(DarlingMcpStoreMetricsTools.DefaultLimit, mcpParams[3].DefaultValue);
 
         /* The window ceiling is the series' own retention — past it there is nothing to read, and the two
            numbers drifting apart would let a caller ask for days the sweep deliberately deleted. */
@@ -73,15 +84,42 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     {
         var sql = DarlingStoreMetricsReader.StoreMetricsLatestSql;
 
-        /* DISTINCT ON with a newest-first tiebreak — one settled row per (kind, name). */
-        Assert.Contains("SELECT DISTINCT ON (object_kind, object_name)", sql, StringComparison.Ordinal);
+        /* #3934: a skip-scan (loose index scan) over idx_store_metrics_kind_name_time, not a DISTINCT ON over
+           the whole table — the recursive CTE walks distinct (kind, name) pairs and the outer LATERAL takes
+           each pair's newest row, both index descents rather than a sort of every retained row. */
+        Assert.Contains("WITH RECURSIVE objects AS", sql, StringComparison.Ordinal);
+        Assert.Contains("(object_kind, object_name) > (objects.object_kind, objects.object_name)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.store_metrics", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY object_kind, object_name, metric_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY metric_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY latest.object_kind, latest.object_name", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DISTINCT ON", sql, StringComparison.Ordinal);
 
         /* The forecasting columns ride along. */
         Assert.Contains("compressed_before_bytes", sql, StringComparison.Ordinal);
         Assert.Contains("compressed_after_bytes", sql, StringComparison.Ordinal);
         Assert.Contains("enabled_server_count", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3934: the skip-scan runs only when its index exists. Without the index every recursion step re-reads the
+    /// table, so a store the Tuning stage has not reached yet reads through the pre-#3934 DISTINCT ON instead. CI
+    /// measured the unindexed skip-scan past the 30-second MCP read deadline on a production-shaped seed. The probe
+    /// must name the index the Tuning stage creates: a rename on one side would silently leave every store on the
+    /// fallback.
+    /// </summary>
+    [Fact]
+    public void TheLatestRead_UsesTheSkipScanOnlyWhenItsIndexExists_AndTheProbeNamesTheTuningStagesIndex()
+    {
+        Assert.Contains(
+            $"CREATE INDEX IF NOT EXISTS {DarlingStoreMetricsReader.StoreMetricsLatestIndexName} ON collect.store_metrics (object_kind, object_name, metric_time DESC)",
+            string.Join("\n", PgTableTuning.Statements), StringComparison.Ordinal);
+        Assert.Contains($"to_regclass('collect.{DarlingStoreMetricsReader.StoreMetricsLatestIndexName}')",
+            DarlingStoreMetricsReader.StoreMetricsLatestIndexProbeSql, StringComparison.Ordinal);
+
+        var fallback = DarlingStoreMetricsReader.StoreMetricsLatestWithoutIndexSql;
+        Assert.Contains("SELECT DISTINCT ON (object_kind, object_name)", fallback, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY object_kind, object_name, metric_time DESC", fallback, StringComparison.Ordinal);
+        Assert.DoesNotContain("WITH RECURSIVE", fallback, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -102,6 +140,10 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     [Theory]
     [InlineData(nameof(DarlingStoreMetricsReader.StoreMetricsLatestSql))]
     [InlineData(nameof(DarlingStoreMetricsReader.StoreMetricsDailySql))]
+    [InlineData(nameof(DarlingStoreMetricsReader.JobHistoryEvidenceSql))]
+    [InlineData(nameof(DarlingStoreMetricsReader.ContinuousAggregateStateSql))]
+    [InlineData(nameof(DarlingStoreMetricsReader.LargestUnenumeratedSql))]
+    [InlineData(nameof(DarlingStoreMetricsReader.LargestUnenumeratedPlainSql))]
     public void Reads_ArePostgresDialect_NoTsqlIsms_NoBareNow(string sqlName)
     {
         var sql = (string)typeof(DarlingStoreMetricsReader).GetField(sqlName, BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
@@ -216,9 +258,13 @@ public sealed class DarlingMcpStoreMetricsToolsTests
            vacuous, and the whole point of four states is that there are four. */
         Assert.Equal(4, statuses.Length);
 
+        /* NotApplicable evidence on purpose: it contributes NO text (pinned by its own test below), so what
+           is compared here is the GUC half alone — the #3175 arms, byte-for-byte what they were before the
+           evidence half was appended to them. */
         var notes = statuses
             .Select(s => DarlingMcpStoreMetricsTools.JobHistoryNote(
-                new DarlingStoreMetricsReader.JobExecutionLoggingReading(s, null, null, null)))
+                new DarlingStoreMetricsReader.JobExecutionLoggingReading(s, null, null, null),
+                DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable))
             .ToArray();
 
         Assert.Equal(notes.Length, notes.Distinct(StringComparer.Ordinal).Count());
@@ -235,8 +281,8 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.False(offByDefault.OffByExplicitOverride);
         Assert.True(offByOverride.OffByExplicitOverride);
         Assert.NotEqual(
-            DarlingMcpStoreMetricsTools.JobHistoryNote(offByDefault),
-            DarlingMcpStoreMetricsTools.JobHistoryNote(offByOverride));
+            DarlingMcpStoreMetricsTools.JobHistoryNote(offByDefault, DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable),
+            DarlingMcpStoreMetricsTools.JobHistoryNote(offByOverride, DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable));
 
         /* Only On is Recording. A precondition check whose "yes" leaked into any other state would put a
            maximum question back on an instrument that is off. */
@@ -252,6 +298,1203 @@ public sealed class DarlingMcpStoreMetricsToolsTests
                 DarlingStoreMetricsReader.JobExecutionLoggingStatus.On, "on", "configuration file", "postgresql.conf")
                 .OffByExplicitOverride);
     }
+
+    /* ---------------- #3574: the evidence behind the flag, and who the rows are visible to ---------------- */
+
+    private static DarlingStoreMetricsReader.JobExecutionLoggingReading On() => new(
+        DarlingStoreMetricsReader.JobExecutionLoggingStatus.On, "on", "configuration file", null);
+
+    private static DarlingStoreMetricsReader.JobExecutionLoggingReading OffByDefault() => new(
+        DarlingStoreMetricsReader.JobExecutionLoggingStatus.Off, "off", "default", null);
+
+    /// <summary>An <c>Observed</c> reading with every fact stated, so a test flips exactly the one it is
+    /// about. The defaults are the OWNER's reading on a live store: database-owner member, 110 jobs, 12
+    /// rows in the window, 9 jobs started a run in it.</summary>
+    private static DarlingStoreMetricsReader.JobHistoryEvidence Observed(
+        string role = "darling",
+        bool dbOwnerMember = true,
+        long jobs = 110,
+        long ownerMemberJobs = 110,
+        long rows = 12,
+        DateTime? newestRow = null,
+        long ran = 9,
+        DateTime? newestRun = null) => new(
+            DarlingStoreMetricsReader.JobHistoryEvidenceStatus.Observed,
+            role, dbOwnerMember, jobs, ownerMemberJobs, rows,
+            newestRow ?? (rows > 0 ? new DateTime(2026, 9, 18, 10, 0, 0, DateTimeKind.Utc) : null),
+            ran,
+            newestRun ?? (ran > 0 ? new DateTime(2026, 9, 18, 10, 30, 0, DateTimeKind.Utc) : null));
+
+    /// <summary>The managed-mode <c>mcp</c> role's reading on the same store: a member of nothing, and the
+    /// view shows it nothing — zero rows, while the unfiltered <c>job_stats</c> still counts the runs.</summary>
+    private static DarlingStoreMetricsReader.JobHistoryEvidence FilteredReader() =>
+        Observed(role: "mcp", dbOwnerMember: false, ownerMemberJobs: 0, rows: 0, newestRow: null);
+
+    /// <summary>
+    /// #3574: the evidence read evaluates the view's OWN predicate for the connection doing the reading,
+    /// and takes its two counts from the two views that disagree about visibility.
+    ///
+    /// <para><b>Both <c>pg_has_role</c> tests, in the view's own terms.</b> The membership in the database
+    /// owner (resolved through <c>pg_get_userbyid(datdba)</c>, as the view does) and the per-job membership
+    /// in <c>j.owner</c>. Pinned because a read that counted rows without asking whether it was allowed to
+    /// see any would report zero on every managed store — the MCP host connects as the <c>mcp</c> role, which
+    /// the view filters out — and manufacture the contradiction the issue exists to prevent.</para>
+    ///
+    /// <para><b>The population half comes from the UNFILTERED view.</b> <c>job_stats</c> has no ownership
+    /// clause, so "jobs started a run in the window" holds whatever the reader's standing; taken from the
+    /// filtered view it would be zero exactly when the count it was meant to qualify is zero, and the pair
+    /// would agree for the wrong reason.</para>
+    /// </summary>
+    [Fact]
+    public void TheEvidenceSql_EvaluatesTheViewsOwnPredicate_AndCountsFromBothViews()
+    {
+        var sql = DarlingStoreMetricsReader.JobHistoryEvidenceSql;
+
+        /* The view's two tests, evaluated for this reader. IS TRUE mirrors the view, whose own second test
+           can meet a NULL owner (a history row whose job was deleted) and must read it as "not a member". */
+        Assert.Contains("current_user::text", sql, StringComparison.Ordinal);
+        Assert.Matches(@"pg_has_role\(\s*current_user,\s*\(SELECT pg_get_userbyid\(datdba\) FROM pg_database WHERE datname = current_database\(\)\),\s*'MEMBER'\) IS TRUE", sql);
+        Assert.Matches(@"pg_has_role\(current_user, j\.owner, 'MEMBER'\) IS TRUE", sql);
+
+        /* Three views: the filtered one being counted, and the two unfiltered ones the reader checks first. */
+        Assert.Contains("FROM timescaledb_information.job_history", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM timescaledb_information.jobs", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM timescaledb_information.job_stats", sql, StringComparison.Ordinal);
+
+        /* One window, bound once, applied to both halves — so the count and its population share a
+           denominator. */
+        Assert.Contains("h.start_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("js.last_run_started_at >= $1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$2", sql, StringComparison.Ordinal);
+
+        /* The never-ran sentinel is -infinity, not NULL (#1760); the newest start must NULLIF it away or a
+           store whose jobs have never run reports a start in 4714 BC. */
+        Assert.Contains("NULLIF(js.last_run_started_at, '-infinity'::timestamptz)", sql, StringComparison.Ordinal);
+
+        /* The window is fixed and published beside the count. 24 hours: every job this product schedules
+           runs at least daily, so a live store always has starts inside it, and it sits inside the history
+           view's own one-month default retention. */
+        Assert.Equal(24, DarlingStoreMetricsReader.JobHistoryEvidenceWindowHours);
+    }
+
+    /// <summary>
+    /// #3574: the bind is <c>timestamptz</c> with <c>Kind = Utc</c>, stated explicitly — the INVERSE of
+    /// the naive-UTC discipline every other store read follows, because these are TimescaleDB's own
+    /// <c>TIMESTAMPTZ</c> catalog columns and here the naive bind would be the bug. A source pin, since the
+    /// only server that would catch the wrong Kind is one running off UTC, which no test store does.
+    /// </summary>
+    [Fact]
+    public void TheEvidenceRead_BindsAnExplicitTimestampTz_BecauseTheColumnsAreTimestampTz()
+    {
+        var source = File.ReadAllText(ReaderSourcePath());
+        var method = source[source.IndexOf("GetJobHistoryEvidenceAsync(", StringComparison.Ordinal)..];
+        method = method[..method.IndexOf("/// <summary>One object's newest self-metrics row", StringComparison.Ordinal)];
+
+        Assert.Contains("NpgsqlDbType.TimestampTz", method, StringComparison.Ordinal);
+        Assert.Contains("DateTimeKind.Utc", method, StringComparison.Ordinal);
+        /* And NOT the naive idiom, which is correct one method up and wrong here. */
+        Assert.DoesNotContain("DateTimeKind.Unspecified", method, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3574: <see cref="DarlingStoreMetricsReader.JobHistoryEvidence.Visibility"/> is derived from the
+    /// view's two membership facts exactly as the view combines them — database-owner membership sees
+    /// everything and short-circuits the per-job test; otherwise the per-job count decides — and is
+    /// <c>Unknown</c> wherever a verdict would be vacuous.
+    /// </summary>
+    [Fact]
+    public void TheVisibility_IsDerivedFromTheViewsTwoTests_TheWayTheViewCombinesThem()
+    {
+        /* The owner: a member of the database owner, so All — regardless of the per-job count, which the
+           view never reaches for such a reader. */
+        Assert.Equal(DarlingStoreMetricsReader.JobHistoryVisibility.All, Observed().Visibility);
+        Assert.Equal(DarlingStoreMetricsReader.JobHistoryVisibility.All, Observed(ownerMemberJobs: 0).Visibility);
+        Assert.Equal(110L, Observed(ownerMemberJobs: 0).HistoryVisibleJobCount);
+
+        /* Not the database owner, but a member of every job's owner: still All. */
+        Assert.Equal(
+            DarlingStoreMetricsReader.JobHistoryVisibility.All,
+            Observed(dbOwnerMember: false, ownerMemberJobs: 110).Visibility);
+
+        /* The managed-mode mcp role: a member of neither. None, and the visible count is zero. */
+        Assert.Equal(DarlingStoreMetricsReader.JobHistoryVisibility.None, FilteredReader().Visibility);
+        Assert.Equal(0L, FilteredReader().HistoryVisibleJobCount);
+
+        /* Some jobs' owner but not all: Partial, with the fraction preserved for the note. */
+        var partial = Observed(dbOwnerMember: false, ownerMemberJobs: 3);
+        Assert.Equal(DarlingStoreMetricsReader.JobHistoryVisibility.Partial, partial.Visibility);
+        Assert.Equal(3L, partial.HistoryVisibleJobCount);
+
+        /* No jobs at all: None and All are both vacuously true, so neither is claimed. */
+        Assert.Equal(
+            DarlingStoreMetricsReader.JobHistoryVisibility.Unknown,
+            Observed(jobs: 0, ownerMemberJobs: 0, ran: 0, rows: 0).Visibility);
+
+        /* And nothing was observed: nothing is derived. Every derived field is null, never a plausible zero. */
+        foreach (var blank in new[]
+        {
+            DarlingStoreMetricsReader.JobHistoryEvidence.Unreadable,
+            DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable,
+        })
+        {
+            Assert.Equal(DarlingStoreMetricsReader.JobHistoryVisibility.Unknown, blank.Visibility);
+            Assert.Null(blank.HistoryVisibleJobCount);
+            Assert.Null(blank.RowsObserved);
+            Assert.Null(blank.NewestRowAt);
+            Assert.Null(blank.ReaderRole);
+        }
+    }
+
+    /// <summary>
+    /// #3574: the contradiction is the conjunction of FOUR conditions, and each one alone is a different,
+    /// non-finding shape. A zero read through a filtered role is the filter; a zero with no runs in the
+    /// window is an absence of information; a zero with the GUC off is #3175's arm; rows seen is recording
+    /// proven. Only all four together say the instrument is not writing what the GUC says it is. Each row of
+    /// the table flips exactly one condition off the positive control, so the pin cannot pass by a
+    /// predicate that is simply always false.
+    /// </summary>
+    [Fact]
+    public void TheContradiction_NeedsAllFourConditions_AndEachAloneIsNotOne()
+    {
+        var positive = Observed(rows: 0, newestRow: null);
+        Assert.True(positive.ContradictsRecording(recording: true));
+
+        /* 1. Not recording: the GUC-off arm, not this one. */
+        Assert.False(positive.ContradictsRecording(recording: false));
+
+        /* 2. Reader filtered: the mcp role's zero is the view's doing. Partial is not enough either — the
+           jobs that ran may be the ones this reader cannot see. */
+        Assert.False(FilteredReader().ContradictsRecording(recording: true));
+        Assert.False(Observed(dbOwnerMember: false, ownerMemberJobs: 3, rows: 0, newestRow: null).ContradictsRecording(recording: true));
+
+        /* 3. Rows seen: recording is proven, whatever the run count. */
+        Assert.False(Observed(rows: 1).ContradictsRecording(recording: true));
+
+        /* 4. Nothing ran: nothing to record, so nothing is contradicted. */
+        Assert.False(Observed(rows: 0, newestRow: null, ran: 0, newestRun: null).ContradictsRecording(recording: true));
+
+        /* And not-observed evidence never contradicts anything: a read that did not complete has no
+           standing to declare a finding. */
+        Assert.False(DarlingStoreMetricsReader.JobHistoryEvidence.Unreadable.ContradictsRecording(recording: true));
+        Assert.False(DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable.ContradictsRecording(recording: true));
+    }
+
+    /// <summary>
+    /// #3574: the note names the visibility rule and the reader on every arm where the view exists, and
+    /// says a DIFFERENT thing for each thing the evidence established — including the new contradiction
+    /// arm, in so many words.
+    ///
+    /// <para><b>Distinctness across evidence shapes with the GUC held constant</b>, the same claim the
+    /// #3175 pin makes across GUC states with the evidence held constant. The defect class is one absence
+    /// being read as another; two evidence shapes sharing a sentence would reproduce it.</para>
+    /// </summary>
+    [Fact]
+    public void TheVisibilityNote_NamesTheRuleAndTheReader_AndSaysADifferentThingPerShape()
+    {
+        var on = On();
+
+        var filtered = DarlingMcpStoreMetricsTools.JobHistoryNote(on, FilteredReader());
+        var contradiction = DarlingMcpStoreMetricsTools.JobHistoryNote(on, Observed(rows: 0, newestRow: null));
+        var proven = DarlingMcpStoreMetricsTools.JobHistoryNote(on, Observed());
+        var nothingRan = DarlingMcpStoreMetricsTools.JobHistoryNote(on, Observed(rows: 0, newestRow: null, ran: 0, newestRun: null));
+        var partial = DarlingMcpStoreMetricsTools.JobHistoryNote(on, Observed(dbOwnerMember: false, ownerMemberJobs: 3));
+        var noJobs = DarlingMcpStoreMetricsTools.JobHistoryNote(on, Observed(jobs: 0, ownerMemberJobs: 0, rows: 0, ran: 0));
+        var unreadable = DarlingMcpStoreMetricsTools.JobHistoryNote(on, DarlingStoreMetricsReader.JobHistoryEvidence.Unreadable);
+
+        var all = new[] { filtered, contradiction, proven, nothingRan, partial, noJobs, unreadable };
+        Assert.Equal(all.Length, all.Distinct(StringComparer.Ordinal).Count());
+
+        /* The rule, stated with the view's own predicate, and the trap named, on every one of them. */
+        foreach (var note in all)
+        {
+            Assert.Contains("pg_has_role(current_user, <database owner>, 'MEMBER') OR pg_has_role(current_user, <job owner>, 'MEMBER')", note, StringComparison.Ordinal);
+            Assert.Contains("jobs and job_stats views show every role every job", note, StringComparison.Ordinal);
+            Assert.Contains("contradicts nothing", note, StringComparison.Ordinal);
+            /* And the #3175 half is still in front of it, untouched. */
+            Assert.StartsWith(
+                DarlingMcpStoreMetricsTools.JobHistoryNote(on, DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable),
+                note,
+                StringComparison.Ordinal);
+        }
+
+        /* The reader is named wherever there was one. */
+        Assert.Contains("read as 'mcp'", filtered, StringComparison.Ordinal);
+        Assert.Contains("read as 'darling'", contradiction, StringComparison.Ordinal);
+
+        /* The filtered arm: the zero is the filter, the role that can see is named, and the unfiltered
+           population is reported so the store does not read as idle. */
+        Assert.Contains("NOTHING by construction", filtered, StringComparison.Ordinal);
+        Assert.Contains("the filter, not the table", filtered, StringComparison.Ordinal);
+        Assert.Contains("owner role", filtered, StringComparison.Ordinal);
+        Assert.Contains("9 job(s) started a run", filtered, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONTRADICTION", filtered, StringComparison.Ordinal);
+
+        /* The contradiction arm: named as such, with the benign cause and how to settle it, and never
+           'quiet' or 'clean'. */
+        Assert.Contains("CONTRADICTION", contradiction, StringComparison.Ordinal);
+        Assert.Contains("do not read this zero as quiet", contradiction, StringComparison.Ordinal);
+        Assert.Contains("switched on AFTER", contradiction, StringComparison.Ordinal);
+        Assert.Contains("re-read after", contradiction, StringComparison.Ordinal);
+        Assert.Contains("a finding", contradiction, StringComparison.Ordinal);
+
+        /* Rows seen: the flag is a measurement. */
+        Assert.Contains("12 row(s)", proven, StringComparison.Ordinal);
+        Assert.Contains("a measurement here, not a GUC echo", proven, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONTRADICTION", proven, StringComparison.Ordinal);
+
+        /* Zero rows, zero runs: not clean — an absence of information, said so. */
+        Assert.Contains("proves nothing either way", nothingRan, StringComparison.Ordinal);
+        Assert.Contains("absence of information", nothingRan, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONTRADICTION", nothingRan, StringComparison.Ordinal);
+
+        /* Partial: the fraction, and no verdict. */
+        Assert.Contains("3 of 110 jobs", partial, StringComparison.Ordinal);
+        Assert.Contains("THOSE jobs only", partial, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONTRADICTION", partial, StringComparison.Ordinal);
+
+        /* Unreadable: the flag is a GUC echo and the note says so, instead of a zero. */
+        Assert.Contains("UNKNOWN", unreadable, StringComparison.Ordinal);
+        Assert.Contains("GUC's word alone", unreadable, StringComparison.Ordinal);
+        Assert.DoesNotContain("rows_observed = ", unreadable, StringComparison.Ordinal);
+
+        /* The GUC-off arm with an admitted reader: says what it will see once on, and that anything seen
+           now is failures — never that logging is secretly on. */
+        var offAdmitted = DarlingMcpStoreMetricsTools.JobHistoryNote(OffByDefault(), Observed(rows: 2));
+        Assert.Contains("FAILED runs", offAdmitted, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONTRADICTION", offAdmitted, StringComparison.Ordinal);
+        Assert.DoesNotContain("not a GUC echo", offAdmitted, StringComparison.Ordinal);
+
+        /* The GUC unreadable but the view readable: the rows are counted and NOT classified — neither
+           proof of recording nor a failure census, because that split is the setting's to make. */
+        var gucUnknownAdmitted = DarlingMcpStoreMetricsTools.JobHistoryNote(
+            new DarlingStoreMetricsReader.JobExecutionLoggingReading(
+                DarlingStoreMetricsReader.JobExecutionLoggingStatus.Unreadable, null, null, null),
+            Observed(rows: 2));
+        Assert.Contains("not classified", gucUnknownAdmitted, StringComparison.Ordinal);
+        Assert.Contains("2 row(s)", gucUnknownAdmitted, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONTRADICTION", gucUnknownAdmitted, StringComparison.Ordinal);
+        Assert.DoesNotContain("not a GUC echo", gucUnknownAdmitted, StringComparison.Ordinal);
+        Assert.DoesNotContain("any it sees now are FAILED", gucUnknownAdmitted, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3574: on a plain-PostgreSQL connection there is no view to be filtered, so the evidence half adds
+    /// NOTHING and the #3175 NotRegistered note is byte-for-byte what it was. The one arm where a sentence
+    /// about who may read the view would be noise.
+    /// </summary>
+    [Fact]
+    public void TheNotApplicableEvidence_AddsNoText_SoTheNotRegisteredNoteIsUnchanged()
+    {
+        var notRegistered = new DarlingStoreMetricsReader.JobExecutionLoggingReading(
+            DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered, null, null, null);
+
+        Assert.Equal(
+            "",
+            DarlingMcpStoreMetricsTools.JobHistoryVisibilityNote(notRegistered, DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable));
+
+        var note = DarlingMcpStoreMetricsTools.JobHistoryNote(notRegistered, DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable);
+        Assert.DoesNotContain("WHO CAN SEE", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_has_role", note, StringComparison.Ordinal);
+        Assert.Contains("does not exist on this connection", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3574: the two reads fail SEPARATELY, and the evidence read is not attempted where there is no view.
+    ///
+    /// <para>No store is needed. The data source points at a port nothing listens on, so any read that
+    /// reaches the network fails at connect — which is exactly the failure the isolation has to absorb. The
+    /// NotRegistered half goes further: it hands the read an ALREADY-CANCELLED token, and the method's own
+    /// contract is that cancellation is never isolated, so a NotApplicable coming back (rather than an
+    /// <see cref="OperationCanceledException"/>) proves the read returned before touching the connection
+    /// at all.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheEvidenceRead_FailsSeparatelyFromTheGucRead_AndIsSkippedWhereThereIsNoView()
+    {
+        await using var nowhere = NpgsqlDataSource.Create(
+            "Host=127.0.0.1;Port=1;Username=nobody;Password=nobody;Database=nowhere;Timeout=1;Command Timeout=1");
+
+        /* A registered GUC reading, handed in from outside: the evidence read fails at connect and reports
+           Unreadable, and the GUC reading it was given is untouched — the count timing out cannot make the
+           GUC unknown. */
+        var on = On();
+        var evidence = await DarlingStoreMetricsReader.GetJobHistoryEvidenceAsync(nowhere, on, TestContext.Current.CancellationToken);
+        Assert.Equal(DarlingStoreMetricsReader.JobHistoryEvidenceStatus.Unreadable, evidence.Status);
+        Assert.Null(evidence.RowsObserved);
+        Assert.Null(evidence.ReaderRole);
+        Assert.True(on.Recording);
+
+        /* And the note on that pair still carries the GUC's answer, qualified as an echo. */
+        var note = DarlingMcpStoreMetricsTools.JobHistoryNote(on, evidence);
+        Assert.Contains("is ON", note, StringComparison.Ordinal);
+        Assert.Contains("GUC's word alone", note, StringComparison.Ordinal);
+
+        /* NotRegistered: not attempted. A fired token would throw out of any read that started. */
+        var notRegistered = new DarlingStoreMetricsReader.JobExecutionLoggingReading(
+            DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered, null, null, null);
+        var skipped = await DarlingStoreMetricsReader.GetJobHistoryEvidenceAsync(
+            nowhere, notRegistered, new CancellationToken(canceled: true));
+        Assert.Same(DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable, skipped);
+
+        /* The GUC read's own isolation, for the pairing: it too becomes Unreadable at connect rather than
+           throwing or inventing an Off. */
+        var guc = await DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(nowhere, TestContext.Current.CancellationToken);
+        Assert.Equal(DarlingStoreMetricsReader.JobExecutionLoggingStatus.Unreadable, guc.Status);
+    }
+
+    /// <summary>
+    /// #3574: the description names the ownership filter and the fields the block now carries for it,
+    /// asserted TOGETHER with the shipped SQL evaluating the predicate — the sibling pins' reason: a
+    /// sentence about a read that does not exist is advice to look somewhere this tool declines to look,
+    /// and a read with no sentence sits in the JSON unexplained.
+    /// </summary>
+    [Fact]
+    public void TheDescription_NamesTheOwnershipFilter_AndTheEvidenceFieldsBehindIt()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        /* The rule, the trap, and the fact that the tool's own managed-mode reader is on the wrong side of
+           it — in one ordered match each, so a rewording that kept the words but dropped the claim goes
+           red. */
+        Assert.Matches(@"job_history is ownership-filtered[^.]*members of the job's owner role or of the database owner[^.]*jobs and job_stats views show every role every job", description!);
+        Assert.Matches(@"managed mode[^.]*mcp role[^.]*filters out", description!);
+
+        /* Every evidence field the block publishes is named where a caller reads about the block. */
+        foreach (var field in new[] { "reader_role", "visibility", "rows_observed", "newest_row_at", "jobs_run_in_window", "contradiction" })
+        {
+            Assert.Contains(field, description!, StringComparison.Ordinal);
+        }
+
+        /* And the window the counts are over, so the number never travels without its denominator. */
+        Assert.Contains($"{DarlingStoreMetricsReader.JobHistoryEvidenceWindowHours}-hour window", description!, StringComparison.Ordinal);
+
+        /* The read behind the sentence. */
+        Assert.Contains("pg_has_role", DarlingStoreMetricsReader.JobHistoryEvidenceSql, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #3574, managed-mode self-proof: the owner's persisted reading ---------------- */
+
+    /// <summary>
+    /// The evidence SELECT is ONE string with two consumers: the reader's constant IS the sweep's, the
+    /// window constants agree, and the sweep's INSERT embeds the reader's text verbatim. Two copies of a
+    /// nine-column predicate would drift without erroring; this pins that there is one.
+    /// </summary>
+    [Fact]
+    public void TheEvidenceSql_IsSharedWithTheSweep_NotCopied()
+    {
+        Assert.Equal(StoreSelfMetrics.JobHistoryEvidenceSql, DarlingStoreMetricsReader.JobHistoryEvidenceSql);
+        Assert.Equal(StoreSelfMetrics.JobHistoryEvidenceWindowHours, DarlingStoreMetricsReader.JobHistoryEvidenceWindowHours);
+        Assert.Contains(DarlingStoreMetricsReader.JobHistoryEvidenceSql, StoreSelfMetrics.JobHistoryInsertSql, StringComparison.Ordinal);
+    }
+
+    private static readonly DateTime SweepAt = new(2026, 9, 18, 15, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>An existence map (#4619) from (kind, name, verdict) triples; a null verdict is "no check".</summary>
+    private static IReadOnlyDictionary<(string ObjectKind, string ObjectName), bool?> Exists(params (string Kind, string Name, bool? Verdict)[] entries)
+        => entries.ToDictionary(e => (e.Kind, e.Name), e => e.Verdict);
+
+    /// <summary>ComputeInventory over rows that all share the store row's sweep, where the existence map is
+    /// never consulted — so the empty one is as good as any.</summary>
+    private static DarlingStoreMetricsReader.InventoryReconciliation? OneSweep(IReadOnlyList<DarlingStoreMetricsReader.StoreMetricRow> rows)
+        => DarlingStoreMetricsReader.ComputeInventory(rows, Exists());
+
+    /// <summary>A <c>job_history</c> row as the sweep writes it: role in the name, count in row_count (null =
+    /// filtered), population in total_runs, window in schedule_interval_ms, newest-row AGE in
+    /// last_run_duration_ms.</summary>
+    private static DarlingStoreMetricsReader.StoreMetricRow OwnerRow(
+        DateTime? at = null, long? rows = 48, long? ran = 110, long? ageMs = 780_000, string role = "darling", long? windowMs = 86_400_000) => new(
+            StoreSelfMetrics.JobHistoryObjectKind, role, at ?? SweepAt,
+            null, null, null, null, rows, null,
+            LastRunDurationMs: ageMs, ScheduleIntervalMs: windowMs, TotalRuns: ran, TotalFailures: null);
+
+    private static DarlingStoreMetricsReader.StoreMetricRow StoreRow(DateTime? at = null, long bytes = 1_000) => new(
+        StoreSelfMetrics.StoreObjectKind, "darling", at ?? SweepAt, bytes, null, null, null, null, 52);
+
+    private static DarlingStoreMetricsReader.StoreMetricRow Row(string kind, string name, long? bytes, DateTime? at = null, int? chunks = null) => new(
+        kind, name, at ?? SweepAt, bytes, null, null, chunks, null, null);
+
+    /// <summary>
+    /// #3574: the decoder turns the sweep's overloaded columns back into what they mean — count, population,
+    /// window, and the newest row as an INSTANT (metric_time minus the persisted age) — and judges
+    /// freshness against the sweep's stamp, not against the newest row. The four statuses each come from
+    /// one fact: no row, a NULL count, an old stamp, or none of those.
+    /// </summary>
+    [Fact]
+    public void OwnerEvidence_DecodesTheColumnMapping_AndJudgesFreshnessFromTheSweepStamp()
+    {
+        var now = new DateTime(2026, 9, 18, 15, 30, 0, DateTimeKind.Utc);
+
+        var observed = DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(new[] { StoreRow(), OwnerRow() }, now);
+        Assert.Equal(DarlingStoreMetricsReader.OwnerJobHistoryEvidenceStatus.Observed, observed.Status);
+        Assert.Equal("darling", observed.ReaderRole);
+        Assert.Equal(DateTime.SpecifyKind(SweepAt, DateTimeKind.Utc), observed.ObservedAt);
+        Assert.Equal(DateTimeKind.Utc, observed.ObservedAt!.Value.Kind);
+        Assert.Equal(0.5, observed.AgeHours);
+        Assert.Equal(24.0, observed.WindowHours);
+        Assert.Equal(48L, observed.RowsObserved);
+        Assert.Equal(110L, observed.JobsRunInWindow);
+        /* The age decodes to an instant 13 minutes before the sweep — never surfaced as a duration. */
+        Assert.Equal(new DateTime(2026, 9, 18, 14, 47, 0, DateTimeKind.Utc), observed.NewestRowAt);
+
+        /* No row ever seen: the age is NULL and so is the instant — a count of zero and a missing newest
+           row are two facts, and the whole issue is one being read as the other. */
+        var noneEver = DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(new[] { OwnerRow(rows: 0, ageMs: null) }, now);
+        Assert.Equal(0L, noneEver.RowsObserved);
+        Assert.Null(noneEver.NewestRowAt);
+
+        /* Filtered: the sweep's role could not see, so it wrote no count — and that is a status, not a zero. */
+        var filtered = DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(new[] { OwnerRow(rows: null, ageMs: null, role: "svc") }, now);
+        Assert.Equal(DarlingStoreMetricsReader.OwnerJobHistoryEvidenceStatus.Filtered, filtered.Status);
+        Assert.Equal("svc", filtered.ReaderRole);
+        Assert.Null(filtered.RowsObserved);
+        Assert.Equal(110L, filtered.JobsRunInWindow);
+
+        /* Stale: judged on the SWEEP's age, past the fresh bar. The count is still carried. */
+        var stale = DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(
+            new[] { OwnerRow(at: SweepAt.AddHours(-(DarlingStoreMetricsReader.OwnerEvidenceFreshHours + 1))) }, now);
+        Assert.Equal(DarlingStoreMetricsReader.OwnerJobHistoryEvidenceStatus.Stale, stale.Status);
+        Assert.Equal(48L, stale.RowsObserved);
+        Assert.True(stale.AgeHours > DarlingStoreMetricsReader.OwnerEvidenceFreshHours);
+
+        /* Exactly at the bar is fresh; one second past it is not. */
+        var atBar = DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(
+            new[] { OwnerRow(at: now.AddHours(-DarlingStoreMetricsReader.OwnerEvidenceFreshHours)) }, now);
+        Assert.Equal(DarlingStoreMetricsReader.OwnerJobHistoryEvidenceStatus.Observed, atBar.Status);
+
+        /* Absent: no row of the kind at all — every field null, never a plausible zero. */
+        var absent = DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(new[] { StoreRow() }, now);
+        Assert.Same(DarlingStoreMetricsReader.OwnerJobHistoryEvidence.Absent, absent);
+        Assert.Null(absent.RowsObserved);
+        Assert.Null(absent.ReaderRole);
+
+        /* Two rows (a renamed owner role): the newest sweep's speaks. */
+        var renamed = DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(
+            new[] { OwnerRow(at: SweepAt.AddHours(-2), role: "old_owner", rows: 5), OwnerRow(role: "new_owner", rows: 7) }, now);
+        Assert.Equal("new_owner", renamed.ReaderRole);
+        Assert.Equal(7L, renamed.RowsObserved);
+
+        Assert.Equal(3, DarlingStoreMetricsReader.OwnerEvidenceFreshHours);
+    }
+
+    /// <summary>
+    /// #3574: the owner's contradiction is the same conjunction as the connection's own, judged on a FRESH
+    /// reading only. Each flip off the positive control is a different non-finding: not recording, stale,
+    /// filtered, rows seen, nothing ran.
+    /// </summary>
+    [Fact]
+    public void OwnerContradiction_NeedsAFreshAdmittedZeroWithRuns_AndEachAloneIsNotOne()
+    {
+        var now = new DateTime(2026, 9, 18, 15, 30, 0, DateTimeKind.Utc);
+        DarlingStoreMetricsReader.OwnerJobHistoryEvidence Decode(params DarlingStoreMetricsReader.StoreMetricRow[] rows)
+            => DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(rows, now);
+
+        var positive = Decode(OwnerRow(rows: 0, ageMs: null));
+        Assert.True(positive.ContradictsRecording(recording: true));
+
+        Assert.False(positive.ContradictsRecording(recording: false));
+        Assert.False(Decode(OwnerRow(rows: 0, ageMs: null, at: SweepAt.AddHours(-9))).ContradictsRecording(recording: true));
+        Assert.False(Decode(OwnerRow(rows: null, ageMs: null)).ContradictsRecording(recording: true));
+        Assert.False(Decode(OwnerRow(rows: 1)).ContradictsRecording(recording: true));
+        Assert.False(Decode(OwnerRow(rows: 0, ageMs: null, ran: 0)).ContradictsRecording(recording: true));
+        Assert.False(DarlingStoreMetricsReader.OwnerJobHistoryEvidence.Absent.ContradictsRecording(recording: true));
+    }
+
+    /// <summary>
+    /// #3574: the owner's half of the note is appended exactly where this connection is NOT itself an
+    /// admitted reader, names its source (the service's hourly sweep) on every arm, and says a different
+    /// thing per owner shape — including the contradiction from the owner's numbers, in so many words. On
+    /// the <c>All</c> arm and the <c>NotApplicable</c> arm it adds NOTHING: there the connection's own count
+    /// is the census, or there is no view.
+    /// </summary>
+    [Fact]
+    public void TheOwnerNote_IsAppendedOnlyWhereThisConnectionCannotSee_AndSaysADifferentThingPerShape()
+    {
+        var now = new DateTime(2026, 9, 18, 15, 30, 0, DateTimeKind.Utc);
+        DarlingStoreMetricsReader.OwnerJobHistoryEvidence Decode(params DarlingStoreMetricsReader.StoreMetricRow[] rows)
+            => DarlingStoreMetricsReader.OwnerJobHistoryEvidence.FromLatest(rows, now);
+        var on = On();
+        var mcp = FilteredReader();
+
+        var proven = DarlingMcpStoreMetricsTools.JobHistoryNote(on, mcp, Decode(OwnerRow()));
+        var contradiction = DarlingMcpStoreMetricsTools.JobHistoryNote(on, mcp, Decode(OwnerRow(rows: 0, ageMs: null)));
+        var nothingRan = DarlingMcpStoreMetricsTools.JobHistoryNote(on, mcp, Decode(OwnerRow(rows: 0, ageMs: null, ran: 0)));
+        var stale = DarlingMcpStoreMetricsTools.JobHistoryNote(on, mcp, Decode(OwnerRow(rows: 0, ageMs: null, at: SweepAt.AddHours(-9))));
+        var filtered = DarlingMcpStoreMetricsTools.JobHistoryNote(on, mcp, Decode(OwnerRow(rows: null, ageMs: null, role: "svc")));
+        var absent = DarlingMcpStoreMetricsTools.JobHistoryNote(on, mcp, DarlingStoreMetricsReader.OwnerJobHistoryEvidence.Absent);
+        var offFailures = DarlingMcpStoreMetricsTools.JobHistoryNote(OffByDefault(), mcp, Decode(OwnerRow(rows: 2)));
+
+        var all = new[] { proven, contradiction, nothingRan, stale, filtered, absent, offFailures };
+        Assert.Equal(all.Length, all.Distinct(StringComparer.Ordinal).Count());
+
+        /* Every arm: the connection's own None verdict first, untouched, then the source of the owner's numbers. */
+        foreach (var note in all)
+        {
+            Assert.Contains("NOTHING by construction", note, StringComparison.Ordinal);
+            Assert.Contains("THE OWNER'S OWN COUNT", note, StringComparison.Ordinal);
+            Assert.Contains("the service's sweep, not from this connection", note, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("Reading as 'darling' at 2026-09-18T15:00:00.0000000Z", proven, StringComparison.Ordinal);
+        Assert.Contains("48 row(s)", proven, StringComparison.Ordinal);
+        Assert.Contains("newest 2026-09-18T14:47:00.0000000Z", proven, StringComparison.Ordinal);
+        Assert.Contains("110 job(s) started a run", proven, StringComparison.Ordinal);
+        Assert.Contains("a measurement on this store after all", proven, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONTRADICTION", proven, StringComparison.Ordinal);
+
+        Assert.Contains("CONTRADICTION (from the owner's numbers)", contradiction, StringComparison.Ordinal);
+        Assert.Contains("do not read this zero as quiet", contradiction, StringComparison.Ordinal);
+        Assert.Contains("switched on AFTER", contradiction, StringComparison.Ordinal);
+        Assert.Contains("none ever", contradiction, StringComparison.Ordinal);
+
+        Assert.Contains("absence of information", nothingRan, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONTRADICTION", nothingRan, StringComparison.Ordinal);
+
+        /* Stale: shown with its age, explicitly not read as current, and NO verdict even though the numbers
+           alone would be the contradiction's. */
+        Assert.Contains("hours old", stale, StringComparison.Ordinal);
+        Assert.Contains("not read as current evidence", stale, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONTRADICTION", stale, StringComparison.Ordinal);
+
+        Assert.Contains("'svc' was itself NOT admitted", filtered, StringComparison.Ordinal);
+        Assert.Contains("recorded no count", filtered, StringComparison.Ordinal);
+
+        Assert.Contains("holds no such row yet", absent, StringComparison.Ordinal);
+        Assert.Contains("nothing in this block is a measurement", absent, StringComparison.Ordinal);
+
+        Assert.Contains("FAILED runs, which TimescaleDB writes regardless", offFailures, StringComparison.Ordinal);
+        Assert.DoesNotContain("after all", offFailures, StringComparison.Ordinal);
+
+        /* NOT appended where this connection already sees everything, and where there is no view. */
+        var ownReader = DarlingMcpStoreMetricsTools.JobHistoryNote(on, Observed(), Decode(OwnerRow()));
+        Assert.DoesNotContain("THE OWNER'S OWN COUNT", ownReader, StringComparison.Ordinal);
+        Assert.Equal(DarlingMcpStoreMetricsTools.JobHistoryNote(on, Observed()), ownReader);
+
+        var notRegistered = new DarlingStoreMetricsReader.JobExecutionLoggingReading(
+            DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered, null, null, null);
+        Assert.DoesNotContain("THE OWNER'S OWN COUNT",
+            DarlingMcpStoreMetricsTools.JobHistoryNote(notRegistered, DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable, Decode(OwnerRow())),
+            StringComparison.Ordinal);
+
+        /* Appended on Partial and on Unreadable too — anywhere this connection's count is not a census. */
+        Assert.Contains("THE OWNER'S OWN COUNT",
+            DarlingMcpStoreMetricsTools.JobHistoryNote(on, Observed(dbOwnerMember: false, ownerMemberJobs: 3), Decode(OwnerRow())),
+            StringComparison.Ordinal);
+        Assert.Contains("THE OWNER'S OWN COUNT",
+            DarlingMcpStoreMetricsTools.JobHistoryNote(on, DarlingStoreMetricsReader.JobHistoryEvidence.Unreadable, Decode(OwnerRow())),
+            StringComparison.Ordinal);
+
+        /* And the two-argument form is the three-argument form with Absent, so every older pin still
+           describes a note the tool can produce. */
+        Assert.Equal(absent, DarlingMcpStoreMetricsTools.JobHistoryNote(on, mcp));
+    }
+
+    /// <summary>
+    /// #3175 corrected (#3582 follow-up): an OFF setting does not empty the view. TimescaleDB writes a
+    /// FAILED run's row regardless of the GUC, so both Off arms now say the view is a census of failures
+    /// and neither claims it "returns zero rows" — which contradicted the visibility arm beside it that
+    /// (correctly) classifies rows an admitted reader sees with the GUC off as failures. Pinned with a
+    /// positive control on the On arm, which is the one allowed to call the rows a census of runs.
+    /// </summary>
+    [Fact]
+    public void TheGucOffNotes_SayFailuresOnly_AndNoLongerClaimZeroRows()
+    {
+        var none = DarlingStoreMetricsReader.JobHistoryEvidence.NotApplicable;
+        var offDefault = DarlingMcpStoreMetricsTools.JobHistoryNote(OffByDefault(), none);
+        var offOverride = DarlingMcpStoreMetricsTools.JobHistoryNote(
+            new DarlingStoreMetricsReader.JobExecutionLoggingReading(
+                DarlingStoreMetricsReader.JobExecutionLoggingStatus.Off, "off", "configuration file", "postgresql.auto.conf"),
+            none);
+
+        foreach (var note in new[] { offDefault, offOverride })
+        {
+            Assert.Contains("recording FAILED runs only", note, StringComparison.Ordinal);
+            Assert.Contains("regardless of this setting", note, StringComparison.Ordinal);
+            Assert.Contains("census of failures", note, StringComparison.Ordinal);
+            Assert.Contains("secretly on", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("returns zero rows", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("is NOT recording", note, StringComparison.Ordinal);
+        }
+
+        /* The two Off arms still differ on what to DO. */
+        Assert.Contains("ALTER SYSTEM RESET", offOverride, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER SYSTEM RESET", offDefault, StringComparison.Ordinal);
+
+        /* Positive control: only the On arm calls it a census of the runs it covers. */
+        var onNote = DarlingMcpStoreMetricsTools.JobHistoryNote(On(), none);
+        Assert.Contains("census of the runs it covers", onNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("census of failures", onNote, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3574 + #3582: the description names the owner fields and where their numbers come from, asserted
+    /// TOGETHER with the sweep arm that writes them (the sibling pins' reason).
+    /// </summary>
+    [Fact]
+    public void TheDescription_NamesTheOwnerEvidence_AndTheSweepThatProducesIt()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        Assert.Matches(@"hourly self-metrics sweep runs as it[^.]*persists the owner's own count[^.]*same 24-hour window", description!);
+        foreach (var field in new[] { "owner_evidence", "owner_role", "owner_observed_at", "owner_rows_observed", "owner_newest_row_at", "owner_jobs_run_in_window" })
+        {
+            Assert.Contains(field, description!, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("taken by the service's sweep rather than by this connection", description!, StringComparison.Ordinal);
+        Assert.Contains($"'{StoreSelfMetrics.JobHistoryObjectKind}'", StoreSelfMetrics.JobHistoryInsertSql, StringComparison.Ordinal);
+
+        /* And the corrected GUC claim: successes need it on, failures are written regardless. */
+        Assert.Matches(@"records a SUCCESSFUL run only while timescaledb\.enable_job_execution_logging is on[^.]*defaults OFF[^.]*FAILED run's row is written regardless", description!);
+    }
+
+    /* ---------------- #3582: the inventory reconciled ---------------- */
+
+    /// <summary>
+    /// #3582: the reconciliation is computed over ONE sweep — the rows sharing the store row's stamp — and
+    /// states the two coverages separately: enumerated (named objects) and attributed (any row). Rows from
+    /// an older sweep are counted and excluded, not summed against a newer database figure; a missing
+    /// catch-all row makes the verdict unjudgeable rather than false-by-arithmetic; a residual past the bar
+    /// is NOT reconciled; the bar is the larger of the percent and the floor.
+    /// </summary>
+    [Fact]
+    public void ComputeInventory_ReconcilesOneSweep_SplitsEnumeratedFromAttributed_AndCountsStaleRows()
+    {
+        const long gib = 1L << 30;
+        var older = SweepAt.AddHours(-1);
+
+        var rows = new[]
+        {
+            StoreRow(bytes: 415 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "wait_stats", 100 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "query_stats", 20 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "query_store_stats_hourly", 235 * gib),
+            Row(StoreSelfMetrics.DimensionObjectKind, PayloadDimensions.QueryPlanDimTable, 39 * gib),
+            Row(StoreSelfMetrics.TableObjectKind, QueryStoreTextStore.TableName, 15 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 14),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 161),
+            /* Kinds with no bytes contribute nothing and are not stale. */
+            new DarlingStoreMetricsReader.StoreMetricRow(StoreSelfMetrics.BackgroundJobObjectKind, "policy_compression x [1]", SweepAt, null, null, null, null, null, null, 100, 3_600_000, 5, 0),
+            OwnerRow(),
+            /* From the previous sweep, for an object that still exists: excluded and counted as a gap. */
+            Row(StoreSelfMetrics.HypertableObjectKind, "not_reached", 7 * gib, at: older),
+        };
+
+        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows, Exists((StoreSelfMetrics.HypertableObjectKind, "not_reached", true)));
+        Assert.NotNull(inventory);
+        Assert.Equal(SweepAt, inventory!.SweepAt);
+        Assert.Equal(415 * gib, inventory.DatabaseBytes);
+        Assert.Equal((100 + 20 + 235 + 39 + 15) * gib, inventory.EnumeratedBytes);
+        Assert.Equal((100 + 20 + 235 + 39 + 15 + 3 + 2) * gib, inventory.AttributedBytes);
+        Assert.Equal(gib, inventory.ResidualBytes);
+        Assert.Equal(1, inventory.StaleRowCount);
+        Assert.Equal(3 * gib, inventory.UnenumeratedBytes);
+        Assert.Equal(14, inventory.UnenumeratedRelationCount);
+        Assert.Equal(2 * gib, inventory.SystemBytes);
+        Assert.Equal(161, inventory.SystemRelationCount);
+        Assert.True(inventory.CatchAllPresent);
+
+        Assert.Equal(Math.Round(100.0 * 409 / 415, 2), inventory.EnumeratedPercent);
+        Assert.Equal(Math.Round(100.0 * 414 / 415, 2), inventory.AttributedPercent);
+        Assert.Equal(120 * gib, inventory.BytesByKind[StoreSelfMetrics.HypertableObjectKind]);
+        Assert.Equal(235 * gib, inventory.BytesByKind[StoreSelfMetrics.ContinuousAggregateObjectKind]);
+        Assert.False(inventory.BytesByKind.ContainsKey(StoreSelfMetrics.BackgroundJobObjectKind));
+
+        /* The bar: 1% of 415 GiB is 4.15 GiB, well above the 64 MiB floor; a 1 GiB residual reconciles. */
+        Assert.Equal((long)Math.Ceiling(415 * gib * 0.01), inventory.ToleranceBytes);
+        Assert.True(inventory.Reconciled);
+
+        /* Ten GiB attributed to no row: a finding. */
+        var gap = OneSweep(new[]
+        {
+            StoreRow(bytes: 415 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "a", 400 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+        })!;
+        Assert.Equal(10 * gib, gap.ResidualBytes);
+        Assert.False(gap.Reconciled);
+
+        /* The floor: on a 17 MiB store, 1% is 170 KiB and a 160 KiB residual would sit under it — but the
+           floor is what carries a small store, and a residual under 64 MiB reconciles regardless. */
+        var small = OneSweep(new[]
+        {
+            StoreRow(bytes: 17_192_639),
+            Row(StoreSelfMetrics.HypertableObjectKind, "a", 1_720_320),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 827_392, chunks: 40),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 13_352_960, chunks: 161),
+        })!;
+        Assert.Equal(DarlingStoreMetricsReader.ReconciliationToleranceFloorBytes, small.ToleranceBytes);
+        Assert.True(small.Reconciled);
+
+        /* No catch-all rows: not judgeable, so not reconciled — however small the arithmetic residual. */
+        var noCatchAll = OneSweep(new[]
+        {
+            StoreRow(bytes: 1_000),
+            Row(StoreSelfMetrics.HypertableObjectKind, "a", 1_000),
+        })!;
+        Assert.False(noCatchAll.CatchAllPresent);
+        Assert.False(noCatchAll.Reconciled);
+        Assert.Null(noCatchAll.UnenumeratedBytes);
+
+        /* No store row: nothing to reconcile against, and no percentage of nothing. */
+        Assert.Null(OneSweep(new[] { Row(StoreSelfMetrics.HypertableObjectKind, "a", 1) }));
+        Assert.Null(OneSweep(Array.Empty<DarlingStoreMetricsReader.StoreMetricRow>()));
+
+        Assert.Equal(1.0, DarlingStoreMetricsReader.ReconciliationTolerancePercent);
+        Assert.Equal(64L * 1024 * 1024, DarlingStoreMetricsReader.ReconciliationToleranceFloorBytes);
+    }
+
+    /// <summary>
+    /// #3582: the inventory note states coverage in the issue's words, names the largest un-enumerated
+    /// relations, calls a residual past the bar a FINDING, calls missing catch-all rows a sweep failure,
+    /// explains a low enumerated share on a store with no TimescaleDB rows, and reports aggregates holding
+    /// bytes with compression off. Each shape is distinct from the others.
+    /// </summary>
+    [Fact]
+    public void TheInventoryNote_StatesCoverage_NamesTheLargest_AndCallsAGapAFinding()
+    {
+        const long gib = 1L << 30;
+        var rows = new[]
+        {
+            StoreRow(bytes: 415 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "wait_stats", 120 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "query_store_stats_hourly", 200 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "query_store_stats_daily", 35 * gib),
+            Row(StoreSelfMetrics.DimensionObjectKind, PayloadDimensions.QueryPlanDimTable, 39 * gib),
+            Row(StoreSelfMetrics.TableObjectKind, QueryStoreTextStore.TableName, 15 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 14),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 161),
+        };
+        var states = new[]
+        {
+            new DarlingStoreMetricsReader.ContinuousAggregateState("query_store_stats_hourly", false, true, "query_store_stats", 1001, null, null),
+            new DarlingStoreMetricsReader.ContinuousAggregateState("query_store_stats_daily", true, true, "query_store_stats_hourly", 1002, 1003, 1004),
+        };
+        var largest = new[]
+        {
+            new DarlingStoreMetricsReader.UnenumeratedRelation("collect.store_log_events", "r", 2 * gib),
+            new DarlingStoreMetricsReader.UnenumeratedRelation("collect.store_metrics", "r", gib / 2),
+        };
+
+        var inventory = OneSweep(rows)!;
+        var reconciled = DarlingMcpStoreMetricsTools.InventoryNote(inventory, rows, states, largest, existenceRead: true);
+
+        Assert.Contains("account for 409.0 GiB of the 415.0 GiB database (98.55%)", reconciled, StringComparison.Ordinal);
+        Assert.Contains("3.0 GiB sits in 14 un-enumerated user-schema relation(s) (object_kind other)", reconciled, StringComparison.Ordinal);
+        Assert.Contains("the largest being collect.store_log_events (2.0 GiB), collect.store_metrics (512.0 MiB)", reconciled, StringComparison.Ordinal);
+        Assert.Contains("2.0 GiB is PostgreSQL catalog and TimescaleDB bookkeeping in 161 relation(s)", reconciled, StringComparison.Ordinal);
+        Assert.Contains("RECONCILED: every row together accounts for 99.76%", reconciled, StringComparison.Ordinal);
+        Assert.Contains("1 of 2 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT RECONCILED", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("not from the store row's sweep", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("uncompressed by design", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("plain-PostgreSQL", reconciled, StringComparison.Ordinal);
+
+        /* The gap: a finding, with the direction stated. */
+        var gapRows = new[]
+        {
+            StoreRow(bytes: 415 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "a", 400 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+        };
+        var gap = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(gapRows)!, gapRows, states, largest, existenceRead: true);
+        Assert.Contains("NOT RECONCILED — a finding: 10.0 GiB of pg_database_size is attributed to NO row", gap, StringComparison.Ordinal);
+        Assert.DoesNotContain("RECONCILED: every", gap, StringComparison.Ordinal);
+
+        /* Missing catch-all rows: a sweep failure, said so, and no coverage verdict dressed up as arithmetic. */
+        var partialRows = new[] { StoreRow(bytes: 415 * gib), Row(StoreSelfMetrics.HypertableObjectKind, "a", 400 * gib) };
+        var partial = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(partialRows)!, partialRows, null, null, existenceRead: true);
+        Assert.Contains("'other' catch-all row is MISSING", partial, StringComparison.Ordinal);
+        Assert.Contains("'system' catch-all row is MISSING", partial, StringComparison.Ordinal);
+        Assert.Contains("NOT RECONCILED: without both catch-all rows", partial, StringComparison.Ordinal);
+        Assert.Contains("live read of each aggregate's compression and policy state did not complete", partial, StringComparison.Ordinal);
+
+        /* A row for an object that still exists but the newest sweep did not reach, and the live census
+           failing, are each named — the gap with the two places the service log says why (#4619: there is
+           no "Warning line" for a failed sweep, so the note no longer promises one). */
+        var staleRows = rows.Append(Row(StoreSelfMetrics.HypertableObjectKind, "old", gib, at: SweepAt.AddHours(-1))).ToArray();
+        var stale = DarlingMcpStoreMetricsTools.InventoryNote(
+            DarlingStoreMetricsReader.ComputeInventory(staleRows, Exists((StoreSelfMetrics.HypertableObjectKind, "old", true)))!,
+            staleRows, states, null, existenceRead: true);
+        Assert.Contains("1 object row(s) are for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", stale, StringComparison.Ordinal);
+        Assert.Contains("an Error starting 'Store self-metrics sweep'", stale, StringComparison.Ordinal);
+        Assert.Contains("in a line containing 'plain-PostgreSQL mode'", stale, StringComparison.Ordinal);
+        Assert.DoesNotContain("Warning line", stale, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", stale, StringComparison.Ordinal);
+        Assert.Contains("live census naming them did not complete", stale, StringComparison.Ordinal);
+
+        /* No TimescaleDB rows at all: the low share is explained, not flagged. */
+        var plainRows = new[]
+        {
+            StoreRow(bytes: 10 * gib),
+            Row(StoreSelfMetrics.DimensionObjectKind, PayloadDimensions.QueryPlanDimTable, gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 8 * gib, chunks: 70),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, gib, chunks: 60),
+        };
+        var plain = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(plainRows)!, plainRows, Array.Empty<DarlingStoreMetricsReader.ContinuousAggregateState>(), Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>(), existenceRead: true);
+        Assert.Contains("a plain-PostgreSQL store, or TimescaleDB unavailable to the sweep", plain, StringComparison.Ordinal);
+        Assert.Contains("not a fault", plain, StringComparison.Ordinal);
+        Assert.DoesNotContain("the largest being", plain, StringComparison.Ordinal);
+
+        Assert.Equal(5, new[] { reconciled, gap, partial, stale, plain }.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /* ---------------- #4619: a gone object is not a sweep gap ---------------- */
+
+    /// <summary>
+    /// #4619: a row from another sweep is split by whether its object still EXISTS — the pin that tells a
+    /// retired object from a real sweep gap. On three production stores every such row was a retired object
+    /// (a superseded baseline and its jobs, a frozen rollup's refresh job), and every one was reported as a
+    /// sweep that "is not completing". Exists: stale, a gap. Gone: dropped, newest last row first, with that
+    /// row's time. No verdict (null, a missing key, or a null map because the check failed): unchecked. A row
+    /// NEWER than the store row (a sweep that failed after its first statements) is a gap like an older one.
+    /// A job_history row under another role is superseded, not missed, whenever the newest sweep wrote its
+    /// own, whatever pg_roles says. None of the three is ever summed.
+    /// </summary>
+    [Fact]
+    public void ComputeInventory_SplitsRowsFromAnotherSweep_ByWhetherTheObjectStillExists()
+    {
+        const long gib = 1L << 30;
+        var dayBefore = SweepAt.AddDays(-1);
+        var weekBefore = SweepAt.AddDays(-7);
+        const string retiredView = "perfmon_baseline";
+        const string retiredJob = "policy_refresh_continuous_aggregate perfmon_baseline [1012]";
+
+        var current = new[]
+        {
+            StoreRow(bytes: 10 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "wait_stats", 4 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+            OwnerRow(),
+        };
+        var outside = new[]
+        {
+            Row(StoreSelfMetrics.HypertableObjectKind, "not_reached", gib, at: dayBefore),
+            Row(StoreSelfMetrics.HypertableObjectKind, "written_after_the_store_row", gib, at: SweepAt.AddMinutes(1)),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView, 5 * gib, at: weekBefore),
+            new DarlingStoreMetricsReader.StoreMetricRow(StoreSelfMetrics.BackgroundJobObjectKind, retiredJob, dayBefore, null, null, null, null, null, null, 100, 3_600_000, 5, 0),
+            Row(StoreSelfMetrics.DimensionObjectKind, "no_verdict", gib, at: dayBefore),
+            Row(StoreSelfMetrics.TableObjectKind, "collect.missing_from_the_map", gib, at: dayBefore),
+            OwnerRow(at: weekBefore, role: "previous_role"),
+        };
+        var rows = current.Concat(outside).ToArray();
+        var existence = Exists(
+            (StoreSelfMetrics.HypertableObjectKind, "not_reached", true),
+            (StoreSelfMetrics.HypertableObjectKind, "written_after_the_store_row", true),
+            (StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView, false),
+            (StoreSelfMetrics.BackgroundJobObjectKind, retiredJob, false),
+            (StoreSelfMetrics.DimensionObjectKind, "no_verdict", null),
+            /* The role still exists, but the newest sweep read as another one: superseded. */
+            (StoreSelfMetrics.JobHistoryObjectKind, "previous_role", true));
+
+        /* The rows the check is asked about: every non-store row off the store row's stamp, in both directions. */
+        Assert.Equal(
+            outside.Select(r => (r.ObjectKind, r.ObjectName)).OrderBy(k => k),
+            DarlingStoreMetricsReader.RowsOutsideTheSweep(rows).Select(r => (r.ObjectKind, r.ObjectName)).OrderBy(k => k));
+
+        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows, existence)!;
+        Assert.Equal(2, inventory.StaleRowCount);
+        Assert.Equal(2, inventory.UncheckedRowCount);
+        Assert.Equal(
+            new[]
+            {
+                (StoreSelfMetrics.BackgroundJobObjectKind, retiredJob, dayBefore),
+                (StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView, weekBefore),
+                (StoreSelfMetrics.JobHistoryObjectKind, "previous_role", weekBefore),
+            },
+            inventory.DroppedObjects.Select(d => (d.ObjectKind, d.ObjectName, d.LastRowAt)));
+
+        /* None of it is summed: the sums are the store row's sweep alone. */
+        Assert.Equal(4 * gib, inventory.EnumeratedBytes);
+        Assert.Equal(9 * gib, inventory.AttributedBytes);
+        Assert.Equal(4 * gib, inventory.BytesByKind[StoreSelfMetrics.HypertableObjectKind]);
+        Assert.False(inventory.BytesByKind.ContainsKey(StoreSelfMetrics.ContinuousAggregateObjectKind));
+
+        /* The check failed (a null map): no verdict on anything the catalog would have judged. Only the
+           superseded job_history row, judged from the rows themselves, is still retired. */
+        var failed = DarlingStoreMetricsReader.ComputeInventory(rows, null)!;
+        Assert.Equal(0, failed.StaleRowCount);
+        Assert.Equal(6, failed.UncheckedRowCount);
+        Assert.Equal(new[] { "previous_role" }, failed.DroppedObjects.Select(d => d.ObjectName));
+
+        /* Without a job_history row in the newest sweep, an older one is judged by the catalog like any row:
+           here the role exists, so the sweep missed it. */
+        var noCurrentHistory = current.Where(r => r.ObjectKind != StoreSelfMetrics.JobHistoryObjectKind)
+            .Append(OwnerRow(at: weekBefore, role: "previous_role"))
+            .ToArray();
+        var missed = DarlingStoreMetricsReader.ComputeInventory(noCurrentHistory, Exists((StoreSelfMetrics.JobHistoryObjectKind, "previous_role", true)))!;
+        Assert.Equal(1, missed.StaleRowCount);
+        Assert.Empty(missed.DroppedObjects);
+
+        /* The healthy store: nothing outside the sweep, so nothing to check and every count zero. */
+        Assert.Empty(DarlingStoreMetricsReader.RowsOutsideTheSweep(current));
+        Assert.Empty(DarlingStoreMetricsReader.RowsOutsideTheSweep(Array.Empty<DarlingStoreMetricsReader.StoreMetricRow>()));
+        var healthy = DarlingStoreMetricsReader.ComputeInventory(current, null)!;
+        Assert.Equal(0, healthy.StaleRowCount + healthy.UncheckedRowCount + healthy.DroppedObjects.Count);
+    }
+
+    /// <summary>
+    /// #4619: the note says what each kind of row from another sweep IS. A dropped object is named with its
+    /// last row and called history, never a sweep failure; only a row whose object still exists gets the
+    /// "did not reach them" sentence and the two log lines that say why; an unchecked row says which of its
+    /// two causes applies. The three shapes are distinct, and each carries none of the others' claims.
+    /// </summary>
+    [Fact]
+    public void TheInventoryNote_TellsAGoneObjectFromASweepGap()
+    {
+        const long gib = 1L << 30;
+        var sweep = new[]
+        {
+            StoreRow(bytes: 10 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "wait_stats", 5 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+        };
+        var retiredAt = new DateTime(2026, 9, 10, 4, 0, 0, DateTimeKind.Unspecified);
+        var outside = sweep.Append(Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "perfmon_baseline", gib, at: retiredAt)).ToArray();
+        var none = Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>();
+
+        string Note(bool? verdict, bool existenceRead) => DarlingMcpStoreMetricsTools.InventoryNote(
+            DarlingStoreMetricsReader.ComputeInventory(outside, existenceRead
+                ? Exists((StoreSelfMetrics.ContinuousAggregateObjectKind, "perfmon_baseline", verdict))
+                : null)!,
+            outside, null, none, existenceRead);
+
+        var dropped = Note(false, existenceRead: true);
+        Assert.Contains("1 object row(s) are for objects that no longer exist — dropped or retired since their last row — and are excluded from these sums", dropped, StringComparison.Ordinal);
+        Assert.Contains("That is history, not a sweep failure", dropped, StringComparison.Ordinal);
+        Assert.Contains($"stays its newest for {StoreSelfMetrics.RetentionDays} days", dropped, StringComparison.Ordinal);
+        Assert.Contains("The most recent: perfmon_baseline (continuous_aggregate, last row 2026-09-10T04:00:00.0000000)", dropped, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not reach them", dropped, StringComparison.Ordinal);
+        Assert.DoesNotContain("Store self-metrics sweep", dropped, StringComparison.Ordinal);
+        Assert.DoesNotContain("no verdict", dropped, StringComparison.Ordinal);
+
+        var gap = Note(true, existenceRead: true);
+        Assert.Contains("1 object row(s) are for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", gap, StringComparison.Ordinal);
+        Assert.Contains("darling-service_yyyyMMdd.log", gap, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", gap, StringComparison.Ordinal);
+        Assert.DoesNotContain("no verdict", gap, StringComparison.Ordinal);
+
+        var noCheck = Note(null, existenceRead: true);
+        Assert.Contains("1 object row(s) are not from the store row's sweep and are excluded from these sums, with no verdict", noCheck, StringComparison.Ordinal);
+        Assert.Contains("their kind has no existence check on this store", noCheck, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not reach them", noCheck, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", noCheck, StringComparison.Ordinal);
+
+        var failed = Note(null, existenceRead: false);
+        Assert.Contains("with no verdict on whether their objects still exist: the live existence check did not complete.", failed, StringComparison.Ordinal);
+        Assert.DoesNotContain("their kind has no existence check", failed, StringComparison.Ordinal);
+
+        Assert.Equal(4, new[] { dropped, gap, noCheck, failed }.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /// <summary>
+    /// #4619: collection_health_hourly is uncompressed BY DESIGN, so the compression line explains it rather
+    /// than counting it DISABLED — beside a real finding it is left out of the count and the bytes, and on
+    /// its own it produces no finding at all. The explanation's two spans are the policy's own constants, and
+    /// the claim they support is pinned: retention does not outlast the refresh window, and the refresh
+    /// window plus the store's one-chunk compression margin lies past retention, so no chunk of it could
+    /// ever be compressed. If either stops holding, this fails and the "by design" sentence is a lie to fix.
+    /// </summary>
+    [Fact]
+    public void TheCompressionLine_ExplainsCollectionHealthHourly_InsteadOfCountingIt()
+    {
+        const long gib = 1L << 30;
+        var rows = new[]
+        {
+            StoreRow(bytes: 300 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "query_store_stats_hourly", 200 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "query_store_stats_daily", 35 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, TimescaleSupport.CollectionHealthHourlyView, 60 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+        };
+        var byDesign = new DarlingStoreMetricsReader.ContinuousAggregateState(TimescaleSupport.CollectionHealthHourlyView, false, false, "collection_log", 1005, null, 1006);
+        var states = new[]
+        {
+            new DarlingStoreMetricsReader.ContinuousAggregateState("query_store_stats_hourly", false, true, "query_store_stats", 1001, null, null),
+            new DarlingStoreMetricsReader.ContinuousAggregateState("query_store_stats_daily", true, true, "query_store_stats_hourly", 1002, 1003, 1004),
+            byDesign,
+        };
+        var none = Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>();
+        const string explained = "collection_health_hourly is uncompressed by design: each refresh re-materializes its last 8 days and its retention keeps 8 days";
+
+        var both = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, states, none, existenceRead: true);
+        Assert.Contains("1 of 3 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB between them", both, StringComparison.Ordinal);
+        Assert.Contains("not counting the one uncompressed by design below.", both, StringComparison.Ordinal);
+        Assert.Contains(explained, both, StringComparison.Ordinal);
+        Assert.Contains("no chunk of this one gets that old before retention drops it", both, StringComparison.Ordinal);
+
+        var alone = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, new[] { states[1], byDesign }, none, existenceRead: true);
+        Assert.DoesNotContain("compression DISABLED", alone, StringComparison.Ordinal);
+        Assert.Contains(explained, alone, StringComparison.Ordinal);
+
+        /* Compressed after all (a hand-enabled store): nothing to explain, and it is counted like any other. */
+        var enabled = byDesign with { CompressionEnabled = true };
+        var handEnabled = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, new[] { states[0], states[1], enabled }, none, existenceRead: true);
+        Assert.DoesNotContain("uncompressed by design", handEnabled, StringComparison.Ordinal);
+        Assert.Contains("1 of 3 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it).", handEnabled, StringComparison.Ordinal);
+
+        Assert.Equal("8 days", TimescaleSupport.CollectionHealthRefreshStartOffset);
+        Assert.Equal("8 days", TimescaleSupport.CollectionHealthRetentionInterval);
+        Assert.True(TimescaleSupport.CollectionHealthRetentionSpan <= TimescaleSupport.CollectionHealthRefreshStartSpan,
+            "retention outlasts the refresh window, so some chunks sit outside it and could be compressed");
+        Assert.True(TimescaleSupport.CollectionHealthRefreshStartSpan + TimescaleSupport.AggregateCompressMarginSpan > TimescaleSupport.CollectionHealthRetentionSpan,
+            "the refresh window plus the compression margin now falls inside retention, so collection_health_hourly could be compressed");
+    }
+
+    /// <summary>The byte formatter picks the unit that gives a whole-number part, so a registry table is
+    /// not "0.0 GiB" beside a 235 GiB aggregate family.</summary>
+    [Fact]
+    public void TheByteFormatter_PicksTheUnitWithAWholeNumberPart()
+    {
+        Assert.Equal("235.0 GiB", DarlingMcpStoreMetricsTools.Gib(235L << 30));
+        Assert.Equal("1.5 GiB", DarlingMcpStoreMetricsTools.Gib(3L << 29));
+        Assert.Equal("512.0 MiB", DarlingMcpStoreMetricsTools.Gib(1L << 29));
+        Assert.Equal("72.0 KiB", DarlingMcpStoreMetricsTools.Gib(73_728));
+        Assert.Equal("161 bytes", DarlingMcpStoreMetricsTools.Gib(161));
+        Assert.Equal("0 bytes", DarlingMcpStoreMetricsTools.Gib(0));
+    }
+
+    /// <summary>
+    /// #3582: the aggregate-state read takes its three policy facts from the <c>jobs</c> view by the
+    /// aggregate's VIEW name (the view reports a policy on an aggregate under <c>user_view_name</c>), hedges
+    /// the compression proc's 2.18+ rebrand the way the rest of the codebase does, and resolves a
+    /// hierarchical aggregate's source back to its parent's view name. The live top-N composes the SAME
+    /// census fragments the sweep sums with, so the list and the number cannot disagree.
+    /// </summary>
+    [Fact]
+    public void TheAggregateStateAndTopNReads_UseTheCatalogTheWayTheSweepDoes()
+    {
+        var state = DarlingStoreMetricsReader.ContinuousAggregateStateSql;
+        Assert.Contains("FROM timescaledb_information.continuous_aggregates ca", state, StringComparison.Ordinal);
+        Assert.Contains("ca.compression_enabled", state, StringComparison.Ordinal);
+        Assert.Contains("j.proc_name = 'policy_refresh_continuous_aggregate'", state, StringComparison.Ordinal);
+        Assert.Contains("(j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')", state, StringComparison.Ordinal);
+        Assert.Contains("j.proc_name = 'policy_retention'", state, StringComparison.Ordinal);
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(state, @"j\.hypertable_schema = ca\.view_schema AND j\.hypertable_name = ca\.view_name").Count);
+        Assert.Contains("coalesce(parent.view_name, ca.hypertable_name) AS source_name", state, StringComparison.Ordinal);
+        Assert.Contains("parent.materialization_hypertable_name = ca.hypertable_name", state, StringComparison.Ordinal);
+
+        foreach (var (sql, timescale) in new[] { (DarlingStoreMetricsReader.LargestUnenumeratedSql, true), (DarlingStoreMetricsReader.LargestUnenumeratedPlainSql, false) })
+        {
+            Assert.Contains(StoreSelfMetrics.CensusRelationPredicateSql, sql, StringComparison.Ordinal);
+            Assert.Contains("NOT " + StoreSelfMetrics.SystemSchemaPredicateSql, sql, StringComparison.Ordinal);
+            Assert.Contains("NOT " + StoreSelfMetrics.NamedRelationPredicateSql, sql, StringComparison.Ordinal);
+            Assert.Contains("n.nspname || '.' || c.relname AS relation", sql, StringComparison.Ordinal);
+            Assert.Contains("ORDER BY pg_total_relation_size(c.oid) DESC", sql, StringComparison.Ordinal);
+            Assert.Contains("LIMIT $1", sql, StringComparison.Ordinal);
+            Assert.Equal(timescale, sql.Contains(StoreSelfMetrics.TimescaleInventoriedPredicateSql, StringComparison.Ordinal));
+        }
+
+        Assert.Equal(10, DarlingStoreMetricsReader.LargestUnenumeratedLimit);
+    }
+
+    /// <summary>
+    /// #3582: the two live reads fail to NULL, not to an empty list — an empty list reads as "no aggregates"
+    /// / "nothing un-enumerated" and would drop a section without a word — and the aggregate read is not
+    /// attempted where the GUC probe said the TimescaleDB catalogs do not exist. The port-1 data source
+    /// and the pre-cancelled token are the sibling test's devices.
+    /// </summary>
+    [Fact]
+    public async Task TheLiveInventoryReads_FailToNull_AndSkipTheCatalogsThatDoNotExist()
+    {
+        await using var nowhere = NpgsqlDataSource.Create(
+            "Host=127.0.0.1;Port=1;Username=nobody;Password=nobody;Database=nowhere;Timeout=1;Command Timeout=1");
+        var ct = TestContext.Current.CancellationToken;
+
+        Assert.Null(await DarlingStoreMetricsReader.GetContinuousAggregateStatesAsync(nowhere, On(), ct));
+        Assert.Null(await DarlingStoreMetricsReader.GetLargestUnenumeratedAsync(nowhere, On(), ct));
+
+        var notRegistered = new DarlingStoreMetricsReader.JobExecutionLoggingReading(
+            DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered, null, null, null);
+        var skipped = await DarlingStoreMetricsReader.GetContinuousAggregateStatesAsync(nowhere, notRegistered, new CancellationToken(canceled: true));
+        Assert.NotNull(skipped);
+        Assert.Empty(skipped!);
+
+        /* The top-N is attempted on a plain store (its plain variant), so it fails to null there too. */
+        Assert.Null(await DarlingStoreMetricsReader.GetLargestUnenumeratedAsync(nowhere, notRegistered, ct));
+    }
+
+    /// <summary>
+    /// #4758: the description's <c>requested</c> field says what PostgreSQL's counter counts. A requested
+    /// checkpoint is started by WAL volume reaching <c>max_wal_size</c>, a base backup or a <c>CHECKPOINT</c>
+    /// statement, and the counter does not say which, so the description must not call them all WAL-forced.
+    /// </summary>
+    [Fact]
+    public void TheDescription_SaysARequestedCheckpointHasThreeCauses_NotOnlyWalVolume()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        Assert.Contains(
+            "requested (checkpoints started by WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement rather than by checkpoint_timeout; the counter does not say which)",
+            description!, StringComparison.Ordinal);
+        Assert.DoesNotContain("checkpoints forced by WAL volume", description!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4834: the checkpointer paragraph names the four fields the block emits for the per-checkpoint average, each
+    /// with what the emitting code makes it: <c>timed</c> and <c>checkpoint_count</c> (timed plus requested),
+    /// <c>average_sync_ms_per_checkpoint</c> (sync_ms over that count) and <c>sync_bar_ms</c> (the bar it is judged
+    /// against, 10,000 ms).
+    /// </summary>
+    [Fact]
+    public void TheDescription_NamesTheAveragePerCheckpointFields()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        Assert.Contains("timed (the checkpoints started by checkpoint_timeout inside the interval", description!, StringComparison.Ordinal);
+        Assert.Contains("checkpoint_count (timed plus requested, the checkpoints the interval held)", description!, StringComparison.Ordinal);
+        Assert.Contains("average_sync_ms_per_checkpoint is sync_ms divided by checkpoint_count", description!, StringComparison.Ordinal);
+        Assert.Contains("sync_bar_ms is the per-checkpoint bar in milliseconds", description!, StringComparison.Ordinal);
+        Assert.Equal(10_000, PerformanceMonitor.Darling.Service.DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
+    }
+
+    /// <summary>
+    /// #3582: the description names every new kind, the coverage fields and the reconciliation bar,
+    /// asserted TOGETHER with the sweep arms that write the kinds and the constants that set the bar.
+    /// </summary>
+    [Fact]
+    public void TheDescription_StatesTheInventorysCoverage_AndNamesTheNewKinds()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        foreach (var kind in new[] { StoreSelfMetrics.ContinuousAggregateObjectKind, StoreSelfMetrics.TableObjectKind, StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.SystemObjectKind })
+        {
+            Assert.Contains($"object_kind {kind}", description!, StringComparison.Ordinal);
+        }
+
+        Assert.Matches(@"RECONCILES the newest sweep against its own pg_database_size", description!);
+        foreach (var field in new[] { "enumerated_percent", "attributed_percent", "residual_bytes", "reconciled", "bytes_by_kind", "largest_unenumerated", "compression_enabled" })
+        {
+            Assert.Contains(field, description!, StringComparison.Ordinal);
+        }
+
+        /* The bar, in the description's words, agrees with the constants. */
+        Assert.Contains("the larger of 1% and 64 MiB", description!, StringComparison.Ordinal);
+        Assert.Equal(1.0, DarlingStoreMetricsReader.ReconciliationTolerancePercent);
+        Assert.Equal(64L << 20, DarlingStoreMetricsReader.ReconciliationToleranceFloorBytes);
+
+        /* The named tables, by the names the sweep writes. */
+        Assert.Contains(QueryStoreTextStore.TableName, description!, StringComparison.Ordinal);
+        Assert.Contains(StoreSelfMetrics.AlertLogTable, description!, StringComparison.Ordinal);
+
+        /* And the mechanism claim is the one the rig verified: the hypertables view never lists a
+           materialization — not "lists it under an internal name". */
+        Assert.Contains("timescaledb_information.hypertables never lists a materialization", description!, StringComparison.Ordinal);
+    }
+
+    private static string ReaderSourcePath([CallerFilePath] string thisFile = "")
+        => Path.GetFullPath(Path.Combine(
+            Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingStoreMetricsReader.cs"));
 
     [Fact]
     public void GetStoreMetrics_IsInTheServerInstructions()
@@ -335,12 +1578,293 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(Array.Empty<DarlingStoreMetricsReader.StoreMetricDailyPoint>()));
         Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5) }));
     }
+
+    /* ---------------- #4734: a gap in the series is not one day's growth ---------------- */
+
+    /// <summary>
+    /// The store recorded nothing for one or more whole days (the service was down), so the first day back is
+    /// compared with a baseline several days old. That pair must not be labeled as the later day's growth: the
+    /// whole gap's bytes would read as one day's spike, and the per-server rate built on it would overstate what
+    /// onboarding a server costs. The pair is skipped, and the days on either side keep their own one-day numbers.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(10)]
+    public void ComputeDailyGrowth_AGapOfSeveralDays_IsNotOneDaysGrowth_AndTheDaysOnEitherSideAreRight(int missingDays)
+    {
+        var firstDayAfterTheGap = 2 + missingDays + 1;
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(new[]
+        {
+            StoreDay(1, 1_000, 10),
+            StoreDay(2, 1_100, 10),
+            /* the days in between recorded nothing; the whole gap's growth lands on the first day back */
+            StoreDay(firstDayAfterTheGap, 1_700, 10),
+            StoreDay(firstDayAfterTheGap + 1, 1_800, 20),
+        });
+
+        Assert.Equal(
+            new[] { new DateTime(2026, 8, 2), new DateTime(2026, 8, firstDayAfterTheGap + 1) },
+            growth.Select(g => g.Day).ToArray());
+        Assert.DoesNotContain(growth, g => g.Day == new DateTime(2026, 8, firstDayAfterTheGap));
+
+        /* No single-day spike: the 600 bytes the gap accumulated are on no day. */
+        Assert.All(growth, g => Assert.Equal(100, g.DeltaBytes));
+        Assert.Equal(100 / 10.0, growth[0].PerServerBytes);
+        Assert.Equal(100 / 20.0, growth[1].PerServerBytes);
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_ASeriesWithoutAGap_GivesEveryDayItsOwnNumbers()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(new[]
+        {
+            StoreDay(1, 5_000, 10),
+            StoreDay(2, 5_400, 10),
+            StoreDay(3, 5_250, 12),
+            StoreDay(4, 5_250, 0),
+            StoreDay(5, 5_700, 15),
+            StoreDay(6, 6_000, 20),
+        });
+
+        Assert.Equal(
+            new (DateTime Day, long Delta, double? PerServer)[]
+            {
+                (new DateTime(2026, 8, 2), 400, 40.0),
+                (new DateTime(2026, 8, 3), -150, -12.5),
+                (new DateTime(2026, 8, 4), 0, null),
+                (new DateTime(2026, 8, 5), 450, 30.0),
+                (new DateTime(2026, 8, 6), 300, 15.0),
+            },
+            growth.Select(g => (g.Day, g.DeltaBytes, g.PerServerBytes)).ToArray());
+    }
+
+    /// <summary>
+    /// The daily read now projects the day's last snapshot time as its last column, so a growth point can say
+    /// when its reading was taken (today's point is a partial day, and only the time shows how far in). Paired
+    /// with the ordinal the reader takes it from.
+    /// </summary>
+    [Fact]
+    public void StoreMetricsDailySql_ProjectsTheDaysLastSnapshotTime_AndTheReaderTakesItFromThatColumn()
+    {
+        var sql = DarlingStoreMetricsReader.StoreMetricsDailySql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("    toast_live_bytes,\n    metric_time\nFROM collect.store_metrics", sql, StringComparison.Ordinal);
+
+        var source = File.ReadAllText(ReaderSourcePath());
+        Assert.Contains("reader.GetDateTime(15)", source, StringComparison.Ordinal);
+    }
+
+    private static DarlingStoreMetricsReader.StoreMetricDailyPoint StoreDayAt(
+        int day, int hour, long? totalBytes, int? servers) => new(
+            "store", "darling", new DateTime(2026, 8, day, 0, 0, 0, DateTimeKind.Unspecified),
+            totalBytes, null, null, null, null, servers,
+            MetricTime: new DateTime(2026, 8, day, hour, 5, 0, DateTimeKind.Unspecified));
+
+    [Fact]
+    public void ComputeDailyGrowth_TodaysPoint_IsMarkedPartial_AndASettledDayIsNot()
+    {
+        var points = new[]
+        {
+            StoreDayAt(1, 23, 1_000, 10),
+            StoreDayAt(2, 23, 1_100, 10),
+            StoreDayAt(3, 9, 1_150, 10),
+        };
+
+        /* Day 3 is still open at 09:30: its point is the morning's last snapshot, not a full day's growth.
+           It is still reported, as what it is. */
+        var midMorning = DarlingStoreMetricsReader.ComputeDailyGrowth(points, new DateTime(2026, 8, 3, 9, 30, 0, DateTimeKind.Utc));
+        Assert.Equal(new[] { false, true }, midMorning.Select(g => g.Partial).ToArray());
+        Assert.Equal(50, midMorning[1].DeltaBytes);
+
+        /* Once the day is over it is a settled day like the rest. */
+        var nextDay = DarlingStoreMetricsReader.ComputeDailyGrowth(points, new DateTime(2026, 8, 4, 0, 0, 1, DateTimeKind.Utc));
+        Assert.All(nextDay, g => Assert.False(g.Partial));
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_CarriesEachPointsRealSnapshotTime_AndItsSpanInDays()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 22, 1_000, 10), StoreDayAt(2, 23, 1_100, 10), StoreDayAt(3, 21, 1_300, 10) },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        /* The day's last snapshot, not its midnight bucket. */
+        Assert.Equal(new DateTime(2026, 8, 2, 23, 5, 0), growth[0].MetricTime);
+        Assert.Equal(new DateTime(2026, 8, 3, 21, 5, 0), growth[1].MetricTime);
+        Assert.All(growth, g => Assert.Equal(1, g.SpanDays));
+
+        /* A point with no recorded time carries none: the midnight bucket is not a snapshot time. */
+        var untimed = DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5), StoreDay(2, 130, 5) });
+        Assert.Null(untimed.Single().MetricTime);
+    }
+
+    [Fact]
+    public void TheDailyGrowthEntry_CarriesTheDay_TheSnapshotTime_TheSpan_AndThePartialFlag()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 22, 1_000, 10), StoreDayAt(2, 9, 1_500, 10) },
+            new DateTime(2026, 8, 2, 9, 30, 0, DateTimeKind.Utc));
+
+        using var timed = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpStoreMetricsTools.DailyGrowthEntry(growth.Single())));
+        var entry = timed.RootElement;
+        Assert.Equal("2026-08-02", entry.GetProperty("day").GetString());
+        Assert.Equal(new DateTime(2026, 8, 2, 9, 5, 0).ToString("o"), entry.GetProperty("metric_time").GetString());
+        Assert.Equal(1, entry.GetProperty("span_days").GetInt32());
+        Assert.True(entry.GetProperty("partial").GetBoolean());
+        Assert.Equal(500L, entry.GetProperty("delta_bytes").GetInt64());
+        Assert.Equal(50.0, entry.GetProperty("per_server_bytes").GetDouble());
+
+        /* No recorded time is null, never the day's midnight. */
+        var untimedGrowth = DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5), StoreDay(2, 130, 5) });
+        using var untimed = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpStoreMetricsTools.DailyGrowthEntry(untimedGrowth.Single())));
+        Assert.Equal(JsonValueKind.Null, untimed.RootElement.GetProperty("metric_time").ValueKind);
+        Assert.False(untimed.RootElement.GetProperty("partial").GetBoolean());
+    }
+
+    [Fact]
+    public void TheDescription_SaysAHoleInTheDailyGrowthIsMissingSnapshots_AndTodaysPointIsPartial()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+        Assert.Matches(@"daily_growth point carries[^.]*metric_time[^.]*span_days[^.]*partial", description!);
+        Assert.Contains("not zero growth", description!, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #4734: two snapshots about two days apart are not one day's growth ---------------- */
+
+    /// <summary>
+    /// A day's point is its LAST snapshot, so two points on consecutive calendar days can be nearly two days
+    /// apart: the service stopped shortly after the first day's early snapshot, ran again, and the next day's
+    /// last snapshot came at 23:05, 47 hours later. That pair is not one day's growth and is left out, as a
+    /// calendar gap is; the day after it compares with the second point and is right.
+    /// </summary>
+    [Fact]
+    public void ComputeDailyGrowth_ConsecutiveDaysWhoseSnapshotsAreAboutTwoDaysApart_AreNotOneDaysGrowth()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[]
+            {
+                StoreDayAt(1, 0, 1_000, 10),
+                StoreDayAt(2, 23, 1_900, 10),
+                StoreDayAt(3, 23, 2_000, 10),
+            },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        /* Day 2 is left out: its 900 bytes are two days' growth. Day 3 is 24 hours after day 2 and is right. */
+        var only = Assert.Single(growth);
+        Assert.Equal(new DateTime(2026, 8, 3), only.Day);
+        Assert.Equal(100, only.DeltaBytes);
+    }
+
+    /// <summary>
+    /// The edges of "about a day": a pair is kept when its two snapshots are at least 12 hours and under 36
+    /// hours apart, a span that rounds to one day. The first day's snapshot is at <c>firstHour</c>:05 and the
+    /// next day's at <c>secondHour</c>:05, so the spans here are 23, 24, 25, 12 and 35 hours (kept) and 11,
+    /// 36 and 47 hours (left out).
+    /// </summary>
+    [Theory]
+    [InlineData(1, 0, true)]
+    [InlineData(23, 23, true)]
+    [InlineData(0, 1, true)]
+    [InlineData(12, 0, true)]
+    [InlineData(0, 11, true)]
+    [InlineData(13, 0, false)]
+    [InlineData(0, 12, false)]
+    [InlineData(0, 23, false)]
+    public void ComputeDailyGrowth_KeepsAPairOnlyWhenItsSnapshotsAreAboutADayApart(int firstHour, int secondHour, bool kept)
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, firstHour, 1_000, 10), StoreDayAt(2, secondHour, 1_100, 10) },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        if (kept)
+        {
+            var point = Assert.Single(growth);
+            Assert.Equal(100, point.DeltaBytes);
+            Assert.False(point.Partial);
+        }
+        else
+        {
+            Assert.Empty(growth);
+        }
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_APairWithAPointThatHasNoSnapshotTime_IsJudgedByItsCalendarDays()
+    {
+        var asOf = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        /* With either point untimed there is no span to measure, and the day's midnight bucket is not a
+           snapshot time to measure one from: consecutive days are kept, whichever side lacks the time. */
+        var earlierUntimed = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDay(1, 1_000, 10), StoreDayAt(2, 23, 1_100, 10) }, asOf);
+        Assert.Equal(100, Assert.Single(earlierUntimed).DeltaBytes);
+
+        var laterUntimed = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 0, 1_000, 10), StoreDay(2, 1_100, 10) }, asOf);
+        Assert.Equal(100, Assert.Single(laterUntimed).DeltaBytes);
+
+        /* Days that are not consecutive stay left out, with or without the other point's time. */
+        Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDay(1, 1_000, 10), StoreDayAt(3, 23, 1_100, 10) }, asOf));
+        Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 0, 1_000, 10), StoreDay(3, 1_100, 10) }, asOf));
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_APairWithAWholeDayBetweenItsDays_IsLeftOutHoweverCloseItsTimesAre()
+    {
+        /* 23:05 on day 1 and 00:05 on day 3 are 25 hours apart, but day 2 has no point: a gap, as before. */
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 23, 1_000, 10), StoreDayAt(3, 0, 1_100, 10) },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        Assert.Empty(growth);
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_TodaysPartialPoint_MayBeUnderHalfADayApart_ButNotOverADayAndAHalf()
+    {
+        var asOf = new DateTime(2026, 8, 3, 16, 30, 0, DateTimeKind.Utc);
+
+        /* Yesterday's last snapshot at 23:05 and today's newest at 09:05: 10 hours, a partial day is short by
+           nature. It is kept and marked partial. */
+        var shortDay = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(2, 23, 1_100, 10), StoreDayAt(3, 9, 1_150, 10) }, asOf);
+        var kept = Assert.Single(shortDay);
+        Assert.True(kept.Partial);
+        Assert.Equal(50, kept.DeltaBytes);
+
+        /* Yesterday's last snapshot at 00:05 and today's newest at 16:05: 40 hours of growth would read as
+           part of today. It is left out like any other pair over a day and a half apart. */
+        var longSpan = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(2, 0, 1_100, 10), StoreDayAt(3, 16, 1_300, 10) }, asOf);
+        Assert.Empty(longSpan);
+    }
+
+    [Fact]
+    public void TheDescription_SaysItsTimesAreUtc_AndWhichPairsTheDailyGrowthLeavesOut()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        /* The served head is at its tools/list budget, so both statements live in the guide part. */
+        var (_, guide) = PerformanceMonitor.Common.McpToolGuide.Split(description!);
+        Assert.NotNull(guide);
+        Assert.Contains("Every date and time in the response is UTC", guide!, StringComparison.Ordinal);
+        Assert.Matches(@"daily_growth point carries[^.]*between 12 and 36 hours apart[^.]*partial", guide!);
+        /* Today's partial point is short by nature, so the reader skips the 12-hour floor for it and only the
+           36-hour ceiling applies. A pair rule that leaves this out reads as if a short partial day were dropped. */
+        Assert.Contains(
+            "today's partial point skips the 12-hour floor but not the 36-hour ceiling", guide!, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
-/// The <c>job_history</c> precondition probe against a LIVE server (#3175). Two things no text assertion
-/// can reach: that the shipped SQL parses and binds its one positional parameter, and that the GUC name the
-/// product writes into postgresql.conf is a name PostgreSQL actually knows.
+/// The <c>job_history</c> precondition probe against a LIVE server (#3175), and the evidence probe behind it
+/// (#3574). Things no text assertion can reach: that the shipped SQL parses and binds its positional
+/// parameter, that the GUC name the product writes into postgresql.conf is a name PostgreSQL actually knows,
+/// and that the view's ownership predicate evaluates for the connection the way the record derives it.
 ///
 /// <para><b>A PAIRED control, because a zero-row result is the whole subject.</b> The reader maps "no
 /// pg_settings row" to <c>NotRegistered</c>, so a probe that only ever saw zero rows — because the name was
@@ -354,10 +1878,11 @@ public sealed class DarlingMcpStoreMetricsToolsTests
 /// change look like a defect. What is pinned is that the reading is INTERNALLY CONSISTENT — a registered
 /// state, a value PostgreSQL renders for a bool, and <c>Recording</c> true for exactly <c>on</c>.</para>
 /// </summary>
-/* #1776 own-store: this class reads only pg_settings — a server-scoped catalog view, no store tables, no
-   DDL, no rows written — but it takes [Collection("live-postgres")] anyway because it shares the cluster
-   whose GUCs it reads with every other class that has it, and a class reading the shared store must either
-   carry the attribute or record why not. */
+/* #1776 own-store: this class reads only pg_settings and TimescaleDB's own information views (#3574) —
+   server- and catalog-scoped, no store tables, no DDL, no rows written — but it takes
+   [Collection("live-postgres")] anyway because it shares the cluster whose GUCs and jobs it reads with every
+   other class that has it, and a class reading the shared store must either carry the attribute or record
+   why not. */
 [Collection("live-postgres")]
 public sealed class DarlingStoreMetricsJobLoggingLivePostgresTests
 {
@@ -389,5 +1914,109 @@ public sealed class DarlingStoreMetricsJobLoggingLivePostgresTests
         command.Parameters.AddWithValue(StoreSelfMetrics.JobExecutionLoggingSetting + "_not_a_real_guc");
         await using var reader = await command.ExecuteReaderAsync(ct);
         Assert.False(await reader.ReadAsync(ct));
+    }
+
+    /// <summary>
+    /// #3574: the evidence read against a live TimescaleDB — the shipped SQL parses, binds its one
+    /// <c>timestamptz</c> parameter, evaluates the view's predicate for the connection, and its fields are
+    /// INTERNALLY CONSISTENT with each other and with direct reads of the same views.
+    ///
+    /// <para><b>Inserts nothing and pins no count.</b> How many jobs exist, whether any ran in the last day
+    /// and whether the GUC is on are properties of whatever cluster <c>DARLING_TEST_PG</c> points at. What
+    /// is pinned is the null-versus-zero contract: <c>RowsObserved</c> is a COUNT and never null once the
+    /// read completes (a zero is a zero), while <c>NewestRowAt</c> is null exactly when the view showed this
+    /// connection no row at all — the two are different facts, and the whole issue is one being read as the
+    /// other. The all-time total is read DIRECTLY first, then the shipped read; rows are only ever added
+    /// between two reads (the history retention job runs monthly), so a direct total above zero must be
+    /// matched by a non-null newest row, and a direct total of zero by a null one and a zero count.</para>
+    ///
+    /// <para><b>The predicate is cross-checked, not trusted.</b> The database-owner test is re-evaluated
+    /// directly on the same connection and must agree with the record; when it holds and jobs exist, the
+    /// derived <c>Visibility</c> must be <c>All</c> and the visible count the job count — which is the
+    /// managed-mode OWNER's reading, and the shape under which a zero would be a real contradiction.</para>
+    /// </summary>
+    [Fact]
+    public async Task JobHistoryEvidenceProbe_EvaluatesThePredicateForThisConnection_AndItsFieldsAgree()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live job-history evidence probe test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        /* Direct facts first, through the same views the shipped read uses. */
+        long directTotal;
+        bool directDbOwnerMember;
+        string directRole;
+        await using (var direct = postgres.CreateCommand(
+            "SELECT (SELECT count(*) FROM timescaledb_information.job_history), "
+            + "pg_has_role(current_user, (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()), 'MEMBER') IS TRUE, "
+            + "current_user::text"))
+        await using (var directReader = await direct.ExecuteReaderAsync(ct))
+        {
+            Assert.True(await directReader.ReadAsync(ct));
+            directTotal = directReader.GetInt64(0);
+            directDbOwnerMember = directReader.GetBoolean(1);
+            directRole = directReader.GetString(2);
+        }
+
+        var logging = await DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(postgres, ct);
+        Assert.NotEqual(DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered, logging.Status);
+
+        var evidence = await DarlingStoreMetricsReader.GetJobHistoryEvidenceAsync(postgres, logging, ct);
+
+        Assert.Equal(DarlingStoreMetricsReader.JobHistoryEvidenceStatus.Observed, evidence.Status);
+        Assert.Equal(directRole, evidence.ReaderRole);
+        Assert.Equal(directDbOwnerMember, evidence.ReaderIsDatabaseOwnerMember);
+
+        /* Counts, never nulls, once observed. */
+        Assert.NotNull(evidence.JobCount);
+        Assert.NotNull(evidence.OwnerMemberJobCount);
+        Assert.NotNull(evidence.RowsObserved);
+        Assert.NotNull(evidence.JobsRunInWindow);
+        Assert.InRange(evidence.OwnerMemberJobCount!.Value, 0, evidence.JobCount!.Value);
+        Assert.InRange(evidence.HistoryVisibleJobCount!.Value, 0, evidence.JobCount.Value);
+
+        /* The null-versus-zero contract. */
+        if (directTotal == 0)
+        {
+            Assert.Null(evidence.NewestRowAt);
+            Assert.Equal(0L, evidence.RowsObserved);
+        }
+        else
+        {
+            Assert.NotNull(evidence.NewestRowAt);
+            Assert.Equal(DateTimeKind.Utc, evidence.NewestRowAt!.Value.Kind);
+        }
+
+        /* A row inside the window implies a newest row; a run inside the window implies a newest run. */
+        if (evidence.RowsObserved > 0)
+        {
+            Assert.NotNull(evidence.NewestRowAt);
+        }
+
+        if (evidence.JobsRunInWindow > 0)
+        {
+            Assert.NotNull(evidence.NewestRunStartedAt);
+            Assert.Equal(DateTimeKind.Utc, evidence.NewestRunStartedAt!.Value.Kind);
+        }
+
+        /* The predicate's verdict, derived as the view combines its two tests. */
+        if (evidence.JobCount > 0 && directDbOwnerMember)
+        {
+            Assert.Equal(DarlingStoreMetricsReader.JobHistoryVisibility.All, evidence.Visibility);
+            Assert.Equal(evidence.JobCount, evidence.HistoryVisibleJobCount);
+        }
+
+        if (evidence.JobCount == 0)
+        {
+            Assert.Equal(DarlingStoreMetricsReader.JobHistoryVisibility.Unknown, evidence.Visibility);
+        }
+
+        /* And the note built on a live reading names the role that read. */
+        Assert.Contains(
+            $"read as '{directRole}'",
+            DarlingMcpStoreMetricsTools.JobHistoryNote(logging, evidence),
+            StringComparison.Ordinal);
     }
 }

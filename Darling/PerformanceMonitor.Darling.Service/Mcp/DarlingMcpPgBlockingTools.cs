@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -76,15 +77,16 @@ public sealed class DarlingMcpPgBlockingTools
              + "client that stopped reading.";
     }
 
-    [McpServerTool(Name = "get_pg_blocking"), Description("Gets PostgreSQL blocking chains that were captured for a server, assembled from the stored edge list into one entry per chain with its ROOT blocker identified and attributed. Use this when sessions are timing out, waiting, or piling up on a PostgreSQL target, or to check whether a past slowdown involved lock contention. Reports for each captured chain: the root blocker's pid, state, application, username and query text, how many sessions were behind it in total and directly, how deep the chain went, the longest-waiting victim, and how many separate captures that same backend has been the root of - which distinguishes one stuck session from a recurring pattern. Also returns a specific remedy per root state, because an 'idle in transaction' root is an application defect while an 'active' root is a query-tuning problem and the two need opposite responses. IMPORTANT: this is a periodic SAMPLE, not an event log. Unlike SQL Server's blocked-process report, PostgreSQL records nothing on its own, so blocking shorter than the collection interval is never seen and an empty result means 'none was sampled', not 'none happened' - the capture counts in the response say how many samples the window actually contains. root_backend_id is returned as a STRING, not a number, and it is the value to compare a root blocker across captures with: it is a 64-bit composite of the backend's start time and its pid, always well past what a JSON number survives, so a numeric wire form would round DIFFERENT backends onto the same id rather than merely lose one. Works on any PostgreSQL target including standbys.")]
+    [McpServerTool(Name = "get_pg_blocking"), Description("PostgreSQL blocking chains, one entry per chain with its ROOT blocker and a remedy keyed to the root's state (idle in transaction: an application defect; active: a query to tune). IMPORTANT: a periodic SAMPLE, not an event log. PostgreSQL records nothing on its own, so blocking shorter than the interval is never seen; empty means none was SAMPLED, not none happened. Capture counts say how many samples the window held. Cycles (deadlocks) are reported separately, never folded into a chain. root_backend_id is a STRING; compare as text, never as a number. <<GUIDE>> Gets PostgreSQL blocking chains that were captured for a server, assembled from the stored edge list into one entry per chain with its ROOT blocker identified and attributed. Use this when sessions are timing out, waiting, or piling up on a PostgreSQL target, or to check whether a past slowdown involved lock contention. Reports for each captured chain: the root blocker's pid, state, application, username and query text, how many sessions were behind it in total and directly, how deep the chain went, the longest-waiting victim, and how many separate captures that same backend has been the root of - which distinguishes one stuck session from a recurring pattern. Also returns a specific remedy per root state, because an 'idle in transaction' root is an application defect while an 'active' root is a query-tuning problem and the two need opposite responses. IMPORTANT: this is a periodic SAMPLE, not an event log. Unlike SQL Server's blocked-process report, PostgreSQL records nothing on its own, so blocking shorter than the collection interval is never seen and an empty result means 'none was sampled', not 'none happened' - the capture counts in the response say how many samples the window actually contains. root_backend_id is returned as a STRING, not a number, and it is the value to compare a root blocker across captures with: it is a 64-bit composite of the backend's start time and its pid, always well past what a JSON number survives, so a numeric wire form would round DIFFERENT backends onto the same id rather than merely lose one. Works on any PostgreSQL target including standbys.")]
     public static async Task<string> GetPgBlocking(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum chains to return, worst-first by victim count. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -99,17 +101,17 @@ public sealed class DarlingMcpPgBlockingTools
             var startUtc = now.AddHours(-hours_back);
 
             var chains = await DarlingPgBlockingReader.GetPgBlockingChainsAsync(
-                postgres, resolved.ServerId, startUtc, now, limit);
+                postgres, resolved.ServerId, startUtc, now, limit, cancellationToken);
 
             /* The denominator comes first because it is what makes an empty answer honest. */
             var captures = await DarlingPgBlockingReader.GetPgBlockingCaptureCountsAsync(
-                postgres, resolved.ServerId, startUtc, now);
+                postgres, resolved.ServerId, startUtc, now, cancellationToken);
 
             /* Cycles are read separately and MUST be, because the chain query structurally cannot see them:
                it finds a root by absence, and in a cycle every participant is blocked. Without this the
                tool would report "no blocking" from a capture that recorded a deadlock. */
             var cycles = await DarlingPgBlockingReader.GetPgBlockingCyclesAsync(
-                postgres, resolved.ServerId, startUtc, now, limit);
+                postgres, resolved.ServerId, startUtc, now, limit, cancellationToken);
 
             var cycleEntries = BuildCycleEntries(cycles);
 
@@ -140,7 +142,7 @@ public sealed class DarlingMcpPgBlockingTools
                 if (captures.CapturesTotal == 0)
                 {
                     var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_blocking");
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_blocking", cancellationToken);
                     if (gated != null)
                     {
                         return gated;
@@ -174,9 +176,9 @@ public sealed class DarlingMcpPgBlockingTools
             return BuildBlockingChainsJson(
                 resolved.ServerName, hours_back, chains, cycleEntries, captures);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL blocking chains failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_blocking", ex);
         }
     }
 

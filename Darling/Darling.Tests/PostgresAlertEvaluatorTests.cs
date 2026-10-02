@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -224,7 +226,10 @@ public class PostgresAlertEvaluatorTests
 
     /// <summary>
     /// The persistence gate is what keeps this from firing on every long-running report. Same age, same
-    /// holder — only the persistence differs, and only the chronic one alerts.
+    /// holder — only the persistence differs, and only the chronic one alerts. The chronic case is the
+    /// classic single-pid incident, and it still fires through the IDENTITY arm with the holder as the
+    /// subject and the original "in N of M observations" wording — truthful now that the floor guarantees
+    /// M is a real sample.
     /// </summary>
     [Fact]
     public void XminFiresOnlyForAChronicHolderNotALongQuery()
@@ -232,8 +237,104 @@ public class PostgresAlertEvaluatorTests
         var chronic = new PostgresXminHorizonAlertInfo("session", "12345", 100_000_000, 30, 40, "idle in transaction");
         var transient = new PostgresXminHorizonAlertInfo("session", "12345", 100_000_000, 2, 40, "running");
 
-        Assert.NotNull(PostgresAlertEvaluator.EvaluateXmin(chronic));
+        var finding = PostgresAlertEvaluator.EvaluateXmin(chronic);
+        Assert.NotNull(finding);
+        Assert.Equal("session:12345", finding!.Subject);
+        Assert.Contains("in 30 of 40 observations", finding.ShortMessage, StringComparison.Ordinal);
+
         Assert.Null(PostgresAlertEvaluator.EvaluateXmin(transient));
+    }
+
+    /// <summary>
+    /// #3537 edge 1: the identity denominator counts only holder-bearing collections, so the first holder
+    /// after quiet hours arrived as 1 win in 1 observation — 100%, "chronic", off a single sample. The
+    /// observation floor closes every denominator too small for its majority to mean anything.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(2, 2)]
+    [InlineData(4, 4)]
+    [InlineData(3, 4)]
+    public void XminDoesNotFireBeneathTheObservationFloorHoweverTotalTheFraction(int held, int total)
+    {
+        Assert.Null(PostgresAlertEvaluator.EvaluateXmin(
+            new PostgresXminHorizonAlertInfo("session", "1", 900_000_000, held, total, null)));
+    }
+
+    /// <summary>The floor is a floor, not a fudge: at exactly the minimum, a majority still fires.</summary>
+    [Fact]
+    public void XminIdentityArmFiresAtExactlyTheObservationFloor()
+    {
+        Assert.NotNull(PostgresAlertEvaluator.EvaluateXmin(
+            new PostgresXminHorizonAlertInfo(
+                "session", "1", 900_000_000,
+                PostgresAlertEvaluator.XminMinimumObservations,
+                PostgresAlertEvaluator.XminMinimumObservations,
+                null)));
+    }
+
+    /// <summary>
+    /// #3537 edge 2: a horizon continuously pinned past the threshold by a PARADE of distinct holders never
+    /// accumulates any single holder's identity fraction, and the old gate never fired while the alert's own
+    /// claim was true the whole time. The horizon arm fires on the horizon's persistence across the window's
+    /// real captures, names the rotating pattern, still carries the latest holder's remedy — and subjects
+    /// the stable sentinel, not the latest member, so the host's per-subject cooldown holds across
+    /// rotations.
+    /// </summary>
+    [Fact]
+    public void XminRotatingHoldersFireTheHorizonArmUnderTheStableSubject()
+    {
+        var finding = PostgresAlertEvaluator.EvaluateXmin(new PostgresXminHorizonAlertInfo(
+            "session", "9101", 80_000_000, ObservationsHeld: 1, ObservationsTotal: 60,
+            "state=idle in transaction", ObservationsAboveThreshold: 70, CapturesInWindow: 120));
+
+        Assert.NotNull(finding);
+        Assert.Equal(AlertSeverityLevel.Warning, finding!.Severity);
+        Assert.Equal(PostgresAlertEvaluator.XminRotatingHoldersSubject, finding.Subject);
+        Assert.Contains("succession of different holders", finding.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("session:9101", finding.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("70 of the window's 120 collections", finding.ShortMessage, StringComparison.Ordinal);
+        /* The remedy names the latest holder's cause — the one actionable thing either way. */
+        Assert.Contains("idle in transaction", finding.ShortMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The horizon arm's own boundaries: a majority of the window's real captures fires, one capture short
+    /// of it does not, and a window with fewer captures than the floor cannot fire at any fraction — which
+    /// is also what keeps the compat default (no capture data supplied) silent.
+    /// </summary>
+    [Theory]
+    [InlineData(60, 120, true)]   // exactly the majority
+    [InlineData(59, 120, false)]  // one capture short
+    [InlineData(4, 4, false)]     // 100%, but beneath the capture floor
+    [InlineData(0, 0, false)]     // no capture data supplied — the compat default
+    public void XminHorizonArmNeedsAMajorityOfAtLeastTheFloorsWorthOfCaptures(
+        int above, int captures, bool fires)
+    {
+        var finding = PostgresAlertEvaluator.EvaluateXmin(new PostgresXminHorizonAlertInfo(
+            "session", "1", 80_000_000, ObservationsHeld: 1, ObservationsTotal: 60, null,
+            ObservationsAboveThreshold: above, CapturesInWindow: captures));
+
+        Assert.Equal(fires, finding is not null);
+    }
+
+    /// <summary>
+    /// The overlap case, told apart by the identity FRACTION alone: a service restarted into an incident
+    /// already underway sees a stable holder through a window still too young for the identity floor. The
+    /// horizon arm supplies the persistence evidence, but the wording must not claim a "succession" and
+    /// the subject stays the holder — there is exactly one, and it is the thing to kill.
+    /// </summary>
+    [Fact]
+    public void XminStableHolderInAYoungWindowKeepsTheHolderSubjectOnAHorizonArmFire()
+    {
+        var finding = PostgresAlertEvaluator.EvaluateXmin(new PostgresXminHorizonAlertInfo(
+            "session", "77", 80_000_000, ObservationsHeld: 3, ObservationsTotal: 3, null,
+            ObservationsAboveThreshold: 3, CapturesInWindow: 6));
+
+        Assert.NotNull(finding);
+        Assert.Equal("session:77", finding!.Subject);
+        Assert.DoesNotContain("succession", finding.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("3 of the window's 6 collections", finding.ShortMessage, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -241,6 +342,13 @@ public class PostgresAlertEvaluatorTests
     {
         Assert.Null(PostgresAlertEvaluator.EvaluateXmin(
             new PostgresXminHorizonAlertInfo("session", "1", 1_000_000, 40, 40, null)));
+
+        /* Both arms saturated, current age below the bar: the age gate answers first. The latest reading
+           is what the alert would quote as "current", so a horizon that has already come back under the
+           threshold must not page off its own history. */
+        Assert.Null(PostgresAlertEvaluator.EvaluateXmin(
+            new PostgresXminHorizonAlertInfo("session", "1", 1_000_000, 40, 40, null,
+                ObservationsAboveThreshold: 120, CapturesInWindow: 120)));
     }
 
     /// <summary>A zero denominator must not divide — it means nothing was observed, so nothing fires.</summary>
@@ -536,5 +644,268 @@ public class PostgresAlertEvaluatorTests
         Assert.Equal(
             PostgresAlertEvaluator.PoisonWaitSubject(row),
             PostgresAlertEvaluator.EvaluatePoisonWait(row)!.Subject);
+    }
+
+    /* ---------------- poison waits: the observed-window clear (#3653) ---------------- */
+
+    /// <summary>
+    /// The witness the PostgreSQL host clears on. Zero rows AND zero logged runs is an UNOBSERVED window —
+    /// collector silence, the read the pre-#3653 host announced "Cleared" on. One logged run with no rows
+    /// is observed-and-quiet (the #2694 skip means a quiet poison event writes no row, so this is the
+    /// normal shape of a storm that ended). Rows with no logged run is observed too: a stored row is proof
+    /// the collector ran even when the failure-isolated log write skipped its row. The static
+    /// <c>Unobserved</c> is the first shape, for fakes and failed reads.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitWindow_IsObservedWhenTheCollectorRan_ByLogOrByRow()
+    {
+        var none = Array.Empty<PostgresPoisonWaitAlertInfo>();
+        Assert.False(new PostgresPoisonWaitWindow(none, 0).Observed);
+        Assert.True(new PostgresPoisonWaitWindow(none, 1).Observed);
+        Assert.True(new PostgresPoisonWaitWindow(none, 10).Observed);
+        Assert.True(new PostgresPoisonWaitWindow(new[] { Poison(0, waits: 0) }, 0).Observed);
+        Assert.True(new PostgresPoisonWaitWindow(new[] { Poison(600_000) }, 10).Observed);
+
+        Assert.False(PostgresPoisonWaitWindow.Unobserved.Observed);
+        Assert.Empty(PostgresPoisonWaitWindow.Unobserved.Waits);
+        Assert.Equal(0, PostgresPoisonWaitWindow.Unobserved.CapturesInWindow);
+
+        /* Observation is orthogonal to the grade: an observed window with a sub-bar row evaluates to no
+           finding, which is exactly the "quiet, and we looked" shape the host clears on. */
+        Assert.Empty(PostgresAlertEvaluator.EvaluatePoisonWaits(new PostgresPoisonWaitWindow(new[] { Poison(599_999) }, 3).Waits));
+    }
+
+    /// <summary>
+    /// The read carries the witness from the collector's own <c>collection_log</c> SUCCESS rows — the #3537
+    /// xmin-horizon source, the one table that records a run that stored nothing — bounded by the SAME
+    /// window bind as the accumulation, and joined so the witness arrives even when no poison event wrote
+    /// a row. The accumulation half is the #2711 text unchanged: no task filter, no LIMIT (a limit on a sum
+    /// or a count is an undercount), no ORDER BY, no threshold.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitSql_CarriesTheCollectionLogWitness_OverTheSameWindow()
+    {
+        var sql = DarlingPostgresAlertReadAdapter.PoisonWaitSql;
+
+        Assert.Contains("FROM collection_log", sql, StringComparison.Ordinal);
+        Assert.Contains("collector_name = 'pg_wait_stats'", sql, StringComparison.Ordinal);
+        Assert.Contains("status = 'SUCCESS'", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*)::int AS captures_in_window", sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN accumulated AS a ON true", sql, StringComparison.Ordinal);
+        Assert.Equal(2, sql.Split("collection_time >= $2").Length - 1);
+        Assert.Equal(2, sql.Split("server_id = $1").Length - 1);
+
+        Assert.Contains("SUM(delta_wait_time_us)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_waits)", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time) AS newest_collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("lower(wait_event) IN ('btreepage', 'bufferio')", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("delta_waits > 0", sql, StringComparison.Ordinal);
+
+        /* The collector the witness counts is the collector that writes the rows it stands in for. */
+        Assert.Equal("pg_wait_stats", PerformanceMonitor.Collectors.PgWaitStatsCollector.Instance.Name);
+    }
+
+    /// <summary>
+    /// Both engines' hosts gate the Cleared edge on an observation — the SQL Server engine on the rows
+    /// (<c>accumulated.Count > 0</c>, #3593) and the PostgreSQL host on the window witness
+    /// (<c>window.Observed</c>, #3653) — and the PostgreSQL host's pre-#3653 shape, which walked straight
+    /// into the clear loop off an empty read, is gone. Source-pinned because the host method is private and
+    /// needs a live store to drive; the witness's truth table is pinned above and the SQL beside it.
+    /// </summary>
+    [Fact]
+    public void BothEngines_ClearPoisonWaitsOnlyOnAnObservedWindow()
+    {
+        var engine = RepoFile.ReadRepoFile("PerformanceMonitor.Alerting", "AlertEngine.cs");
+        Assert.Contains("else if (accumulated.Count > 0", engine, StringComparison.Ordinal);
+
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var start = worker.IndexOf("private async Task EvaluatePgPoisonWaitAsync(", StringComparison.Ordinal);
+        var end = worker.IndexOf("Writes a Postgres Deadlocks/Blocking resolution", start, StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, "EvaluatePgPoisonWaitAsync must precede NotifyPgResolutionAsync's doc comment as it does today.");
+        var host = worker[start..end];
+
+        Assert.Contains("var window = await adapter.GetPoisonWaitPressureAsync(", host, StringComparison.Ordinal);
+        Assert.Contains("var rows = window.Waits;", host, StringComparison.Ordinal);
+        Assert.Contains("if (!window.Observed)", host, StringComparison.Ordinal);
+        /* The hold is announced once per server at Debug, and the once-flag resets on the next observed
+           window — a second outage logs again. */
+        Assert.Contains("_pgPoisonWaitHoldLogged.TryAdd(serverKey, true)", host, StringComparison.Ordinal);
+        Assert.Contains("_pgPoisonWaitHoldLogged.TryRemove(serverKey, out _);", host, StringComparison.Ordinal);
+        Assert.Contains("_logger.LogDebug(", host, StringComparison.Ordinal);
+        /* The unobserved arm returns BEFORE the clear loop: the flag-flip and the Cleared write sit after it. */
+        var hold = host.IndexOf("if (!window.Observed)", StringComparison.Ordinal);
+        var clear = host.IndexOf("_activePgPoisonWaitAlert[entry.Key] = false;", StringComparison.Ordinal);
+        Assert.True(hold > 0 && clear > hold);
+        Assert.Contains("\"Poison Waits Cleared\"", host, StringComparison.Ordinal);
+    }
+
+    /* ---------------- poison waits: the SQL Server port (#3539 A4) ---------------- */
+
+    private static PoisonWaitAccumulation SqlPoison(long accumulatedMs, string waitType = "THREADPOOL", long waits = 1)
+        => new(waitType, accumulatedMs, waits, 10, new DateTime(2026, 9, 18, 12, 0, 0));
+
+    /// <summary>
+    /// The constants are LITERALLY shared — one definition on <see cref="PoisonWaitEvaluator"/>, with the
+    /// PostgreSQL names as aliases of it in source, not merely three numbers that happen to agree today. The
+    /// value equality is the cheap half; the source pin is the load-bearing one, because two equal literals
+    /// are exactly the state that drifts (a future "tune the SQL Server bar" edit would leave the PostgreSQL
+    /// one behind, and one alert name under one mute key would mean two things again — the #3539 finding).
+    /// </summary>
+    [Fact]
+    public void PoisonWaitConstantsAreOneDefinition_SharedByBothEngines()
+    {
+        Assert.Equal(PoisonWaitEvaluator.WindowMinutes, PostgresAlertEvaluator.PoisonWaitWindowMinutes);
+        Assert.Equal(PoisonWaitEvaluator.WarningAvgWaiters, PostgresAlertEvaluator.PoisonWaitWarningAvgWaiters);
+        Assert.Equal(PoisonWaitEvaluator.CriticalAvgWaiters, PostgresAlertEvaluator.PoisonWaitCriticalAvgWaiters);
+
+        var source = RepoFile.ReadRepoFile("PerformanceMonitor.Alerting", "PostgresAlertEvaluator.cs");
+        Assert.Contains("public const int PoisonWaitWindowMinutes = PoisonWaitEvaluator.WindowMinutes;", source, StringComparison.Ordinal);
+        Assert.Contains("public const double PoisonWaitWarningAvgWaiters = PoisonWaitEvaluator.WarningAvgWaiters;", source, StringComparison.Ordinal);
+        Assert.Contains("public const double PoisonWaitCriticalAvgWaiters = PoisonWaitEvaluator.CriticalAvgWaiters;", source, StringComparison.Ordinal);
+        /* The positive control for the pin below: the same Contains form does find a literal initializer
+           that IS in the file (the metric name), so its silence on a "= 1.0" for the poison bar is a real
+           absence rather than a matcher that never matches. */
+        Assert.Contains("public const string PoisonWaitMetric = \"Poison Wait\";", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("PoisonWaitWarningAvgWaiters = 1.0", source, StringComparison.Ordinal);
+
+        /* And the figures themselves, as documented on the shared home: 10 minutes, one waiter, ten. */
+        Assert.Equal(10, PoisonWaitEvaluator.WindowMinutes);
+        Assert.Equal(600_000d, PoisonWaitEvaluator.WindowMs);
+        Assert.Equal(1.0, PoisonWaitEvaluator.WarningAvgWaiters);
+        Assert.Equal(10.0, PoisonWaitEvaluator.CriticalAvgWaiters);
+    }
+
+    /// <summary>
+    /// Both engines grade the same accumulated milliseconds to the same tier at every documented boundary —
+    /// the parity the shared constants promise, checked through both evaluators' own entry points rather
+    /// than through the constants alone.
+    /// </summary>
+    [Theory]
+    [InlineData(0, null)]
+    [InlineData(599_999, null)]
+    [InlineData(600_000, "Warning")]
+    [InlineData(5_999_999, "Warning")]
+    [InlineData(6_000_000, "Critical")]
+    public void PoisonWaitGradesIdenticallyOnBothEngines(long accumulatedMs, string? expected)
+    {
+        var pg = PostgresAlertEvaluator.EvaluatePoisonWait(Poison(accumulatedMs));
+        var sql = PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(accumulatedMs));
+        var shared = PoisonWaitEvaluator.Grade(accumulatedMs);
+
+        if (expected is null)
+        {
+            Assert.Null(pg);
+            Assert.Null(sql);
+            Assert.Null(shared);
+            return;
+        }
+
+        var tier = Enum.Parse<AlertSeverityLevel>(expected);
+        Assert.Equal(tier, pg!.Severity);
+        Assert.Equal(tier, sql!.Severity);
+        Assert.Equal(tier, shared);
+        /* Same numeric pair, too: accumulated ms against the breached bar in ms. */
+        Assert.Equal(pg.NumericCurrentValue, (double)sql.AccumulatedWaitMs);
+        Assert.Equal(pg.NumericThresholdValue, sql.NumericThresholdValue);
+    }
+
+    /// <summary>
+    /// The SQL Server mirror of <see cref="PoisonWaitFiresOnAccumulatedTimeNotPerWaitAverage"/>: 300,000
+    /// THREADPOOL waits of 2 ms each is one task continuously starved for the whole window and fires
+    /// Warning; the retired avg-ms-per-wait bar (500) read the same window as 2 ms. And the mirror of the
+    /// false page: one 600 ms wait — the shape the old bar paged CRITICAL on — is silent.
+    /// </summary>
+    [Fact]
+    public void SqlServerPoisonWaitFiresOnTheStorm_AndNotOnOneSlowWait()
+    {
+        var storm = PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(600_000, waits: 300_000));
+        Assert.NotNull(storm);
+        Assert.Equal(AlertSeverityLevel.Warning, storm!.Severity);
+        Assert.Equal(1.0, storm.AvgWaiters);
+        Assert.Equal("THREADPOOL (600s in 10m)", storm.CurrentValueClause);
+
+        Assert.Null(PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(600, waits: 1)));
+    }
+
+    /// <summary>
+    /// The SQL Server fleet-quiet pin, the twin of <see cref="PoisonWaitStaysSilentOnTheWorstFleetBaselineObserved"/>:
+    /// on 43 servers over 4 days the worst ten-minute bucket anywhere held 5,795 ms of THREADPOOL (0.0097
+    /// avg waiters — ~100x under the bar), the largest single row was 703 tasks at 8.2 ms (5,779 ms), and
+    /// one server's daily compile burst sat at 3,154 ms over 8 tasks just under the OLD bar. None may fire.
+    /// </summary>
+    [Theory]
+    [InlineData(5_795, "THREADPOOL")]
+    [InlineData(5_779, "THREADPOOL")]
+    [InlineData(3_154, "RESOURCE_SEMAPHORE_QUERY_COMPILE")]
+    public void SqlServerPoisonWaitStaysSilentOnTheWorstFleetBucketObserved(long accumulatedMs, string waitType)
+    {
+        Assert.Null(PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(accumulatedMs, waitType)));
+    }
+
+    /// <summary>
+    /// A (0, 0) row — the delta calculator's "no delta is knowable here" marker, indistinguishable in
+    /// wait_stats from a genuinely idle interval — is not evidence of anything: it does not fire (nothing
+    /// accumulated) and it is not a finding of quiet either; the evaluator returns no finding for it and
+    /// says nothing about the window's health. Which of "observed" and "silent" applies is the engine's
+    /// call, made on whether rows came back at all (pinned in AlertEngineTests), never on a zero.
+    /// </summary>
+    [Fact]
+    public void SqlServerPoisonWaitTreatsAZeroRowAsNoEvidence()
+    {
+        Assert.Null(PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(0, waits: 0)));
+        Assert.Empty(PoisonWaitEvaluator.EvaluateSqlServer(new[] { SqlPoison(0, waits: 0), SqlPoison(0, "RESOURCE_SEMAPHORE", 0) }));
+        Assert.Empty(PoisonWaitEvaluator.EvaluateSqlServer((IReadOnlyList<PoisonWaitAccumulation>?)null));
+        Assert.Empty(PoisonWaitEvaluator.EvaluateSqlServer(Array.Empty<PoisonWaitAccumulation>()));
+    }
+
+    /// <summary>Worst-first: severity, then accumulated wait — so the engine's "worst" and mute key are stable.</summary>
+    [Fact]
+    public void SqlServerPoisonWaitFindingsAreOrderedWorstFirst()
+    {
+        var findings = PoisonWaitEvaluator.EvaluateSqlServer(new[]
+        {
+            SqlPoison(700_000, "THREADPOOL"),                          // Warning, more ms
+            SqlPoison(6_000_000, "RESOURCE_SEMAPHORE"),                // Critical
+            SqlPoison(650_000, "RESOURCE_SEMAPHORE_QUERY_COMPILE"),    // Warning, fewer ms
+            SqlPoison(100, "THREADPOOL"),                              // under the bar
+        });
+
+        Assert.Equal(new[] { "RESOURCE_SEMAPHORE", "THREADPOOL", "RESOURCE_SEMAPHORE_QUERY_COMPILE" },
+            findings.Select(f => f.WaitType).ToArray());
+        Assert.Equal(10.0, findings[0].BreachedAvgWaiters);
+        Assert.Equal(1.0, findings[1].BreachedAvgWaiters);
+    }
+
+    /// <summary>
+    /// The two engines' messages share one clause order — seconds accumulated, the window, the wait count,
+    /// the average stuck — with only the noun differing (task / backend), so a "Poison Wait" read alike from
+    /// either engine; and the SQL remedy names the fix for its type like the PostgreSQL one does.
+    /// </summary>
+    [Fact]
+    public void SqlServerPoisonWaitMessageMirrorsThePostgresShape()
+    {
+        var sql = PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(600_000, waits: 300_000))!;
+        var pg = PostgresAlertEvaluator.EvaluatePoisonWait(Poison(600_000, waits: 300_000))!;
+
+        Assert.Equal(
+            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 task(s) continuously stuck",
+            sql.ShortMessage);
+        Assert.StartsWith("[IPC:BtreePage] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 backend(s) continuously stuck", pg.ShortMessage, StringComparison.Ordinal);
+        Assert.Equal(
+            pg.ThresholdValue.Replace("backend(s)", "task(s)", StringComparison.Ordinal),
+            sql.ThresholdValue);
+    }
+
+    [Theory]
+    [InlineData("THREADPOOL", "worker thread")]
+    [InlineData("threadpool", "worker thread")]
+    [InlineData("RESOURCE_SEMAPHORE", "memory grants")]
+    [InlineData("RESOURCE_SEMAPHORE_QUERY_COMPILE", "compile memory")]
+    [InlineData("SOMETHING_ELSE", "active-query snapshots")]
+    public void SqlServerPoisonWaitRemedyNamesTheFixForItsType(string waitType, string fragment)
+    {
+        Assert.Contains(fragment, PoisonWaitEvaluator.SqlServerRemedyFor(waitType), StringComparison.Ordinal);
     }
 }

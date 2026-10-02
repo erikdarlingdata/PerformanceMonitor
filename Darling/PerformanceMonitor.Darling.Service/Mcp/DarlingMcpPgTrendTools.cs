@@ -6,6 +6,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -32,9 +33,10 @@ public sealed class DarlingMcpPgTrendTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("The exact wait event name, e.g. DataFileRead, WALWrite. Omit to follow whichever event dominates the window.")] string? wait_event = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -48,13 +50,13 @@ public sealed class DarlingMcpPgTrendTools
                somebody guessed. Which one was chosen is reported, so the answer is never about a different
                event than the reader thinks. */
             var chosen = string.IsNullOrWhiteSpace(wait_event)
-                ? await DarlingPgTrendReader.GetDominantWaitEventAsync(postgres, resolved.ServerId, start, windowEnd)
+                ? await DarlingPgTrendReader.GetDominantWaitEventAsync(postgres, resolved.ServerId, start, windowEnd, cancellationToken)
                 : wait_event.Trim();
 
             if (string.IsNullOrWhiteSpace(chosen))
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No wait event was sampled on {resolved.ServerName} in the last {hours_back} "
@@ -63,12 +65,12 @@ public sealed class DarlingMcpPgTrendTools
             }
 
             var points = await DarlingPgTrendReader.GetWaitTrendAsync(
-                postgres, resolved.ServerId, chosen, start, windowEnd);
+                postgres, resolved.ServerId, chosen, start, windowEnd, cancellationToken);
 
             if (points.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No samples for wait event '{chosen}' on {resolved.ServerName} in the last "
@@ -109,31 +111,49 @@ public sealed class DarlingMcpPgTrendTools
                 {
                     collection_time = p.CollectionTimeUtc,
                     sample_count = p.SampleCount,
-                    estimated_wait_ms_per_second = Math.Round(p.EstimatedWaitMsPerSecond, 3),
+                    /* Null, never 0, when the reader had no positive interval to rate over (#3653): the
+                       statement's own guard keeps that unreachable today, and the key is nullable so the
+                       day it is not, the point says unknowable rather than idle. */
+                    estimated_wait_ms_per_second = p.EstimatedWaitMsPerSecond is { } wait ? Math.Round(wait, 3) : (double?)null,
                     backend_count = p.BackendCount,
                     counter_reset = p.CounterReset,
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading the PostgreSQL wait trend failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_wait_trend", ex);
         }
     }
 
-    [McpServerTool(Name = "get_pg_query_duration_trend"), Description("Gets a time series for ONE PostgreSQL statement by queryid: what a single execution cost in each collection interval, how many times it ran, and its call rate. This is the regression read - a query whose mean execution time steps up and stays up has changed plan or lost an index, and the step is visible here where a single-window average hides it. Use get_pg_top_queries first to get a queryid. mean_exec_ms is null rather than zero for an interval where the statement did not run, because a mean over no calls is absent rather than fast.")]
-    public static async Task<string> GetPgQueryDurationTrend(
+    [McpServerTool(Name = "get_pg_query_duration_trend"), Description("Gets a time series for ONE PostgreSQL statement by queryid, in time buckets: what a single execution cost, how many times it ran, and its call rate. This is the regression read - a query whose mean execution time steps up and stays up has changed plan or lost an index, and the step is visible here where a single-window average hides it. Use get_pg_top_queries first to get a queryid. mean_exec_ms is null rather than zero where the statement did not run, because a mean over no calls is absent rather than fast.")]
+    public static Task<string> GetPgQueryDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("The queryid from get_pg_top_queries; PostgreSQL query ids can be negative. Omit to follow the statement that spent the most time in the window.")] string? queryid = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetPgQueryDurationTrend(postgres, server_name, queryid, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgQueryDurationMaxPoints), cancellationToken);
+
+    /// <summary>
+    /// get_pg_query_duration_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own,
+    /// the web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>. The window figures are counted from
+    /// the buckets' own interval counts and end intervals, so they are the numbers the per-interval read produced.
+    /// </summary>
+    internal static async Task<string> GetPgQueryDurationTrend(
+        NpgsqlDataSource postgres, string? server_name, string? queryid, int hours_back, string? as_of, int? bucket_minutes,
+        TrendBudget budget, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
+
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
 
         long parsedQueryId;
         var requested = !string.IsNullOrWhiteSpace(queryid);
@@ -143,8 +163,8 @@ public sealed class DarlingMcpPgTrendTools
            statement that does not exist. */
         if (requested && !long.TryParse(queryid!.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedQueryId))
         {
-            return McpHelpers.Status(
-                "error",
+            return McpHelpers.Refusal(
+                "queryid",
                 $"queryid '{queryid}' is not a 64-bit integer. PostgreSQL query ids are signed and often "
                 + "negative; pass the value from get_pg_top_queries exactly as it appears.");
         }
@@ -155,12 +175,12 @@ public sealed class DarlingMcpPgTrendTools
 
             if (!requested)
             {
-                var top = await DarlingPgTrendReader.GetTopQueryIdAsync(postgres, resolved.ServerId, start, windowEnd);
+                var top = await DarlingPgTrendReader.GetTopQueryIdAsync(postgres, resolved.ServerId, start, windowEnd, cancellationToken);
 
                 if (top is null)
                 {
                     return await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken)
                         ?? McpHelpers.Status(
                             "empty",
                             $"No statement recorded execution time on {resolved.ServerName} in the last "
@@ -174,13 +194,13 @@ public sealed class DarlingMcpPgTrendTools
                 parsedQueryId = long.Parse(queryid!.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture);
             }
 
-            var points = await DarlingPgTrendReader.GetQueryDurationTrendAsync(
-                postgres, resolved.ServerId, parsedQueryId, start, windowEnd);
+            var points = await DarlingPgTrendReader.GetQueryDurationBucketsAsync(
+                postgres, resolved.ServerId, parsedQueryId, start, windowEnd, bucketMinutes, cancellationToken);
 
             if (points.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No samples for queryid {parsedQueryId} on {resolved.ServerName} in the last "
@@ -199,48 +219,72 @@ public sealed class DarlingMcpPgTrendTools
                     ? "as requested"
                     : "chosen automatically: the statement with the most execution time in this window",
                 hours_back,
+                bucket = TrendBuckets.Word(bucketMinutes),
+                bucket_minutes = bucketMinutes,
+                aggregate_note = TrendBuckets.AggregateNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
                 status = "query_duration_trend",
                 point_count = points.Count,
-                intervals_with_calls = ran.Count,
+                /* The rated intervals the points summarize — what point_count counted before #3960 — and how many
+                   of them ran the statement, counted from each bucket's own tallies. */
+                interval_count = points.Sum(p => p.Intervals),
+                intervals_with_calls = points.Sum(p => p.IntervalsWithCalls),
                 /* The two ends of the series that actually ran, so a step is visible without reading every
-                   point - and null when nothing ran, rather than a shape invented from no executions. */
-                first_mean_exec_ms = ran.Count > 0 ? Math.Round(ran[0].MeanExecMs, 3) : (double?)null,
-                last_mean_exec_ms = ran.Count > 0 ? Math.Round(ran[^1].MeanExecMs, 3) : (double?)null,
-                note = "mean_exec_ms is the interval's total execution time over its calls - what ONE "
-                     + "execution cost then. It is null for an interval with no calls, because a mean over "
-                     + "no executions is absent rather than zero. A step that persists is a plan or index "
-                     + "change; a spike that recovers is usually contention, which get_pg_wait_trend and "
-                     + "get_pg_blocking speak to.",
+                   point - and null when nothing ran, rather than a shape invented from no executions. Still the
+                   first and last INTERVAL's mean: each bucket carries its own end intervals (#3960). */
+                first_mean_exec_ms = ran.Count > 0 && ran[0].FirstMeanExecMs is { } first ? Math.Round(first, 3) : (double?)null,
+                last_mean_exec_ms = ran.Count > 0 && ran[^1].LastMeanExecMs is { } last ? Math.Round(last, 3) : (double?)null,
+                note = "mean_exec_ms is the point's total execution time over its calls - what ONE "
+                     + "execution cost then - and peak_mean_exec_ms the costliest single interval inside it. Both "
+                     + "are null where nothing ran, because a mean over no executions is absent rather than zero. "
+                     + "A step that persists is a plan or index change; a spike that recovers is usually "
+                     + "contention, which get_pg_wait_trend and get_pg_blocking speak to.",
                 points = points.Select(p => new
                 {
                     collection_time = p.CollectionTimeUtc,
                     calls = p.Calls,
                     total_exec_ms = Math.Round(p.TotalExecMs, 3),
                     mean_exec_ms = p.Calls > 0 ? Math.Round(p.MeanExecMs, 3) : (double?)null,
+                    peak_mean_exec_ms = p.PeakMeanExecMs is { } peak ? Math.Round(peak, 3) : (double?)null,
                     calls_per_second = Math.Round(p.CallsPerSecond, 4),
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Reading the PostgreSQL query duration trend failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_query_duration_trend", ex);
         }
     }
 
-    [McpServerTool(Name = "get_pg_io_trend"), Description("Gets a time series for ONE PostgreSQL (backend_type, context) pair from pg_stat_io: read, write and extend rates per second, the buffer-cache hit ratio for each interval, and per-operation latency where the server measures it. Use get_pg_io_stats first to see which combinations are busy, then this to see whether one is growing or slowing. The subject is a PAIR because a hit ratio summed across contexts is meaningless - bulkread is a sequential scan deliberately bypassing the buffer pool with a ring buffer, so averaging its misses with the normal context's understates both and they have opposite remedies. Object types are summed together, which cannot distort the ratio because WAL rows report no buffer hits. Reports whether the server tracks I/O TIMING at all: track_io_timing is OFF by default in PostgreSQL, and its zero read_time would otherwise divide out to a latency of 0.000 ms that reads as an impossibly fast disk rather than an unmeasured one. Also reports whether byte volumes are MEASURED (PostgreSQL 18's read_bytes/write_bytes) or ESTIMATED as operations x block size (pre-18) - the two are different quantities and 18 moves several blocks per operation, so the older estimate undercounts there. Write counters are null rather than zero on Amazon Aurora, where backends do not write data files. An interval spanning a pg_stat_reset_shared('io') or a restart is flagged and reports everything since the reset, rather than the quiet interval that clamping the difference at zero would show. Requires PostgreSQL 16 or later; valid on a standby.")]
-    public static async Task<string> GetPgIoTrend(
+    [McpServerTool(Name = "get_pg_io_trend"), Description("Gets a time series for ONE PostgreSQL (backend_type, context) pair from pg_stat_io: read/write/extend rates per second, cache-hit ratio, per-op latency, bucketed to as_of. Requires PostgreSQL 16+. avg_read_ms/avg_write_ms are null, never 0.000, when track_io_timing is off. Write fields are null, not 0, on Amazon Aurora (no write counters). Byte rates: measured (18+), estimated (earlier), or null. Empty: no pair was active, or the window holds one snapshot (a trend needs two to difference). A point spanning a stats reset reports everything since the reset, not a quiet interval. <<GUIDE>> Gets a time series for ONE PostgreSQL (backend_type, context) pair from pg_stat_io, in time buckets: read, write and extend rates per second, the buffer-cache hit ratio for each point, and per-operation latency where the server measures it. Use get_pg_io_stats first to see which combinations are busy, then this to see whether one is growing or slowing. The subject is a PAIR because a hit ratio summed across contexts is meaningless - bulkread is a sequential scan deliberately bypassing the buffer pool with a ring buffer, so averaging its misses with the normal context's understates both and they have opposite remedies. Object types are summed together, which cannot distort the ratio because WAL rows report no buffer hits. Reports whether the server tracks I/O TIMING at all: track_io_timing is OFF by default in PostgreSQL, and its zero read_time would otherwise divide out to a latency of 0.000 ms that reads as an impossibly fast disk rather than an unmeasured one. Also reports whether byte volumes are MEASURED (PostgreSQL 18's read_bytes/write_bytes) or ESTIMATED as operations x block size (pre-18) - the two are different quantities and 18 moves several blocks per operation, so the older estimate undercounts there. Write counters are null rather than zero on Amazon Aurora, where backends do not write data files. A point holding an interval that spans a pg_stat_reset_shared('io') or a restart is flagged and reports everything since the reset, rather than the quiet interval that clamping the difference at zero would show. Requires PostgreSQL 16 or later; valid on a standby. On backend_type: Naming this alone follows the busiest CONTEXT for that backend; omit both to follow whichever pair moved the most I/O.")]
+    public static Task<string> GetPgIoTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Which backend did the I/O, e.g. 'client backend', 'autovacuum worker', 'checkpointer'. Naming this alone follows the busiest CONTEXT for that backend; omit both to follow whichever pair moved the most I/O.")] string? backend_type = null,
+        [Description("Which backend did the I/O, e.g. 'client backend', 'autovacuum worker', 'checkpointer'.")] string? backend_type = null,
         [Description("Why the I/O happened: normal, bulkread, bulkwrite, vacuum, index, walreplay. Naming this alone follows the busiest BACKEND in that context; omit both to follow whichever pair moved the most I/O.")] string? context = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetPgIoTrend(postgres, server_name, backend_type, context, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgIoMcpAutoPoints, TrendBuckets.PgIoMaxPoints), cancellationToken);
+
+    /// <summary>
+    /// get_pg_io_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool passes its own, the web
+    /// viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>. One series, so the width is settled before
+    /// any read runs; the window figures below are counted from the buckets' own sums, peaks and interval counts,
+    /// so they are the same numbers the per-interval read produced.
+    /// </summary>
+    internal static async Task<string> GetPgIoTrend(
+        NpgsqlDataSource postgres, string? server_name, string? backend_type, string? context, int hours_back,
+        string? as_of, int? bucket_minutes, TrendBudget budget, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
+
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
 
         try
         {
@@ -264,13 +308,18 @@ public sealed class DarlingMcpPgTrendTools
                    Whichever half was named CONSTRAINS the choice, and subject_source says which half was
                    chosen for them - the alternative was accepting a backend type and quietly answering
                    about a different one. */
+                /* #3961: the LAG form sorts every pg_io_stats row in the window before it can rank them -
+                   3.8 s over a week on DARLING01. A TimescaleDB store answers from each series' endpoints
+                   instead, in a quarter of a second; a plain-PostgreSQL store has no first()/last() and
+                   keeps the row-by-row form. */
+                var fromEndpoints = await DarlingPgTrendReader.IsTimescaleDbStoreAsync(postgres, cancellationToken);
                 var dominant = await DarlingPgTrendReader.GetDominantIoSubjectAsync(
-                    postgres, resolved.ServerId, start, windowEnd, askedBackend, askedContext);
+                    postgres, resolved.ServerId, start, windowEnd, askedBackend, askedContext, fromEndpoints, cancellationToken);
 
                 if (dominant is null)
                 {
                     return await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats", cancellationToken)
                         ?? McpHelpers.Status(
                             "empty",
                             (askedBackend ?? askedContext) is null
@@ -292,12 +341,12 @@ public sealed class DarlingMcpPgTrendTools
             }
 
             var points = await DarlingPgTrendReader.GetIoTrendAsync(
-                postgres, resolved.ServerId, chosenBackend, chosenContext, start, windowEnd);
+                postgres, resolved.ServerId, chosenBackend, chosenContext, start, windowEnd, bucketMinutes, cancellationToken);
 
             if (points.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No I/O samples for '{chosenBackend}' in the '{chosenContext}' context on "
@@ -311,14 +360,16 @@ public sealed class DarlingMcpPgTrendTools
                readings a zero latency permits - "the disk is instant" and "nobody is timing it" - are not
                distinguishable in the counters and only one of them is ever true. */
             var timingSetting = await DarlingPgTrendReader.GetIoTimingTrackedAsync(
-                postgres, resolved.ServerId, windowEnd);
+                postgres, resolved.ServerId, windowEnd, cancellationToken);
             var timingObserved = points.Any(p => p.ReadTimeMs > 0 || p.WriteTimeMs > 0);
             var timingTracked = timingSetting ?? timingObserved;
 
             var writesTracked = points.Any(p => p.WriteCountersTracked);
             var bytesMeasured = points.Any(p => p.BytesMeasured);
             var bytesEstimated = !bytesMeasured && points.Any(p => p.BytesEstimable);
-            var resets = points.Count(p => p.CounterReset);
+            /* Counted from the buckets' own reset counts (#3897): a bucket can hold several reset intervals, and
+               the figure is intervals, as it always was. */
+            var resets = points.Sum(p => p.CounterResets);
 
             return JsonSerializer.Serialize(new
             {
@@ -342,8 +393,13 @@ public sealed class DarlingMcpPgTrendTools
                       + "parameters to pin the pair exactly.",
                 context_meaning = DarlingPgIoReader.ContextMeaning(chosenContext),
                 hours_back,
+                bucket = TrendBuckets.Word(bucketMinutes),
+                bucket_minutes = bucketMinutes,
+                aggregate_note = TrendBuckets.AggregateNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
                 status = "io_trend",
                 point_count = points.Count,
+                /* The differenced intervals the points summarize — what point_count counted before #3897. */
+                interval_count = points.Sum(p => p.Intervals),
                 counter_reset_count = resets,
                 total_reads = points.Sum(p => p.Reads),
                 total_writes = writesTracked ? points.Sum(p => p.Writes) : (long?)null,
@@ -353,7 +409,10 @@ public sealed class DarlingMcpPgTrendTools
                 total_write_bytes = (bytesMeasured || bytesEstimated) && writesTracked
                     ? points.Sum(p => p.WriteBytes)
                     : (decimal?)null,
-                peak_reads_per_second = Math.Round(points.Max(p => p.ReadsPerSecond), 3),
+                /* Max over the RATED intervals — each bucket's own peak, so a bucket's pooled rate cannot hide its
+                   busiest interval (#3897); null only if no interval could be rated, which the reader's guard makes
+                   unreachable today (#3653). */
+                peak_reads_per_second = points.Max(p => p.PeakReadsPerSecond) is { } peakReads ? Math.Round(peakReads, 3) : (double?)null,
                 /* Named at the top rather than only per point: a caller has to know which of these are
                    measured before it draws any conclusion from a number below. */
                 write_counters_tracked = writesTracked,
@@ -366,9 +425,10 @@ public sealed class DarlingMcpPgTrendTools
                 bytes_source = bytesMeasured
                     ? "measured"
                     : (bytesEstimated ? "estimated_from_block_size" : "unavailable"),
-                note = "Every figure is the difference between CONSECUTIVE snapshots, normalised per SECOND "
-                     + "by the interval's own length - collection cadence is not uniform, and a per-interval "
-                     + "total would render a slow sweep as a spike in the data rather than in the server. "
+                note = "Every figure is built from the difference between CONSECUTIVE snapshots; a point sums "
+                     + "the intervals in its bucket and normalises per SECOND by the seconds they covered "
+                     + "(interval_seconds) - collection cadence is not uniform, and a per-interval total would "
+                     + "render a slow sweep as a spike in the data rather than in the server. "
                      + "cache_hit_pct is scoped to this pair, which is the only scope where it means "
                      + "anything."
                      + (writesTracked
@@ -405,19 +465,31 @@ public sealed class DarlingMcpPgTrendTools
                 {
                     collection_time = p.CollectionTimeUtc,
                     interval_seconds = Math.Round(p.IntervalSeconds, 1),
-                    reads_per_second = Math.Round(p.ReadsPerSecond, 3),
-                    writes_per_second = p.WriteCountersTracked ? Math.Round(p.WritesPerSecond, 3) : (double?)null,
-                    extends_per_second = Math.Round(p.ExtendsPerSecond, 3),
+                    /* Each rate is null when the reader could not rate the interval (#3653; the reader's SQL
+                       says why that is unreachable today), and the write-side ones are null too when the
+                       server tracks no writes - two different absences, both spelled null, neither 0. */
+                    reads_per_second = p.ReadsPerSecond is { } reads ? Math.Round(reads, 3) : (double?)null,
+                    writes_per_second = p.WriteCountersTracked && p.WritesPerSecond is { } writes ? Math.Round(writes, 3) : (double?)null,
+                    extends_per_second = p.ExtendsPerSecond is { } extends ? Math.Round(extends, 3) : (double?)null,
                     /* The rate beside the ratio, because they answer different questions: cache_hit_pct
                        says what share the pool absorbed, hits_per_second says how much work there was to
                        absorb. A pair can hold 100% while doing almost nothing. */
-                    hits_per_second = Math.Round(p.HitsPerSecond, 3),
+                    hits_per_second = p.HitsPerSecond is { } hits ? Math.Round(hits, 3) : (double?)null,
                     /* Ring-buffer REUSE is a different thing and is not folded in here: a bulk operation
                        recycling its own buffers is not pressure on the pool, and conflating the two is the
-                       standard misreading of pg_stat_io. */
+                       standard misreading of pg_stat_io.
+
+                       Null, not 0, when there is no interval to rate over (#3653; #3540 rule 1, readers
+                       NULL-not-0 on unknowable) - the C# twin of the reader's SQL rate arms, which end at
+                       END for the same reason, and spelled the way the sibling per-second keys in this
+                       payload spell an unmeasured value (writes_per_second, write_bytes_per_second: a
+                       flag-gated nullable). The null arm is unreachable today - the reader derives
+                       IntervalSeconds from the DISTINCT collection times of the series and drops the
+                       window's first snapshot, so every point's interval is positive - and a 0 here would
+                       have been a measured idle second the day that changed, not an absent one. */
                     evictions_per_second = p.IntervalSeconds > 0
                         ? Math.Round(p.Evictions / p.IntervalSeconds, 3)
-                        : 0,
+                        : (double?)null,
                     cache_hit_pct = p.CacheHitPct is { } hit ? Math.Round(hit, 2) : (double?)null,
                     /* Nulled when the server does not time I/O, rather than passing the 0.000 the
                        arithmetic produces: that value is a statement about the configuration, not about
@@ -426,35 +498,55 @@ public sealed class DarlingMcpPgTrendTools
                     avg_write_ms = timingTracked && p.WriteCountersTracked && p.AvgWriteMs is { } write
                         ? Math.Round(write, 3)
                         : (double?)null,
-                    read_bytes_per_second = bytesMeasured || bytesEstimated
-                        ? Math.Round(p.ReadBytesPerSecond, 1)
+                    /* #3897: the bucket's busiest and slowest single intervals, so a one-minute burst or stall
+                       survives the bucket. The latency peak is nulled on the same rule as avg_read_ms. */
+                    peak_reads_per_second = p.PeakReadsPerSecond is { } peak ? Math.Round(peak, 3) : (double?)null,
+                    peak_read_ms = timingTracked && p.PeakReadMs is { } peakRead ? Math.Round(peakRead, 3) : (double?)null,
+                    read_bytes_per_second = (bytesMeasured || bytesEstimated) && p.ReadBytesPerSecond is { } readBytes
+                        ? Math.Round(readBytes, 1)
                         : (double?)null,
-                    write_bytes_per_second = (bytesMeasured || bytesEstimated) && p.WriteCountersTracked
-                        ? Math.Round(p.WriteBytesPerSecond, 1)
+                    write_bytes_per_second = (bytesMeasured || bytesEstimated) && p.WriteCountersTracked && p.WriteBytesPerSecond is { } writeBytes
+                        ? Math.Round(writeBytes, 1)
                         : (double?)null,
                     counter_reset = p.CounterReset,
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_io_trend", ex);
         }
     }
 
-    [McpServerTool(Name = "get_pg_database_trend"), Description("Gets a time series for ONE PostgreSQL database from pg_stat_database: temp-file spills, the buffer-cache hit ratio, deadlocks and the rollback share, interval by interval. This is where the cache hit ratio becomes usable at all - pg_stat_database's counters are cumulative since the last reset, so the ratio computed from them raw is a lifetime average that barely moves, and a database that fell off a cliff an hour ago still reports 99% because of the weeks behind it. Differenced per interval, the cliff is visible. Temp files are the same story: 'this database spilled 40 GB this week' does not say whether it was one bad afternoon or a steady leak, and the two have different fixes. Deadlocks are reported as a COUNT per interval rather than a rate, because they are discrete server-recorded events. Omit database to follow the biggest temp-file spiller. PostgreSQL's shared-relations row - the cluster-wide catalog, which has a NULL database name - is followable by passing '(shared relations)' but is never chosen automatically. An interval spanning a pg_stat_reset or a crash restart is flagged and reports everything since the reset, rather than the quiet interval that clamping the difference at zero would show. Works on every PostgreSQL major and on a standby, where sorts spill exactly the way they do on a writer.")]
-    public static async Task<string> GetPgDatabaseTrend(
+    [McpServerTool(Name = "get_pg_database_trend"), Description("Gets a time series for ONE PostgreSQL database from pg_stat_database: temp-file spills, cache-hit ratio, deadlocks and rollback share, bucketed to as_of. Differenced per interval - the raw counters are cumulative, and a real cliff averages out otherwise. cache_hit_pct/rollback_pct are null, not 0, on an interval with no accesses or no completed transactions. deadlocks is a COUNT per point, not a rate. A point spanning a stats reset reports everything since, never a quiet interval. Empty: wrong name, only one snapshot so far, or none in the window - the message says which. <<GUIDE>> Gets a time series for ONE PostgreSQL database from pg_stat_database, in time buckets: temp-file spills, the buffer-cache hit ratio (with each bucket's worst interval), deadlocks and the rollback share. This is where the cache hit ratio becomes usable at all - pg_stat_database's counters are cumulative since the last reset, so the ratio computed from them raw is a lifetime average that barely moves, and a database that fell off a cliff an hour ago still reports 99% because of the weeks behind it. Differenced per interval, the cliff is visible. Temp files are the same story: 'this database spilled 40 GB this week' does not say whether it was one bad afternoon or a steady leak, and the two have different fixes. Deadlocks are reported as a COUNT per point rather than a rate, because they are discrete server-recorded events. Omit database to follow the biggest temp-file spiller. PostgreSQL's shared-relations row - the cluster-wide catalog, which has a NULL database name - is followable by passing '(shared relations)' but is never chosen automatically. A point holding an interval that spans a pg_stat_reset or a crash restart is flagged and reports everything since the reset, rather than the quiet interval that clamping the difference at zero would show. Works on every PostgreSQL major and on a standby, where sorts spill exactly the way they do on a writer.")]
+    public static Task<string> GetPgDatabaseTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("The database to follow. Pass '(shared relations)' for PostgreSQL's cluster-wide catalog row. Omit to follow the biggest temp-file spiller in the window.")] string? database = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetPgDatabaseTrend(postgres, server_name, database, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgDatabaseMaxPoints), cancellationToken);
+
+    /// <summary>
+    /// get_pg_database_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool passes its own, the
+    /// web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>. The window figures are counted from
+    /// the buckets' own sums, worst intervals and interval counts, so they are the numbers the per-interval read
+    /// produced.
+    /// </summary>
+    internal static async Task<string> GetPgDatabaseTrend(
+        NpgsqlDataSource postgres, string? server_name, string? database, int hours_back, string? as_of,
+        int? bucket_minutes, TrendBudget budget, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
+
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
 
         try
         {
@@ -477,12 +569,12 @@ public sealed class DarlingMcpPgTrendTools
             else
             {
                 chosen = await DarlingPgTrendReader.GetTopDatabaseAsync(
-                    postgres, resolved.ServerId, start, windowEnd);
+                    postgres, resolved.ServerId, start, windowEnd, cancellationToken);
 
                 if (chosen is null)
                 {
                     return await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_database_stats")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_database_stats", cancellationToken)
                         ?? McpHelpers.Status(
                             "empty",
                             $"No database recorded block accesses or temp files on {resolved.ServerName} in "
@@ -491,14 +583,14 @@ public sealed class DarlingMcpPgTrendTools
             }
 
             var points = await DarlingPgTrendReader.GetDatabaseTrendAsync(
-                postgres, resolved.ServerId, chosen, start, windowEnd);
+                postgres, resolved.ServerId, chosen, start, windowEnd, bucketMinutes, cancellationToken);
 
             var label = chosen ?? DarlingMcpPgDatabaseTools.SharedRelationsLabel;
 
             if (points.Count == 0)
             {
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_database_stats");
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_database_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -510,7 +602,7 @@ public sealed class DarlingMcpPgTrendTools
                    in exactly that state, and telling its operator the database was quiet would be a
                    confident wrong answer for as long as it takes the second cycle to land. */
                 var (samplesInWindow, everCollected) = await DarlingPgDatabaseReader.GetCoverageAsync(
-                    postgres, resolved.ServerId, start, windowEnd);
+                    postgres, resolved.ServerId, start, windowEnd, cancellationToken);
 
                 return McpHelpers.Status(
                     "empty",
@@ -538,9 +630,12 @@ public sealed class DarlingMcpPgTrendTools
             var totalAccesses = totalHits + totalReads;
             var totalCommits = points.Sum(p => p.XactCommit);
             var totalRollbacks = points.Sum(p => p.XactRollback);
-            var spilled = points.Where(p => p.TempFiles > 0).ToList();
-            var rated = points.Where(p => p.CacheHitPct.HasValue).ToList();
-            var resets = points.Count(p => p.CounterReset);
+            /* Counted from the buckets' own interval counts, worst intervals and reset counts (#3897), so each
+               figure below is about INTERVALS, as it always was, not about the buckets that hold them. */
+            var spilledIntervals = points.Sum(p => p.IntervalsWithTempFiles);
+            var rated = points.Where(p => p.WorstCacheHitPct.HasValue).ToList();
+            var worst = rated.OrderBy(p => p.WorstCacheHitPct!.Value).FirstOrDefault();
+            var resets = points.Sum(p => p.CounterResets);
 
             double? windowHitPct = totalAccesses > 0
                 ? Math.Round((double)totalHits / totalAccesses * 100, 2)
@@ -558,10 +653,15 @@ public sealed class DarlingMcpPgTrendTools
                       + "chosen automatically - it is the cluster-wide catalog and never the database in "
                       + "trouble - but it is followable by passing '(shared relations)'.",
                 hours_back,
+                bucket = TrendBuckets.Word(bucketMinutes),
+                bucket_minutes = bucketMinutes,
+                aggregate_note = TrendBuckets.AggregateNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
                 status = "database_trend",
                 point_count = points.Count,
+                /* The differenced intervals the points summarize — what point_count counted before #3897. */
+                interval_count = points.Sum(p => p.Intervals),
                 counter_reset_count = resets,
-                intervals_with_temp_files = spilled.Count,
+                intervals_with_temp_files = spilledIntervals,
                 total_temp_files = totalTempFiles,
                 total_temp_bytes = totalTempBytes,
                 total_deadlocks = points.Sum(p => p.Deadlocks),
@@ -569,13 +669,13 @@ public sealed class DarlingMcpPgTrendTools
                    read already gives; the reason to difference per interval is that a database can average
                    99% and still have spent twenty minutes at 40%, and only the floor says so. */
                 cache_hit_pct_window = windowHitPct,
-                worst_interval_cache_hit_pct = rated.Count > 0
-                    ? Math.Round(rated.Min(p => p.CacheHitPct!.Value), 2)
+                worst_interval_cache_hit_pct = worst is not null
+                    ? Math.Round(worst.WorstCacheHitPct!.Value, 2)
                     : (double?)null,
-                worst_interval_at = rated.Count > 0
-                    ? rated.OrderBy(p => p.CacheHitPct!.Value).First().CollectionTimeUtc
-                    : (DateTime?)null,
-                peak_temp_bytes_per_second = Math.Round(points.Max(p => p.TempBytesPerSecond), 1),
+                worst_interval_at = worst?.WorstCacheHitAt,
+                /* Max over the RATED intervals — each bucket's own peak (#3897); null only if no interval could be
+                   rated (#3653, unreachable today). */
+                peak_temp_bytes_per_second = points.Max(p => p.PeakTempBytesPerSecond) is { } peakTemp ? Math.Round(peakTemp, 1) : (double?)null,
                 /* The same prose the single-window read serves, from the same method: the scale of a spill
                    decides whether work_mem is the answer or a plan is, and two copies of that judgement is
                    how it stops being one judgement. */
@@ -584,11 +684,13 @@ public sealed class DarlingMcpPgTrendTools
                 xact_commit = totalCommits,
                 xact_rollback = totalRollbacks,
                 rollback_finding = DarlingMcpPgDatabaseTools.RollbackFinding(totalCommits, totalRollbacks),
-                note = "Every figure is the difference between CONSECUTIVE snapshots, normalised per SECOND "
-                     + "by the interval's own length where it is a rate. cache_hit_pct and rollback_pct are "
-                     + "NULL rather than zero for an interval with no block accesses or no completed "
-                     + "transactions, because a ratio over nothing is absent rather than bad. deadlocks is a "
-                     + "COUNT for the interval, not a rate: they are discrete events, and per-second would "
+                note = "Every figure is built from the difference between CONSECUTIVE snapshots; a point sums "
+                     + "the intervals in its bucket and, where it is a rate, normalises per SECOND by the seconds "
+                     + "they covered. cache_hit_pct and rollback_pct are "
+                     + "NULL rather than zero for a point with no block accesses or no completed "
+                     + "transactions, because a ratio over nothing is absent rather than bad; "
+                     + "worst_cache_hit_pct is the point's worst single interval. deadlocks is a "
+                     + "COUNT for the point, not a rate: they are discrete events, and per-second would "
                      + "render every real one as four leading zeros."
                      + (resets > 0
                          ? $"  {resets} interval(s) span a statistics RESET - pg_stat_reset(), or a crash "
@@ -598,18 +700,24 @@ public sealed class DarlingMcpPgTrendTools
                 points = points.Select(p => new
                 {
                     collection_time = p.CollectionTimeUtc,
-                    transactions_per_second = Math.Round(p.TransactionsPerSecond, 3),
+                    /* Null when the reader had no positive interval to rate over (#3653), as the ratios
+                       beside it have always been null over nothing. */
+                    transactions_per_second = p.TransactionsPerSecond is { } tps ? Math.Round(tps, 3) : (double?)null,
                     rollback_pct = p.RollbackPct is { } rb ? Math.Round(rb, 2) : (double?)null,
                     cache_hit_pct = p.CacheHitPct is { } hit ? Math.Round(hit, 2) : (double?)null,
                     temp_files = p.TempFiles,
                     temp_bytes = p.TempBytes,
-                    temp_bytes_per_second = Math.Round(p.TempBytesPerSecond, 1),
+                    temp_bytes_per_second = p.TempBytesPerSecond is { } tempBytes ? Math.Round(tempBytes, 1) : (double?)null,
                     deadlocks = p.Deadlocks,
                     counter_reset = p.CounterReset,
+                    /* #3897: the bucket's worst single interval and biggest single-interval spill, so the cliff
+                       survives the bucket's pooled ratio. */
+                    worst_cache_hit_pct = p.WorstCacheHitPct is { } worstHit ? Math.Round(worstHit, 2) : (double?)null,
+                    peak_temp_bytes_per_second = p.PeakTempBytesPerSecond is { } peakSpill ? Math.Round(peakSpill, 1) : (double?)null,
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_database_trend", ex);
         }

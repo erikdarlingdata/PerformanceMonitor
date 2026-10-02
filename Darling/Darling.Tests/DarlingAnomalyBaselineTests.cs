@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
@@ -83,15 +85,15 @@ public sealed class DarlingAnomalyBaselineTests
     private static readonly string[] AllDetectorSql =
     {
         PgAnomalyDetector.HasBaselineDataSql,
-        PgAnomalyDetector.CpuWindowSql,
-        PgAnomalyDetector.WaitRateWindowSql,
+        PgAnomalyDetector.CpuTileWindowSql,
+        PgAnomalyDetector.WaitRateTileWindowSql,
         PgAnomalyDetector.WaitContribWindowSql,
         PgAnomalyDetector.BlockingWindowSql,
-        PgAnomalyDetector.IoWindowSql,
-        PgAnomalyDetector.BatchRequestWindowSql,
-        PgAnomalyDetector.SessionWindowSql,
-        PgAnomalyDetector.QueryDurationWindowSql,
-        PgAnomalyDetector.MemoryWindowSql,
+        PgAnomalyDetector.IoTileWindowSql,
+        PgAnomalyDetector.BatchRequestTileWindowSql,
+        PgAnomalyDetector.SessionTileWindowSql,
+        PgAnomalyDetector.QueryDurationTileWindowSql,
+        PgAnomalyDetector.MemoryTileWindowSql,
         PgAnomalyDetector.ObjectGrowthSql,
         PgAnomalyDetector.ObjectContentionSql
     };
@@ -145,11 +147,67 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.NotNull(typeof(PgAnomalyDetector).GetMethod("SetDeviationThreshold"));
     }
 
+    /// <summary>
+    /// #4731: the two SQL Server COUNT families (<c>ANOMALY_BLOCKING_SPIKE</c>, <c>ANOMALY_DEADLOCK_SPIKE</c>)
+    /// are assembled the same way in both products. Each detector's <c>DetectBlockingAnomalies</c> builds the
+    /// fact's metadata through <c>CountFamilyMetadata.Build</c> (which stamps <c>baseline_zero_history</c>
+    /// beside <c>is_new</c> and <c>ratio</c>), adds its own baseline context, and keeps the firing rule it
+    /// always had: at least 5 blocking events / 3 deadlocks AND (an untrustworthy baseline OR a per-hour rate
+    /// at least <c>DefaultEventRatioThreshold</c> times the baseline). A mirrored inline copy in either product
+    /// would drop the stamp for that product alone, which is the drift this pin exists to refuse.
+    /// </summary>
+    [Fact]
+    public void CountFamilies_BothProductsBuildTheirMetadataThroughTheSharedFunction_AndKeepTheFiringRule()
+    {
+        var sources = new[]
+        {
+            ("Darling", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs")),
+            ("Lite", RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs")),
+        };
+
+        foreach (var (product, raw) in sources)
+        {
+            var stripped = CSharpSourceWalker.StripCommentsAndStrings(raw);
+            var declaration = Regex.Match(stripped, @"Task\s+DetectBlockingAnomalies\s*\(");
+            Assert.True(declaration.Success, $"{product}: DetectBlockingAnomalies was not found; this pin's anchor is stale.");
+
+            var open = stripped.IndexOf('{', declaration.Index);
+            var body = CSharpSourceWalker.BraceBalanced(stripped, open);
+            /* StripCommentsAndStrings preserves every offset, so the same span of the raw text is the body with
+               its literals intact — what the "no inline key" assertions below have to read. */
+            var rawBody = raw.Substring(open, body.Length);
+
+            Assert.Equal(2, Regex.Matches(body, @"CountFamilyMetadata\.Build\(").Count);
+            Assert.Matches(
+                @"CountFamilyMetadata\.Build\(\s*currentBlocking,\s*currentBlockingPerHour,\s*baselineBlockingRate,\s*blockingBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*blockingBaseline\s*\)",
+                body);
+            Assert.Matches(
+                @"CountFamilyMetadata\.Build\(\s*currentDeadlocks,\s*currentDeadlocksPerHour,\s*baselineDeadlockRate,\s*deadlockBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*deadlockBaseline\s*\)",
+                body);
+
+            foreach (var inlineKey in new[] { "\"is_new\"", "\"ratio\"", "\"current_count\"", "\"baseline_rate\"", "\"baseline_zero_history\"" })
+            {
+                Assert.DoesNotContain(inlineKey, rawBody, StringComparison.Ordinal);
+            }
+
+            /* The firing rule, verbatim in both products. */
+            Assert.Matches(
+                @"currentBlocking\s*>=\s*5\s*&&\s*\(\s*!blockingTrust\s*\|\|\s*currentBlockingPerHour\s*/\s*Math\.Max\(\s*baselineBlockingRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                body);
+            Assert.Matches(
+                @"currentDeadlocks\s*>=\s*3\s*&&\s*\(\s*!deadlockTrust\s*\|\|\s*currentDeadlocksPerHour\s*/\s*Math\.Max\(\s*baselineDeadlockRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                body);
+        }
+    }
+
     [Fact]
     public void BaselineProvider_CarriesLitesSurface_AndAllElevenMetricQueries()
     {
-        /* Lite's public surface: bucket lookup with tier collapse + the test cache hooks. */
-        Assert.NotNull(typeof(PgBaselineProvider).GetMethod("GetBaselineAsync"));
+        /* Lite's public surface: bucket lookup with tier collapse + the test cache hooks. The lookup is asked for by
+           its four-parameter signature since #3691 lane 33 put the KEYED five-parameter overload beside it — a bare
+           GetMethod(name) is ambiguous with two overloads and would throw, not fail. Lite's twin has one overload. */
+        Assert.NotNull(typeof(PgBaselineProvider).GetMethod("GetBaselineAsync", [typeof(int), typeof(string), typeof(DateTime), typeof(CancellationToken)]));
+        Assert.NotNull(typeof(PgBaselineProvider).GetMethod("GetBaselineAsync", [typeof(int), typeof(string), typeof(string), typeof(DateTime), typeof(CancellationToken)]));
         Assert.NotNull(typeof(PgBaselineProvider).GetMethod("InvalidateCache"));
         Assert.NotNull(typeof(PgBaselineProvider).GetMethod("ClearCache"));
         Assert.NotNull(typeof(PgBaselineProvider).GetProperty("CacheTtl"));
@@ -233,15 +291,549 @@ public sealed class DarlingAnomalyBaselineTests
 
         var lagAt = sql.IndexOf("COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) AS prior_delta", StringComparison.Ordinal);
         var fromCteAt = sql.IndexOf("FROM windowed", StringComparison.Ordinal);
-        var exclusionAt = sql.IndexOf("WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000)", StringComparison.Ordinal);
+        var exclusionAt = sql.IndexOf("WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000 AND sample_interval_seconds IS NULL)", StringComparison.Ordinal);
 
         Assert.True(lagAt >= 0, "the restart LAG must be computed in the windowed CTE");
         Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the windowed CTE");
         Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the CTE — after the window is computed");
 
-        /* The pre-window row filter is unchanged from Lite. */
-        Assert.Contains("counter_name = 'Batch Requests/sec'", TimescaleSupport.CreatePerfmonBaselineSql, StringComparison.Ordinal);
-        Assert.Contains("delta_cntr_value >= 0", TimescaleSupport.CreatePerfmonBaselineSql, StringComparison.Ordinal);
+        /* The pre-window row filter is unchanged from Lite — and since #3653 carries Lite's knowability
+           filter too, so the restart's interval-0 row never reaches the heuristic. */
+        Assert.Contains("FROM perfmon_interval_baseline", sql, StringComparison.Ordinal);
+        Assert.Contains("counter_name = 'Batch Requests/sec'", TimescaleSupport.CreatePerfmonIntervalBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("delta_cntr_value >= 0", TimescaleSupport.CreatePerfmonIntervalBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", TimescaleSupport.CreatePerfmonIntervalBaselineSql, StringComparison.Ordinal);
+
+        /* #3527 re-taken by #3653: v is the PER-SECOND rate over the collection's STORED interval, which the
+           perfmon_interval_baseline supply now carries; the LAG(collection_time) gap is only the fallback for a
+           pre-column (NULL-interval) collection. Both live in the SAME windowed CTE (window-before-filter
+           holds for the fallback too), and the interval filter sits OUTSIDE with the exclusion. The DOUBLE
+           PRECISION cast is the io-arm rule: STDDEV_SAMP over numeric can overflow System.Decimal. */
+        var intervalAt = sql.IndexOf("COALESCE(sample_interval_seconds::DOUBLE PRECISION,", StringComparison.Ordinal);
+        var lagFallbackAt = sql.IndexOf("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))) AS interval_sec", StringComparison.Ordinal);
+        Assert.True(intervalAt >= 0 && intervalAt < fromCteAt, "interval_sec must read the stored interval inside the windowed CTE");
+        Assert.True(lagFallbackAt > intervalAt && lagFallbackAt < fromCteAt, "the LAG-derived gap must be the COALESCE fallback, inside the same CTE");
+        Assert.Contains("delta_cntr_value::DOUBLE PRECISION / interval_sec AS v", sql, StringComparison.Ordinal);
+        var intervalFilterAt = sql.IndexOf("interval_sec > 0", StringComparison.Ordinal);
+        Assert.True(intervalFilterAt > fromCteAt, "the interval filter must sit OUTSIDE the windowed CTE, with the exclusion");
+    }
+
+    /// <summary>
+    /// #3653 (A10, the mechanical half): the three arms whose supply became interval-honest apply the
+    /// three-state rule — the <c>LAG &gt; N</c> magnitude heuristic is GATED on <c>sample_interval_seconds IS
+    /// NULL</c> (pre-column collections, where it is still the only restart guard) and is not consulted for a
+    /// collection with a measured interval, whose zero is a real idle sample. The pin is on the gate's presence
+    /// in the successor text AND its absence from the legacy text, so neither can be "simplified" into the other.
+    /// </summary>
+    [Fact]
+    public void SuccessorArms_GateTheMagnitudeHeuristicOnANullInterval_LegacyArmsDoNot()
+    {
+        var gated = new (string Metric, string Predicate)[]
+        {
+            (MetricNames.BatchRequests, "WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000 AND sample_interval_seconds IS NULL)"),
+            (MetricNames.WaitStats, "WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000 AND sample_interval_seconds IS NULL)"),
+            (MetricNames.WaitMsPerSec, "WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100 AND sample_interval_seconds IS NULL)"),
+        };
+        /* The ungated form closes its parenthesis right after the bar; the gated form continues with AND. */
+        var ungated = new (string Metric, string Predicate)[]
+        {
+            (MetricNames.BatchRequests, "WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000)"),
+            (MetricNames.WaitStats, "WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)"),
+            (MetricNames.WaitMsPerSec, "WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100)"),
+        };
+
+        for (var i = 0; i < gated.Length; i++)
+        {
+            var successor = PgBaselineProvider.GetBaselineQuery(gated[i].Metric)!;
+            var legacy = PgBaselineProvider.GetLegacyBaselineQuery(gated[i].Metric)!;
+
+            Assert.Contains(gated[i].Predicate, successor, StringComparison.Ordinal);
+            Assert.DoesNotContain(gated[i].Predicate, legacy, StringComparison.Ordinal);
+            Assert.Contains(ungated[i].Predicate, legacy, StringComparison.Ordinal);
+            Assert.DoesNotContain(ungated[i].Predicate, successor, StringComparison.Ordinal);
+
+            /* The successor reads the successor relation and never the legacy one; the legacy text the reverse.
+               The legacy name is a PREFIX of the successor's source line only in the other direction
+               (wait_stats_baseline vs wait_stats_interval_baseline), so "FROM <legacy>" followed by a line
+               break is what distinguishes a real legacy read from the successor's longer name. */
+            var (legacyView, successorView) = PgBaselineProvider.SupersededSupplyFor(gated[i].Metric)!.Value;
+            Assert.Contains("FROM " + successorView, successor, StringComparison.Ordinal);
+            Assert.False(
+                System.Text.RegularExpressions.Regex.IsMatch(successor, "FROM " + System.Text.RegularExpressions.Regex.Escape(legacyView) + @"\s"),
+                $"the successor text for {gated[i].Metric} still reads the legacy relation {legacyView}");
+            Assert.Contains("FROM " + legacyView, legacy, StringComparison.Ordinal);
+            Assert.DoesNotContain("FROM " + successorView, legacy, StringComparison.Ordinal);
+
+            /* Both texts are Postgres: bound window, no QUALIFY, no bare clock, same robust scaffold. */
+            foreach (var text in new[] { successor, legacy })
+            {
+                Assert.DoesNotContain("QUALIFY", text, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("now(", text, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("$1", text, StringComparison.Ordinal);
+                Assert.EndsWith(PgBaselineProvider.RobustTierScaffold, text, StringComparison.Ordinal);
+            }
+        }
+
+        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL. */
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.BatchRequests)!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3527: the batch-request WINDOW statistic must be requests/sec — the per-interval
+    /// delta_cntr_value divided by the row's measured sample_interval_seconds — or the
+    /// BatchRequestFloor/Fallback thresholds (defined in requests/sec) admit 60-300x-inflated
+    /// deltas and the comparison against the per-second baseline is cross-unit. Interval &lt;= 0
+    /// rows carry NO knowable delta and must be filtered, never read as a rate of 0 or as the
+    /// raw delta.
+    /// </summary>
+    [Fact]
+    public void BatchRequestWindow_DividesByMeasuredInterval_AndSkipsUnknowableRows()
+    {
+        /* #3653 A8 option B (lane L2b): the SQL Server-store detector reads the TILED const now — the
+           production reader moved, so the pin follows it. The old plain BatchRequestWindowSql const had
+           no remaining reader and was deleted. */
+        var sql = PgAnomalyDetector.BatchRequestTileWindowSql;
+
+        Assert.Contains("AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds > 0", sql, StringComparison.Ordinal);
+
+        /* A raw AVG/MAX of the delta is exactly the #3527 defect — pin its absence. */
+        Assert.DoesNotContain("AVG(delta_cntr_value)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(delta_cntr_value)", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3653 (A8, first slice): the I/O window read hands the shared gate the PEAK and the MEAN per-file-row
+    /// latency for reads and for writes — it was the one z-score family reading AVG ALONE while its siblings
+    /// read the window MAX under the same shared cutoffs. Structural pin on the PG const, and a line-for-line
+    /// parity pin against Lite's inline twin (the two SKUs' window reads are Lite-verbatim by contract; the
+    /// repo pins no other IO-window parity, so this is the one that keeps them from drifting apart on the
+    /// statistic they hand the gate).
+    /// </summary>
+    [Fact]
+    public void IoWindow_ReadsThePeakAndMeanPair_ForReadsAndWrites_LiteVerbatim()
+    {
+        var sql = PgAnomalyDetector.IoTileWindowSql;
+        var expectedColumns = new[]
+        {
+            "MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat",
+            "AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat",
+            /* #4731: each side counts its OWN samples. One shared COUNT(*) over the (reads OR writes) rows made a
+               write-only row a read sample (peak and mean NULL, read as 0), so the read gate admitted tiles and
+               window_samples differed from Lite's. */
+            "COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count",
+            "MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat",
+            "AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat",
+            "COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count",
+        };
+        foreach (var column in expectedColumns)
+            Assert.Contains(column, sql, StringComparison.Ordinal);
+
+        /* The column ORDER is the reader's ordinal contract (0 local hour, 1 peak read, 2 avg read, 3 read samples, 4 peak write, 5 avg write, 6 write samples). */
+        var positions = expectedColumns.Select(c => sql.IndexOf(c, StringComparison.Ordinal)).ToArray();
+        Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)), "peak/avg column order is the reader's ordinal contract");
+
+        /* Same grain and row filter as the io_latency baseline arm (per-file-row, read-or-write-bearing rows). */
+        Assert.Contains("FROM v_file_io_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("(delta_reads > 0 OR delta_writes > 0)", sql, StringComparison.Ordinal);
+
+        /* Lite's inline twin carries the same six columns, in the same order. */
+        var lite = RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs");
+        var litePositions = expectedColumns.Select(c => lite.IndexOf(c, StringComparison.Ordinal)).ToArray();
+        Assert.All(litePositions, p => Assert.True(p > 0, "Lite's I/O window read has drifted from the PG twin"));
+        Assert.True(litePositions.SequenceEqual(litePositions.OrderBy(p => p)));
+
+        /* #4731: the reader ordinals are part of the same contract. Both products hand the read gate ordinals
+           1/2 with the read count at 3, and the write gate 4/5 with the write count at 6 - a shared count read
+           from one ordinal for both sides is the drift this pin exists to stop. */
+        var pgIoCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteIoCode = CSharpSourceWalker.StripCommentsAndStrings(lite);
+        foreach (var code in new[] { pgIoCode, liteIoCode })
+        {
+            Assert.Matches(@"readTiles\.Add\(WindowTiles\.ReadTile\(\w+, 0, 1, 2, 3\)\)", code);
+            Assert.Matches(@"writeTiles\.Add\(WindowTiles\.ReadTile\(\w+, 0, 4, 5, 6\)\)", code);
+        }
+
+        /* And every z-score family in BOTH detectors hands the gate the PAIR — no peak-only call survives
+           in the SQL Server detector bodies (the PostgreSQL-target detector's peak-only calls are the
+           documented transitional state, owned by its content lanes). Eight since #3741: the wait-profile
+           detector's trusted robust arm is the eighth call — it was the one baseline detector #3724 left
+           on an inline peak-only gate, and this pin deliberately excluded it until it went through the root. */
+        var pg = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteCode = CSharpSourceWalker.StripCommentsAndStrings(lite);
+        foreach (var code in new[] { pg, liteCode })
+        {
+            /* #3653 A8 option B (lane L2a-2): the tiled read/write I/O arms now name their never-blind
+               fallback locals readBaseline/writeBaseline (each family reads its own bucket independently
+               once tiles fall back), not the shared "baseline" local the other six families still use —
+               so the baseline-argument capture is widened to any identifier ending in "Baseline", still
+               anchored on "baseline," as a literal for the pin's substring intent. */
+            var calls = System.Text.RegularExpressions.Regex.Matches(code, @"AnomalyGate\.EvaluateZScore\(\s*(\w*[Bb]aseline),\s*(\w+),\s*(\w+),");
+            Assert.Equal(8, calls.Count); // cpu, wait profile (#3741), read, write, batch, session, query duration, memory
+            foreach (System.Text.RegularExpressions.Match call in calls)
+            {
+                Assert.EndsWith("aseline", call.Groups[1].Value, StringComparison.Ordinal);
+                Assert.StartsWith("peak", call.Groups[2].Value, StringComparison.Ordinal);
+                Assert.StartsWith("avg", call.Groups[3].Value, StringComparison.Ordinal);
+            }
+            Assert.DoesNotMatch(@"AnomalyGate\.EvaluateZScore\(\s*\w*[Bb]aseline,\s*\w+,\s*(ioThreshold|GetDeviationThreshold)", code);
+        }
+    }
+
+    /// <summary>
+    /// #4731: a window where reads and writes have DIFFERENT sample counts. Hour A has 12 read samples and 4
+    /// write samples; hour B is write-only (5 write samples, no read sample, its read peak and mean NULL). Each
+    /// side's tile carries its own count, so the whole-window read count is 12 - not 17 - and the write count
+    /// is 9; and a window with no read rows at all reads 0 read samples, so the read gate never sees it (the
+    /// shared count it replaced handed that gate the write rows' count). Fed to the detector's own row reader
+    /// through a hand-built table in the <see cref="PgAnomalyDetector.IoTileWindowSql"/> column order.
+    /// </summary>
+    [Fact]
+    public void IoTileReader_GivesEachSideItsOwnSampleCount_AWriteOnlyTileIsNotAReadSample()
+    {
+        static System.Data.DataTable IoTable()
+        {
+            var table = new System.Data.DataTable();
+            table.Columns.Add("local_hour", typeof(DateTime));
+            table.Columns.Add("peak_read_lat", typeof(double));
+            table.Columns.Add("avg_read_lat", typeof(double));
+            table.Columns.Add("read_sample_count", typeof(long));
+            table.Columns.Add("peak_write_lat", typeof(double));
+            table.Columns.Add("avg_write_lat", typeof(double));
+            table.Columns.Add("write_sample_count", typeof(long));
+            return table;
+        }
+
+        var hourA = new DateTime(2026, 9, 24, 5, 0, 0, DateTimeKind.Unspecified);
+        var hourB = hourA.AddHours(1);
+        var table = IoTable();
+        table.Rows.Add(hourA, 30.0, 12.5, 12L, 8.0, 3.0, 4L);
+        table.Rows.Add(hourB, DBNull.Value, DBNull.Value, 0L, 9.0, 4.0, 5L);
+
+        var readTiles = new List<WindowTile>();
+        var writeTiles = new List<WindowTile>();
+        using (var reader = table.CreateDataReader())
+        {
+            while (reader.Read())
+                PgAnomalyDetector.ReadIoTiles(reader, readTiles, writeTiles);
+        }
+
+        Assert.Equal(new long[] { 12, 0 }, readTiles.Select(t => t.Samples).ToArray());
+        Assert.Equal(new long[] { 4, 5 }, writeTiles.Select(t => t.Samples).ToArray());
+        Assert.Equal(30.0, readTiles[0].Peak);
+        Assert.Equal(12.5, readTiles[0].Mean);
+        Assert.Equal(8.0, writeTiles[0].Peak);
+        Assert.Equal(3.0, writeTiles[0].Mean);
+        Assert.Equal(12L, WindowTiles.WholeWindow(readTiles).Samples);
+        Assert.Equal(9L, WindowTiles.WholeWindow(writeTiles).Samples);
+
+        // A window whose every row is write-only: the read side reads 0 samples, so the detector's
+        // wholeRead.Samples > 0 guard skips the read gate - the tile Darling used to admit and Lite rejects.
+        var writeOnly = IoTable();
+        writeOnly.Rows.Add(hourA, DBNull.Value, DBNull.Value, 0L, 9.0, 4.0, 6L);
+        var onlyReadTiles = new List<WindowTile>();
+        var onlyWriteTiles = new List<WindowTile>();
+        using (var reader = writeOnly.CreateDataReader())
+        {
+            while (reader.Read())
+                PgAnomalyDetector.ReadIoTiles(reader, onlyReadTiles, onlyWriteTiles);
+        }
+        Assert.Equal(0L, WindowTiles.WholeWindow(onlyReadTiles).Samples);
+        Assert.Equal(6L, WindowTiles.WholeWindow(onlyWriteTiles).Samples);
+    }
+
+    /// <summary>
+    /// #3741 (the last leg of #3653 Q1 / #3724): the wait-profile window read hands the detector the PEAK and
+    /// the MEAN all-types ms/sec, and the trusted robust arm is the shared gate's PAIR call rather than the
+    /// inline peak-only test it kept through #3724. Structural pin on the PG const (the two aggregates share
+    /// the interval-guarded arm, so a NULL-interval collection is neither statistic's term; column order is
+    /// the reader's ordinal contract), a line-for-line parity pin against Lite's inline twin, and a pin on
+    /// the detector bodies: the gate call names <c>HeavyTailModifiedZThreshold</c> and
+    /// <c>WaitProfileFallbackMsPerSec</c> (the wait family's cutoff and its one bar), the inline
+    /// <c>modifiedZ &lt; HeavyTailModifiedZThreshold</c> gate is gone from both SKUs, the ratio arm tests a
+    /// <c>meanRatio</c> beside <c>ratio</c>, and the no-baseline arm still tests <c>peakRate</c> alone against
+    /// the bar — the ruling keeps it there.
+    /// </summary>
+    [Fact]
+    public void WaitRateWindow_ReadsThePeakAndMeanPair_AndTheRobustArmIsTheSharedPairGate_LiteVerbatim()
+    {
+        /* #3653 B: both SQL Server-store reads are now the TILED const — one row per target-local hour,
+           local_hour first (peak 1, avg 2, total 3, count 4 in each reader's own read, per DetectWaitAnomalies
+           on each SKU, #4172 then #4169). The four Lite-parity columns below are unaffected by that shift:
+           they are substring/ordinal pins on the SAME peak/avg/total/count column TEXT, checked to appear in
+           the same relative order in both, which the shared local_hour-first shift does not change. */
+        var sql = PgAnomalyDetector.WaitRateTileWindowSql;
+        var expectedColumns = new[]
+        {
+            "MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec",
+            "AVG(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS avg_ms_per_sec",
+            "SUM(total_wait_ms) AS total_wait_ms",
+            "COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count",
+        };
+        foreach (var column in expectedColumns)
+            Assert.Contains(column, sql, StringComparison.Ordinal);
+
+        /* The column ORDER among these four is still the reader's ordinal contract, one position later than
+           before (local_hour occupies 0): peak 1, avg 2, total 3, count 4 (WaitRateTileWindowSql's doc
+           comment, pinned). */
+        var positions = expectedColumns.Select(c => sql.IndexOf(c, StringComparison.Ordinal)).ToArray();
+        Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)), "peak/avg/total/count column order is the reader's ordinal contract");
+
+        /* Lite's inline twin carries the same four columns, in the same order. */
+        var lite = RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs");
+        var litePositions = expectedColumns.Select(c => lite.IndexOf(c, StringComparison.Ordinal)).ToArray();
+        Assert.All(litePositions, p => Assert.True(p > 0, "Lite's wait-rate window read has drifted from the PG twin"));
+        Assert.True(litePositions.SequenceEqual(litePositions.OrderBy(p => p)));
+
+        var pg = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteCode = CSharpSourceWalker.StripCommentsAndStrings(lite);
+        foreach (var code in new[] { pg, liteCode })
+        {
+            /* The robust arm: ONE pair call, the wait family's cutoff as the modified-z cutoff and its one bar as
+               the floor — peak AND mean must clear 5.0, the 250 ms/sec floor stays on the peak inside the gate. */
+            /* #3653 B: both detectors' never-blind fallback pass the pre-computed `window` local
+               (TimeRangeEnd - TimeRangeStart, computed once at the top of the method for BindTiledWindow/
+               GetBucketMapAsync and EvaluateTiles to share) rather than re-deriving it inline at the call site
+               (#4172 then #4169). Untiled families still re-derive it inline, so either spelling is accepted
+               here rather than pinning one. */
+            Assert.Matches(
+                @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*avgRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*WaitProfileFallbackMsPerSec,\s*WaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window:\s*(window|context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart)\)",
+                code);
+
+            /* The inline peak-only gate is gone. */
+            Assert.DoesNotMatch(@"modifiedZ\s*<\s*HeavyTailModifiedZThreshold", code);
+
+            /* The ratio arm asks the same of both ratios. */
+            Assert.Matches(@"var\s+meanRatio\s*=\s*avgRate\s*/\s*baseline\.Mean", code);
+            Assert.Matches(@"ratio\s*<\s*DefaultRatioThreshold\s*\|\|\s*meanRatio\s*<\s*DefaultRatioThreshold", code);
+
+            /* The no-baseline arm stays on the peak's absolute bar alone (the ruling). */
+            /* On an Azure SQL Database the bar's peak leaves out the excluded wait set; elsewhere it IS the peak. */
+            Assert.Matches(@"var\s+barPeak\s*=\s*peakRate", code);
+            Assert.Matches(@"ratio\s*=\s*barPeak\s*>=\s*WaitProfileFallbackMsPerSec\s*\?\s*NoBaselineRatio\s*:\s*0", code);
+            Assert.DoesNotMatch(@"avgRate\s*>=\s*WaitProfileFallbackMsPerSec", code);
+        }
+
+        /* #3653 B (#4169): both detectors now read peakRate/avgRate off WindowTiles.WholeWindow(tiles).Peak/
+           .Mean, fed by a tiled read, rather than off a single-row reader ordinal directly. Pin that shape
+           directly, on BOTH SKUs, rather than against a stale reader-ordinal regex that assumed a single
+           collapsed row on one side. */
+        foreach (var (name, code) in new[] { ("pg", pg), ("lite", liteCode) })
+        {
+            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+whole\s*=\s*WindowTiles\.WholeWindow\(tiles\)"), $"{name}: missing 'var whole = WindowTiles.WholeWindow(tiles)'");
+            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+peakRate\s*=\s*whole\.Peak"), $"{name}: missing 'var peakRate = whole.Peak'");
+            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+avgRate\s*=\s*whole\.Mean"), $"{name}: missing 'var avgRate = whole.Mean'");
+        }
+
+        /* #3653 A8 hygiene: PG used to re-run WaitRateTileWindowSql a SECOND time, word for word, just to sum
+           total_wait_ms (ordinal 3) into totalWaitMs — a real structural difference from Lite's twin (which
+           has always summed the same column inside its tile-read loop) that #3653 B's own pin above left
+           unresolved pending a coordinator ruling. That ruling is this: read once, like Lite. Both sides now
+           sum ordinal 3 off the SAME reader the tiles themselves come from (rateReader), inside the SAME
+           loop, so this pin both requires the new shape AND forbids the old one's tell (a second reader
+           variable, totalReader, reading the identical SQL again) from coming back. Live-measured with
+           pg_stat_statements: this statement ran twice per analysis pass before the fix, once after. */
+        Assert.Matches(@"totalWaitMs\s*\+=\s*rateReader\.IsDBNull\(3\)", pg);
+        Assert.Matches(@"windowTotalWaitMs\s*\+=\s*rateReader\.IsDBNull\(3\)", liteCode);
+        Assert.DoesNotMatch(@"totalReader", pg);
+    }
+
+    /// <summary>
+    /// #3653 B (#4172 then #4169): a census of <c>AnomalyGate.EvaluateTiles</c> calls in the tiled families
+    /// (CPU, wait-profile's robust arm, I/O read, I/O write) — four on each SKU. CPU and wait's calls are
+    /// byte-identical between the two detectors (checked literally). I/O's two calls tolerate the SAME two
+    /// differences this file already tolerates elsewhere by design, not by omission: the baseline-map
+    /// argument (PG re-fetches into <c>readMap</c>/<c>writeMap</c>, each gate scoring independently; Lite
+    /// shares one <c>map</c> fetch — same cache key, same value, mirroring how this file already accepts
+    /// <c>\w*[Bb]aseline</c> for PG's <c>readBaseline</c>/<c>writeBaseline</c> against Lite's shared
+    /// <c>baseline</c>), and the modified-z threshold argument (PG hoists it once into <c>modifiedZThreshold</c>;
+    /// Lite calls <c>ModifiedZThresholdFor</c> inline at each site — same pure function, same two inputs —
+    /// mirroring how the wait test above already accepts either the hoisted <c>window</c> local or the inline
+    /// <c>context.TimeRangeEnd - context.TimeRangeStart</c> expression for the SAME reason).
+    /// </summary>
+    [Fact]
+    public void AnomalyGate_EvaluateTilesCalls_AreFourPerSku_AndMatchBetweenPgAndLite()
+    {
+        var pg = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs"));
+
+        // #3653 B: L4b lands Lite's mirror of L2b's four (batch, sessions, query, memory), so the census is
+        // exact again -- eight calls on each side, byte-identical per family.
+        foreach (var (name, code) in new[] { ("pg", pg), ("lite", liteCode) })
+        {
+            var calls = System.Text.RegularExpressions.Regex.Matches(code, @"AnomalyGate\.EvaluateTiles\(");
+            Assert.True(calls.Count == 8, $"{name}: expected 8 EvaluateTiles calls (cpu, wait, io-read, io-write, batch, sessions, query, memory), found {calls.Count}");
+        }
+
+        // CPU: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*cpuThreshold,\s*ModifiedZThresholdFor\(MetricNames\.Cpu,\s*cpuThreshold\),\s*CpuFloorPct,\s*CpuFallbackPct,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*cpuThreshold,\s*ModifiedZThresholdFor\(MetricNames\.Cpu,\s*cpuThreshold\),\s*CpuFloorPct,\s*CpuFallbackPct,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Wait profile's robust arm: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*WaitProfileFallbackMsPerSec,\s*WaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*WaitProfileFallbackMsPerSec,\s*WaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // I/O read: the map argument and the modified-z threshold tolerate the two documented differences.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*readTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*ReadLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*readTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*ReadLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // I/O write: same tolerances.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Batch requests: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*batchThreshold,\s*ModifiedZThresholdFor\(MetricNames\.BatchRequests,\s*batchThreshold\),\s*BatchRequestFloor,\s*BatchRequestFallback,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*batchThreshold,\s*ModifiedZThresholdFor\(MetricNames\.BatchRequests,\s*batchThreshold\),\s*BatchRequestFloor,\s*BatchRequestFallback,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Sessions: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*sessionThreshold,\s*ModifiedZThresholdFor\(MetricNames\.SessionCount,\s*sessionThreshold\),\s*SessionCountFloor,\s*SessionCountFallback,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*sessionThreshold,\s*ModifiedZThresholdFor\(MetricNames\.SessionCount,\s*sessionThreshold\),\s*SessionCountFloor,\s*SessionCountFallback,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Query duration: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*queryDurationThreshold,\s*ModifiedZThresholdFor\(MetricNames\.QueryDuration,\s*queryDurationThreshold\),\s*QueryDurationFloorUs,\s*QueryDurationFallbackUs,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*queryDurationThreshold,\s*ModifiedZThresholdFor\(MetricNames\.QueryDuration,\s*queryDurationThreshold\),\s*QueryDurationFloorUs,\s*QueryDurationFallbackUs,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Memory: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*memoryThreshold,\s*ModifiedZThresholdFor\(MetricNames\.Memory,\s*memoryThreshold\),\s*MemoryPressureFloorPct,\s*MemoryPressureFallbackPct,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*memoryThreshold,\s*ModifiedZThresholdFor\(MetricNames\.Memory,\s*memoryThreshold\),\s*MemoryPressureFloorPct,\s*MemoryPressureFallbackPct,\s*SigmaDisplayCap,\s*window\)", liteCode);
+    }
+
+    /// <summary>
+    /// #3527 proven live, both halves in one place: the BatchRequests BASELINE arm derives its
+    /// per-second unit from LAG(collection_time) over the perfmon_baseline supply, and the DETECTOR's
+    /// window read divides by the stored measured interval — so the two sides meet in the same
+    /// requests/sec unit and the absolute bars judge honest rates.
+    ///
+    /// <para>History (one Monday-10:00 bucket, 12 collections at 300s spacing, delta 30000 each —
+    /// 100 req/sec, every row carrying its measured interval): c1 is rated off its STORED interval
+    /// (#3653 — the legacy arm had to drop it for lacking a LAG prior), c6 is the restart row as the
+    /// collector actually writes one (delta 0 WITH interval 0 → dropped by the supply's knowability filter
+    /// before it can be a sample), c7 is a genuine idle zero over a measured interval (kept at 0/sec — the
+    /// magnitude heuristic is gated off for a measured row). 11 samples, mean (10x100 + 0)/11 = 90.909 —
+    /// in requests/sec, where the raw-delta unit would read ~27273.</para>
+    ///
+    /// <para>Window (the following Monday): three rows at stored interval 60, delta 600000 — 10000
+    /// req/sec — plus one interval-0 row with a wild delta that must be SKIPPED, not rated. The one
+    /// planted history day leaves the bucket untrustworthy (Full tier needs 3 distinct days), so the
+    /// detector fires on the absolute BatchRequestFallback bar (5000 req/sec): peak 10000 clears it
+    /// honestly. Pre-#3527 the raw deltas cleared every bar by orders of magnitude regardless of
+    /// workload; post-fix the emitted Value, peak/avg metadata, and baseline_mean are all per-second.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_BatchRequestArm_PerSecondBaselineAndWindow_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live batch-request test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int batchServerId = TestServerId + 2; // own id — this test cleans its own rows
+        const string batchServerName = "batch-per-second-e2e";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM perfmon_stats WHERE server_id = {batchServerId}; " +
+            $"DELETE FROM wait_stats WHERE server_id = {batchServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var historyStart = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+
+            for (var i = 0; i < 12; i++)
+            {
+                var delta = (i == 5 || i == 6) ? 0L : 30000L;
+                /* c6 is the restart as the collector writes it: interval 0 beside the zero delta. c7 is a
+                   measured idle zero. The difference between them is the whole of #3653's A10 half. */
+                var interval = i == 5 ? 0 : 300;
+                await InsertAsync(connection,
+                    "INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                    (long)(200 + i), historyStart.AddMinutes(5 * i), batchServerId, batchServerName,
+                    "SQLServer:SQL Statistics", "Batch Requests/sec", "", delta * 2, delta, interval);
+            }
+
+            /* The baseline supply must exist (see the wait test's note) — plain fallback views. */
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var analysisTime = historyStart.AddDays(7);
+
+            var baseline = await provider.GetBaselineAsync(batchServerId, MetricNames.BatchRequests, analysisTime);
+            Assert.Equal(11L, baseline.SampleCount);
+            Assert.Equal(1000.0 / 11.0, baseline.Mean, 0.001);
+            Assert.Equal(BaselineTier.Full, baseline.Tier);
+            Assert.Equal(10, baseline.HourOfDay);
+            Assert.Equal((int)DayOfWeek.Monday, baseline.DayOfWeek);
+
+            /* Canary for the HasBaselineData gate — OUTSIDE the analysis window so the wait
+               detector's own window read stays empty and it emits nothing. */
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                300L, historyStart, batchServerId, batchServerName, TestWaitType, 1L, 100L);
+
+            /* The anomalous current window: 10000 req/sec (delta 600000 over a measured 60s),
+               plus one interval-0 row whose wild delta must never be rated. */
+            for (var i = 0; i < 3; i++)
+            {
+                await InsertAsync(connection,
+                    "INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                    (long)(400 + i), analysisTime.AddMinutes(5 * (i + 1)), batchServerId, batchServerName,
+                    "SQLServer:SQL Statistics", "Batch Requests/sec", "", 1200000L, 600000L, 60);
+            }
+            await InsertAsync(connection,
+                "INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                403L, analysisTime.AddMinutes(20), batchServerId, batchServerName,
+                "SQLServer:SQL Statistics", "Batch Requests/sec", "", 0L, 999999999L, 0);
+
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = batchServerId,
+                ServerName = batchServerName,
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(30),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            var anomalies = await detector.DetectAnomaliesAsync(context);
+
+            var fact = Assert.Single(anomalies);
+            Assert.Equal("ANOMALY_BATCH_REQUESTS", fact.Key);
+            Assert.Equal(10000.0, fact.Value, 0.001);                              // per-second, not 600000
+            Assert.Equal(10000.0, fact.Metadata["peak_batch_requests"], 0.001);
+            Assert.Equal(10000.0, fact.Metadata["avg_batch_requests"], 0.001);
+            Assert.Equal(3.0, fact.Metadata["window_samples"]);                    // the interval-0 row is NOT a sample
+            Assert.Equal(1000.0 / 11.0, fact.Metadata["baseline_mean"], 0.001);    // same unit as the window
+            Assert.Equal(1.0, fact.Metadata["baseline_low_quality"]);              // one distinct day → absolute bar
+            Assert.Equal(2.0, fact.Metadata["fallback_exceedance"], 0.001);        // 10000 / the 5000 req/sec bar
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand(
+                    $"DELETE FROM perfmon_stats WHERE server_id = {batchServerId}; " +
+                    $"DELETE FROM wait_stats WHERE server_id = {batchServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
     }
 
     [Fact]
@@ -259,19 +851,28 @@ public sealed class DarlingAnomalyBaselineTests
            #1757 moved the per-collection collapse into the baseline aggregate, so the grouping no longer
            appears in this query -- the totals arrive already one row per collection_time. The INVARIANT is
            unchanged and is what is pinned: LAG runs over the per-collection series, and the exclusion is
-           applied OUTSIDE the windowed CTE so a dropped row still serves as its successor's LAG value. */
-        var sql = PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!;
+           applied OUTSIDE the windowed CTE so a dropped row still serves as its successor's LAG value.
 
-        Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
+           #3653: the supply is the interval-honest aggregate and the exclusion is gated on a NULL stored
+           interval (SuccessorArms_GateTheMagnitudeHeuristicOnANullInterval_LegacyArmsDoNot pins the gate
+           itself); the shape pinned here holds for both the successor and the legacy text. */
+        foreach (var (sql, supply) in new[]
+        {
+            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_interval_baseline"),
+            (PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_baseline"),
+        })
+        {
+            Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
 
-        var supplyAt = sql.IndexOf("FROM wait_stats_baseline", StringComparison.Ordinal);
-        var lagAt = sql.IndexOf("COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms", StringComparison.Ordinal);
-        var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
-        var exclusionAt = sql.IndexOf("WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)", StringComparison.Ordinal);
+            var supplyAt = sql.IndexOf(supply, StringComparison.Ordinal);
+            var lagAt = sql.IndexOf("COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms", StringComparison.Ordinal);
+            var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
+            var exclusionAt = sql.IndexOf("WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000", StringComparison.Ordinal);
 
-        Assert.True(supplyAt >= 0 && lagAt > supplyAt, "LAG must run over the per-collection totals supplied by the baseline aggregate");
-        Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
-        Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
+            Assert.True(supplyAt >= 0 && lagAt > supplyAt, "LAG must run over the per-collection totals supplied by the baseline aggregate");
+            Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
+            Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
+        }
     }
 
     [Fact]
@@ -316,21 +917,43 @@ public sealed class DarlingAnomalyBaselineTests
            an idle zero after a zero survives. The per_collection interval computation
            (LAG(collection_time) over the GROUPED rows) is standard SQL in both engines and
            carries over verbatim — it never had a QUALIFY. */
-        var sql = PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!;
+        /* #3653: the same orderings hold for the successor text (stored interval first, LAG only where it is
+           NULL, heuristic gated on NULL) and for the legacy text it falls back to. */
+        /* #3653 (#3540 rule 1, readers NULL-not-0 on unknowable) - the rate arm and its WHERE, both texts, both
+           halves. The arm ends at END: an interval_sec of 0 (two collections that date_trunc to the same
+           second, on the LAG fallback) has no rate, and ELSE 0 rated it 0 ms/sec INTO the sample set - not
+           dead text, as the census roster had it: on a PG18 rig three planted collections averaged 66.7 where
+           the two rated ones say 100. And with_rate's WHERE carries interval_sec > 0 beside IS NOT NULL
+           (Lite's text), because END alone hands clean a NULL ms_per_sec that NOT (NULL = 0 AND ...) lets
+           through whenever another conjunct is FALSE, and COUNT(*) AS sample_count counts it (same rig: count
+           3, mean 100). The WHERE sits in with_rate, BEFORE the restart LAG, so the LAG window is exactly the
+           rated rows - the ordering (b) above already requires. */
+        foreach (var sql in new[]
+        {
+            PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!,
+            PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!,
+        })
+        {
+            Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
 
-        Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
+            /* The Lite-verbatim interval spine survives. */
+            Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
 
-        /* The Lite-verbatim interval spine survives. */
-        Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
+            var rateFilterAt = sql.IndexOf("WHERE interval_sec IS NOT NULL AND interval_sec > 0", StringComparison.Ordinal);
+            var lagAt = sql.IndexOf("COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) AS prior_ms_per_sec", StringComparison.Ordinal);
+            var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
+            var exclusionAt = sql.IndexOf("WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100", StringComparison.Ordinal);
 
-        var rateFilterAt = sql.IndexOf("WHERE interval_sec IS NOT NULL", StringComparison.Ordinal);
-        var lagAt = sql.IndexOf("COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) AS prior_ms_per_sec", StringComparison.Ordinal);
-        var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
-        var exclusionAt = sql.IndexOf("WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100)", StringComparison.Ordinal);
+            Assert.True(rateFilterAt >= 0 && lagAt > rateFilterAt, "the IS NOT NULL AND > 0 filter must precede the restart LAG (DuckDB's WHERE-before-QUALIFY order)");
+            Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
+            Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
 
-        Assert.True(rateFilterAt >= 0 && lagAt > rateFilterAt, "the IS NOT NULL filter must precede the restart LAG (DuckDB's WHERE-before-QUALIFY order)");
-        Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
-        Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
+            /* The rate arm yields NULL, never 0, for a non-positive interval; the ELSE that rated it 0 is gone
+               from both texts. */
+            Assert.Contains("CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+            Assert.True(rateFilterAt > sql.IndexOf("END AS ms_per_sec", StringComparison.Ordinal), "the > 0 filter is with_rate's own WHERE, under the arm it guards");
+        }
     }
 
     /* ---------------- gated: live restart-exclusion + detector proof ---------------- */
@@ -479,6 +1102,11 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Equal(600000.0, fact.Value);               // total all-types wait ms in the window
             Assert.Equal(1.0, fact.Metadata["is_new"]);       // thin baseline → absolute-bar fallback
             Assert.Equal(100.0, fact.Metadata["ratio"]);      // NoBaselineRatio sentinel (is_new)
+            /* #3741: the mean rides beside the peak on every arm; on THIS arm the bar stayed on the peak alone
+               (both rated collections sit at 666.7, so the two statistics coincide here — the arm's rule is
+               pinned structurally, its verdict on a split window in the pair e2e below). */
+            Assert.Equal(200000.0 / 300.0, fact.Metadata["current_ms_per_sec"], 0.01);
+            Assert.Equal(200000.0 / 300.0, fact.Metadata["avg_ms_per_sec"], 0.01);
             Assert.True(fact.Metadata.ContainsKey($"contrib_{TestWaitType}"), "the planted wait type must be named as a contributor");
             Assert.Equal(600000.0, fact.Metadata[$"contrib_{TestWaitType}"]);
             /* The Full-tier baseline still resolved (10 samples ≥ collapse threshold) — only its
@@ -568,6 +1196,492 @@ public sealed class DarlingAnomalyBaselineTests
             {
                 using var command = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", cleanup);
                 await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4248: IoLatency reads the RAW file_io_stats hypertable at per-file grain over the 30-day window, so its
+    /// cache key is the UTC DAY, not the hour (PgBaselineProvider.IsDailyCacheMetric) — two calls hours apart on
+    /// the same UTC day share the one compute, and a call on the next UTC day recomputes. Proven by counting the
+    /// baseline reads Npgsql actually executes (CommandCapture), #3941's own live-pin technique.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_IoLatencyArm_TwoCallsHoursApartOnOneDay_ShareOneCompute_NextDayRecomputes_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live IO-arm day-cache test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 5; // own id — this test cleans its own rows
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var historyStart = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+
+            for (var i = 0; i < 5; i++)
+            {
+                await InsertAsync(connection,
+                    "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    (long)(200 + i), historyStart.AddMinutes(5 * i), ioServerId, "IO-DAILY-CACHE",
+                    10L, 0L, (long)(10 * (i + 1)));
+            }
+
+            var provider = new PgBaselineProvider(postgres);
+            var analysisDay = historyStart.AddDays(7).Date; // the 30-day window's end (#4248: midnight, not the hour)
+
+            var (morning, firstReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisDay.AddHours(1), ct));
+            Assert.Equal(1, firstReads);
+            Assert.True(morning.SampleCount > 0, "the seed produced no baseline — the comparison would prove nothing");
+
+            /* Nineteen hours later (over CacheTtl's one hour), same UTC day: the #4248 pin — no second read. */
+            var (afternoon, secondReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisDay.AddHours(20), ct));
+            Assert.Equal(0, secondReads);
+            Assert.Equal(morning.SampleCount, afternoon.SampleCount);
+            Assert.Equal(morning.Median, afternoon.Median);
+
+            /* The next UTC day is a different window end (midnight moved), so a fresh compute. */
+            var (_, nextDayReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisDay.AddDays(1).AddHours(1), ct));
+            Assert.Equal(1, nextDayReads);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", cleanup);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /* ────────────────── #4298: every PgTargetBaselineProvider arm is a daily-cache arm ────────────────── */
+
+    /// <summary>
+    /// #4298: lane B2a's measurement (issuecomment-5836035579) found all 15 <c>PgTargetBaselineProvider</c> arms
+    /// (13 unkeyed, 2 keyed) reading plain hypertables at full grain over the 30-day window, up to 2.45 s and
+    /// 262 MB of temp per hourly compute (<c>pg_statement_mean_ms</c> keyed, worst) — so EVERY one, not just Cpu and
+    /// IoLatency's SQL Server twins, gets the day key. <see cref="PgBaselineProvider.RoundedKeyTime"/> is the ONE
+    /// seam both the cache key and the compute's window end read (the #3941/#4248 invariant), so proving it returns
+    /// the UTC day for an arbitrary PostgreSQL-target metric — keyed or not — proves both halves at once. Reverting
+    /// <c>PgTargetBaselineProvider.IsDailyCacheArm</c> to the inherited <c>=&gt; IsDailyCacheMetric(metricName)</c>
+    /// body fails this exactly as the old code did: <c>pg_tps</c> is neither Cpu nor IoLatency, so the old key was
+    /// hourly (proven once by hand, reverting the override, before this test was added).
+    /// </summary>
+    [Fact]
+    public void PgTargetArm_KeyIsTheUtcDay_TwoAnalysisTimesInOneDayRoundToOneEntry()
+    {
+        var provider = new PgTargetBaselineProvider(NpgsqlDataSource.Create("Host=localhost;Database=never-opened"));
+
+        var midnight = new DateTime(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
+        var morning = new DateTime(2026, 3, 10, 1, 0, 0, DateTimeKind.Unspecified);
+        var night = new DateTime(2026, 3, 10, 23, 59, 0, DateTimeKind.Unspecified);
+        var nextDay = new DateTime(2026, 3, 11, 0, 0, 1, DateTimeKind.Unspecified);
+
+        foreach (var metric in new[] { MetricNames.PgTps, MetricNames.PgCpu, MetricNames.PgStatementMeanMs, MetricNames.PgStatementShare })
+        {
+            Assert.Equal(midnight, provider.RoundedKeyTime(metric, morning));
+            Assert.Equal(midnight, provider.RoundedKeyTime(metric, night));
+            Assert.NotEqual(provider.RoundedKeyTime(metric, morning), provider.RoundedKeyTime(metric, nextDay));
+        }
+    }
+
+    /// <summary>
+    /// #4298: <c>pg_statement_mean_ms</c> is one of the two KEYED arms. <see cref="BaselineCache.Put"/> is what
+    /// <c>GetOrComputeKeyedBaselinesAsync</c> calls on every SUCCESSFUL member compute, keyed on (kind, serverId,
+    /// cacheKey, <c>entry.ComputedAt</c>) — so two computes inside one UTC day collide on the SAME key (one entry,
+    /// overwritten) and a compute the next UTC day is a second, distinct key. Proven directly against the shared
+    /// tier's own <c>Put</c>/<c>EntryKey</c> rather than a live compute, since the plumbing that calls <c>Put</c> is
+    /// untouched by #4298 — only which time <see cref="PgBaselineProvider.RoundedKeyTime"/> hands it changed.
+    /// </summary>
+    [Fact]
+    public void PgTargetKeyedArm_WalkedAcrossAUtcDayBoundary_HoldsAtMostTwoEntriesPerMember()
+    {
+        var shared = new BaselineCache();
+        var kind = typeof(PgTargetBaselineProvider).FullName!;
+        const int serverId = 9101;
+        var member1 = PgBaselineProvider.CacheKeyFor(serverId, MetricNames.PgStatementMeanMs, "9001");
+        var member2 = PgBaselineProvider.CacheKeyFor(serverId, MetricNames.PgStatementMeanMs, "9002");
+
+        var provider = new PgTargetBaselineProvider(NpgsqlDataSource.Create("Host=localhost;Database=never-opened"));
+        var day1 = provider.RoundedKeyTime(MetricNames.PgStatementMeanMs, new DateTime(2026, 3, 10, 2, 0, 0, DateTimeKind.Unspecified));
+        var day1Later = provider.RoundedKeyTime(MetricNames.PgStatementMeanMs, new DateTime(2026, 3, 10, 22, 0, 0, DateTimeKind.Unspecified));
+        var day2 = provider.RoundedKeyTime(MetricNames.PgStatementMeanMs, new DateTime(2026, 3, 11, 2, 0, 0, DateTimeKind.Unspecified));
+        Assert.Equal(day1, day1Later); // same UTC day, same key — the point of the fix
+        Assert.NotEqual(day1, day2);
+
+        foreach (var member in new[] { member1, member2 })
+        {
+            shared.Put(kind, serverId, member, MakeSuccess(day1, DateTime.UtcNow));
+            shared.Put(kind, serverId, member, MakeSuccess(day1Later, DateTime.UtcNow)); // same key: overwrites, not a second entry
+            shared.Put(kind, serverId, member, MakeSuccess(day2, DateTime.UtcNow));      // next UTC day: a second, distinct entry
+        }
+
+        Assert.Equal(4, shared.Count); // 2 members * at most 2 entries (today's and yesterday's, before the sweep drops the old one)
+    }
+
+    private static PgBaselineProvider.CachedBaseline MakeSuccess(DateTime computedAt, DateTime realTime) => new()
+    {
+        ComputedAt = computedAt,
+        RealTime = realTime,
+        Buckets = new Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>(),
+        FreshUntilUtc = realTime.AddDays(1)
+    };
+
+    /// <summary>
+    /// #4291's rule, unchanged by #4298: <c>FreshUntilUtc</c> is set ONLY on a SUCCESSFUL compute (<c>buckets is not
+    /// null</c>), so a FAILED compute of a PostgreSQL-target arm — now every one of them a daily-cache arm — still
+    /// falls back to the ordinary <see cref="PgBaselineProvider.CacheTtl"/> (one hour) rather than inheriting the
+    /// day-long lifetime a SUCCESS gets. Both call sites read <c>buckets is not null &amp;&amp;
+    /// IsDailyCacheArm(metricName)</c>, never <c>IsDailyCacheArm(metricName)</c> alone — the source pin below is
+    /// what would catch a future edit that drops the guard.
+    /// </summary>
+    [Fact]
+    public void FailedCompute_OfADailyCacheArm_StillRetriesWithinTheHour_NotTheDay()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs"));
+        Assert.Equal(2, Regex.Matches(code, Regex.Escape("is not null && IsDailyCacheArm(metricName)")).Count);
+
+        var computedAtDay = new DateTime(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
+        var failedAt = new DateTime(2026, 3, 10, 3, 0, 0, DateTimeKind.Unspecified);
+        var failed = new PgBaselineProvider.CachedBaseline
+        {
+            ComputedAt = computedAtDay,
+            RealTime = failedAt,
+            Buckets = null,
+            FreshUntilUtc = null // what a failed compute of ANY arm gets, daily-cache or not
+        };
+
+        Assert.True(PgBaselineProvider.IsFresh(failed, failedAt.AddMinutes(59)));         // within CacheTtl: no retry yet
+        Assert.False(PgBaselineProvider.IsFresh(failed, failedAt.AddHours(1).AddMinutes(1))); // past CacheTtl: retries, though the UTC day has not turned over
+    }
+
+    /// <summary>
+    /// #4298 touches ONLY <see cref="PgTargetBaselineProvider"/>'s answer: the base class's own daily-cache arms
+    /// (Cpu, IoLatency, #4248; Blocking, Deadlock, #4731) and every other SQL Server arm's hourly key are exactly what
+    /// they were — <see cref="PgBaselineProvider.IsDailyCacheArm"/>'s base body is still
+    /// <see cref="PgBaselineProvider.IsDailyCacheMetric"/>, untouched.
+    /// </summary>
+    [Fact]
+    public void SqlServerArms_KeepTheirKeys_RawTableArmsDaily_EverythingElseHourly()
+    {
+        var provider = new PgBaselineProvider(NpgsqlDataSource.Create("Host=localhost;Database=never-opened"));
+        var t1 = new DateTime(2026, 3, 10, 1, 0, 0, DateTimeKind.Unspecified);
+        var t2 = new DateTime(2026, 3, 10, 23, 0, 0, DateTimeKind.Unspecified);
+
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Cpu));
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.IoLatency));
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Blocking));
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Deadlock));
+        Assert.False(PgBaselineProvider.IsDailyCacheMetric(MetricNames.BatchRequests));
+
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Cpu, t1));
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.IoLatency, t1));
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Blocking, t1));
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Deadlock, t1));
+        Assert.Equal(PgBaselineProvider.RoundedHour(t1), provider.RoundedKeyTime(MetricNames.BatchRequests, t1));
+        Assert.NotEqual(provider.RoundedKeyTime(MetricNames.BatchRequests, t1), provider.RoundedKeyTime(MetricNames.BatchRequests, t2));
+    }
+
+    /// <summary>
+    /// #3653 (A8, first slice) proven live through the PG detector: the I/O read hands the shared gate the
+    /// per-file-row PEAK and MEAN, and the gate fires only when both clear. History: three Mondays at 10:00,
+    /// four read-bearing rows each at exactly 2 ms (20 ms of stall over 10 reads) — 12 samples over 3 distinct
+    /// days, so the Full bucket is TRUSTWORTHY and the verdict is the z path, not the absolute bar; the
+    /// collapsed dispersion sits on the 2.5 ms I/O floor. Window A (the A8 shape): fifteen 2 ms rows and ONE
+    /// 60 ms row — peak 60 ms is 23σ and over the 10 ms floor, the pre-#3653 fire; the window mean 5.625 ms is
+    /// 1.45σ, under the 3.5 cutoff — no fact. Window B: fifteen 40 ms rows and one at 60 — peak 60 (23.2σ),
+    /// mean 41.25 (15.7σ) — ONE ANOMALY_READ_LATENCY whose Value and current_latency_ms are the PEAK (no
+    /// longer the average the read used to emit), avg_latency_ms the mean, both sigmas stamped.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_IoDetector_PeakAndMeanPair_OneHotRowStaysQuiet_SustainedWindowFires_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live IO-detector test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 3; // own id — this test cleans its own rows
+        const string ioServerName = "io-peak-mean-e2e";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+            $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var lastHistoryMonday = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var analysisTime = lastHistoryMonday.AddDays(7); // a Monday 10:00, at least a day in the past
+
+            const string insertIo =
+                "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+            var id = 500L;
+            foreach (var weeksBack in new[] { 2, 1, 0 })
+            {
+                var monday = lastHistoryMonday.AddDays(-7 * weeksBack);
+                for (var i = 0; i < 4; i++)
+                    await InsertAsync(connection, insertIo, id++, monday.AddMinutes(5 * i), ioServerId, ioServerName, 10L, 0L, 20L);
+            }
+
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var baseline = await provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisTime);
+            Assert.Equal(BaselineTier.Full, baseline.Tier);
+            Assert.Equal(12L, baseline.SampleCount);
+            Assert.Equal(3L, baseline.DistinctDays);
+            Assert.True(baseline.IsTrustworthy, "three Mondays clear the Full-tier day floor: the z path, not the bar");
+            Assert.Equal(2.0, baseline.Mean, precision: 6);
+            Assert.Equal(2.5, baseline.EffectiveRobustSigma, precision: 6); // MAD 0 → the I/O absolute floor
+
+            /* Canary for the HasBaselineData gate — OUTSIDE the analysis window so the wait detector's own
+               window read stays empty and it emits nothing. */
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                600L, lastHistoryMonday, ioServerId, ioServerName, TestWaitType, 1L, 100L);
+
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = ioServerId,
+                ServerName = ioServerName,
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(90),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            /* Window A: one hot file row in an otherwise-baseline window. */
+            for (var i = 0; i < 16; i++)
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 10L, 0L, i == 7 ? 600L : 20L);
+
+            var quiet = await detector.DetectAnomaliesAsync(context);
+            Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_READ_LATENCY");
+            Assert.Empty(quiet);
+
+            /* Window B: the whole window ran high. */
+            await using (var clearWindow = new NpgsqlCommand(
+                $"DELETE FROM file_io_stats WHERE server_id = {ioServerId} AND collection_time > $1;", connection))
+            {
+                clearWindow.Parameters.AddWithValue(analysisTime);
+                await clearWindow.ExecuteNonQueryAsync(ct);
+            }
+            for (var i = 0; i < 16; i++)
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 10L, 0L, i == 7 ? 600L : 400L);
+
+            var sustained = await detector.DetectAnomaliesAsync(context);
+            var fact = Assert.Single(sustained);
+            Assert.Equal("ANOMALY_READ_LATENCY", fact.Key);
+            Assert.Equal(60.0, fact.Value, 0.001);                                  // the PEAK, not the window average
+            Assert.Equal(60.0, fact.Metadata["current_latency_ms"], 0.001);
+            /* #3653 A8 option B: the fact reports the WORST TILE, the target-local hour holding the 60 ms row. Its mean is
+               that hour's n rows (n - 1 at 40 ms plus the 60 ms row), not the whole window's 41.25. The whole window's 16
+               rows ride in window_samples_total. */
+            var tileStart = new DateTime((long)fact.Metadata["tile_start_ticks"]);
+            var rowTimes = Enumerable.Range(0, 16).Select(i => analysisTime.AddMinutes(5 * (i + 1))).ToList();
+            Assert.InRange(rowTimes[7], tileStart, tileStart.AddHours(1).AddTicks(-1));   // the worst hour holds the hot row
+            var tileRows = rowTimes.Count(t => t >= tileStart && t < tileStart.AddHours(1));
+            var tileMean = ((tileRows - 1) * 40.0 + 60.0) / tileRows;
+            Assert.Equal(tileMean, fact.Metadata["avg_latency_ms"], 0.001);
+            Assert.Equal(16.0, fact.Metadata["window_samples_total"]);
+            Assert.Equal(60.0, fact.Metadata["window_peak"], 0.001);
+            Assert.Equal(0.0, fact.Metadata["baseline_low_quality"]);               // the z path
+            Assert.Equal((60.0 - 2.0) / 2.5, fact.Metadata["deviation_sigma"], 0.001);         // 23.2σ, the peak's
+            Assert.Equal((tileMean - 2.0) / 2.5, fact.Metadata["mean_deviation_sigma"], 0.001); // the worst hour's mean
+            Assert.Equal(AnomalyThresholds.ModifiedZThreshold, fact.Metadata["fire_threshold"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand(
+                    $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+                    $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #3741 proven live through the PG detector: the wait-profile read hands the detector the per-collection
+    /// PEAK and MEAN ms/sec, and the trusted robust arm — now the shared gate's pair call — fires only when
+    /// both clear the heavy-tail 5.0 cutoff. History: three Mondays at 10:00, twelve collections each at
+    /// 5-minute spacing, one wait type, totals cycling 30000 / 60000 / 90000 ms so the rates cycle 100 / 200 /
+    /// 300 ms/sec (the interval is the LAG — no stored interval, the pre-V127 shape the baseline read still
+    /// serves). The first collection of the first Monday has no prior and is dropped; the first of each later
+    /// Monday rates against a week-long LAG and lands near zero. 35 samples over 3 distinct days: the Full
+    /// bucket is TRUSTWORTHY, median 200, MAD 100 (percentile_cont over the 35, hand-checked: 2 near-zero, 9 at
+    /// 100, 12 at 200, 12 at 300 — the 18th of both sorted sets), EffectiveRobustSigma 148.26.
+    /// Window A (the A8 shape #3724 removed everywhere else): seventeen collections at 5-minute spacing, the
+    /// first unrated (no in-window prior), fifteen at the 60000 ms median rate and ONE at 960000 ms — peak
+    /// 3200 ms/sec is 20.2 robust σ and over the 250 ms/sec floor, the pre-#3741 fire; the window mean 387.5
+    /// ms/sec is 1.26σ, under 5.0 — no fact. Window B: fifteen at 450000 ms (1500 ms/sec) and one at 960000 —
+    /// peak 3200 (20.2σ), mean 1606.25 (9.5σ) — ONE ANOMALY_WAIT_PROFILE, is_new 0, current_ms_per_sec the
+    /// PEAK, avg_ms_per_sec the mean, modified_z and mean_modified_z both over the cutoff, and Value the
+    /// window's total wait ms including the unrated first collection (the SUM ranges over every collection;
+    /// only the rates skip the unrated one).
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_WaitProfileDetector_PeakAndMeanPair_OneHotCollectionStaysQuiet_SustainedWindowFires_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live wait-profile pair test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int waitServerId = TestServerId + 4; // own id — this test cleans its own rows
+        const string waitServerName = "wait-peak-mean-e2e";
+        const string insertWait =
+            "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {waitServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var lastHistoryMonday = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var analysisTime = lastHistoryMonday.AddDays(7); // a Monday 10:00, at least a day in the past
+
+            var id = 700L;
+            foreach (var weeksBack in new[] { 2, 1, 0 })
+            {
+                var monday = lastHistoryMonday.AddDays(-7 * weeksBack);
+                for (var i = 0; i < 12; i++)
+                {
+                    var totalMs = (i % 3) switch { 0 => 30000L, 1 => 60000L, _ => 90000L };
+                    await InsertAsync(connection, insertWait, id++, monday.AddMinutes(5 * i), waitServerId, waitServerName, TestWaitType, 10L, totalMs);
+                }
+            }
+
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var baseline = await provider.GetBaselineAsync(waitServerId, MetricNames.WaitMsPerSec, analysisTime);
+            Assert.Equal(BaselineTier.Full, baseline.Tier);
+            Assert.Equal(35L, baseline.SampleCount);
+            Assert.Equal(3L, baseline.DistinctDays);
+            Assert.True(baseline.IsTrustworthy, "three Mondays clear the Full-tier day floor: the gate's z path, not the is_new bar");
+            Assert.Equal(200.0, baseline.Median, 0.001);
+            Assert.Equal(100.0, baseline.Mad, 0.001);
+            Assert.True(baseline.EffectiveRobustSigma > 0, "the robust frame — the arm the pair gate now owns");
+            var robustSigma = baseline.EffectiveRobustSigma;
+            Assert.Equal(100.0 / 0.6745, robustSigma, 0.01);
+
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = waitServerId,
+                ServerName = waitServerName,
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(90),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            /* Window A: one hot collection in an otherwise-median window. i = 0 is the unrated first
+               collection (its LAG has no in-window prior); i = 1..16 rate against 300 s. */
+            for (var i = 0; i < 17; i++)
+                await InsertAsync(connection, insertWait, id++, analysisTime.AddMinutes(5 * (i + 1)), waitServerId, waitServerName, TestWaitType, 50L, i == 8 ? 960000L : 60000L);
+
+            var quiet = await detector.DetectAnomaliesAsync(context);
+            Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_WAIT_PROFILE");
+            Assert.Empty(quiet);
+
+            /* The A8 arithmetic, stated so a reader can see the pre-#3741 fire this window used to be: the
+               peak alone cleared both halves of the old inline gate. */
+            var peakZ = (3200.0 - baseline.Median) / robustSigma;
+            var meanAZ = (387.5 - baseline.Median) / robustSigma;
+            Assert.True(peakZ >= AnomalyThresholds.HeavyTailModifiedZThreshold && 3200.0 >= AnomalyThresholds.WaitProfileFallbackMsPerSec, "red-first: the peak-only gate fired on window A");
+            Assert.True(meanAZ < AnomalyThresholds.HeavyTailModifiedZThreshold, "the window mean is what keeps window A quiet");
+
+            /* Window B: the whole window ran heavy. */
+            await using (var clearWindow = new NpgsqlCommand(
+                $"DELETE FROM wait_stats WHERE server_id = {waitServerId} AND collection_time > $1;", connection))
+            {
+                clearWindow.Parameters.AddWithValue(analysisTime);
+                await clearWindow.ExecuteNonQueryAsync(ct);
+            }
+            for (var i = 0; i < 17; i++)
+                await InsertAsync(connection, insertWait, id++, analysisTime.AddMinutes(5 * (i + 1)), waitServerId, waitServerName, TestWaitType, 50L, i == 8 ? 960000L : 450000L);
+
+            var sustained = await detector.DetectAnomaliesAsync(context);
+            var fact = Assert.Single(sustained);
+            Assert.Equal("ANOMALY_WAIT_PROFILE", fact.Key);
+            Assert.Equal(0.0, fact.Metadata["is_new"]);                                     // the trusted robust arm
+            Assert.Equal(3200.0, fact.Metadata["current_ms_per_sec"], 0.001);                // the PEAK
+            /* #3653 A8 option B: the worst tile's mean, the hour holding the 3,200 ms/s collection: its n rated
+               collections, n - 1 at 1,500 plus the spike. It is not the whole window's (15 × 1500 + 3200) / 16. */
+            var tileStart = new DateTime((long)fact.Metadata["tile_start_ticks"]);
+            var collectionTimes = Enumerable.Range(0, 17).Select(i => analysisTime.AddMinutes(5 * (i + 1))).ToList();
+            Assert.InRange(collectionTimes[8], tileStart, tileStart.AddHours(1).AddTicks(-1));   // the worst hour holds the spike
+            var tileCollections = collectionTimes.Skip(1).Count(t => t >= tileStart && t < tileStart.AddHours(1)); // the first is unrated
+            var tileMeanRate = ((tileCollections - 1) * 1500.0 + 3200.0) / tileCollections;
+            Assert.Equal(tileMeanRate, fact.Metadata["avg_ms_per_sec"], 0.001);
+            Assert.Equal(16.0, fact.Metadata["window_samples_total"]);
+            Assert.Equal(16 * 450000.0 + 960000.0, fact.Value, 0.001);                        // every collection's total, the unrated first included
+            Assert.Equal(3200.0 / baseline.Mean, fact.Metadata["ratio"], 0.001);             // the ratio stays the peak's
+            Assert.Equal(peakZ, fact.Metadata["modified_z"], 0.001);                          // uncapped, the scorer's anchor
+            Assert.Equal((tileMeanRate - baseline.Median) / robustSigma, fact.Metadata["mean_modified_z"], 0.001);
+            Assert.True(fact.Metadata["mean_modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold, "a fired fact's mean cleared the same cutoff");
+            Assert.True(fact.Metadata["modified_z"] >= fact.Metadata["mean_modified_z"], "the reported deviation is the peak's; the mean's is the smaller one");
+            Assert.Equal(16 * 450000.0 + 960000.0, fact.Metadata[$"contrib_{TestWaitType}"], 0.001); // the one type carries the whole total
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {waitServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
             });
         }
     }

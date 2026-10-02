@@ -10,10 +10,9 @@ authors:
 repository-code: "https://github.com/erikdarlingdata/PerformanceMonitor"
 url: "https://erikdarling.com/free-sql-server-performance-monitoring/"
 license: MIT
-version: "2.3.0"
-date-released: "2026-03-18"
 keywords:
   - sql-server
+  - postgresql
   - performance-monitoring
   - database-monitoring
   - dba-tools

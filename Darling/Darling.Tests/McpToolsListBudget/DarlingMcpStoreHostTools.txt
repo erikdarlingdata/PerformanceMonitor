@@ -1,0 +1,2 @@
+# DarlingMcpStoreHostTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_store_host 510

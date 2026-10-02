@@ -425,6 +425,43 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
         Assert.Equal("live-1", loaded[0].Id);
     }
 
+    /// <summary>
+    /// #3916 pins 1–3 on DuckDB: an undelivered row older than the cooldown does NOT seed the analysis hold
+    /// on the delivered-page read — NEGATIVE CONTROL: the pre-#3916 analysis seed read
+    /// (<c>GetLastAlertTimeAsync</c>, still the Tier-0 seed) answers on the same rows — a delivered row does
+    /// seed, and a digest row stays excluded.
+    /// </summary>
+    [Fact]
+    public async Task GetLastDeliveredPageUtc_IgnoresUndeliveredAndDigestRows_TheOldReadDoesNot()
+    {
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+
+        var undelivered = AlertDelivery.FromFanout(
+            new EmailFanoutResult(AlertChannelOutcome.NotAttempted, null, AlertChannelOutcome.NotAttempted, null, AnyChannelConfigured: false),
+            muted: false, trayChannelPresent: true);   /* the mislabelled production shape: stored `tray` */
+        await store.RecordAlertAsync(new AlertHistoryRecord(
+            "31", "Srv", "Analysis: cpu [3916aaaa]", "1.5", "1.5", 1.5, 1.5, undelivered, false, null, null));
+        using (var age = (await SeedConnectionAsync()).CreateCommand())
+        {
+            age.CommandText = "UPDATE config_alert_log SET alert_time = alert_time - INTERVAL 35 DAY WHERE server_id = 31";
+            await age.ExecuteNonQueryAsync();
+        }
+
+        Assert.NotNull(await store.GetLastAlertTimeAsync("31", "Analysis: cpu [3916aaaa]"));        /* dev's seed: held */
+        Assert.Null(await store.GetLastDeliveredPageUtcAsync("31", "Analysis: cpu [3916aaaa]"));    /* the fix: heard */
+
+        await store.RecordAlertAsync(new AlertHistoryRecord(
+            "32", "Srv", "Analysis: cpu [3916cccc]", "1.5", "1.5", 1.5, 1.5, AlertDelivery.RoutedToDigest(), false, null, null));
+        Assert.Null(await store.GetLastDeliveredPageUtcAsync("32", "Analysis: cpu [3916cccc]"));
+
+        var delivered = AlertDelivery.FromFanout(
+            new EmailFanoutResult(AlertChannelOutcome.NotAttempted, null, AlertChannelOutcome.Delivered, null, AnyChannelConfigured: true),
+            muted: false, trayChannelPresent: true);
+        await store.RecordAlertAsync(new AlertHistoryRecord(
+            "33", "Srv", "Analysis: cpu [3916bbbb]", "1.5", "1.5", 1.5, 1.5, delivered, false, null, null));
+        Assert.NotNull(await store.GetLastDeliveredPageUtcAsync("33", "Analysis: cpu [3916bbbb]"));
+    }
+
     /* These two exercise the cooldown-seed filters' notification_type predicates, so they need to store
        an arbitrary column triple rather than one a producer would derive — the same reason the deprecated
        SKU's hatch exists. */

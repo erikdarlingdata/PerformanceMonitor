@@ -29,6 +29,7 @@ public partial class WaitDrillDownWindow : Window
     private readonly int _serverId;
     private readonly string _waitType;
     private readonly int _hoursBack;
+    private readonly TimeZoneInfo _displayZone;
     private readonly DateTime? _fromDate;
     private readonly DateTime? _toDate;
     private readonly string? _connectionString;
@@ -39,11 +40,15 @@ public partial class WaitDrillDownWindow : Window
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
+    /// <param name="displayZone">#4766: the zone the opening server tab words its times in (its own clock or the
+    /// display mode's zone), so the range line names the same wall times the tab does. It is required, so no caller
+    /// can leave the window on whichever server's clock happens to be the active one.</param>
     public WaitDrillDownWindow(
         LocalDataService dataService,
         int serverId,
         string waitType,
         int hoursBack,
+        TimeZoneInfo displayZone,
         DateTime? fromDate = null,
         DateTime? toDate = null,
         string? connectionString = null)
@@ -53,13 +58,15 @@ public partial class WaitDrillDownWindow : Window
         _serverId = serverId;
         _waitType = waitType;
         _hoursBack = hoursBack;
+        _displayZone = displayZone;
         _fromDate = fromDate;
         _toDate = toDate;
         _connectionString = connectionString;
 
         _planActions = new PlanNavigationController(
             this,
-            (xml, label, qt) => PlanViewerWindow.ShowPlanAsync(this, xml, label, qt),
+            async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
+                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
             (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite"),
@@ -123,7 +130,7 @@ public partial class WaitDrillDownWindow : Window
 
         _filterManager!.UpdateData(data);
 
-        var timeRange = GetTimeRangeDescription(data);
+        var timeRange = GetTimeRangeDescription(data, _displayZone);
         var truncated = data.Count >= 500 ? " (limited to 500 rows)" : "";
         SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {timeRange}{truncated}";
 
@@ -146,7 +153,7 @@ public partial class WaitDrillDownWindow : Window
         data = SortByProperty(data, classification.SortProperty);
         _filterManager!.UpdateData(data);
 
-        var timeRange = GetTimeRangeDescription(data);
+        var timeRange = GetTimeRangeDescription(data, _displayZone);
         var truncated = data.Count >= 500 ? " (limited to 500 rows)" : "";
         SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {timeRange}{truncated}";
 
@@ -179,7 +186,7 @@ public partial class WaitDrillDownWindow : Window
         {
             // No chain found — fall back to showing the waiters directly
             _filterManager!.UpdateData(waiters);
-            var timeRange = GetTimeRangeDescription(waiters);
+            var timeRange = GetTimeRangeDescription(waiters, _displayZone);
             SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {timeRange} | No blocking chains found, showing waiters";
             return;
         }
@@ -205,7 +212,7 @@ public partial class WaitDrillDownWindow : Window
         {
             // Head blockers not found in snapshots — show waiters instead
             _filterManager!.UpdateData(waiters);
-            var timeRange = GetTimeRangeDescription(waiters);
+            var timeRange = GetTimeRangeDescription(waiters, _displayZone);
             SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {timeRange} | Head blockers not in snapshots, showing waiters";
             return;
         }
@@ -215,7 +222,7 @@ public partial class WaitDrillDownWindow : Window
 
         _filterManager!.UpdateData(headBlockerRows);
 
-        var timeRangeDesc = GetTimeRangeDescription(headBlockerRows);
+        var timeRangeDesc = GetTimeRangeDescription(headBlockerRows, _displayZone);
         SummaryText.Text = $"{headBlockerRows.Count} head blocker(s) from {waiters.Count} waiting session(s) | " +
                            $"{classification.Description} | {timeRangeDesc}";
     }
@@ -352,13 +359,20 @@ public partial class WaitDrillDownWindow : Window
         }
     }
 
-    private static string GetTimeRangeDescription(List<QuerySnapshotRow> data)
+    /// <summary>
+    /// The window's range line (#4766): the earliest and latest collection instant of <paramref name="data"/>, each
+    /// worded as a wall time of <paramref name="zone"/> with <see cref="DisplayZone.Format"/>. Rows at 05:30Z and
+    /// 06:30Z on a US Eastern autumn change day both read 01:30, and the line says which is which.
+    /// </summary>
+    internal static string GetTimeRangeDescription(List<QuerySnapshotRow> data, TimeZoneInfo zone)
     {
         if (data.Count == 0) return "";
         var first = data.Min(r => r.CollectionTime);
         var last = data.Max(r => r.CollectionTime);
-        return $"{ServerTimeHelper.FormatServerTime(first)} to {ServerTimeHelper.FormatServerTime(last)}";
+        return $"{DisplayZone.Format(first, zone, RangeTimeFormat)} to {DisplayZone.Format(last, zone, RangeTimeFormat)}";
     }
+
+    private const string RangeTimeFormat = "yyyy-MM-dd HH:mm:ss";
 
 
     private void OnThemeChanged(string _)
@@ -424,20 +438,33 @@ public partial class WaitDrillDownWindow : Window
     private void CopyAllRows_Click(object sender, RoutedEventArgs e) => DataGridExport.CopyAllRows(sender);
     private void ExportToCsv_Click(object sender, RoutedEventArgs e) => DataGridExport.ExportToCsv(sender, "wait_drill_down", App.CsvSeparator);
 
+    /// <summary>Live-if-present, else estimated (#4239) — mirrors the old in-row <c>LiveQueryPlan ?? QueryPlan</c>
+    /// read. <c>ResolveSnapshot*PlanAsync</c> reads the in-row XML first when a caller already populated it
+    /// (the ServerTab Live Snapshot path builds rows that are never written to the store), and only falls
+    /// back to a capture-key fetch when the row's flag says a plan exists but the payload is null.</summary>
+    private System.Threading.Tasks.Task<string?> FetchSnapshotPlanAsync(QuerySnapshotRow row) =>
+        System.Threading.Tasks.Task.Run(async () => await _dataService.ResolveSnapshotLivePlanAsync(_serverId, row)
+            ?? await _dataService.ResolveSnapshotEstimatedPlanAsync(_serverId, row));
+
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not QuerySnapshotRow row) return;
         await _planActions.ViewPlanAsync(
-            () => System.Threading.Tasks.Task.FromResult<string?>(row.LiveQueryPlan ?? row.QueryPlan),
+            () => FetchSnapshotPlanAsync(row),
             $"Est Plan - SPID {row.SessionId}", row.QueryText);
     }
 
     private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not QuerySnapshotRow row) return;
+        /* #4239: fetch before passing estimatedPlanXml on — it feeds ReproScriptBuilder's SET-options
+           extraction (ActualPlanExecutor, #233); a null plan silently loses that fidelity. (This path's
+           confirm dialog is PlanNavigationController's generic one — Lite's only QueryModificationDetector
+           call is ServerTab.Plans.cs's GetActualPlan_Click, unaffected by this window.) */
+        var estimatedPlanXml = await FetchSnapshotPlanAsync(row);
         await _planActions.GetActualPlanAsync(row.QueryText, row.DatabaseName ?? "",
             $"Actual Plan - SPID {row.SessionId}",
-            estimatedPlanXml: row.LiveQueryPlan ?? row.QueryPlan,
+            estimatedPlanXml: estimatedPlanXml,
             isolationLevel: row.TransactionIsolationLevel);
     }
 

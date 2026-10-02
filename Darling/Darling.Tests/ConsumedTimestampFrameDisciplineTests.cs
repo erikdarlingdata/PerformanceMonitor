@@ -72,11 +72,15 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /* Floors, so a broken walk cannot report a clean bill of health. Measured on dev at cb208f6a4:
        66 Timestamp columns over 69 catalog definitions, 49 of them on SqlServer definitions and 17 on
-       PostgreSql ones. Pinned exactly rather than as a floor because the whole point is a closed census —
-       a floor would let a column vanish. */
-    private const int TimestampColumnCount = 66;
-    private const int SqlServerTimestampColumnCount = 49;
-    private const int PostgresTimestampColumnCount = 17;
+       PostgreSql ones; #3601 added pg_log_events.occurred_at, so 67 over 70, 18 PostgreSql; V134 (#3653
+       item 13) added cpu_utilization_stats.sample_time_utc, so 68 over 70, 50 SqlServer; V139 (#3955)
+       added pg_write_stats.postmaster_start_time (AT TIME ZONE 'UTC' inline), so 69 over 71, 19 PostgreSql;
+       V155 (#4765) added query_store_stats.interval_end_time_utc beside interval_start_time_utc, so 70 over 71,
+       51 SqlServer. Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
+       a column vanish. */
+    private const int TimestampColumnCount = 70;
+    private const int SqlServerTimestampColumnCount = 51;
+    private const int PostgresTimestampColumnCount = 19;
 
     private static IReadOnlyList<(string Table, string Column, string Collector, CollectorTargetEngine Engine)>
         TimestampColumns() =>
@@ -92,13 +96,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// The census is the catalog's own <see cref="CollectorColumnType.Timestamp"/> columns, and the engine
     /// split is <see cref="ICollectorSchemaInfo.TargetEngine"/> rather than a name prefix or a hand list.
     ///
-    /// <para>The T-SQL classifier below reaches the SqlServer arm ONLY. The 17 PostgreSQL columns are a
+    /// <para>The T-SQL classifier below reaches the SqlServer arm ONLY. The 19 PostgreSQL columns are a
     /// different provenance mechanism, not a shortfall of this one: PostgreSQL has no
     /// <c>column = expression</c> alias form at all (there it is a boolean comparison), so those collectors
     /// write <c>expression AS column</c>, and their timestamps arrive as <c>timestamptz</c> normalised in
     /// four different spellings — <c>AT TIME ZONE 'UTC'</c> inline, the same inside an interpolated SQL
-    /// fragment, a bare <c>min()</c> handled in the reader, and two computed entirely in C#
-    /// (<c>pg_cpu_utilization.sample_time</c>, <c>pg_deadlocks.occurred_at</c>). Counting them here is what
+    /// fragment, a bare <c>min()</c> handled in the reader, and three computed entirely in C#
+    /// (<c>pg_cpu_utilization.sample_time</c>, <c>pg_deadlocks.occurred_at</c>, <c>pg_log_events.occurred_at</c>
+    /// — the last through the same zone check as the deadlock one, #3601). Counting them here is what
     /// makes the T-SQL arm's reach a measured fact instead of an implied one.</para>
     /// </summary>
     [Fact]
@@ -263,7 +268,12 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     private const int NonTsqlProvenanceCount = 9;
     private const int TsqlServerLocalCount = 28;
-    private const int TsqlUtcCount = 12;
+    /* 12 until V134 (#3653 item 13): cpu_utilization_stats.sample_time_utc is read as Utc off its own
+       SYSUTCDATETIME() — the first SqlServer table to carry BOTH frames as two columns, and the reason
+       the sibling sample_time stays ServerLocal beside it rather than flipping. */
+    /* 13 until V155 (#4765): query_store_stats.interval_end_time_utc is read as Utc off its own
+       AT TIME ZONE 'UTC', the twin of interval_start_time_utc beside it. */
+    private const int TsqlUtcCount = 14;
 
     /// <summary>
     /// The classifier's verdict per column, in the census's own (table, column) ordinal order — the whole
@@ -291,6 +301,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         "agent_status.next_scheduled_run=ServerLocal",
         "blocked_process_reports.event_time=Utc",
         "cpu_utilization_stats.sample_time=ServerLocal",
+        /* V134 (#3653 item 13): the same instant in UTC beside the local stamp, derived by the same DATEADD
+           off SYSUTCDATETIME() — so the classifier reads the two columns of one row in two frames, which is
+           the honest answer and the whole point of the rung. */
+        "cpu_utilization_stats.sample_time_utc=Utc",
         "deadlocks.deadlock_time=Utc",
         "default_trace_events.end_time=ServerLocal",
         "default_trace_events.event_time=ServerLocal",
@@ -324,6 +338,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         "query_snapshots.tran_start_time=ServerLocal",
         "query_stats.creation_time=ServerLocal",
         "query_stats.last_execution_time=ServerLocal",
+        "query_store_stats.interval_end_time_utc=Utc",
         "query_store_stats.interval_start_time_utc=Utc",
         "running_jobs.start_time=ServerLocal",
         "server_properties.sqlserver_start_time=ServerLocal",
@@ -768,9 +783,11 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /// <summary>A payload field stamped by <c>ToString("o")</c>. On a <c>DateTimeKind.Unspecified</c> value
     /// that renders NO offset suffix, so a server-local and a naive-UTC field serialise identically and the
-    /// payload carries no in-band signal a caller could key on.</summary>
+    /// payload carries no in-band signal a caller could key on. Lite's blocking and version store tools stamp
+    /// through a file-local <c>UtcOrNull(r.X)</c> (#4793), whose body holds the <c>ToString("o")</c>, so a call
+    /// to it counts as the stamp too.</summary>
     private static Regex McpPayloadEmission(string field) =>
-        new(@"(?<![\w.])" + Regex.Escape(field) + @"\s*=[^;,\r\n]*?ToString\(""o""\)");
+        new(@"(?<![\w.])" + Regex.Escape(field) + @"\s*=[^;,\r\n]*?(?:ToString\(""o""\)|\bUtcOrNull\()");
 
     /// <summary>A renderer call on a column's property, taken off the enclosing row OR off a receiver:
     /// three real sites pass the property off a lambda parameter (<c>ForDisplay(d.SampleTime)</c>), and a
@@ -795,6 +812,11 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// is not optional: this scan keys on the renderer's NAME, so an unlisted one is invisible and its
     /// sites would leave the census as the price of being fixed.</para>
     ///
+    /// <para><c>FormatForDisplay</c> is the text form of <c>ForDisplay</c> (#4766): the same naive-UTC
+    /// contract, plus the UTC offset in the repeated autumn hour. The grid and caption sites moved from
+    /// <c>ForDisplay(x).ToString(format)</c> to it, and <c>\bForDisplay</c> does not match inside its name,
+    /// so it is registered here or those sites would leave the census.</para>
+    ///
     /// <para><b>This list's completeness is the guard's own soft spot, and two checks cover it.</b>
     /// <see cref="TheOneHopRenderWrappers_AreExactlyTheDeclaredSet"/> derives the ALIASES — a static
     /// formatter over a <c>DateTime</c> reaching a renderer under a different name — and pins them at set
@@ -805,6 +827,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private static readonly (string Renderer, ClockFrame Expects)[] Renderers =
     [
         ("ForDisplay", ClockFrame.Utc),
+        ("FormatForDisplay", ClockFrame.Utc),
         ("FormatServerTime", ClockFrame.Utc),
         ("FormatStoredUtc", ClockFrame.Utc),
         ("FormatServerClock", ClockFrame.ServerLocal),
@@ -815,7 +838,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// <see cref="Renderers"/> instead of being one. A wrapper hides the renderer's NAME from the
     /// render scan, which keys on it - so a column rendered through one is invisible to a census that
     /// calls itself closed. That is not hypothetical: the four <c>plan_correction</c> stamps reached
-    /// <c>ForDisplay</c> through <c>ViewerDataService.PlanCorrection</c>'s <c>Local()</c>, and no scan
+    /// <c>ForDisplay</c> (now <c>FormatForDisplay</c>) through <c>ViewerDataService.PlanCorrection</c>'s <c>Local()</c>, and no scan
     /// here could see which renderer they were getting.
     ///
     /// <para>Declared with the renderer each one reaches and pinned at SET EQUALITY against the
@@ -831,10 +854,13 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// </summary>
     private static readonly (string File, string Method, string Renderer)[] RenderWrappers =
     [
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs", "Local", "ForDisplay"),
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "Local", "ForDisplay"),
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "ForDisplay"),
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "ForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs", "Local", "FormatForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "Local", "FormatForDisplay"),
+        /* #4766: the Default Trace row's bare renderer. A time read from the stored server wall clock cannot say which
+           pass of the repeated autumn hour it was in, so it goes through ForDisplay and never takes an offset. */
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "StoredWallClock", "ForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "FormatForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "FormatForDisplay"),
         ("Lite/Services/LocalDataService.ConfigChanges.cs", "Local", "FormatServerTime"),
         ("Lite/Services/LocalDataService.SystemEvents.cs", "Local", "FormatServerTime"),
     ];
@@ -906,7 +932,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "blocking_last_batch_completed", "blocked_process_reports", 1, "get_blocking; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs",
             "start_time", "running_jobs", 1,
-            "get_running_jobs; collection_time in the same object is UTC, so a job started seconds ago "
+            "get_running_jobs; captured_at (collection_time before #3653) in the same object is UTC, so a job started seconds ago "
             + "reads as a four-hour runner — a long-running-job alert's exact signature; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs",
             "last_user_access", "index_object_stats", 1,
@@ -955,12 +981,20 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         /* ── MCP payloads that are CORRECT because the read converts first (#3202, #1262) ── */
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDefaultTraceTools.cs",
             "event_time", "default_trace_events", 1,
-            "#3202: the read projects event_time_utc and the payload stamps THAT, so the field name is the "
-            + "column's while the value is not"),
-        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
-            "sample_time", "cpu_utilization_stats", 1,
-            "#1262: get_cpu_utilization de-skews sample_time in SQL by the per-batch quantised offset, then "
-            + "buckets the de-skewed value, so the emitted expression is the bucket key"),
+            "#3202: the read projects event_time_local and DarlingDefaultTraceReader converts each row to UTC "
+            + "in C# (#4793); the payload stamps that converted value, so the field name is the column's while "
+            + "the value is not"),
+        /* #3960 REMOVED this row (get_cpu_utilization's sample_time, cpu_utilization_stats, DarlingMcpDataTools.cs):
+           the SQL still de-skews sample_time exactly as before (CpuUtilizationBucketedSql wraps CpuUtilizationSql
+           unchanged), but the JSON emission moved from an inline `sample_time = g.Key.ToString("o")` projection into
+           the shared TrendPayloads.CpuUtilization builder's generic Stamp(DateTime) helper — which every bucketed
+           trend's timestamp now goes through, PerformanceMonitor.Common/Mcp, outside McpSourceFiles' reach, and with
+           no field name textually beside its ToString("o") for McpPayloadEmission to key on. The census cannot see a
+           site it cannot reach; the site itself did not regress (TrendPayloadBudgetLiveTests and
+           DarlingMcpTrendToolsTests.MemoryTrend_Description_PromisesTheJoinedGrantSeries_AndNamesTheNullGap's
+           siblings still exercise get_cpu_utilization's values against a live store). A future column that reaches
+           TrendPayloads still de-skews at read in its own SQL is equally invisible here; broadening this census to
+           scan PerformanceMonitor.Common's shared builders is future work, not #3960's. */
 
         /* ── desktop renders: the column's frame against the renderer's (#3207) ──
 
@@ -983,10 +1017,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        #3419 took the de-skewed label from 34 to 26 without fixing anything: the eight plan_correction
        sites are not sites at all, because the column is UTC in the store and the four surfaces that reach
        it now emit it unconverted. A site whose column and whose consumer are in the same frame has nothing
-       for this census to say about it. */
+       for this census to say about it.
+
+       #3960 took it from 26 to 25: get_cpu_utilization's sample_time row is gone, not fixed nor broken — the
+       row above explains why the census can no longer reach that site now that it buckets through the shared
+       TrendPayloads.CpuUtilization builder. */
     private const int McpPayloadUnmarkedSites = 1;
     private const int DesktopRenderMismatchSites = 0;
-    private const int DeSkewedAtReadSites = 26;
+    private const int DeSkewedAtReadSites = 25;
 
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */
 
@@ -995,6 +1033,17 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// column, reached through the reading shape each SKU uses.</summary>
     private static readonly Regex SqlRelation =
         new(@"\b(?:FROM|JOIN)\s+(?:collect\.)?(?:v_)?([a-z][a-z0-9_]*)", RegexOptions.IgnoreCase);
+
+    /// <summary>The table each <c>StoredEventCopies</c> read names, read off that class's own source. Lite reads
+    /// blocked process reports, long query completions and system_health events through it, so a file that calls
+    /// <c>StoredEventCopies.BlockedProcessReports(</c> reads <c>blocked_process_reports</c> as surely as one that
+    /// writes the FROM itself. A parse that found nothing would leave those sites unresolved, and the judged-site
+    /// floor fails on that.</summary>
+    private static readonly Lazy<IReadOnlyDictionary<string, string>> s_storedEventCopiesReads = new(() =>
+        Regex.Matches(
+                RepoFile.ReadRepoFileLf("Lite", "Database", "StoredEventCopies.cs"),
+                @"public static string (\w+)\([^)]*\) =>\s*Read\(""v_([a-z][a-z0-9_]*)""")
+            .ToDictionary(m => "StoredEventCopies." + m.Groups[1].Value + "(", m => m.Groups[2].Value, StringComparer.Ordinal));
 
     /// <summary>
     /// Row-type files carry no SQL, so the table comes from the enclosing type instead. Three entries, each
@@ -1076,6 +1125,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private static HashSet<string> ReadableRelations(string path, string text)
     {
         var relations = SqlRelation.Matches(text).Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        relations.UnionWith(s_storedEventCopiesReads.Value
+            .Where(read => text.Contains(read.Key, StringComparison.Ordinal))
+            .Select(read => read.Value));
         var directory = Path.GetDirectoryName(path)!;
 
         foreach (var reader in Regex.Matches(text, @"\b([A-Z]\w*Reader)\b").Cast<Match>()
@@ -1129,8 +1181,11 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        reached DateTime.ToLocalTime() rather than any renderer, so nothing judged it) and the four
        plan_correction stamps in the Darling viewer, which name their renderer at the site instead of
        reaching one through a wrapper (FormatStoredUtc since #3419, FormatServerClock before it - the
-       site count is the same either way, which is why this figure did not move). */
-    private const int JudgedRenderSites = 43;
+       site count is the same either way, which is why this figure did not move). The 43 became 46 for two
+       reasons (#4766): this branch's head judged 42, one below the 43, and the history rows' four server-clock
+       properties (a query's creation and last execution, a procedure's cached and last execution) now name
+       FormatServerClock in both arms of their Clock test, which adds four. */
+    private const int JudgedRenderSites = 46;
 
     /* Call sites of a declared RenderWrapper passing a census column, and how many (file, method)
        wrappers reach one at all. Measured at 16 sites across 2 of the 6 wrappers - every one of them
@@ -1140,8 +1195,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private const int WrapperCallSitesOverCensusColumns = 16;
 
     /* Calls of ANY identifier on a census timestamp column across the render surface. Floored so the
-       shape-free residual check cannot satisfy its set equality with an empty left side. */
-    private const int CallsOnACensusColumn = 72;
+       shape-free residual check cannot satisfy its set equality with an empty left side. Measured at 79
+       (#4766): the 72 before, plus the four second arms of the history rows' Clock tests and the calls the
+       branch's earlier changes added. */
+    private const int CallsOnACensusColumn = 79;
     private const int WrapperFilesReachingACensusColumn = 2;
 
     /// <summary>
@@ -1247,18 +1304,22 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// from the file's own reach. Pinned at set equality so the decline cannot grow quietly, which is the
     /// only thing that makes "cannot key on the column name" a cost rather than an excuse.
     ///
-    /// <para>All nineteen are Query Store, system_health, long-query or PostgreSQL reads, and #3206's own
+    /// <para>All eighteen are Query Store, system_health, long-query or PostgreSQL reads, and #3206's own
     /// sweep checked each of them rather than assuming: <c>query_store_stats.last_execution_time</c> is
     /// genuinely naive UTC, Lite's Default Trace read already de-skews (#2967), and
     /// <c>memory_pressure_events.sample_time</c> is UTC per #2932. None is an offender — but this guard is
-    /// not what establishes that, and it does not pretend to.</para>
+    /// not what establishes that, and it does not pretend to.
+    ///
+    /// <para>#3960 REMOVED Lite <c>McpCpuTools.cs</c>'s row (get_cpu_utilization's sample_time, declined here
+    /// because a Lite tool file carries no FROM/JOIN for the census to resolve a table from): the emission moved
+    /// into the shared <c>TrendPayloads.CpuUtilization</c> builder, the same move and the same reasoning as the
+    /// DeSkewedAtRead row this change removes from Darling's side, below.</para>
     /// </summary>
     private static readonly (string File, string Column, int Sites)[] DeclinedAmbiguousMcpSites =
     [
         ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "last_execution_time", 1),
         ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgCpuUtilizationTools.cs", "sample_time", 1),
         ("Lite/Mcp/McpBlockingTools.cs", "event_time", 2),
-        ("Lite/Mcp/McpCpuTools.cs", "sample_time", 1),
         ("Lite/Mcp/McpDefaultTraceTools.cs", "event_time", 1),
         ("Lite/Mcp/McpHealthParserTools.cs", "event_time", 9),
         ("Lite/Mcp/McpLongQueryTools.cs", "event_time", 1),
@@ -1538,6 +1599,30 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("DateTime", "new DateTime(d.SampleTime.Year, ..., d.SampleTime.Hour, 0, 0) - an hour-truncating "
             + "bucket key built FROM a timestamp, not a rendering of one"),
         ("Compare", "Nullable.Compare(a.EventTime, b.EventTime) - a sort comparison"),
+        ("ToUtc", "serverClock.ToUtc(r.StartTime) in Lite get_running_jobs (#4793) - the server-clock conversion of a "
+            + "stored server-local stamp to naive UTC, which is the de-skew itself rather than a rendering of it"),
+        ("UtcOrNull", "UtcOrNull(r.BlockedLastTranStarted) and the like in Lite get_blocking and get_pvs_stats (#4793) "
+            + "- the file's local function for the same server-clock conversion of a nullable stamp to naive UTC"),
+        ("GhostX", "TimeWindows.GhostX(d.CollectionTime, days, zone) in Lite's Overview lanes (#4766) - moves a "
+            + "comparison row's naive-UTC instant onto the current axis by a day count, so it converts an instant "
+            + "and does not word one"),
+        ("FromOADate", "DateTime.FromOADate(row.SampleTimeUtc.ToOADate()) in Lite's CPU chart hover (#4766) - the round "
+            + "trip the hover reads a plotted X back through, so the set of points to word without a UTC offset is keyed "
+            + "exactly as the hover looks it up; it turns an instant into a lookup key and does not word it"),
+    ];
+
+    /// <summary>
+    /// Registered renderers that no code hands a census timestamp column. Declared with why, so the typo check
+    /// below (a registered renderer that reaches no census column is a mis-typed name) keeps its force for every
+    /// other renderer, and pinned both ways: a declared name that reaches a census column again is stale.
+    /// </summary>
+    private static readonly (string Renderer, string Why)[] RenderersWithNoCensusCall =
+    [
+        ("ForDisplay", "#4766: every grid and caption site that worded a census column moved to FormatForDisplay, "
+            + "which adds the repeated-hour UTC offset. What still calls ForDisplay hands it a DateTime that stays a "
+            + "DateTime (a FinOps or Query Store row property a XAML StringFormat words, the time-range slicer's plain "
+            + "labels, the heatmap's ticks, a discontinuity marker): none of those is a census column. It stays "
+            + "registered, so a new ForDisplay(row.SomeColumn) is judged for its clock frame like any renderer's"),
     ];
 
     /// <summary>
@@ -1609,11 +1694,26 @@ public sealed class ConsumedTimestampFrameDisciplineTests
            is left unguarded by relaxing it here. The other two directions ARE asserted: */
 
         /* a registered renderer that reaches no census column is a typo in the map, and it would take
-           its sites out of the judged population silently; */
+           its sites out of the judged population silently - unless it is declared in RenderersWithNoCensusCall
+           with why; */
         Assert.Equal(
             Array.Empty<string>(),
-            Renderers.Select(r => r.Renderer).Where(name => !applied.ContainsKey(name))
+            Renderers.Select(r => r.Renderer)
+                .Where(name => !applied.ContainsKey(name) && RenderersWithNoCensusCall.All(d => d.Renderer != name))
                 .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        /* a declared one that reaches a census column again is an exemption asserting nothing, and a declared
+           name that is not a registered renderer is a mis-typed exemption; each carries its reasoning; */
+        Assert.Equal(
+            Array.Empty<string>(),
+            RenderersWithNoCensusCall.Select(d => d.Renderer).Where(name => applied.ContainsKey(name))
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+        Assert.All(
+            RenderersWithNoCensusCall,
+            d => Assert.Contains(Renderers, r => r.Renderer == d.Renderer));
+        Assert.All(
+            RenderersWithNoCensusCall,
+            d => Assert.False(string.IsNullOrWhiteSpace(d.Why), $"{d.Renderer}: an exemption with no reasoning"));
 
         /* and a declared non-renderer that no longer appears is an exemption asserting nothing, which is
            the direction an exemption list rots in. */
@@ -1714,18 +1814,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /// <summary>
     /// Render sites this guard DECLINES: a frame-ambiguous property name whose table cannot be narrowed to
-    /// one frame, because the file holds no SQL and no row type that resolves it. All three plot
-    /// <c>cpu_utilization_stats.sample_time</c>, which <c>GetCpuUtilizationAsync</c> de-skews to naive UTC
-    /// in SQL (#1262) before the chart sees it — so <c>ForDisplay</c> is correct there — but it is the
-    /// READ that establishes that, not anything this scan can see. Pinned at set equality so the decline
-    /// cannot grow, which is the whole cost of refusing to key on the column name.
+    /// one frame, because the file holds no SQL and no row type that resolves it. There were three, all plotting
+    /// <c>cpu_utilization_stats.sample_time</c> (which <c>GetCpuUtilizationAsync</c> de-skews to naive UTC in SQL,
+    /// #1262, before the chart sees it) through <c>ForDisplay</c>; since #4766 a chart plots the UTC instant and
+    /// draws its labels in the display zone, so no chart projects a sample time through <c>ForDisplay</c> any
+    /// more and the decline is empty. Pinned at set equality so a new decline is a deliberate edit, which is the
+    /// whole cost of refusing to key on the column name.
     /// </summary>
-    private static readonly string[] DeclinedAmbiguousRenderSites =
-    [
-        "Darling/PerformanceMonitor.Darling.Viewer/CorrelatedTimelineLanesControl.xaml.cs|sample_time|ForDisplay",
-        "Darling/PerformanceMonitor.Darling.Viewer/CorrelatedTimelineLanesControl.xaml.cs|sample_time|ForDisplay",
-        "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Charts.cs|sample_time|ForDisplay",
-    ];
+    private static readonly string[] DeclinedAmbiguousRenderSites = [];
 
     /// <summary>Each <see cref="SiteLabel.DeSkewedAtRead"/> entry's conversion is present in the reader it
     /// depends on. Without this the label is a way to delete a site from the census by asserting it is
@@ -1735,58 +1831,62 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     {
         var evidence = new (string Column, string ReaderFile, string Conversion)[]
         {
+            /* #3960 REMOVED the ("sample_time", DarlingDataReader.cs, "MAX(sample_time) OVER (...)") row that
+               stood here: the conversion still runs, unchanged, inside CpuUtilizationSql (CpuUtilizationBucketedSql
+               wraps it verbatim) — only the once-inline JSON emission this evidence backed moved to the shared
+               TrendPayloads.CpuUtilization builder, which the DeSkewedAtRead inventory above can no longer see
+               (see that array's own #3960 comment). Keeping this row would assert "sample_time" is still a
+               DeSkewedAtRead column, which is no longer true of the CENSUS even though it stays true of the SQL. */
             ("event_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs",
-                "dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc"),
-            ("sample_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs",
-                "MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time"),
+                "clock.ToUtc(reader.GetDateTime(0))"),
             ("blocked_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started"),
+                "BlockedLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 25),"),
             ("blocking_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started"),
+                "BlockingLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 26),"),
             ("blocked_last_batch_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started"),
+                "BlockedLastBatchStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 27),"),
             ("blocking_last_batch_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started"),
+                "BlockingLastBatchStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 28),"),
             ("blocked_last_batch_completed", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed"),
+                "BlockedLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 29),"),
             ("blocking_last_batch_completed", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed"),
+                "BlockingLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 30),"),
             ("start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingJobReader.cs",
-                "start_time - make_interval(mins => svr.offset_minutes) AS start_time"),
+                "clock.ToUtc(reader.GetDateTime(4))"),
             ("last_user_access", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs",
-                "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 12),"),
             ("aborted_version_cleaner_start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
-                "aborted_version_cleaner_start_time - make_interval(mins => svr.offset_minutes) AS aborted_version_cleaner_start_time"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 8),"),
             ("aborted_version_cleaner_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
-                "aborted_version_cleaner_end_time - make_interval(mins => svr.offset_minutes) AS aborted_version_cleaner_end_time"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 9),"),
             ("offrow_version_cleaner_start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
-                "offrow_version_cleaner_start_time - make_interval(mins => svr.offset_minutes) AS offrow_version_cleaner_start_time"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 10),"),
             ("offrow_version_cleaner_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
-                "offrow_version_cleaner_end_time - make_interval(mins => svr.offset_minutes) AS offrow_version_cleaner_end_time"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 11),"),
             ("blocked_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockedLastTranStarted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockedLastTranStarted)"),
             ("blocking_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockingLastTranStarted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockingLastTranStarted)"),
             ("blocked_last_batch_started", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockedLastBatchStarted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockedLastBatchStarted)"),
             ("blocking_last_batch_started", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockingLastBatchStarted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockingLastBatchStarted)"),
             ("blocked_last_batch_completed", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockedLastBatchCompleted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockedLastBatchCompleted)"),
             ("blocking_last_batch_completed", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockingLastBatchCompleted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockingLastBatchCompleted)"),
             ("start_time", "Lite/Mcp/McpJobTools.cs",
-                "StartTime.AddMinutes(-utcOffsetMinutes)"),
+                "serverClock.ToUtc(r.StartTime)"),
             ("last_user_access", "Lite/Mcp/McpObjectStatsTools.cs",
-                "LastUserAccess?.AddMinutes(-utcOffsetMinutes)"),
+                "r.LastUserAccess is { } lastAccess ? serverClock.ToUtc(lastAccess)"),
             ("aborted_version_cleaner_start_time", "Lite/Mcp/McpPvsTools.cs",
-                "AbortedCleanerStartTime?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.AbortedCleanerStartTime)"),
             ("aborted_version_cleaner_end_time", "Lite/Mcp/McpPvsTools.cs",
-                "AbortedCleanerEndTime?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.AbortedCleanerEndTime)"),
             ("offrow_version_cleaner_start_time", "Lite/Mcp/McpPvsTools.cs",
-                "OffrowCleanerStartTime?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.OffrowCleanerStartTime)"),
             ("offrow_version_cleaner_end_time", "Lite/Mcp/McpPvsTools.cs",
-                "OffrowCleanerEndTime?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.OffrowCleanerEndTime)"),
         };
 
         Assert.Equal(
@@ -1797,6 +1897,17 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         {
             Assert.Contains(column, Inventory.Where(i => i.Label == SiteLabel.DeSkewedAtRead).Select(i => i.Column));
             Assert.Contains(conversion, File.ReadAllText(RepoPath(readerFile)), StringComparison.Ordinal);
+        }
+
+        /* The Lite blocking and version store tools reach the conversion through a local function, so the
+           call site alone (UtcOrNull(r.X)) proves nothing: the function itself must convert with the
+           server's clock (#4793). */
+        foreach (var liteFile in new[] { "Lite/Mcp/McpBlockingTools.cs", "Lite/Mcp/McpPvsTools.cs" })
+        {
+            Assert.Contains(
+                "UtcOrNull(DateTime? serverLocal) => serverLocal is { } stamp ? serverClock.ToUtc(stamp).ToString(\"o\") : null",
+                File.ReadAllText(RepoPath(liteFile)),
+                StringComparison.Ordinal);
         }
     }
 
@@ -1922,6 +2033,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "cpuTask.Result.Select(d => ViewerTimeHelper.ForDisplay(d.SampleTime).ToOADate())");
         Assert.DoesNotMatch(RenderCall("ForDisplay", "sample_time"), "ViewerTimeHelper.ForDisplay(s.SampleTimeUtc).ToOADate()");
         Assert.DoesNotMatch(RenderCall("FormatServerClock", "sample_time"), "ViewerTimeHelper.ForDisplay(d.SampleTime)");
+        /* The text renderer is its own name: it is found where it is called, and ForDisplay is not found inside it. */
+        Assert.Matches(RenderCall("FormatForDisplay", "sample_time"), "ViewerTimeHelper.FormatForDisplay(d.SampleTime, \"s\")");
+        Assert.DoesNotMatch(RenderCall("ForDisplay", "sample_time"), "ViewerTimeHelper.FormatForDisplay(d.SampleTime, \"s\")");
 
         /* ProjectionAlias takes an alias that is the LAST column before FROM, with no comma after it. */
         Assert.Equal(
@@ -1955,15 +2069,16 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         Assert.Matches(WrapperSignature, "    /// public static string Local(DateTime? utc)");
         Assert.DoesNotMatch(WrapperSignature, WithoutComments("    /// public static string Local(DateTime? utc)"));
 
-        /* And the two renderer families are distinguished, not merged: four names, two expectations. Three
+        /* And the two renderer families are distinguished, not merged: five names, two expectations. Four
            take naive UTC and exactly ONE takes the server's own clock — asserted as a count rather than
            left as a comment, because the defect class IS a value reaching the renderer for the other
            frame, and a second server-local renderer appearing unnoticed would split that side. */
-        Assert.Equal(4, Renderers.Length);
+        Assert.Equal(5, Renderers.Length);
         Assert.Equal(2, Renderers.Select(r => r.Expects).Distinct().Count());
         Assert.Equal(ClockFrame.ServerLocal, Renderers.Single(r => r.Renderer == "FormatServerClock").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatServerTime").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatStoredUtc").Expects);
+        Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatForDisplay").Expects);
         Assert.Single(Renderers, r => r.Expects == ClockFrame.ServerLocal);
     }
 

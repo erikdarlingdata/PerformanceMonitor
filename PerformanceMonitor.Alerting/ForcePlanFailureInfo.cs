@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Alerting;
 
 /// <summary>
@@ -23,6 +25,16 @@ namespace PerformanceMonitor.Alerting;
 ///
 /// <para>A counter that DROPS (an unforce/re-force cycle resets it) is not a failure and must not alert;
 /// the adapter treats that as a silent re-arm.</para>
+///
+/// <para><b>A row is an observation, and it carries its own identity (#3579).</b> "Rose between the two
+/// most recent collections" becomes true the instant the newer collection lands and stays true, unchanged,
+/// until the next one does — the adapter re-reads the SAME two rows on every alert pass in between. The
+/// engine evaluates every ~30 s against a fact that changes once per collection (5–15 min) with a 5-minute
+/// cooldown between them, so without <see cref="ObservedAtUtc"/> it could not tell "still failing" from
+/// "no new data yet" and treated the second as the first: one production store, one plan, a counter that
+/// went 0 → 1 → 0 across three collections, and SIX alert rows in 28 minutes, each honestly reading
+/// "New Failures: 1". The stamp is what lets the engine fire once per observation rather than once per
+/// cooldown.</para>
 /// </summary>
 public sealed class ForcePlanFailureInfo
 {
@@ -54,4 +66,20 @@ public sealed class ForcePlanFailureInfo
 
     /// <summary>The cumulative count as of the newer sample, for context on whether this is chronic.</summary>
     public long TotalFailures { get; set; }
+
+    /// <summary>
+    /// The <c>collection_time</c> of the NEWER of the two samples — the collector's clock, not the alert
+    /// sweep's — which is the identity of the observation this row reports (#3579). Two reads that return
+    /// the same stamp for the same plan are the same observation surfacing twice, not two failures; a newer
+    /// stamp is a new collection and a new rise. The engine keeps the stamp it last alerted on per plan and
+    /// declines to re-fire the same one regardless of cooldown (the poison-wait family's #2704
+    /// unrefreshed-source-row guard, at plan grain).
+    ///
+    /// <para>Nullable so an adapter that does not supply it degrades to the pre-#3579 cooldown-repeat rather
+    /// than to silence: a <c>null</c> never equals a remembered stamp, so every read counts as new and the
+    /// cooldown alone rate-limits it — the same stated fallback <see cref="IAlertStateStore"/> gives a host
+    /// that cannot persist. Both shipped adapters always supply it; <c>collection_time</c> is NOT NULL in both
+    /// stores.</para>
+    /// </summary>
+    public DateTime? ObservedAtUtc { get; set; }
 }

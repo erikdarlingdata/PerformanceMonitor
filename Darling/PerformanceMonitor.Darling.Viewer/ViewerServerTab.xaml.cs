@@ -142,9 +142,9 @@ public partial class ViewerServerTab : UserControl
         /* Overview lanes (copied from Lite): init the data service + server up front so the lanes theme
            their chrome and wire the correlated crosshair before the first load. Wire the lanes' own
            right-click "Show Active Queries at This Time" drill-down (every lane: CPU / Wait Stats /
-           Blocking / Buffer Pool / I/O Latency) to the Active Queries loader — the lanes plot X through
-           ViewerTimeHelper.ForDisplay, so the event's argument is display-time, exactly what
-           OnActiveQueriesDrillDown converts back to naive UTC. ThemeManager is fixed to Dark, so the shared
+           Blocking / Buffer Pool / I/O Latency) to the Active Queries loader — the lanes plot X as the
+           UTC instant, so the event's argument is already naive UTC, the centre
+           OnActiveQueriesDrillDown reads its window around. ThemeManager is fixed to Dark, so the shared
            chart chrome applies without any per-control theme plumbing. */
         OverviewLanes.Initialize(_dataService, _server.ServerId);
         OverviewLanes.ShowActiveQueriesRequested += OnActiveQueriesDrillDown;
@@ -282,8 +282,8 @@ public partial class ViewerServerTab : UserControl
         {
             /* Point the process-wide time helper at THIS server's UTC offset before rendering — only the
                visible tab renders (the viewer's visible-only rule), so its offset wins. Loaded once, cached. */
-            await EnsureServerOffsetLoadedAsync();
-            ApplyServerOffsetToHelper();
+            await RefreshServerClockAsync();
+            ApplyServerClockToHelper();
 
             /* Refresh the toolbar freshness readout in the same pass (after the offset is applied so it renders
                in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
@@ -317,6 +317,9 @@ public partial class ViewerServerTab : UserControl
     /// #1591: badges the Collection Health tab header with the number of collectors that were permission-denied.
     /// Mirrors Lite's <c>RefreshPermissionDeniedBadgeAsync</c>. Best-effort chrome like the freshness readout
     /// above — a read failure leaves the plain header rather than disturbing the tab load.
+    /// <see cref="ViewerDataService.GetPermissionDeniedCollectorCountAsync"/> reads the shared fleet-by-server
+    /// rollup read (#4226), not a raw <c>collection_log</c> scan of its own — this refresh (auto default 1 min,
+    /// plus tab activation) issues no such read per open tab any more.
     /// </summary>
     private async Task UpdatePermissionDeniedBadgeAsync()
     {
@@ -345,8 +348,10 @@ public partial class ViewerServerTab : UserControl
     /// Fills the toolbar's freshness readout with this server's newest collection time (the shared
     /// MAX(collection_time) read the sidebar dots use), rendered in the active Server/Local/UTC display mode
     /// exactly like the Manage Servers "Last Collected" column. A server the service hasn't collected yet is
-    /// absent from the freshness map, shown as "no data collected yet". Best-effort chrome: a read failure
-    /// blanks the readout rather than disturbing the tab load.
+    /// absent from the freshness map, shown as "no data collected yet"; so is a server whose whole history
+    /// retention has dropped, which reads "no collection retained" instead (#3967), by the same registration
+    /// rule the sidebar dot applies. Best-effort chrome: a read failure blanks the readout rather than
+    /// disturbing the tab load.
     /// </summary>
     private async Task UpdateServerFreshnessLabelAsync()
     {
@@ -354,8 +359,10 @@ public partial class ViewerServerTab : UserControl
         {
             var freshness = await _dataService.GetServerFreshnessAsync();
             ServerFreshnessText.Text = freshness.TryGetValue(_server.ServerId, out var lastUtc)
-                ? $"collected {ViewerTimeHelper.ForDisplay(lastUtc):yyyy-MM-dd HH:mm}"
-                : "no data collected yet";
+                ? $"collected {ViewerTimeHelper.FormatForDisplay(lastUtc, "yyyy-MM-dd HH:mm")}"
+                : ServerSummaryItem.ClassifyFreshness(null, _server.RegisteredAt, DateTime.UtcNow) == ServerFreshness.Offline
+                    ? "no collection retained"
+                    : "no data collected yet";
         }
         catch
         {

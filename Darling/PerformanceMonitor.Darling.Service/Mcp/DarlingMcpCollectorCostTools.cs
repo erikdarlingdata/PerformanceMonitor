@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -50,15 +51,26 @@ public sealed class DarlingMcpCollectorCostTools
         + "read get_collection_log's sql_store_ms per run before concluding a target is slow.";
 
     [McpServerTool(Name = "get_collector_cost"), Description(
-        "Gets the monitoring tool's OWN per-collector cost ON the monitored servers — which of THIS tool's collectors are the most expensive to run, so a hog shows on a dashboard instead of a log scrape. This is the tool measuring itself, NOT a monitored SQL Server. The service records an hourly aggregate per (server, collector): run count, total and average query duration in ms (sql_ms is a DURATION that includes waits, not pure CPU), the WORST single execution in the window (max_sql_ms — the tail is how a collector sticks out on a target), store-write time, rows collected, and how many servers ran it. Returns the ranked fleet list, most expensive by total_sql_ms first. Pass collector_name to get that ONE collector's daily trend instead (summed cost and the day's worst execution), for spotting a regression against its own history. CRITICAL — sql_ms is NOT purely target-side on the collectors that fetch plan XML or statement text (query_store). Those fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what content is already held before writing back what came off the target, so the store's probe and write land in this figure. On this fleet the store probe is the largest single term in both fetches — 55.4% of plan_fetch and 80.6% of text_fetch — and on one production run it was 107,334 ms of a 124,972 ms figure, 86%, against a plan-plus-text target time of 6,494 ms. This series carries NO phase split (it is an hourly total per server and collector, nothing more), so the attribution cannot be recovered here at all: use get_collection_log, whose sql_store_ms names the store share per run. Do NOT read a large total_sql_ms or max_sql_ms on query_store as evidence that the monitored servers are slow.")]
+        "Gets the monitoring tool's OWN per-collector cost on monitored servers — measuring itself, not server "
+        + "health; no server_name. Default: ranked fleet list, total_sql_ms desc; collector_name switches to "
+        + "that one collector's daily trend. sql_ms is a DURATION (waits included), not CPU; max_sql_ms is the "
+        + "worst single execution. CRITICAL on query_store: sql_ms includes the STORE's own probe/write, "
+        + "55-81% of the figure here, with no phase split — never read it as server-slowness; "
+        + "get_collection_log.sql_store_ms has the per-run split. Empty means no run in the window, not a "
+        + "failure. <<GUIDE>> "
+        + "Gets the monitoring tool's OWN per-collector cost ON the monitored servers — which of THIS tool's collectors are the most expensive to run, so a hog shows on a dashboard instead of a log scrape. This is the tool measuring itself, NOT a monitored SQL Server. The service records an hourly aggregate per (server, collector): run count, total and average query duration in ms (sql_ms is a DURATION that includes waits, not pure CPU), the WORST single execution in the window (max_sql_ms — the tail is how a collector sticks out on a target), store-write time, rows collected, and how many servers ran it. Returns the ranked fleet list, most expensive by total_sql_ms first. Pass collector_name to get that ONE collector's daily trend instead (summed cost and the day's worst execution), for spotting a regression against its own history. CRITICAL — sql_ms is NOT purely target-side on the collectors that fetch plan XML or statement text (query_store). Those fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what content is already held before writing back what came off the target, so the store's probe and write land in this figure. On this fleet the store probe is the largest single term in both fetches — 55.4% of plan_fetch and 80.6% of text_fetch. This series carries NO phase split (it is an hourly total per server and collector, nothing more), so the attribution cannot be recovered here at all: use get_collection_log, whose sql_store_ms names the store share per run. Do NOT read a large total_sql_ms or max_sql_ms on query_store as evidence that the monitored servers are slow.")]
     public static async Task<string> GetCollectorCost(
         NpgsqlDataSource postgres,
         [Description("Days of history to summarize. Default 7; max 90 (the series' own retention).")] int days_back = 7,
-        [Description("Optional: a collector name (e.g. query_store) to return its daily trend instead of the ranked fleet list.")] string? collector_name = null)
+        [Description("Optional: a collector name (e.g. query_store) to return its daily trend instead of the ranked fleet list.")] string? collector_name = null,
+        CancellationToken cancellationToken = default)
     {
-        if (days_back <= 0 || days_back > MaxDaysBack)
+        /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
+           tool's (the series' own retention). */
+        var daysError = McpHelpers.ValidateDaysBack(days_back, MaxDaysBack);
+        if (daysError != null)
         {
-            return $"Invalid days_back value '{days_back}'. Must be a positive integer (1-{MaxDaysBack}).";
+            return daysError;
         }
 
         var since = DateTime.UtcNow.AddDays(-days_back);
@@ -67,7 +79,7 @@ public sealed class DarlingMcpCollectorCostTools
         {
             if (!string.IsNullOrWhiteSpace(collector_name))
             {
-                var trend = await DarlingCollectorCostReader.GetTrendAsync(postgres, collector_name.Trim(), since);
+                var trend = await DarlingCollectorCostReader.GetTrendAsync(postgres, collector_name.Trim(), since, cancellationToken);
                 if (trend.Count == 0)
                 {
                     return McpHelpers.Status(
@@ -93,7 +105,7 @@ public sealed class DarlingMcpCollectorCostTools
                 });
             }
 
-            var top = await DarlingCollectorCostReader.GetTopAsync(postgres, since);
+            var top = await DarlingCollectorCostReader.GetTopAsync(postgres, since, cancellationToken);
             if (top.Count == 0)
             {
                 return McpHelpers.Status(
@@ -120,9 +132,9 @@ public sealed class DarlingMcpCollectorCostTools
                 })
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.Status("error", $"Failed to read collector cost: {ex.Message}");
+            return McpHelpers.FormatError("get_collector_cost", ex);
         }
     }
 }

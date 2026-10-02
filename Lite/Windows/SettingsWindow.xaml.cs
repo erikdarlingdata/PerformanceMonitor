@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Text.Json.Nodes;
@@ -17,6 +18,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Navigation;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
@@ -457,8 +459,9 @@ public partial class SettingsWindow : Window
         var port = McpPortTextBox.Text;
         var command = $"claude mcp add --transport http --scope user sql-monitor http://localhost:{port}/";
         /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
-        Clipboard.SetDataObject(command, false);
-        McpStatusText.Text = "Copied to clipboard!";
+        McpStatusText.Text = ClipboardText.TrySetDataObject(command)
+            ? "Copied to clipboard!"
+            : "Couldn't copy: the clipboard is in use.";
     }
 
     private async void AutoPortButton_Click(object sender, RoutedEventArgs e)
@@ -647,6 +650,8 @@ public partial class SettingsWindow : Window
         LrqExcludeBackupsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeBackups;
         LrqExcludeMiscWaitsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeMiscWaits;
         LrqExcludeCdcCheckBox.IsChecked = App.AlertLongRunningQueryExcludeCdc;
+        AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedProgramNamePrefixes);
+        AlertLrqExcludedLoginsBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedLogins);
         AlertExcludedDatabasesBox.Text = string.Join(", ", App.AlertExcludedDatabases);
         AlertTempDbSpaceCheckBox.IsChecked = App.AlertTempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
@@ -683,6 +688,8 @@ public partial class SettingsWindow : Window
         AnalysisIntervalBox.Text = App.AnalysisIntervalMinutes.ToString();
         AnalysisNotifySeverityBox.Text = App.AnalysisNotifySeverity.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = App.AnalysisNotifyCooldownMinutes.ToString();
+        /* #3712: checked = digest (the shipped default), unchecked = page. */
+        AnalysisUncorroboratedDigestCheckBox.IsChecked = App.AnalysisUncorroboratedRoute == FindingRoute.Digest;
         UpdateAlertControlStates();
     }
 
@@ -736,6 +743,12 @@ public partial class SettingsWindow : Window
         App.AlertLongRunningQueryExcludeBackups = LrqExcludeBackupsCheckBox.IsChecked == true;
         App.AlertLongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true;
         App.AlertLongRunningQueryExcludeCdc = LrqExcludeCdcCheckBox.IsChecked == true;
+        /* #3653 (A5, Q5): comma-separated in the box, normalised through the shared rule (trim, blanks dropped,
+           case-insensitive dedupe) so the list the engine reads is the list the card shows. An emptied box is an
+           EMPTY list, persisted as such below: the seeded defaults are defaults, and clearing one is the
+           operator's decision to evaluate that arm's sessions. */
+        App.AlertLongRunningQueryExcludedProgramNamePrefixes = LongRunningQueryExclusions.Normalize(AlertLrqExcludedProgramNamePrefixesBox.Text.Split(',')).ToList();
+        App.AlertLongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(AlertLrqExcludedLoginsBox.Text.Split(',')).ToList();
         App.AlertExcludedDatabases = AlertExcludedDatabasesBox.Text
             .Split(',')
             .Select(s => s.Trim())
@@ -803,6 +816,10 @@ public partial class SettingsWindow : Window
             App.AnalysisNotifyCooldownMinutes = analysisCooldown;
         else
             validationErrors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
+        /* #3712: the checkbox IS the route — no third state, so no validation arm. */
+        App.AnalysisUncorroboratedRoute = AnalysisUncorroboratedDigestCheckBox.IsChecked == true
+            ? FindingRoute.Digest
+            : FindingRoute.Page;
 
         root["minimize_to_tray"] = App.MinimizeToTray;
         root["alerts_enabled"] = App.AlertsEnabled;
@@ -835,6 +852,12 @@ public partial class SettingsWindow : Window
         var dbArray = new System.Text.Json.Nodes.JsonArray();
         foreach (var db in App.AlertExcludedDatabases) dbArray.Add(db);
         root["alert_excluded_databases"] = dbArray;
+        var lrqProgramArray = new System.Text.Json.Nodes.JsonArray();
+        foreach (var name in App.AlertLongRunningQueryExcludedProgramNamePrefixes) lrqProgramArray.Add(name);
+        root["alert_long_running_query_excluded_program_name_prefixes"] = lrqProgramArray;
+        var lrqLoginArray = new System.Text.Json.Nodes.JsonArray();
+        foreach (var login in App.AlertLongRunningQueryExcludedLogins) lrqLoginArray.Add(login);
+        root["alert_long_running_query_excluded_logins"] = lrqLoginArray;
         root["alert_tempdb_space_enabled"] = App.AlertTempDbSpaceEnabled;
         root["alert_tempdb_space_threshold_percent"] = App.AlertTempDbSpaceThresholdPercent;
         root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
@@ -865,6 +888,8 @@ public partial class SettingsWindow : Window
         root["analysis_interval_minutes"] = App.AnalysisIntervalMinutes;
         root["analysis_notify_severity"] = App.AnalysisNotifySeverity;
         root["analysis_notify_cooldown_minutes"] = App.AnalysisNotifyCooldownMinutes;
+        /* #3712: persisted as its wire spelling ('digest' / 'page'), the one App.LoadAlertSettings parses back. */
+        root["analysis_uncorroborated_route"] = App.AnalysisUncorroboratedRoute.ToWireText();
 
         if (validationErrors.Count > 0)
         {
@@ -910,7 +935,11 @@ public partial class SettingsWindow : Window
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
         AnalysisNotifyCooldownBox.Text = "360";
+        AnalysisUncorroboratedDigestCheckBox.IsChecked = true;
         AlertExcludedDatabasesBox.Text = "";
+        /* #3653 (A5, Q5): "defaults" for the opt-out knob are the SEEDS, not empty boxes. */
+        AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultProgramNamePrefixes);
+        AlertLrqExcludedLoginsBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultLogins);
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();
     }
@@ -947,7 +976,9 @@ public partial class SettingsWindow : Window
         if (AlertDeadlockCheckBox.IsChecked == true)
             parts.Add($"deadlocks >= {AlertDeadlockThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
-            parts.Add($"poison waits >= {AlertPoisonWaitThresholdBox.Text}ms avg");
+            /* #3539 A4: the live bar, from the shared constants — not the retired ms box, which nothing reads. */
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"poison waits >= {PoisonWaitEvaluator.WarningAvgWaiters * PoisonWaitEvaluator.WindowMinutes * 60:N0}s accumulated in {PoisonWaitEvaluator.WindowMinutes}min"));
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
@@ -957,7 +988,10 @@ public partial class SettingsWindow : Window
         if (AlertPvsCheckBox.IsChecked == true)
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
         if (AlertFileGrowthCheckBox.IsChecked == true)
-            parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text}MB/{AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
+            /* #3539 A8c: the rise is a RATE (MB per hour) averaged over the lookback, in the same unit phrase the
+               row's label, the alert's threshold line and the MCP payload description use. It used to read
+               "10240MB/60m", which was the per-window delta the engine then compared literally. */
+            parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text} {AlertContextBuilders.FileGrowthRiseUnit} over {AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
         if (AlertFailedJobCheckBox.IsChecked == true)
@@ -981,10 +1015,16 @@ public partial class SettingsWindow : Window
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
-        AlertPoisonWaitThresholdBox.IsEnabled = enabled;
+        /* #3539 A4: the poison-wait ms box is retired (nothing reads it) and stays disabled regardless of the
+           master switch — the XAML sets IsEnabled="False", and this loop must not re-enable it on load or
+           on toggle, or the operator is back to tuning a number the engine ignores. */
+        AlertPoisonWaitThresholdBox.IsEnabled = false;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;
+        /* #3653 (A5, Q5): the opt-out knob's two lists ride the master switch like every other threshold box. */
+        AlertLrqExcludedProgramNamePrefixesBox.IsEnabled = enabled;
+        AlertLrqExcludedLoginsBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;

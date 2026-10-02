@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -69,14 +70,19 @@ LIMIT 1";
     public const string RecommendationsMemoryP95Sql = @"
 SELECT
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
-    COUNT(*) AS sample_count
+    COUNT(*) AS sample_count,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample,
+    COUNT(total_server_memory_mb) AS window_samples
 FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
 
     /// <summary>7-day P95 of SQL Server CPU utilization, for the VM right-sizing CPU prescription. $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsCpuP95Sql = @"
-SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu
+SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
+       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample,
+       COUNT(sqlserver_cpu_utilization) AS window_samples
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -106,13 +112,22 @@ SELECT
     SUM(delta_reads) AS total_reads,
     SUM(delta_stall_read_ms) AS total_stall_read_ms,
     SUM(delta_writes) AS total_writes,
-    SUM(delta_stall_write_ms) AS total_stall_write_ms
+    SUM(delta_stall_write_ms) AS total_stall_write_ms,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample,
+    COUNT(*) AS window_samples
 FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   delta_reads > 0
 GROUP BY database_name
 HAVING SUM(delta_reads) > 1000";
+
+    /// <summary>Oldest query-stats sample for the server (idle-database advice waits until it is at or before the 7-day cutoff). $1 server_id.</summary>
+    public const string RecommendationsQueryStatsFirstSampleSql = @"
+SELECT MIN(collection_time)
+FROM v_query_stats
+WHERE server_id = $1";
 
     /// <summary>CPU utilization mean + standard deviation + sample count (reserved-capacity stability). $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsReservedCapacitySql = @"
@@ -156,6 +171,34 @@ HAVING COUNT(*) >= 24";
         var agReplicaRole = reader.IsDBNull(3) ? "Standalone" : reader.GetString(3);
         var isHadrEnabled = !reader.IsDBNull(4) && reader.GetBoolean(4);
         return new EditionFacts(edition, ParseMajorVersion(productVersion), cpuCount, agReplicaRole, isHadrEnabled);
+    }
+
+    /// <summary>
+    /// The server's latest collected <c>SERVERPROPERTY('EngineEdition')</c>, for the right-sizing rules that do not
+    /// apply to Azure SQL Database. Same row Lite reads (<c>GetSqlEngineEditionAsync</c>): the newest collected
+    /// <c>server_properties</c> row. $1 server_id.
+    /// </summary>
+    public const string RecommendationsEngineEditionSql = @"
+SELECT engine_edition
+FROM server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The server's latest collected engine edition, or <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
+    /// when nothing is collected yet (or the row carries no edition).
+    /// </summary>
+    public async Task<int> GetRecommendationEngineEditionAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(RecommendationsEngineEditionSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0)
+            ? Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture)
+            : CollectorEngineCapability.UnknownEngineEdition;
     }
 
     /// <summary>
@@ -369,6 +412,34 @@ HAVING COUNT(*) >= 24";
     }
 
     /// <summary>
+    /// The CPU right-sizing recommendation for one utilization row, or <c>null</c> when it has nothing to say. A window with no CPU
+    /// sample reads a P95 of 0, which is "idle" only because nothing was measured. The utilization row gives that window no verdict
+    /// (<c>HasCpuSample</c> is false), and the advice follows it. The count the text prints is the vCores the service objective
+    /// gives an Azure SQL Database, so there it is named "vCores", as the utilization card names it; on every other edition it
+    /// is the CPU count and the word stays "cores". Lite's recommendation reads the same rule.
+    /// </summary>
+    internal static RecommendationRow? BuildCpuRightSizingRecommendation(UtilizationEfficiencyRow? util, decimal monthlyCost)
+    {
+        if (util == null || !util.HasCpuSample || util.P95CpuPct >= 30 || util.CpuCount <= 4
+            || util.ProvisioningStatus == ProvisioningVerdict.NotApplicable)
+            return null;
+
+        var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
+        var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
+        var cpuNoun = ServerHardwareScope.CpuCoreNoun(util.EngineEdition);
+        return new RecommendationRow
+        {
+            Category = "Compute",
+            Severity = util.P95CpuPct < 15 ? "High" : "Medium",
+            Confidence = "Medium",
+            Finding = $"CPU over-provisioned ({util.CpuCount} {cpuNoun}, P95 = {util.P95CpuPct:N1}%)",
+            Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} {cpuNoun}. " +
+                     $"Consider reducing to ~{targetCores} {cpuNoun}.",
+            EstMonthlySavings = monthlyCost > 0 ? monthlyCost * savingsPct * 0.60m : null
+        };
+    }
+
+    /// <summary>
     /// Runs every monitor-side FinOps recommendation check over the collected store and returns the consolidated
     /// list sorted by severity. All reads are async I/O (they don't block the UI thread), and each check is
     /// isolated in its own try/catch so a single failing read degrades to "that check absent" rather than an
@@ -410,21 +481,9 @@ HAVING COUNT(*) >= 24";
         try
         {
             var util = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            if (util != null && util.P95CpuPct < 30 && util.CpuCount > 4)
-            {
-                var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
-                var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Compute",
-                    Severity = util.P95CpuPct < 15 ? "High" : "Medium",
-                    Confidence = "Medium",
-                    Finding = $"CPU over-provisioned ({util.CpuCount} cores, P95 = {util.P95CpuPct:N1}%)",
-                    Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} cores. " +
-                             $"Consider reducing to ~{targetCores} cores.",
-                    EstMonthlySavings = monthlyCost > 0 ? monthlyCost * savingsPct * 0.60m : null
-                });
-            }
+            var cpuRecommendation = BuildCpuRightSizingRecommendation(util, monthlyCost);
+            if (cpuRecommendation != null)
+                recommendations.Add(cpuRecommendation);
         }
         catch (Exception ex)
         {
@@ -435,24 +494,30 @@ HAVING COUNT(*) >= 24";
         try
         {
             var util = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            if (util != null && util.PhysicalMemoryMb > 8192)
+            /* No memory advice on an Azure SQL Database (engine_edition 5): its memory comes with its service objective
+               and cannot be resized on its own. util.PhysicalMemoryMb is the database's own memory limit there
+               (memory_stats, filled from committed_target_kb), not the host's, so the skip is not about a wrong
+               denominator: there is nothing to resize. Managed Instance (8) and SQL Server are unchanged. */
+            if (util != null && util.PhysicalMemoryMb > 8192
+                && await GetRecommendationEngineEditionAsync(serverId, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
-                var (p95Mb, sampleCount) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
+                var (p95Mb, sampleCount, window) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
 
                 // Need ~16 samples to smooth a single-point anomaly without delaying the recommendation for hours.
                 if (sampleCount >= 16)
                 {
                     var memRatio = (decimal)p95Mb / util.PhysicalMemoryMb;
-                    if (memRatio < 0.50m)
+                    var targetMb = Math.Max(8192, p95Mb * 2);
+                    // Compared in the whole GB the text prints, so the advice never reads "of 8GB RAM ... reducing to ~8GB".
+                    if (memRatio < 0.50m && targetMb / 1024 < util.PhysicalMemoryMb / 1024)
                     {
-                        var targetMb = Math.Max(8192, p95Mb * 2);
                         recommendations.Add(new RecommendationRow
                         {
                             Category = "Memory",
                             Severity = memRatio < 0.30m ? "High" : "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                            Detail = $"P95 SQL Server memory over 7 days is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
+                            Detail = $"P95 SQL Server memory from {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
                                      $"Consider reducing to ~{targetMb / 1024}GB.",
                             EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
                         });
@@ -484,7 +549,11 @@ HAVING COUNT(*) >= 24";
         // 6. Dormant database detection with cost impact (collected idle DBs + database sizes).
         try
         {
-            var idleDbs = await GetIdleDatabasesAsync(serverId, cancellationToken: cancellationToken);
+            /* "No query activity in 7 days" is only true once 7 days of query stats exist: a server enrolled hours
+               ago has not been watched long enough to call any database idle. */
+            var idleDbs = await HasQueryStatsCoverageAsync(serverId, memoryCutoff, cancellationToken)
+                ? await GetIdleDatabasesAsync(serverId, cancellationToken: cancellationToken)
+                : new List<IdleDatabaseRow>();
             if (idleDbs.Count > 0)
             {
                 var totalSizeGb = idleDbs.Sum(d => d.TotalSizeMb) / 1024m;
@@ -493,7 +562,7 @@ HAVING COUNT(*) >= 24";
                 if (monthlyCost > 0)
                 {
                     var allDbSizes = await GetDatabaseSizeLatestAsync(serverId, cancellationToken);
-                    var totalMb = allDbSizes.Sum(d => d.TotalSizeMb);
+                    var totalMb = DatabaseSizeRow.AllocatedTotalMb(allDbSizes);
                     if (totalMb > 0)
                         costShare = (idleDbs.Sum(d => d.TotalSizeMb) / totalMb) * monthlyCost;
                 }
@@ -578,9 +647,13 @@ HAVING COUNT(*) >= 24";
         try
         {
             var vmUtil = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            if (vmUtil != null)
+            /* No VM to resize on Azure SQL Database (its cores and memory come with its service objective),
+               and no advice from a window with no CPU sample (its P95 of 0 is not a measurement). */
+            if (vmUtil != null && vmUtil.HasCpuSample
+                && await GetRecommendationEngineEditionAsync(serverId, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 decimal p95Cpu7d = vmUtil.P95CpuPct;
+                var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
                 int cpuCount = vmUtil.CpuCount;
                 int physMb = vmUtil.PhysicalMemoryMb;
 
@@ -596,6 +669,7 @@ HAVING COUNT(*) >= 24";
                     if (await cpuReader.ReadAsync(cancellationToken) && !cpuReader.IsDBNull(0))
                     {
                         p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0), CultureInfo.InvariantCulture);
+                        cpuWindow = RightSizingWindow.Describe(cpuReader.IsDBNull(3) ? 0L : Convert.ToInt64(cpuReader.GetValue(3), CultureInfo.InvariantCulture), cpuReader.IsDBNull(1) || cpuReader.IsDBNull(2) ? TimeSpan.Zero : cpuReader.GetDateTime(2) - cpuReader.GetDateTime(1));
                     }
                 }
                 catch (Exception ex)
@@ -603,7 +677,7 @@ HAVING COUNT(*) >= 24";
                     Debug.WriteLine($"Recommendation check (VM right-sizing) 7-day CPU P95 fell back to 24h: {ex.Message}");
                 }
 
-                var (p95MemMb, memSampleCount) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
+                var (p95MemMb, memSampleCount, memWindow) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
 
                 // CPU prescription: only if >= 4 cores.
                 if (cpuCount >= 4)
@@ -622,7 +696,7 @@ HAVING COUNT(*) >= 24";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                            Detail = $"Over the last 7 days, P95 CPU utilization was {p95Cpu7d:N1}%. " +
+                            Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
                                      $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
@@ -641,7 +715,7 @@ HAVING COUNT(*) >= 24";
                     else if (memRatio < 0.40m)
                         targetMb = Math.Max(4096, physMb / 2);
 
-                    if (targetMb > 0 && targetMb < physMb)
+                    if (targetMb > 0 && targetMb / 1024 < physMb / 1024)
                     {
                         recommendations.Add(new RecommendationRow
                         {
@@ -649,7 +723,7 @@ HAVING COUNT(*) >= 24";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
-                            Detail = $"P95 SQL Server memory over 7 days is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
+                            Detail = $"P95 SQL Server memory from {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
                                      $"Reducing to {targetMb / 1024}GB would still leave headroom.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
@@ -668,6 +742,9 @@ HAVING COUNT(*) >= 24";
         try
         {
             var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
+            var storageMin = DateTime.MaxValue;
+            var storageMax = DateTime.MinValue;
+            long storageSamples = 0;
 
             await using (var command = _dataSource.CreateCommand(RecommendationsStorageTierSql))
             {
@@ -690,12 +767,19 @@ HAVING COUNT(*) >= 24";
                     if (avgReadMs < 5m && avgWriteMs < 3m)
                     {
                         lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
+                        storageSamples += reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7), CultureInfo.InvariantCulture);
+                        if (!reader.IsDBNull(5) && !reader.IsDBNull(6))
+                        {
+                            storageMin = reader.GetDateTime(5) < storageMin ? reader.GetDateTime(5) : storageMin;
+                            storageMax = reader.GetDateTime(6) > storageMax ? reader.GetDateTime(6) : storageMax;
+                        }
                     }
                 }
             }
 
             if (lowLatencyDbs.Count > 0)
             {
+                var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
                 var detail = string.Join("; ", lowLatencyDbs.Take(10)
                     .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
                 recommendations.Add(new RecommendationRow
@@ -704,7 +788,7 @@ HAVING COUNT(*) >= 24";
                     Severity = "Low",
                     Confidence = "Medium",
                     Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
-                    Detail = $"These databases have avg read latency under 5ms and write under 3ms over 7 days: {detail}" +
+                    Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
                              (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
                              ". Premium/high-performance storage may not be needed."
                 });
@@ -756,8 +840,18 @@ HAVING COUNT(*) >= 24";
         return recommendations.OrderBy(r => r.SeveritySort).ToList();
     }
 
+    /// <summary>True once the server's query stats reach back to the start of the 7-day window. The advice text claims 7 days, so the data must cover all 7: the first sample has to be at or before the cutoff, with no slack.</summary>
+    private async Task<bool> HasQueryStatsCoverageAsync(int serverId, DateTime cutoff, CancellationToken cancellationToken)
+    {
+        await using var command = _dataSource.CreateCommand(RecommendationsQueryStatsFirstSampleSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        var first = await command.ExecuteScalarAsync(cancellationToken);
+        return first is DateTime firstSample && firstSample <= cutoff;
+    }
+
     /// <summary>Reads the 7-day P95 Total Server Memory (MB) + sample count (shared by the memory + VM right-sizing checks).</summary>
-    private async Task<(int P95Mb, long SampleCount)> ReadMemoryP95Async(int serverId, DateTime cutoff, CancellationToken cancellationToken)
+    private async Task<(int P95Mb, long SampleCount, string Window)> ReadMemoryP95Async(int serverId, DateTime cutoff, CancellationToken cancellationToken)
     {
         await using var command = _dataSource.CreateCommand(RecommendationsMemoryP95Sql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -769,10 +863,11 @@ HAVING COUNT(*) >= 24";
         {
             var p95Mb = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
             var sampleCount = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
-            return (p95Mb, sampleCount);
+            var window = RightSizingWindow.Describe(reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture), reader.IsDBNull(2) || reader.IsDBNull(3) ? TimeSpan.Zero : reader.GetDateTime(3) - reader.GetDateTime(2));
+            return (p95Mb, sampleCount, window);
         }
 
-        return (0, 0L);
+        return (0, 0L, RightSizingWindow.Describe(0, TimeSpan.Zero));
     }
 
     /// <summary>Human-readable duration formatting for the maintenance-window finding (Lite's FinOps FormatDuration, verbatim).</summary>

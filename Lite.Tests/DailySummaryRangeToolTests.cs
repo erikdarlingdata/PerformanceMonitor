@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -86,7 +87,8 @@ public sealed class DailySummaryRangeToolTests : IClassFixture<SharedDuckDbFixtu
 
         /*
             2. two collected days with a hole between them. Today collected cleanly; two days ago collected
-            AND recorded an ERROR run, which bands that day Critical. Yesterday is deliberately left alone:
+            AND recorded an ERROR run — one of two, a 50% error share past the 20% bar, which bands that day
+            Warning (#3539 A2: the share's tier, never Critical). Yesterday is deliberately left alone:
             it is the gap, and the point of the read is that a gap is an ABSENT day rather than a quiet one.
         */
         await SeedRunAsync(Truncate(DateTime.UtcNow), "wait_stats", "SUCCESS", error: null);
@@ -117,8 +119,12 @@ public sealed class DailySummaryRangeToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(today.ToString("yyyy-MM-dd"), days[1].GetProperty("summary_date").GetString());
 
         /* The two days disagree, which is what makes this a calendar rather than one verdict. */
-        Assert.Equal("Critical", days[0].GetProperty("overall_health").GetString());
+        Assert.Equal("Warning", days[0].GetProperty("overall_health").GetString());
         Assert.Equal(1, days[0].GetProperty("collection_errors").GetInt64());
+        /* #3539 A2/A3, additive: the share's denominator and the blocking rate ride the payload, so the
+           band's figures are on the surface that bands — a finished day rates over 24 hours. */
+        Assert.Equal(2, days[0].GetProperty("collection_runs").GetInt64());
+        Assert.Equal(0.0, days[0].GetProperty("blocking_rate_per_hour").GetDouble());
         Assert.Equal("Healthy", days[1].GetProperty("overall_health").GetString());
         Assert.Equal(0, days[1].GetProperty("collection_errors").GetInt64());
     }
@@ -169,18 +175,18 @@ public sealed class DailySummaryRangeToolTests : IClassFixture<SharedDuckDbFixtu
 
         Assert.StartsWith(
             "Invalid days_back value '0'",
-            await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 0),
+            McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 0)),
             StringComparison.Ordinal);
 
         Assert.StartsWith(
             "Invalid days_back value '367'",
-            await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 367),
+            McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 367)),
             StringComparison.Ordinal);
 
         /* An anchor we cannot use is refused, never silently treated as today. */
         Assert.StartsWith(
             "Invalid as_of",
-            await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 30, "last tuesday"),
+            McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 30, "last tuesday")),
             StringComparison.Ordinal);
     }
 

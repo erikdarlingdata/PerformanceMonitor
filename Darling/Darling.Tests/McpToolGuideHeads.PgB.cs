@@ -1,0 +1,379 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using PerformanceMonitor.Common;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #3898 D3 head pins for the "pgB" family: <c>get_pg_extensions</c>, <c>get_pg_write_stats</c>,
+/// <c>get_pg_server_config</c> and <c>get_pg_server_config_changes</c>, all declared on
+/// <c>DarlingMcpPgServerStateTools</c> (Darling only - none of the four has a Lite twin). Follows the pattern in
+/// <see cref="McpToolGuideHeadsPgATests"/>.
+/// </summary>
+public sealed class McpToolGuideHeadsPgBTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_pg_extensions",
+        "get_pg_write_stats",
+        "get_pg_server_config",
+        "get_pg_server_config_changes",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_pg_extensions", "Per-DATABASE, not per-cluster"),
+        ("get_pg_extensions", "truncated withholds state totals"),
+        ("get_pg_extensions", "installed rows like plpgsql are cut first"),
+        ("get_pg_extensions", "Read install_census for the complete picture"),
+        ("get_pg_write_stats", "as ONE row, not a series"),
+        ("get_pg_write_stats", "checkpoints_requested is the signal"),
+        ("get_pg_write_stats", "buffers_backend/buffers_backend_fsync are NULL on PostgreSQL 17+"),
+        ("get_pg_write_stats", "wal_* columns are NULL on Aurora"),
+        ("get_pg_write_stats", "A restart inside the window nulls checkpoints_requested"),
+        ("get_pg_server_config", "LATEST IS A TIME"),
+        ("get_pg_server_config", "captured_at is when it was taken"),
+        ("get_pg_server_config", "pending_restart=true means the file and server disagree"),
+        ("get_pg_server_config", "non_default_count is the snapshot's, not the page's"),
+        ("get_pg_server_config", "database_overrides (present only if any exist)"),
+        ("get_pg_server_config_changes", "NOT reported as a change"),
+        ("get_pg_server_config_changes", "Session-scoped rows are excluded"),
+        ("get_pg_server_config_changes", "change_kind: changed, set (old_value null) or reset (new_value null)"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Nothing dropped: the parameter-overflow sentences D2 moved off <c>get_pg_server_config</c>'s
+    /// <c>include_defaults</c> and <c>get_pg_extensions</c>' <c>database_name</c> land verbatim in their tool's
+    /// tail rather than disappearing when the parameter itself was trimmed to a guardrail sentence.</summary>
+    [Fact]
+    public void D2ParameterOverflow_LandsInTheTail_NotJustTheGuardrailSentence()
+    {
+        var serverConfig = McpToolGuideTests.Served("get_pg_server_config");
+        Assert.Contains("kept in the non-default view whatever its source", serverConfig.Tail!, StringComparison.Ordinal);
+
+        var extensions = McpToolGuideTests.Served("get_pg_extensions");
+        Assert.Contains("1,632 rows against the 1,000-row maximum", extensions.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D8: no renames, no consolidation - all four still resolve as the same tool names with the same
+    /// parameters, just a shorter served head and the two over-cap parameters (D2) trimmed to a pointer.</summary>
+    [Fact]
+    public void OverCapParameters_StayAtOrUnder200_AndKeepThePointer()
+    {
+        foreach (var (tool, param) in new[] { ("get_pg_server_config", "include_defaults"), ("get_pg_extensions", "database_name") })
+        {
+            var served = McpToolGuideTests.Served(tool);
+            var p = Assert.Single(served.ParameterDescriptionLengths, x => x.Parameter == param);
+            Assert.True(p.Length <= 200, $"{tool}.{param}: {p.Length} > 200");
+        }
+    }
+}
+
+/// <summary>
+/// #3898 D3 head pins for the rest of the "pgB" family: <c>get_pg_logging_audit</c> (<c>DarlingMcpPgLoggingAuditTools</c>),
+/// <c>get_pg_io_stats</c> (<c>DarlingMcpPgIoTools</c>) and <c>get_pg_wait_sampling</c> (<c>DarlingMcpPgWaitSamplingTools</c>).
+/// Darling only - none of the three has a Lite twin. A separate class from <see cref="McpToolGuideHeadsPgBTests"/>
+/// so two lanes converting different files in the same family never conflict on one class body.
+/// </summary>
+public sealed class McpToolGuideHeadsPgBAuditIoWaitTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_pg_logging_audit",
+        "get_pg_io_stats",
+        "get_pg_wait_sampling",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_pg_logging_audit", "STORED configuration snapshot"),
+        ("get_pg_logging_audit", "never the live server"),
+        ("get_pg_logging_audit", "LATEST IS A TIME"),
+        ("get_pg_logging_audit", "unknown means the setting is missing from the snapshot, not the same as off"),
+        ("get_pg_logging_audit", "partial means a THRESHOLD is filtering"),
+        ("get_pg_logging_audit", "PostgreSQL-only"),
+        ("get_pg_io_stats", "track_io_timing is OFF by default"),
+        ("get_pg_io_stats", "never a false 0.000"),
+        ("get_pg_io_stats", "Write counters are always null on Aurora"),
+        ("get_pg_io_stats", "THE PAGE IS BOUNDED BY limit"),
+        ("get_pg_io_stats", "SHARES ARE OF THE WINDOW, NOT OF THE PAGE"),
+        ("get_pg_wait_sampling", "One of three instruments feeds each target"),
+        ("get_pg_wait_sampling", "extension_sampled"),
+        ("get_pg_wait_sampling", "service_sampled"),
+        ("get_pg_wait_sampling", "a FLOOR that undercounts sub-second waits"),
+        ("get_pg_wait_sampling", "SAMPLE COUNTS, not measured durations"),
+        ("get_pg_wait_sampling", "event_type CPU means running, not waiting"),
+        ("get_pg_wait_sampling", "THE PAGE IS BOUNDED BY limit"),
+        ("get_pg_wait_sampling", "SHARES ARE OF THE WINDOW, NOT OF THE PAGE"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Nothing dropped: every original sentence rides in the tail, including the ones D2's head
+    /// compression left out of the terse head text (the full 7-setting list, the RDS/Aurora remedy syntax,
+    /// the PLANNED consumer note, and the get_pg_plan_capture_readiness hand-off).</summary>
+    [Fact]
+    public void D3HeadCompression_LandsEveryDroppedSentenceInTheTail()
+    {
+        var audit = McpToolGuideTests.Served("get_pg_logging_audit");
+        Assert.Contains("log_min_duration_statement, log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints, log_connections, log_disconnections", audit.Tail!, StringComparison.Ordinal);
+        Assert.Contains("a parameter group on RDS/Aurora", audit.Tail!, StringComparison.Ordinal);
+        Assert.Contains("says PLANNED where that consumer does not ship yet", audit.Tail!, StringComparison.Ordinal);
+        Assert.Contains("get_pg_plan_capture_readiness", audit.Tail!, StringComparison.Ordinal);
+        Assert.EndsWith("PostgreSQL-only.", audit.Tail!, StringComparison.Ordinal);
+
+        var io = McpToolGuideTests.Served("get_pg_io_stats");
+        Assert.Contains("Richer than SQL Server's file-level dm_io_virtual_file_stats", io.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Requires PostgreSQL 16 or later; valid on a standby.", io.Tail!, StringComparison.Ordinal);
+
+        var wait = McpToolGuideTests.Served("get_pg_wait_sampling");
+        Assert.Contains("Aurora native > pg_wait_sampling extension > service sampler", wait.Tail!, StringComparison.Ordinal);
+        Assert.Contains("queryid joins get_pg_top_queries; queryid 0 is work belonging to no statement", wait.Tail!, StringComparison.Ordinal);
+        Assert.Contains("The profile is cluster-wide and carries no database attribution by design.", wait.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D8: no renames, no consolidation. D2's parameter cap: <c>get_pg_io_stats</c>'s <c>limit</c>
+    /// description was 235 chars, tightened to fit 200 without dropping either guardrail word the shared
+    /// <c>EveryPercentTool_NamesItsDenominator...</c> pin checks for.</summary>
+    [Fact]
+    public void IoStatsLimitParameter_FitsD2Cap_AndKeepsItsGuardrailWords()
+    {
+        var served = McpToolGuideTests.Served("get_pg_io_stats");
+        var limit = Assert.Single(served.ParameterDescriptionLengths, x => x.Parameter == "limit");
+        Assert.True(limit.Length <= 200, $"get_pg_io_stats.limit: {limit.Length} > 200");
+    }
+}
+
+/// <summary>
+/// #3898 D3 head pins for the rest of the "pgB" family: <c>get_pg_blocking</c> (<c>DarlingMcpPgBlockingTools</c>),
+/// <c>get_pg_wait_stats</c> (<c>DarlingMcpPgWaitTools</c>) and <c>get_pg_index_usage</c>
+/// (<c>DarlingMcpPgIndexUsageTools</c>). Darling only - none of the three has a Lite twin (see
+/// <c>CrossAppMcpToolInventoryPinTests.KnownLiteMissingMcpTools</c>). A separate class from
+/// <see cref="McpToolGuideHeadsPgBTests"/> and <see cref="McpToolGuideHeadsPgBAuditIoWaitTests"/> so parallel
+/// lanes converting different files in the same family never conflict on one class body.
+/// </summary>
+public sealed class McpToolGuideHeadsPgBBlockingWaitIndexTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_pg_blocking",
+        "get_pg_wait_stats",
+        "get_pg_index_usage",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_pg_blocking", "a periodic SAMPLE, not an event log"),
+        ("get_pg_blocking", "empty means none was SAMPLED, not none happened"),
+        ("get_pg_blocking", "Cycles (deadlocks) are reported separately, never folded into a chain"),
+        ("get_pg_blocking", "root_backend_id is a STRING; compare as text, never as a number"),
+        ("get_pg_blocking", "idle in transaction: an application defect; active: a query to tune"),
+        ("get_pg_wait_stats", "Aurora only"),
+        ("get_pg_wait_stats", "stock targets are served by get_pg_wait_sampling instead"),
+        ("get_pg_wait_stats", "Values are milliseconds"),
+        ("get_pg_wait_stats", "THE PAGE IS BOUNDED BY limit"),
+        ("get_pg_wait_stats", "SHARES ARE OF THE WINDOW, NOT OF THE PAGE"),
+        ("get_pg_index_usage", "scans_in_window, not lifetime total_scans_since_stats_reset, is the disuse figure"),
+        ("get_pg_index_usage", "needs 2+ samples"),
+        ("get_pg_index_usage", "Droppability is GATED on primary key/unique/exclusion/replica-identity/partial/expression/invalid facts"),
+        ("get_pg_index_usage", "unscanned_without_a_structural_blocker is a candidate, never a conclusion"),
+        ("get_pg_index_usage", "WRITERS ONLY"),
+        ("get_pg_index_usage", "Floors at 64 kB"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Nothing dropped: every original sentence rides in the tail, including the ones the terse head
+    /// left out (the pid/state/application/query field list, the SQL Server blocked-process report contrast,
+    /// the 64-bit backend-id composite explanation, and the full Aurora wait-taxonomy/units narrative).</summary>
+    [Fact]
+    public void D3HeadCompression_LandsEveryDroppedSentenceInTheTail()
+    {
+        var blocking = McpToolGuideTests.Served("get_pg_blocking");
+        Assert.Contains("the root blocker's pid, state, application, username and query text", blocking.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Unlike SQL Server's blocked-process report", blocking.Tail!, StringComparison.Ordinal);
+        Assert.Contains("a 64-bit composite of the backend's start time and its pid", blocking.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Works on any PostgreSQL target including standbys.", blocking.Tail!, StringComparison.Ordinal);
+
+        var wait = McpToolGuideTests.Served("get_pg_wait_stats");
+        Assert.Contains("IO events point at storage or cache misses, Lock events at blocking between sessions", wait.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Note this is a separate tool from get_wait_stats", wait.Tail!, StringComparison.Ordinal);
+        Assert.Contains("reports in microseconds, so the two cannot share one result shape", wait.Tail!, StringComparison.Ordinal);
+
+        var usage = McpToolGuideTests.Served("get_pg_index_usage");
+        Assert.Contains("an index with millions of lifetime scans and none in ninety days is dead weight today", usage.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Ranked by the bytes of an index nothing scanned, largest first, with invalid indexes on top", usage.Tail!, StringComparison.Ordinal);
+        Assert.Contains("1,517", usage.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D2 parameter overflow: <c>get_pg_wait_stats</c>' and <c>get_pg_index_usage</c>'s <c>limit</c>
+    /// descriptions were 214 and 257 chars; the trailing clause each cut to fit 200 lands verbatim in its
+    /// tool's tail rather than disappearing (#3898 lesson: never reword a cut parameter clause).</summary>
+    [Fact]
+    public void D2ParameterOverflow_LandsInTheTail_Verbatim()
+    {
+        var wait = McpToolGuideTests.Served("get_pg_wait_stats");
+        var waitLimit = Assert.Single(wait.ParameterDescriptionLengths, x => x.Parameter == "limit");
+        Assert.True(waitLimit.Length <= 200, $"get_pg_wait_stats.limit: {waitLimit.Length} > 200");
+        Assert.Contains("whatever this is set to.", wait.Tail!, StringComparison.Ordinal);
+
+        var usage = McpToolGuideTests.Served("get_pg_index_usage");
+        var usageLimit = Assert.Single(usage.ParameterDescriptionLengths, x => x.Parameter == "limit");
+        Assert.True(usageLimit.Length <= 200, $"get_pg_index_usage.limit: {usageLimit.Length} > 200");
+        Assert.Contains("This is what bounds the page", usage.Tail!, StringComparison.Ordinal);
+        Assert.Contains("it is observed by fetching one row past this cap, never inferred from a full page", usage.Tail!, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// #3898 D3 head pins for the rest of the "pgB" family: <c>get_pg_kernel_stats</c>
+/// (<c>DarlingMcpPgKernelStatsTools</c>), <c>get_pg_xmin_horizon</c> (<c>DarlingMcpPgXminTools</c>) and
+/// <c>get_pg_table_bloat</c> (<c>DarlingMcpPgTableBloatTools</c>). Darling only - none of the three has a Lite
+/// twin. A separate class from the others in this file so parallel lanes converting different files in the
+/// same family never conflict on one class body.
+/// </summary>
+public sealed class McpToolGuideHeadsPgBKernelXminBloatTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_pg_kernel_stats",
+        "get_pg_xmin_horizon",
+        "get_pg_table_bloat",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_pg_kernel_stats", "zero means cache-served, not unread"),
+        ("get_pg_kernel_stats", "PAGE BOUNDED BY limit: queries_returned/truncated"),
+        ("get_pg_kernel_stats", "SHARES ARE OF THE WINDOW: pct_of_total_cpu divides by total_cpu_ms, not the page sum"),
+        ("get_pg_kernel_stats", "per-interval deltas needing a second to difference"),
+        ("get_pg_xmin_horizon", "EVERY capture in the window, not just captures with a holder"),
+        ("get_pg_xmin_horizon", "no_holder: captured, found nothing - all-clear"),
+        ("get_pg_xmin_horizon", "unavailable: no capture in the window"),
+        ("get_pg_xmin_horizon", "feeds get_pg_wraparound_risk"),
+        ("get_pg_table_bloat", "ESTIMATE, NOT MEASUREMENT"),
+        ("get_pg_table_bloat", "SUPPRESSED (nulled), not shown"),
+        ("get_pg_table_bloat", "pg_monitor alone does not grant it"),
+        ("get_pg_table_bloat", "empty: every table under the 1 MB floor, real all-clear"),
+        ("get_pg_table_bloat", "unavailable: no snapshots ever or in window"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Nothing dropped: every original sentence the terse head left out still rides in the tail -
+    /// get_pg_kernel_stats' get_pg_top_queries pairing and window-share arithmetic, get_pg_xmin_horizon's full
+    /// five-cause list and vacuum-horizon-alert denominator note, and get_pg_table_bloat's measured pgstattuple
+    /// comparison and collection cadence.</summary>
+    [Fact]
+    public void D3HeadCompression_LandsEveryDroppedSentenceInTheTail()
+    {
+        var kernel = McpToolGuideTests.Served("get_pg_kernel_stats");
+        Assert.Contains("which is the first split any tuning question needs", kernel.Tail!, StringComparison.Ordinal);
+        Assert.Contains("do not read them as logical I/O", kernel.Tail!, StringComparison.Ordinal);
+        Assert.Contains("returned_pct_of_total is that ratio stated once", kernel.Tail!, StringComparison.Ordinal);
+
+        var xmin = McpToolGuideTests.Served("get_pg_xmin_horizon");
+        Assert.Contains("a long-running or idle-in-transaction session", xmin.Tail!, StringComparison.Ordinal);
+        Assert.Contains("unheld captures included, the same denominator the vacuum-horizon alert uses", xmin.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Works on any PostgreSQL target.", xmin.Tail!, StringComparison.Ordinal);
+
+        var bloat = McpToolGuideTests.Served("get_pg_table_bloat");
+        Assert.Contains("Against pgstattuple on real tables with current statistics it was within about 2 percentage points", bloat.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Collected hourly per database on writers only, for tables of at least 1 MB.", bloat.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D2 parameter overflow: <c>get_pg_kernel_stats</c>' and <c>get_pg_table_bloat</c>'s <c>limit</c>
+    /// descriptions were 204 and 270 chars; each was trimmed to a verbatim prefix at or under 200, and the
+    /// complete original parameter sentence (not just the cut suffix) lands verbatim in its tool's tail rather
+    /// than being reworded away (#3898 lesson: never reword a cut parameter clause).</summary>
+    [Fact]
+    public void D2ParameterOverflow_LandsInTheTail_Verbatim()
+    {
+        var kernel = McpToolGuideTests.Served("get_pg_kernel_stats");
+        var kernelLimit = Assert.Single(kernel.ParameterDescriptionLengths, x => x.Parameter == "limit");
+        Assert.True(kernelLimit.Length <= 200, $"get_pg_kernel_stats.limit: {kernelLimit.Length} > 200");
+        Assert.Contains("the shares stay of the whole window whatever this is set to.", kernel.Tail!, StringComparison.Ordinal);
+
+        var bloat = McpToolGuideTests.Served("get_pg_table_bloat");
+        var bloatLimit = Assert.Single(bloat.ParameterDescriptionLengths, x => x.Parameter == "limit");
+        Assert.True(bloatLimit.Length <= 200, $"get_pg_table_bloat.limit: {bloatLimit.Length} > 200");
+        Assert.Contains("it is observed by fetching one row past this cap, never inferred from a full page.", bloat.Tail!, StringComparison.Ordinal);
+    }
+}

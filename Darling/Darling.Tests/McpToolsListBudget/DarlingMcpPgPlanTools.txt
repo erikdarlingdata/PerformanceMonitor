@@ -1,0 +1,13 @@
+# DarlingMcpPgPlanTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_pg_plan_capture_readiness 608
+param get_pg_plan_capture_readiness.as_of 167
+param get_pg_plan_capture_readiness.hours_back 162
+param get_pg_plan_capture_readiness.limit 158
+param get_pg_plan_capture_readiness.server_name 28
+
+tool get_pg_plans 547
+param get_pg_plans.as_of 167
+param get_pg_plans.hours_back 40
+param get_pg_plans.limit 72
+param get_pg_plans.query_id 88
+param get_pg_plans.server_name 28

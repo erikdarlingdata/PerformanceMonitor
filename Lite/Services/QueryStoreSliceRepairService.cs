@@ -522,11 +522,27 @@ FROM (SELECT COUNT(*) AS c FROM {Table} GROUP BY {string.Join(", ", hotKey)} HAV
         return new Survey(groups, rows, archive, unreadable);
     }
 
-    /// <summary>The archived Query Store parquet files, oldest name first.</summary>
+    /// <summary>
+    /// The archived Query Store parquet files, oldest name first: the whole-month files and the part files
+    /// (<c>YYYYMM_query_store_stats_ptNNN.parquet</c>) compaction splits a month into when its input is too big
+    /// for one merge (#4721). The archive views read both shapes, so the repair must too. Each part is a file in
+    /// its own right, surveyed and rewritten on its own with the same checks as a whole-month file.
+    /// </summary>
     private IEnumerable<string> ArchiveFiles()
-        => Directory.Exists(_archivePath)
-            ? Directory.GetFiles(_archivePath, $"*_{Table}.parquet").OrderBy(f => f, StringComparer.Ordinal)
-            : [];
+    {
+        if (!Directory.Exists(_archivePath))
+        {
+            return [];
+        }
+
+        /* MatchType.Simple: '?' is exactly one character, as it is in the archive views' own part glob, so the
+           two shapes are the ones compaction writes and no other name. */
+        var exact = new EnumerationOptions { MatchType = MatchType.Simple, MatchCasing = MatchCasing.CaseInsensitive, AttributesToSkip = 0 };
+        return new[] { $"*_{Table}.parquet", $"*_{Table}_pt???.parquet" }
+            .SelectMany(pattern => Directory.EnumerateFiles(_archivePath, pattern, exact))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(f => f, StringComparer.Ordinal);
+    }
 
     private static async Task<ArchiveFileSurvey> SurveyArchiveFileAsync(
         DuckDBConnection connection, string file, CancellationToken cancellationToken)
@@ -628,9 +644,11 @@ HAVING COUNT(*) > 1";
             var match = string.Join(" AND ", key.Select(k => $"t.{k} IS NOT DISTINCT FROM r.{k}"));
 
             /* DELETE the slices that are not the survivor, THEN write the recombined numbers onto the one
-               that is. That order is load-bearing: DuckDB implements UPDATE as delete+insert, so an updated
-               row's rowid CHANGES, and updating first would leave the survivor carrying a rowid the delete
-               predicate no longer recognises — deleting the row it had just repaired. After the delete each
+               that is. DuckDB carries out an UPDATE that writes an indexed column as delete+insert, which
+               CHANGES the row's rowid; the SET list below writes measurements only, which DuckDB updates in
+               place, but deleting first means an indexed column joining that list could never leave the survivor
+               carrying a rowid the delete predicate no longer recognises — deleting the row it had just
+               repaired. After the delete each
                collapsed group holds exactly one row, so the update matches on the key alone and never has to
                trust a rowid across a mutation. */
             using (var command = connection.CreateCommand())
@@ -826,7 +844,11 @@ COPY (
         File.Move(tempPath, originalPath);
 
         await FlushExternalFileCacheAsync(connection, cancellationToken);
-        await _duckDb.CreateArchiveViewsAsync();
+
+        /* CreateArchiveViewsCoreAsync, not CreateArchiveViewsAsync (#4262 round 1 finding 3): the caller
+           (RepairAsync, ~line 767) already holds the write lock for this exact swap, and s_dbLock's
+           NoRecursion policy makes a nested read lock throw. */
+        await _duckDb.CreateArchiveViewsCoreAsync();
     }
 
     /// <summary>The rewritten file's row count and total execution count, for the conservation check.</summary>

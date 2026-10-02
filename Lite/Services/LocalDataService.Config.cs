@@ -15,6 +15,11 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /* #3541 A10: every latest-snapshot read here carries capture_time on the row (the SAME statement as the
+       values, never a second MAX() read that could stamp the next capture), so the MCP tools can publish
+       captured_at. Config is captured ON CONNECT, not on a schedule — the "current" value this family
+       serves is as old as the last successful connect, and the stamp is what says so. */
+
     /// <summary>
     /// Gets the latest server configuration snapshot (sys.configurations).
     /// </summary>
@@ -23,7 +28,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
-SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanced
+SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanced, capture_time
 FROM v_server_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
@@ -41,7 +46,8 @@ ORDER BY configuration_name";
                 ValueConfigured = reader.IsDBNull(1) ? 0 : ToInt64(reader.GetValue(1)),
                 ValueInUse = reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2)),
                 IsDynamic = !reader.IsDBNull(3) && reader.GetBoolean(3),
-                IsAdvanced = !reader.IsDBNull(4) && reader.GetBoolean(4)
+                IsAdvanced = !reader.IsDBNull(4) && reader.GetBoolean(4),
+                CaptureTime = reader.GetDateTime(5)
             });
         }
 
@@ -64,7 +70,8 @@ SELECT database_name, state_desc, compatibility_level, collation_name, recovery_
        is_query_store_on, is_encrypted, is_trustworthy_on, is_db_chaining_on,
        is_broker_enabled, is_cdc_enabled, is_mixed_page_allocation_on,
        log_reuse_wait_desc, page_verify_option, target_recovery_time_seconds, delayed_durability,
-       is_accelerated_database_recovery_on, is_memory_optimized_enabled, is_optimized_locking_on
+       is_accelerated_database_recovery_on, is_memory_optimized_enabled, is_optimized_locking_on,
+       capture_time
 FROM v_database_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)" + dbClause + @"
@@ -108,7 +115,11 @@ ORDER BY database_name";
                 DelayedDurability = reader.IsDBNull(++ordinal) ? "" : reader.GetString(ordinal),
                 IsAcceleratedDatabaseRecoveryOn = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 IsMemoryOptimizedEnabled = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
-                IsOptimizedLockingOn = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                IsOptimizedLockingOn = reader.IsDBNull(++ordinal) ? null : reader.GetBoolean(ordinal),
+                /* Appended as the 29th column and read one past the 28-column block the incrementing
+                   mapping above consumes, so that mapping — shared byte-for-byte with the Darling
+                   viewer and reader — is untouched. */
+                CaptureTime = reader.GetDateTime(++ordinal),
             });
         }
 
@@ -118,6 +129,12 @@ ORDER BY database_name";
 
     /// <summary>
     /// Gets the latest per-database Query Store health snapshot (#2319 — the Query Store grid).
+    ///
+    /// <para>Column order is the collector's payload order — the original nine, then the two v64 capture
+    /// modes (#3796) — with the snapshot stamp <c>capture_time</c> kept LAST, so the modes are ordinals 10
+    /// and 11 and the stamp moves from 10 to 12. The v64 rung appended the columns to the table and the
+    /// archive view is <c>SELECT *</c>, so a migrated database answers both; the MCP tool publishes them as
+    /// its two trailing fields in this order, and the grid shows them as its two trailing columns.</para>
     /// </summary>
     public async Task<List<QueryStoreHealthRow>> GetLatestQueryStoreHealthAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
@@ -125,7 +142,7 @@ ORDER BY database_name";
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
         command.CommandText = @"
-SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes
+SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode, capture_time
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)" + dbClause + @"
@@ -151,6 +168,11 @@ ORDER BY database_name";
                 StaleQueryThresholdDays = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
                 MaxPlansPerQuery = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
                 IntervalLengthMinutes = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
+                /* v64 (#3796): NULL stays null — the row predates the rung, or the engine is 2016 (wait stats) —
+                   so the MCP tool can publish it as null and the grid can render it as the absence glyph. */
+                QueryCaptureMode = reader.IsDBNull(10) ? null : reader.GetString(10),
+                WaitStatsCaptureMode = reader.IsDBNull(11) ? null : reader.GetString(11),
+                CaptureTime = reader.GetDateTime(12),
             });
         }
 
@@ -166,7 +188,7 @@ ORDER BY database_name";
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
         command.CommandText = @"
-SELECT database_name, configuration_name, value, value_for_secondary
+SELECT database_name, configuration_name, value, value_for_secondary, capture_time
 FROM v_database_scoped_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)" + dbClause + @"
@@ -185,7 +207,8 @@ ORDER BY database_name, configuration_name";
                 DatabaseName = reader.GetString(0),
                 ConfigurationName = reader.GetString(1),
                 Value = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                ValueForSecondary = reader.IsDBNull(3) ? "" : reader.GetString(3)
+                ValueForSecondary = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                CaptureTime = reader.GetDateTime(4)
             });
         }
 
@@ -194,16 +217,33 @@ ORDER BY database_name, configuration_name";
 
     /// <summary>
     /// Gets the latest trace flags snapshot.
+    ///
+    /// <para>#3999: anchored on the trace_flags collector's newest SUCCESSFUL run, not the newest row - the
+    /// Darling twin of this read (<c>DarlingCurrentConfigReader.TraceFlagsSql</c> /
+    /// <c>ViewerDataService.Config.TraceFlagsSql</c>) carries the same fix, and the reasoning there applies
+    /// verbatim: a capture that finds every flag off writes ZERO rows, so a plain
+    /// <c>capture_time = MAX(capture_time)</c> falls back to an older capture that still had a flag on. The
+    /// second <c>AND</c> decides on the ROW COUNT of the newest SUCCESS this collector logged in
+    /// <c>v_collection_log</c>: every capture writes the full list of flags that are on, so 0 rows means
+    /// every flag was off and the read reports none. Not on timestamps: Lite stamps collection_log when a run
+    /// STARTS and Darling when it ENDS, so no timestamp comparison means the same thing on both. No SUCCESS
+    /// row, or a NULL count, keeps the pre-fix reading.</para>
     /// </summary>
     public async Task<List<TraceFlagRow>> GetLatestTraceFlagsAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
-SELECT trace_flag, status, is_global, is_session
+SELECT trace_flag, status, is_global, is_session, capture_time
 FROM v_trace_flags
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
+AND   COALESCE(
+          (SELECT rows_collected FROM v_collection_log
+           WHERE server_id = $1 AND collector_name = 'trace_flags' AND status = 'SUCCESS'
+           ORDER BY collection_time DESC NULLS LAST
+           LIMIT 1),
+          1) > 0
 ORDER BY trace_flag";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -217,7 +257,8 @@ ORDER BY trace_flag";
                 TraceFlag = reader.GetInt32(0),
                 Status = !reader.IsDBNull(1) && reader.GetBoolean(1),
                 IsGlobal = !reader.IsDBNull(2) && reader.GetBoolean(2),
-                IsSession = !reader.IsDBNull(3) && reader.GetBoolean(3)
+                IsSession = !reader.IsDBNull(3) && reader.GetBoolean(3),
+                CaptureTime = reader.GetDateTime(4)
             });
         }
 
@@ -227,6 +268,8 @@ ORDER BY trace_flag";
 
 public class ServerConfigRow
 {
+    /// <summary>The connect-time capture this row belongs to (#3541 A10); every row of one snapshot shares it.</summary>
+    public DateTime CaptureTime { get; set; }
     public string ConfigurationName { get; set; } = "";
     public long ValueConfigured { get; set; }
     public long ValueInUse { get; set; }
@@ -239,6 +282,8 @@ public class ServerConfigRow
 
 public class DatabaseConfigRow
 {
+    /// <summary>The connect-time capture this row belongs to (#3541 A10).</summary>
+    public DateTime CaptureTime { get; set; }
     public string DatabaseName { get; set; } = "";
     public string StateDesc { get; set; } = "";
     public int CompatibilityLevel { get; set; }
@@ -266,7 +311,7 @@ public class DatabaseConfigRow
     public string DelayedDurability { get; set; } = "";
     public bool IsAcceleratedDatabaseRecoveryOn { get; set; }
     public bool IsMemoryOptimizedEnabled { get; set; }
-    public bool IsOptimizedLockingOn { get; set; }
+    public bool? IsOptimizedLockingOn { get; set; }
 
     /* Display properties for DataGrid (bool → Yes/No) */
     public string ReadOnlyDisplay => IsReadOnly ? "Yes" : "No";
@@ -286,7 +331,7 @@ public class DatabaseConfigRow
     public string MixedPageAllocationDisplay => IsMixedPageAllocationOn ? "Yes" : "No";
     public string AdrDisplay => IsAcceleratedDatabaseRecoveryOn ? "Yes" : "No";
     public string MemoryOptimizedDisplay => IsMemoryOptimizedEnabled ? "Yes" : "No";
-    public string OptimizedLockingDisplay => IsOptimizedLockingOn ? "Yes" : "No";
+    public string OptimizedLockingDisplay => IsOptimizedLockingOn is null ? "Unknown" : IsOptimizedLockingOn.Value ? "Yes" : "No";
 }
 
 
@@ -297,9 +342,22 @@ public class DatabaseConfigRow
 /// both, because desired READ_WRITE with actual READ_ONLY is precisely the condition this collector
 /// exists to surface. <see cref="ReadonlyReasonDisplay"/> decodes the bitmask values an operator
 /// actually meets; unknown bits fall back to the raw number rather than guessing.
+///
+/// <para>v64 (#3796) added the two capture modes as the row's trailing pair. <see cref="QueryCaptureMode"/>
+/// is the one option on this row that names a plan-churn factory: <c>ALL</c> captures every query the engine
+/// compiles, one-off ad hoc statements included, so on an ad hoc workload each distinct text is a new query
+/// with a new plan and the store fills toward its cap; <c>AUTO</c> (the engine default since 2019) skips
+/// insignificant queries; <c>CUSTOM</c> (2019+) is <c>AUTO</c> with operator-set thresholds; <c>NONE</c> stops
+/// capturing new queries. <see cref="WaitStatsCaptureMode"/> <c>ON</c> / <c>OFF</c> is whether per-plan wait
+/// statistics are recorded into every runtime interval. Both are the DMV's <c>*_desc</c> spelling verbatim and
+/// both are nullable, because NULL is a real state here — the row predates the rung, or (wait stats) the engine
+/// is SQL Server 2016, where the column does not exist — and the two <c>*Display</c> properties render it as the
+/// grid's absence glyph rather than as a blank that reads like a value.</para>
 /// </summary>
 public class QueryStoreHealthRow
 {
+    /// <summary>The hourly capture this row belongs to (#3541 A10).</summary>
+    public DateTime CaptureTime { get; set; }
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";
     public string DesiredState { get; set; } = "";
@@ -310,6 +368,21 @@ public class QueryStoreHealthRow
     public long StaleQueryThresholdDays { get; set; }
     public long MaxPlansPerQuery { get; set; }
     public long IntervalLengthMinutes { get; set; }
+
+    /// <summary>v64 (#3796): <c>query_capture_mode_desc</c> verbatim — <c>ALL</c> / <c>AUTO</c> / <c>CUSTOM</c> /
+    /// <c>NONE</c>; null on a pre-rung row.</summary>
+    public string? QueryCaptureMode { get; set; }
+
+    /// <summary>v64 (#3796): <c>wait_stats_capture_mode_desc</c> verbatim — <c>ON</c> / <c>OFF</c>; null on a
+    /// pre-rung row or a 2016 engine, and that null means "the engine cannot say", never <c>OFF</c>.</summary>
+    public string? WaitStatsCaptureMode { get; set; }
+
+    /// <summary>The Capture Mode cell: the mode verbatim, or the absence glyph for a null (pre-rung row).</summary>
+    public string CaptureModeDisplay => QueryCaptureMode ?? "—";
+
+    /// <summary>The Wait Stats Capture cell: <c>ON</c> / <c>OFF</c> verbatim, or the absence glyph for a null
+    /// (pre-rung row, or a 2016 engine that has no such option — not <c>OFF</c>).</summary>
+    public string WaitStatsCaptureModeDisplay => WaitStatsCaptureMode ?? "—";
 
     public string StateDisplay =>
         string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)
@@ -326,6 +399,8 @@ public class QueryStoreHealthRow
 
 public class DatabaseScopedConfigRow
 {
+    /// <summary>The connect-time capture this row belongs to (#3541 A10).</summary>
+    public DateTime CaptureTime { get; set; }
     public string DatabaseName { get; set; } = "";
     public string ConfigurationName { get; set; } = "";
     public string Value { get; set; } = "";
@@ -334,6 +409,8 @@ public class DatabaseScopedConfigRow
 
 public class TraceFlagRow
 {
+    /// <summary>The connect-time capture this row belongs to (#3541 A10).</summary>
+    public DateTime CaptureTime { get; set; }
     public int TraceFlag { get; set; }
     public bool Status { get; set; }
     public bool IsGlobal { get; set; }

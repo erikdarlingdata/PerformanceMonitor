@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Notifications;
@@ -46,7 +48,8 @@ public class EmailAlertService : IFindingAlertSender
 
     /// <summary>
     /// Attempts to send an alert (email + webhook via the shared core) and writes Lite's single
-    /// combined <c>config_alert_log</c> row, regardless of email status. Never throws.
+    /// combined <c>config_alert_log</c> row, regardless of email status. Never throws, except for the caller's
+    /// own cancellation (<paramref name="cancellationToken"/>).
     /// </summary>
     /// <param name="detailText">
     /// The alert's prose. PERSISTED on the row either way; delivered to the channels only when
@@ -71,7 +74,23 @@ public class EmailAlertService : IFindingAlertSender
     /// findings carry their own <c>analysis_notify_cooldown_minutes</c> throttle and were not part of what
     /// #3430 measured.</para>
     /// </param>
-    public async Task TrySendAlertEmailAsync(
+    /// <param name="trayShown">
+    /// #3916: whether the caller raised Lite's tray balloon for this alert on the same call. Defaults to
+    /// TRUE — the engine path (<c>LiteAlertDeliverer.DeliverAsync</c>) shows a styled balloon for every
+    /// non-muted alert. The analysis finding path passes FALSE: Lite wires no tray sink into
+    /// <c>AnalysisNotificationService</c>, so no toast is raised for a finding, and a row stored
+    /// <c>tray</c> there would read "Shown" for a toast nobody saw.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// #4752: handed to the webhook posts, so a caller that is stopping (the alert engine's token, through
+    /// <see cref="LiteAlertDeliverer"/>) does not wait out an endpoint that never answers. A cancel from this
+    /// token comes out of here as the <see cref="OperationCanceledException"/> it is, before any row is
+    /// written: a delivery the caller abandoned is not a delivery that failed, so it leaves no history row and
+    /// does not count against the channel. A post that only times out is still that channel's failure, and its
+    /// row is still written. Optional, so every caller that has no token to give (the finding path, the
+    /// connection-edge and availability-group alerts) compiles and behaves as before.
+    /// </param>
+    public async Task<AlertDelivery?> TrySendAlertEmailAsync(
         string metricName,
         string serverName,
         string currentValue,
@@ -83,20 +102,38 @@ public class EmailAlertService : IFindingAlertSender
         bool muted = false,
         string? detailText = null,
         bool deliverProse = true,
-        AlertNotificationMode? deliveryMode = null)
+        AlertNotificationMode? deliveryMode = null,
+        bool trayShown = true,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
-                detailText: deliverProse ? detailText : null, deliveryMode: deliveryMode);
+                detailText: deliverProse ? detailText : null, deliveryMode: deliveryMode,
+                cancellationToken: cancellationToken);
 
-            /* trayChannelPresent: true — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
+            /* trayChannelPresent: trayShown, true on the engine path — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
                non-muted alert on the same call that reaches here, so a stored "tray" really does mean a
                toast was shown. This is Lite's half of the deliberate per-SKU divergence; the headless
                Darling service passes false because it has no tray at all. Lite's stored values are
-               unchanged by the shared derivation. */
-            var delivery = AlertDelivery.FromFanout(result, muted, trayChannelPresent: true);
+               unchanged by the shared derivation. #3916: the value is trayShown, which the analysis finding
+               path clears — no toast is raised for a finding on Lite, so its row must not claim one.
+               Still the named argument, so the answer cannot be flipped by a positional edit. */
+            var delivery = AlertDelivery.FromFanout(result, muted, trayChannelPresent: trayShown);
+
+            /* #3598 / #4750: the row records where the posts went and what each channel's send did, exactly as
+               the headless service's DarlingAlertDeliverer does. Lite has no routes table, so the record lists
+               the channels the parent settings resolved to (source "Default"), each with "delivered", "failed"
+               or "not attempted" — an alert that reached one webhook and failed on another used to read as one
+               delivery. Only the outcome word is stored: a webhook error can carry its endpoint's URL, so the
+               reason stays in send_error. Null when no channel reached resolution (throttled, folded, muted,
+               unconfigured), and the context is created here if the alert had none. */
+            if (result.Route is { } route)
+            {
+                context ??= new AlertContext();
+                context.Route = route.ToDto(result.ChannelOutcomes);
+            }
 
             /* Always log the alert, regardless of email status. The numeric current/threshold
                resolution happens in the store (it owns the DuckDB DOUBLE columns); the record
@@ -113,21 +150,34 @@ public class EmailAlertService : IFindingAlertSender
                 numericCurrentValue, numericThresholdValue,
                 delivery,
                 muted, detailText, contextJson));
+
+            /* #3916: the recorded disposition, for the analysis path's hold (a hold is earned by a
+               delivery). The engine callers discard it. */
+            return delivery;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's own cancel is a stop request, not a failed send. Passed on before the
+               catch-all below, which would log it as an error and hand back null, so the deliverer would
+               never see that its caller had stopped. The `when` filter leaves every other exception, a
+               cancel this method did not ask for included, on the old path. */
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogError($"TrySendAlertEmailAsync outer error: {ex.Message}");
+            return null;
         }
     }
 
     /// <summary>
-    /// <see cref="IFindingAlertSender"/>: latest alert_log time for (serverId, metricName),
-    /// any channel/result — seeds the shared AnalysisNotificationService cooldown across
-    /// restarts (the analysis cooldown is stamped unconditionally, so the persisted equivalent
-    /// is the latest row for that metric_name). Delegates to the injected store.
+    /// <see cref="IFindingAlertSender"/>: latest DELIVERED-page time for (serverId, metricName) —
+    /// seeds the shared AnalysisNotificationService #2054 hold across restarts. #3916: a hold is
+    /// earned by a delivery, so the seed reads only rows that reached someone. Delegates to the
+    /// injected store.
     /// </summary>
-    public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
-        => _historyStore.GetLastAlertTimeAsync(serverId, metricName);
+    public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
+        => _historyStore.GetLastDeliveredPageUtcAsync(serverId, metricName);
 
     /// <summary>
     /// <see cref="IFindingAlertSender"/>: dispatches a composed analysis-finding alert.
@@ -136,10 +186,22 @@ public class EmailAlertService : IFindingAlertSender
     /// params — so no separate fallback row is needed.
     /// <para>The row persists <c>DetailText</c>; the channels render it only if the producer says
     /// to. Darling's <c>DarlingFindingAlertSender</c> reads the same declaration.</para>
+    /// <para>#3916: returns the delivery the row recorded; null only when the send path caught.</para>
     /// </summary>
-    public Task SendFindingAlertAsync(FindingAlert alert)
+    public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
     {
         var serverId = int.TryParse(alert.ServerId, out var sid) ? sid : 0;
+
+        if (alert.Route == FindingRoute.Digest)
+        {
+            /* #3712: the corroboration gate routed this finding to the digest — no channel is consulted, so
+               this does NOT go through TrySendAlertEmailAsync (which would spend the send core's cooldown and
+               stamp the row `tray`, a toast that was never shown). One row, disposition `digest`, the routing
+               record already on the context; the Alerts tab, the MCP history read and the Recommendations grid
+               all read it from there. */
+            return RecordDigestRoutedFindingAsync(alert, serverId);
+        }
+
         return TrySendAlertEmailAsync(
             alert.MetricName,
             alert.ServerName,
@@ -151,6 +213,76 @@ public class EmailAlertService : IFindingAlertSender
             numericThresholdValue: alert.NotifyThreshold,
             muted: false,
             detailText: alert.DetailText,
-            deliverProse: alert.DeliverDetailText);
+            deliverProse: alert.DeliverDetailText,
+            /* #3916: Lite raises NO toast for an analysis finding (MainWindow wires no tray sink into
+               AnalysisNotificationService), so an unconfigured finding's row is "unconfigured", not a
+               "tray" row that reads Shown. */
+            trayShown: false);
+    }
+
+    /// <summary>
+    /// <see cref="IFindingAlertSender"/> (#3916): ONE message naming every held page over the cap, then one
+    /// row per named page under its own metric name carrying the summary's delivery. No toast (Lite wires no
+    /// analysis tray sink), so trayChannelPresent is false as on the single-page path. Never throws.
+    /// </summary>
+    public async Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+    {
+        if (named is null || named.Count == 0)
+            return null;
+        try
+        {
+            var (serverName, currentValue, context) = FindingSummary.Compose(named);
+            var result = await _core.TrySendAsync(
+                FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(),
+                named[0].ServerId, context, attemptChannels: true);
+            /* No toast for a summary on Lite, the same answer the single-finding arm states: the local keeps
+               the one declared producer shape (trayChannelPresent: trayShown) the tray-channel pin reads. */
+            const bool trayShown = false;
+            var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: trayShown);
+            foreach (var alert in named)
+            {
+                await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                    alert.ServerId, alert.ServerName, alert.MetricName,
+                    alert.CurrentValue, alert.ThresholdValue,
+                    alert.Severity, alert.NotifyThreshold,
+                    delivery,
+                    false, FindingSummary.RowDetailText(alert, named.Count),
+                    alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null));
+            }
+            return delivery;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"SendFindingSummaryAsync error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The digest arm of <see cref="SendFindingAlertAsync"/> (#3712): Lite's one combined
+    /// <c>config_alert_log</c> row, written with <see cref="AlertDelivery.RoutedToDigest"/> and nothing
+    /// attempted. Mirrors the row <see cref="TrySendAlertEmailAsync"/> writes column for column — the same
+    /// numeric severity/threshold, the full detail text, the serialized context — so every reader of the
+    /// table sees one shape. Never throws.
+    /// </summary>
+    private async Task<AlertDelivery?> RecordDigestRoutedFindingAsync(FindingAlert alert, int serverId)
+    {
+        try
+        {
+            string? contextJson = alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null;
+            var delivery = AlertDelivery.RoutedToDigest();
+            await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                serverId.ToString(), alert.ServerName, alert.MetricName,
+                alert.CurrentValue, alert.ThresholdValue,
+                alert.Severity, alert.NotifyThreshold,
+                delivery,
+                false, alert.DetailText, contextJson));
+            return delivery;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"RecordDigestRoutedFindingAsync error: {ex.Message}");
+            return null;
+        }
     }
 }

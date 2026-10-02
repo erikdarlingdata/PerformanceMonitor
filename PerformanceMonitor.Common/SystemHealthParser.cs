@@ -28,9 +28,12 @@ namespace PerformanceMonitor.Common
     /// <para>This is a <b>parse-on-read</b> shred: it reads stored raw event XML and produces typed records
     /// with NO target proc, NO persisted category tables, and NO viewer coupling — so events can be
     /// reprocessed without re-collecting. It faithfully extracts every column sp_HealthParser defines but
-    /// deliberately does NOT apply sp_HealthParser's warning/severity/duration/ignore-list WHERE predicates:
-    /// those are an analysis/display concern (Stage 2b) and every field needed to re-apply them is
-    /// preserved on the records.</para>
+    /// deliberately does NOT apply sp_HealthParser's warnings_only-specific severity/duration/status WHERE
+    /// predicates: those are an analysis/display concern (Stage 2b) and every field needed to re-apply them is
+    /// preserved on the records. The ONE exception is <see cref="ParseSevereError"/>'s base filter (severity
+    /// &lt; 16, and the two benign connection-reset error numbers) — sp_HealthParser applies that floor
+    /// unconditionally, even in its unfiltered mode, so it is applied here too rather than duplicated in
+    /// every consumer.</para>
     ///
     /// <para>Dispatch is by XE event name (<c>event_type</c>): the ring-buffer / error / wait feeders each map
     /// to exactly one category, while an <c>sp_server_diagnostics_component_result</c> event routes on its
@@ -132,24 +135,31 @@ namespace PerformanceMonitor.Common
             if (ev == null)
                 return null;
 
+            var sqlCpu = ParseInt(DataValue(ev, "process_utilization"));
+            var idle = ParseInt(DataValue(ev, "system_idle"));
+
             return new SchedulerIssueRecord
             {
                 EventTime = ParseTimestamp(ev),
-                SchedulerId = ParseInt(DataValue(ev, "scheduler_id")),
-                CpuId = ParseInt(DataValue(ev, "cpu_id")),
-                Status = DataText(ev, "status"),
-                IsOnline = ParseBool(DataValue(ev, "is_online")),
-                IsRunnable = ParseBool(DataValue(ev, "is_runnable")),
-                IsRunning = ParseBool(DataValue(ev, "is_running")),
-                NonYieldingTimeMs = ParseLong(DataValue(ev, "non_yielding_time")),
-                ThreadQuantumMs = ParseLong(DataValue(ev, "thread_quantum")),
+                SqlCpuUtilization = sqlCpu,
+                OtherProcessCpu = sqlCpu is { } sc && idle is { } id ? 100 - sc - id : (int?)null,
+                SystemIdle = idle,
+                MemoryUtilization = ParseInt(DataValue(ev, "memory_utilization")),
+                PageFaults = ParseLong(DataValue(ev, "page_faults")),
+                WorkingSetDeltaMb = MbFromBytes(DataValue(ev, "working_set_delta")),
             };
         }
 
         /// <summary>
         /// Shreds an <c>error_reported</c> event into a <see cref="SevereErrorRecord"/>. Returns null for
-        /// null/blank or unparseable XML. <see cref="SevereErrorRecord.DatabaseName"/> is intentionally left
-        /// null (server-side <c>DB_NAME(database_id)</c> resolution is not available to a DB-free shred).
+        /// null/blank or unparseable XML, and also null (dropped) for the two rows sp_HealthParser's own base
+        /// filter never surfaces even under its unfiltered (<c>@warnings_only = 0</c>) mode: severity below 16,
+        /// and the two benign connection-reset error numbers (17830, 18056) — sp_HealthParser.sql's
+        /// <c>WHERE ... [. &gt;= 16]</c> plus its <c>#ignore_errors</c> anti-join. Applying that floor here, once,
+        /// means every consumer (unfiltered or significant-only) already agrees with the proc's base population;
+        /// <see cref="SystemHealthSignificance.IsSignificant(SevereErrorRecord)"/> only adds the warnings_only
+        /// severity-19 raise on top. <see cref="SevereErrorRecord.DatabaseName"/> is intentionally left null
+        /// (server-side <c>DB_NAME(database_id)</c> resolution is not available to a DB-free shred).
         /// </summary>
         public static SevereErrorRecord? ParseSevereError(string? eventXml)
         {
@@ -157,15 +167,28 @@ namespace PerformanceMonitor.Common
             if (ev == null)
                 return null;
 
+            var severity = ParseInt(DataValue(ev, "severity"));
+            var errorNumber = ParseInt(DataValue(ev, "error_number"));
+
+            // sp_HealthParser's always-on base filter (line ~4900): severity < 16 never surfaces, and
+            // 17830/18056 never surface, whatever @warnings_only is set to.
+            if (severity is null || severity < 16)
+                return null;
+            if (errorNumber is { } number && SystemHealthSignificance.IgnoredSevereErrorNumbers.Contains(number))
+                return null;
+
             return new SevereErrorRecord
             {
                 EventTime = ParseTimestamp(ev),
-                ErrorNumber = ParseInt(DataValue(ev, "error_number")),
-                Severity = ParseInt(DataValue(ev, "severity")),
+                ErrorNumber = errorNumber,
+                Severity = severity,
                 State = ParseInt(DataValue(ev, "state")),
                 Message = DataValue(ev, "message"),
                 DatabaseName = null, // sp_HealthParser: DB_NAME(database_id) — needs a live connection.
-                DatabaseId = ParseInt(DataValue(ev, "database_id")),
+                // database_id rides on error_reported as an ACTION, not a data element (sp_HealthParser's own
+                // comment: the data axis returns NULL for every event; session_id reads the action axis the
+                // same way).
+                DatabaseId = ParseInt(ActionValue(ev, "database_id")),
             };
         }
 
@@ -415,7 +438,10 @@ namespace PerformanceMonitor.Common
             return new SignificantWaitRecord
             {
                 EventTime = ParseTimestamp(ev),
-                WaitType = DataText(ev, "wait_type"),
+                /* Trimmed like every other wait name read from the server (the collectors use
+                   PerformanceMonitor.Collectors.WaitTypeName, which this assembly cannot reference): the
+                   significance gate matches this against an exact-match ignore set. */
+                WaitType = DataText(ev, "wait_type")?.TrimEnd(),
                 DurationMs = ParseLong(DataValue(ev, "duration")),
                 SignalDurationMs = ParseLong(DataValue(ev, "signal_duration")),
                 WaitResource = DataValue(ev, "wait_resource"),
@@ -525,6 +551,9 @@ namespace PerformanceMonitor.Common
 
         /// <summary>KB -&gt; GB by integer division (÷1024²), matching sp_HealthParser's bigint arithmetic (truncating).</summary>
         private static long? GbFromKb(string? s) => ParseLong(s) is { } v ? v / 1024 / 1024 : (long?)null;
+
+        /// <summary>Bytes -&gt; MB (÷1,048,576) as decimal(19,2), matching sp_HealthParser's <c>CONVERT(decimal(19,2), bigint / 1048576.)</c> — real division, then rounded to 2 places (banker's rounding via decimal.Round, matching CONVERT's rounding behavior).</summary>
+        private static decimal? MbFromBytes(string? s) => ParseLong(s) is { } v ? Math.Round(v / 1048576m, 2, MidpointRounding.AwayFromZero) : (decimal?)null;
 
         /// <summary>
         /// Replaces control characters — except tab (9), line feed (10) and carriage return (13) — with '?',

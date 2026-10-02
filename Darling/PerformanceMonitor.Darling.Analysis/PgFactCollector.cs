@@ -19,7 +19,8 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// <summary>
 /// Collects facts from Darling's Postgres store for the analysis engine — Lite's
 /// <c>DuckDbFactCollector</c> ported method-for-method (Phase-5 analysis slice AN2a): the same
-/// 28 collect methods across the same seven partial files, the same fact keys / values /
+/// collect methods across the same seven partial files (thirty-one fact readers plus the #3538
+/// coverage witness, censused by name in <c>PgFactCollectorTests</c>), the same fact keys / values /
 /// metadata shapes, the same emission order, and the same per-method degrade-to-no-facts error
 /// posture — a missing table or empty store yields "no facts", never an exception. Since #2826
 /// that degradation is REPORTED rather than silent on both sides (see
@@ -64,6 +65,13 @@ public sealed partial class PgFactCollector : IFactCollector
     private readonly ILogger? _logger;
 
     /// <summary>
+    /// #4535: the plan analyzer's per-rule config (darling.json's optional "analyzer" section).
+    /// Same optional-and-defaulted pattern as <see cref="_logger"/>: a caller that constructs this
+    /// collector without one gets <c>AnalyzerConfig.Default</c> — today's behavior, byte-for-byte.
+    /// </summary>
+    private readonly PerformanceMonitor.PlanAnalysis.AnalyzerConfig _analyzerConfig;
+
+    /// <summary>
     /// The per-command deadline for every fact read in this collector (#2810), set explicitly so the
     /// value is a deliberate choice rather than Npgsql's undocumented 30 s default — the #2795 lesson.
     ///
@@ -97,10 +105,11 @@ public sealed partial class PgFactCollector : IFactCollector
     /// <see cref="PgAnomalyDetector"/> and <see cref="PgPlanFetcher"/> in this project — so #2826
     /// cost no call-site churn, and a test constructing a collector without one still compiles.
     /// </summary>
-    public PgFactCollector(NpgsqlDataSource postgres, ILogger? logger = null)
+    public PgFactCollector(NpgsqlDataSource postgres, ILogger? logger = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        _analyzerConfig = analyzerConfig ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
     }
 
     /// <summary>
@@ -139,21 +148,31 @@ public sealed partial class PgFactCollector : IFactCollector
     ///
     /// <para>The site names itself via <see cref="CallerMemberNameAttribute"/> rather than a literal,
     /// so a renamed or copy-pasted collect method cannot report under the wrong name.</para>
+    ///
+    /// <para>#3691: the failure is also RECORDED on the context, beside the log line, under the same
+    /// three-way classification (<see cref="ClassifyOutcome"/>) plus <c>cancelled</c> for a stray
+    /// <see cref="OperationCanceledException"/> in the ERROR arm — so the pass and the tool payloads learn
+    /// what only the log knew: a pass whose families failed used to score an empty fact list and render as
+    /// the <c>empty</c> all-clear. The log levels are unchanged.</para>
     /// </summary>
     private void ReportCollectionFailure(
         Exception ex,
         AnalysisContext context,
         [CallerMemberName] string collectMethod = "")
     {
+        context.RecordCollectionFailure(CollectionFailure.FamilyOf(collectMethod), collectMethod, ClassifyOutcome(ex), ex);
+
         if (PgBaselineProvider.IsCommandTimeout(ex))
         {
             _logger?.LogWarning(
+                ex,
                 "[PgFactCollector] {CollectMethod} did not finish within its command timeout on server {ServerId} ({ServerName}) — that analysis input is MISSING for this pass, which is not the same as the server having none. The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
                 collectMethod, context.ServerId, context.ServerName, ex.Message);
         }
         else if (ex is PostgresException { SqlState: "42P01" or "42703" } pgEx)
         {
             _logger?.LogDebug(
+                ex,
                 "[PgFactCollector] {CollectMethod} skipped on server {ServerId} ({ServerName}): the store does not have a table or column it reads (SQLSTATE {SqlState}), which is the pre-migration / version-skew case, so it contributes no facts. {Message}",
                 collectMethod, context.ServerId, context.ServerName,
                 pgEx.SqlState, ex.Message);
@@ -161,14 +180,50 @@ public sealed partial class PgFactCollector : IFactCollector
         else
         {
             _logger?.LogError(
+                ex,
                 "[PgFactCollector] {CollectMethod} failed on server {ServerId} ({ServerName}) and contributes no facts this pass: {Message}",
                 collectMethod, context.ServerId, context.ServerName, ex.Message);
         }
     }
 
+    /// <summary>
+    /// The recorded outcome for a swallowed failure (#3691): the same three arms the reporter above logs by,
+    /// in the same order and through the same structural classifier — timeout via
+    /// <see cref="PgBaselineProvider.IsCommandTimeout"/> (never message text), 42P01 / 42703 as
+    /// <see cref="CollectionFailureOutcome.MissingSchema"/> — with the ERROR arm split once more so an
+    /// <see cref="OperationCanceledException"/> that was not the pass's own abandonment reads as
+    /// <c>cancelled</c> rather than as a fault. Shared with <see cref="PgTargetFactCollector"/> so the two
+    /// PostgreSQL-store collectors cannot classify the same exception two ways.
+    /// </summary>
+    internal static CollectionFailureOutcome ClassifyOutcome(Exception ex)
+    {
+        if (PgBaselineProvider.IsCommandTimeout(ex)) return CollectionFailureOutcome.Timeout;
+        if (ex is PostgresException { SqlState: "42P01" or "42703" }) return CollectionFailureOutcome.MissingSchema;
+        return ex is OperationCanceledException ? CollectionFailureOutcome.Cancelled : CollectionFailureOutcome.Error;
+    }
+
+    /// <summary>
+    /// The number of family reads this collector runs, derived from the type (#3691) — the
+    /// <c>families_total</c> a collection caveat is stated against. Reflection once per process, not per pass.
+    /// </summary>
+    private static readonly int s_familyCount = CollectionCaveats.CountFamilies(typeof(PgFactCollector));
+
     public async Task<List<Fact>> CollectFactsAsync(AnalysisContext context)
     {
         var facts = new List<Fact>();
+
+        /* #3691: the denominator for the collection caveat, stamped before any family runs so a pass that
+           failed at its first read still states "1 of 32" rather than "1 of 0". */
+        context.CollectionFamilyCount = s_familyCount;
+
+        /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
+           it. Nothing else may run ahead of it — a wait fact emitted before the stamp would have no
+           denominator, and the only "safe" fallback (the nominal window) is the defect being fixed. */
+        await CollectObservedCoverageAsync(context, facts);
+
+        /* #3896: every latest-value read below binds its collector's lower bound, resolved once from the
+           cadence that collector actually runs at. Emits no fact, so it cannot disturb the stamp above. */
+        await PgLatestValueBounds.EnsureAsync(_postgres, context, _logger);
 
         await CollectWaitStatsFactsAsync(context, facts);
         FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
@@ -208,6 +263,31 @@ public sealed partial class PgFactCollector : IFactCollector
     }
 
     /// <summary>
+    /// audit_config's own collection (#4192): exactly the config, hardware, memory and database-size
+    /// families — CONFIG_CTFP/MAXDOP/MAX_MEMORY_MB/MAX_WORKER_THREADS, SERVER_EDITION, SERVER_HARDWARE,
+    /// MEMORY_TOTAL_PHYSICAL_MB, DATABASE_TOTAL_SIZE_MB — none of the other ~28 families
+    /// <see cref="CollectFactsAsync"/> runs (wait stats, blocking, query stats, plan regression, …), and no
+    /// anomaly detector or scorer after it. Those are exactly the 8 point-in-time facts audit_config projects;
+    /// the full pass answered them at the cost of every other family too — on one busy store the plan-regression
+    /// read alone measured 4.8 s mean / 6.5 s max per call. No coverage witness runs here either: every fact
+    /// below is a latest-snapshot read, which is why audit_config already discards WindowCoverage.
+    /// <see cref="PgLatestValueBounds.EnsureAsync"/> still runs, so the two latest-value reads
+    /// (<see cref="CollectMemoryFactsAsync"/>, <see cref="CollectDatabaseSizeFactAsync"/>) bind the same
+    /// per-collector cadence bound the full pass gives them, not the flat 24-hour fallback.
+    /// </summary>
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(AnalysisContext context)
+    {
+        var facts = new List<Fact>();
+        await PgLatestValueBounds.EnsureAsync(_postgres, context, _logger);
+        await CollectServerConfigFactsAsync(context, facts);
+        await CollectServerMetadataFactsAsync(context, facts);
+        await CollectServerPropertiesFactsAsync(context, facts);
+        await CollectMemoryFactsAsync(context, facts);
+        await CollectDatabaseSizeFactAsync(context, facts);
+        return facts;
+    }
+
+    /// <summary>
     /// Every query this collector executes, for the ungated dialect/hygiene pins in
     /// Darling.Tests (no QUALIFY, no bare NOW()/CURRENT_TIMESTAMP, no read_parquet, $N
     /// positional parameters only, and every FROM/JOIN target resolves to a V4 passthrough
@@ -215,6 +295,7 @@ public sealed partial class PgFactCollector : IFactCollector
     /// </summary>
     public static IReadOnlyList<string> AllSql { get; } = new[]
     {
+        CoverageSql,
         WaitStatsSql,
         BlockingSql,
         BlockingChainSql,
@@ -232,6 +313,7 @@ public sealed partial class PgFactCollector : IFactCollector
         QueryStatsSql,
         ParameterSensitivitySql,
         PlanRegressionSql,
+        PlanRegressionTableSql,
         BadActorSql,
         PerfmonSql,
         MemoryClerkSql,

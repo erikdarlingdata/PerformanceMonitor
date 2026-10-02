@@ -50,8 +50,14 @@ jobs:
     # the suite when this reads `skipped`; a second list of paths there would be free to fall out
     # of agreement with the list here, and area lists falling out of agreement with what a guard
     # reads is the thing that job exists to stop.
+    #
+    # docs-fastpath is published the same way, from the classify step's OWN decision rather than a
+    # second copy of the docs allowlist: darling-tree-guards must not pay ~5 minutes running the whole
+    # suite on a docs-only change just because that change also left Darling.Tests `skipped` - the two
+    # skip reasons look identical from `outcome` alone, so the guards job needs to tell them apart.
     outputs:
       darling-tests: ${{ steps.darling-tests.outcome }}
+      docs-fastpath: ${{ steps.fastpath.outputs.engaged }}
 
     steps:
       - uses: actions/checkout@v7
@@ -124,21 +130,21 @@ jobs:
             dashboard:
               - 'deprecated/Dashboard/**/!(*.md)'
               - 'deprecated/Dashboard.Tests/**/!(*.md)'
+              # ThemeParityTests compares the Dashboard's theme files with Lite's, so a change to Lite's
+              # themes alone must run it too. #4658 changed a Lite theme color, its CI skipped the test,
+              # and the next run that included it failed on dev (#4668).
+              - 'Lite/Themes/**/!(*.md)'
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
-              # #2489: LiteRuntimePrerequisiteDocsTests derives Lite's .NET runtime prerequisites
-              # from the BUILT runtimeconfig and from the publish shapes in this very file, then
-              # asserts these two READMEs say so - which artifact is self-contained, which needs two
-              # runtimes. Naming them here is not optional. Every area filter carves markdown out
-              # (dir/**/!(*.md)), and a docs-only PR additionally engages the fast path above, which
-              # skips .NET setup and restore outright - so without these two entries the guard could
-              # not run on a README-only change, i.e. on exactly the edit that would undo the fix.
-              # The cost is that a root-README edit now runs the Lite suite; that is the same trade
-              # the Darling entries below already take, and the alternative is a guard that quietly
-              # stops guarding.
-              - 'README.md'
-              - 'Lite/README.md'
+              # #2489, changed by Erik's 2026-09-24 ruling that docs-only changes skip CI:
+              # README.md and Lite/README.md used to sit here so LiteRuntimePrerequisiteDocsTests
+              # (which reads these two READMEs against the built runtimeconfig and this file's
+              # publish shapes) could still run on a README-only change. That guard now runs on
+              # every CODE pull request and in the nightly instead - both of which build Lite -
+              # so a README edit alone no longer has to pay the Lite suite to keep it exercised.
+              # A README-only PR takes the docs fast path below and does not build or test
+              # anything; the trade is deliberate and is Erik's call, not an oversight.
               # Same silently-stops-guarding reason as the darling filter's Lite entries below:
               # Lite.Tests/ThemeParityLiteDarlingTests.cs READS the Darling viewer's theme
               # dictionaries to assert the two apps' shared brush keys still resolve to the same
@@ -230,6 +236,10 @@ jobs:
               - 'CITATION.cff'
               - '.gitignore'
               - '.gitattributes'
+              # The exact root path, not '**/*.txt': Darling/Darling.Tests/McpToolsListBudget/*.txt
+              # (and Lite's copy) are test INPUTS, not documentation, and a bare extension glob
+              # would wave every budget-pin edit through the fast path unbuilt and untested.
+              - 'llms.txt'
               - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
               - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
             # Catch-all COUNTER, not a boolean gate: the classify step below decides
@@ -247,20 +257,21 @@ jobs:
       # it off every path where a skipped restore would be a real loss:
       #   release  — the filter step does not even run there, and a release must always
       #              compile and publish from a cold, fully restored tree.
-      #   push     — dev/main pushes are the integration signal for what just merged, so
-      #              they restore unconditionally even for a docs-only commit. Cheap
-      #              insurance: this only forces the restore back on, it does not force
-      #              the per-product build/test steps, which stay path-gated as before.
-      #   merge_group — a queue run is the LAST validation before its result lands on dev,
-      #              so it takes the same always-restore path as a push.
       #   areas    — belt and suspenders: even when the counts say docs-only, any lit
       #              area filter vetoes the fast path, because an area=true with restore
       #              skipped would run `dotnet build --no-restore` against nothing. The
       #              two classifications are built from the same allowlist so they cannot
       #              disagree today; this guard is for the day someone edits one and not
       #              the other.
-      # Everything else (pull_request) is eligible, and engages only when EVERY changed
-      # file is on the documentation allowlist (all_count == docs_count).
+      # Everything else — including push and merge_group, per Erik's 2026-09-24 ruling —
+      # is eligible, and engages only when EVERY changed file is on the documentation
+      # allowlist (all_count == docs_count). push/merge_group used to force the restore
+      # back on unconditionally as "cheap insurance" against NuGet drift that a lock-file
+      # diff would not show; that insurance buys nothing on a docs-only commit specifically
+      # BECAUSE it is docs-only — no lock file, Directory.Packages.props, or global.json is
+      # among the changed files (all of those are `root`, which is off the docs allowlist
+      # and vetoes the fast path via the areas guard above), so nothing this restore
+      # validates could have moved since the push that last validated it.
       - name: Classify change for the docs fast path
         id: fastpath
         shell: bash
@@ -278,12 +289,6 @@ jobs:
             exit 0
           fi
 
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
-            echo "engaged=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Full build::${{ github.event_name }} on '${{ github.ref_name }}' - integration runs always restore, even for a docs-only change."
-            exit 0
-          fi
-
           echo "Changed files: ${ALL_COUNT:-0} total, ${DOCS_COUNT:-0} on the documentation allowlist. Areas: ${AREAS}"
 
           if [ "${ALL_COUNT:-0}" -gt 0 ] && [ "${ALL_COUNT:-0}" -eq "${DOCS_COUNT:-0}" ] && [[ "${AREAS}" != *"=true"* ]]; then
@@ -294,6 +299,17 @@ jobs:
             echo "engaged=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Full build::At least one changed file is off the documentation allowlist (${DOCS_COUNT:-0} of ${ALL_COUNT:-0} classified as documentation)."
           fi
+
+      # Every web-dashboard module must parse and link (#4666, #4672). The C# tests only READ the
+      # dashboard's JavaScript, so a syntax error, a missing file or a missing named export passes
+      # every other check and blanks the whole dashboard in the browser. A step INSIDE build, not a
+      # job of its own: a failing job that build `needs:` would SKIP build, and a skipped build reads
+      # as success, so the gate would fail open. It runs on every change the docs fast path does not
+      # engage for (about two seconds), so a docs-only change stays fast.
+      - name: Parse and link every wwwroot/js module
+        if: steps.fastpath.outputs.engaged != 'true'
+        shell: bash
+        run: bash .github/scripts/check-web-js.sh
 
       - name: Setup .NET 10.0
         if: steps.fastpath.outputs.engaged != 'true'
@@ -366,8 +382,10 @@ jobs:
       # compiler warnings and three broken ThemeParityTests accumulated unnoticed (#1643). Deprecated means
       # bug-fix-only, not unverified: it still compiles warning-free and its tests still guard cross-app
       # parity (the theme palettes it checks are LITE's too).
+      # installer_core too: the Dashboard references Installer.Core, and the filter's own comment says a
+      # change there rebuilds both products, which only held for the CLI Installer until now.
       - name: Build Dashboard.Tests
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet build deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-restore
 
       - name: Build Darling
@@ -376,14 +394,20 @@ jobs:
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
           dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release --no-restore
 
-      # One step for the whole Lite suite. It was split into fast / analysis-heavy halves when the
-      # seven analysis classes rebuilt the full DuckDB schema inside every test and their subset
-      # alone cost ~9 minutes; after the shared class fixtures (#1693, #1698) and batched seeding
-      # (#1694) that subset runs in ~1 minute, so the split — and the narrower lite_analysis path
-      # gate that let non-analysis Lite changes skip it — stopped earning its second test-host
-      # spin-up and its filter-drift risk.
+      # RELEASE-ONLY here since #3887; on pull requests and pushes the suite runs in the lite-tests
+      # matrix job below, four shards cut by CLASS-NAME HASH, because this one step had grown to
+      # ~9½ of the build job's ~15 minutes — 62% of the PR wall's critical path. The hash cut is the
+      # deliberate opposite of the SEMANTIC split this step's history retired: it was split into
+      # fast / analysis-heavy halves when the seven analysis classes rebuilt the full DuckDB schema
+      # inside every test and their subset alone cost ~9 minutes; after the shared class fixtures
+      # (#1693, #1698) and batched seeding (#1694) that subset ran in ~1 minute, so the split — and
+      # the narrower lite_analysis path gate that let non-analysis Lite changes skip it — stopped
+      # earning its second test-host spin-up and its FILTER-DRIFT RISK. A hash over the class name
+      # cannot drift: every class lands in exactly one shard by arithmetic, a class added tomorrow
+      # included, and no list anywhere has to be maintained. Releases keep this single unsharded
+      # pass so the artifact-producing run still executes the suite whole, in one log.
       - name: Run Lite tests
-        if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        if: github.event_name == 'release'
         run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build
 
       - name: Run Installer tests
@@ -391,7 +415,7 @@ jobs:
         run: dotnet run --project deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build -- -class- "Installer.Tests.VersionDetectionTests" -class- "Installer.Tests.IdempotencyTests" -class- "Installer.Tests.AdversarialTests"
 
       - name: Run Dashboard tests
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
 
       - name: Run Darling tests
@@ -507,9 +531,15 @@ jobs:
           name: Darling-unsigned
           path: publish/Darling-signing/
 
+      # v3 of this action talks to SignPath's Pipeline Connector, which needs the SignPath
+      # GitHub App installed on this repository (v2's connector did not). Without it every
+      # attempt fails with "Failed to retrieve GitHub App token" (erikdarlingdata/PerformanceStudio#569,
+      # which hit this on that repo's first v3 release run). The app has been installed here
+      # since 2026-09-24. SignPath signs only a run's first 3 attempts: if signing keeps
+      # failing, fix the cause and start a fresh release run instead of re-running this one.
       - name: Sign Lite
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
@@ -522,7 +552,7 @@ jobs:
 
       - name: Sign Darling
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
@@ -581,7 +611,7 @@ jobs:
 
       - name: Sign Lite (Velopack)
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
@@ -599,7 +629,7 @@ jobs:
       # exist fails the release — the standing #1340 SignPath prerequisite.
       - name: Sign Darling Viewer (Velopack)
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
@@ -619,7 +649,7 @@ jobs:
         run: |
           # Pin vpk to the Velopack library version (keep in sync with the Velopack
           # PackageReference in PerformanceMonitorLite.csproj).
-          dotnet tool install -g vpk --version 1.2.0
+          dotnet tool install -g vpk --version 1.2.158
           New-Item -ItemType Directory -Force -Path releases/velopack-lite
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
 
@@ -676,7 +706,7 @@ jobs:
       # collect mode asserts a non-empty staging set for exactly that reason.
       - name: Sign the executables Velopack generates
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
@@ -785,7 +815,7 @@ jobs:
   # shape the build job uses for doc-only changes). Mirrors the nightly darling-pg job step-for-step;
   # the one live-SQL-Server E2E stays skipped (DARLING_TEST_SQL unset — no SQL Server on the runner).
   darling-pg:
-    name: Darling PostgreSQL tests
+    name: Darling PG tests
     runs-on: windows-latest
     # Max observed on a warm cache is ~3m40s; a cold pg-runtime cache adds a ~340MB fetch.
     # 30 minutes is 3x headroom over the cold path — past that, something is hung (pg_ctl -w
@@ -794,6 +824,20 @@ jobs:
     # has NO timeout: on release it waits on SignPath's manual approval gate, which can
     # legitimately take hours.
     timeout-minutes: 30
+    # THREE shards cut by CLASS-NAME HASH (#3890), the machinery #3887 proved on the Lite suite.
+    # Measured on this job's own step timings: ~190s fixed (of which Build Darling.Tests is 132s)
+    # plus 266s of tests, so only the 266s shards and the fixed floor decides where the returns
+    # stop - 2 shards land ~5m23s, 3 ~4m39s, 4 ~4m17s. Three is the stop: it puts this job under
+    # the build job's 6m16s, which is what actually bounds the PR wall, and a fourth Windows runner
+    # from the shared pool buys twenty seconds of a number nothing reads.
+    #
+    # The prebuilt-ladder image this was filed alongside is dead on measurement: the migration
+    # ladder replays in ~1s (timed by running one live class twice against one store) and the whole
+    # cluster costs 8s to initdb and start. There was nothing there to save.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
     permissions:
       contents: read
 
@@ -846,9 +890,13 @@ jobs:
         env:
           DARLING: ${{ steps.filter.outputs.darling }}
           DARLING_COUNT: ${{ steps.filter.outputs.darling_count }}
-          DARLING_FILES: ${{ steps.filter.outputs.darling_files }}
+          # A list goes into the environment only up to 1,000 files. Linux refuses to start a process whose
+          # single environment string passes 128 KiB, so the 2,843-file dev-to-main release PR failed here
+          # before the script ran ("Argument list too long"). The counts always print; the Detect changed
+          # paths step above lists every file either way.
+          DARLING_FILES: ${{ fromJSON(steps.filter.outputs.darling_count || '0') <= 1000 && steps.filter.outputs.darling_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
           ALL_COUNT: ${{ steps.filter.outputs.all_count }}
-          ALL_FILES: ${{ steps.filter.outputs.all_files }}
+          ALL_FILES: ${{ fromJSON(steps.filter.outputs.all_count || '0') <= 1000 && steps.filter.outputs.all_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
         run: |
           set -euo pipefail
 
@@ -899,6 +947,27 @@ jobs:
           [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
           if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
 
+      # store-upgrade-gated (#4326): the same fixture nightly.yml builds, only when a changed path is in
+      # .github/darling-paths-filter.yml's store-upgrade filter, so a PR that cannot move the upgrade E2Es'
+      # answer does not pay for the ~680MB of pinned archives. This runs on every shard, not just the ones
+      # today's upgrade classes happen to hash into: a class's shard must never decide whether it runs, so a
+      # renamed class or a new upgrade E2E landing on a different shard still gets the fixture. Same cache
+      # key as nightly.yml, so a warm cache from either means no download here.
+      - name: Cache upgrade-fixture downloads (previous-major runtime)
+        if: steps.filter.outputs.darling == 'true' && steps.filter.outputs.store-upgrade == 'true'
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/upgrade-fixture/work/downloads
+          key: upgrade-fixture-${{ runner.os }}-${{ hashFiles('Darling/tools/new-upgraded-store-fixture.ps1') }}
+
+      # -SkipNew: the CURRENT runtime is already extracted above from pg-runtime.zip, which is what
+      # DARLING_TEST_PGRUNTIME_NEWZIP points at below. This step only needs the old sides: the previous
+      # major, and (#3906) the previous release on the current major.
+      - name: Build previous-major runtime for the upgrade fixture
+        if: steps.filter.outputs.darling == 'true' && steps.filter.outputs.store-upgrade == 'true'
+        shell: pwsh
+        run: ./Darling/tools/new-upgraded-store-fixture.ps1 -SkipNew
+
       - name: Restore Darling.Tests
         if: steps.filter.outputs.darling == 'true'
         run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
@@ -925,8 +994,8 @@ jobs:
       #
       # The values are the product's own derivation from the live hypertable count
       # (TimescaleSupport.HypertableCount = the 62-collector catalog + collection_log = 63):
-      #   timescaledb.max_background_workers = HypertableCount + 2       = 72
-      #   max_worker_processes = 3 + (HypertableCount + 2) + 8           = 83
+      #   timescaledb.max_background_workers = HypertableCount + 2       = 74
+      #   max_worker_processes = 3 + (HypertableCount + 2) + 8           = 85
       # Hard-coded here because a workflow cannot call into the product — so
       # CiClusterWorkerSizingTests parses THIS FILE and fails the build if either number stops
       # matching the formula as collectors are added, and CiClusterWorkerSizingLiveTests asserts
@@ -941,47 +1010,299 @@ jobs:
           $logFile = "$env:RUNNER_TEMP\darling-pg.log"
           & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
           if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 72"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 83"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
           if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
+
+      # #4160: three more small throwaway clusters, one per log-format shape, so the
+      # csvlog/jsonlog/auto_explain live tests stop skipping in CI (their env vars were never set —
+      # every run "passed" without ever exercising the planted-input proofs #4053/#4058 added). No
+      # TimescaleDB jobs run on these targets, so the worker settings above (sized for the 5541
+      # store's hypertable count) would be needless headroom here; 8/16 is plenty.
+      #   5542 (csvlog): lights up PgLogEventsCsvlogLiveTests, PgDeadlocksCsvlogLiveTests,
+      #     PgRaiseShapedRecordsLiveTests (DARLING_TEST_PG_CSVLOG) and PgPlanCaptureCsvLiveTests,
+      #     which LOADs auto_explain per session on top of it (DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN).
+      #     deadlock_timeout is shortened so a two-session deadlock actually fires inside a test's
+      #     patience; log_min_messages is notice, not the tighter warning/error, because LOG ranks
+      #     ABOVE ERROR in Postgres's server-log severity order and a stricter filter would silently
+      #     drop the very deadlock/duration LOG rows these tests read.
+      #   5543 (jsonlog): PgLogEventsJsonlogLiveTests (DARLING_TEST_PG_JSONLOG) — it also asserts
+      #     that csvlog is OFF on this target, so this cluster must not preload csvlog as a sibling.
+      #   5544 (stderr,csvlog): PgPlanCaptureLiveTests (DARLING_TEST_PG_AUTOEXPLAIN) and
+      #     PgLogTailStderrSiblingLiveTests (DARLING_TEST_PG_CSVLOG_SIBLING) — both need stderr
+      #     present alongside csvlog, and the %Q-bearing log_line_prefix those tests parse.
+      #   5545 (stderr, %u@%d prefix): TheSelfHostedCollector_ReadsTheTargetsOwnLog_EndToEnd
+      #     (DARLING_TEST_PG_LOG_TARGET) and AgainstAUtcTarget_TheLogQueriesReadTheSettingWithTheTail_
+      #     AndStoreWhatTheServerWrote (DARLING_TEST_PG_UTC_LOG_TARGET) share this one cluster: both need
+      #     logging_collector on and log_timezone UTC, and the first also needs log_connections,
+      #     log_disconnections and log_lock_waits on so its workload (the next step) leaves a real event of
+      #     each family — error, connection, lock_wait — in the log before the tests run. The %u@%d-bearing
+      #     prefix is what the second test's live assertion (reader.GetName(1) == "log_timezone") needs.
+      #   5546 (stderr), 5547 (csvlog), 5548 (jsonlog): the #4699 log-rotation pins
+      #     (PgServerLogTailRotationLiveTests and PgDeadlocksResumeLiveTests share 5546 through
+      #     DARLING_TEST_PG_LOGROTATE; PgServerLogTailCsvJsonRotationLiveTests uses 5547/5548 through
+      #     DARLING_TEST_PG_LOGROTATE_CSV/_JSON). They call pg_rotate_logfile(), so each gets its own
+      #     cluster: a rotation on 5542/5543/5545 would move the file under the other log classes reading
+      #     them (#4702). All three need logging_collector on, log_timezone UTC, log_lock_waits on and the
+      #     short deadlock_timeout the helper sets; 5546 also needs the %m [%p] %Q prefix the deadlock reader
+      #     parses. The three classes share one serial xunit collection (pg-log-rotation).
+      - name: Initialize and start the log-format PostgreSQL clusters
+        if: steps.filter.outputs.darling == 'true'
+        shell: pwsh
+        run: |
+          $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+
+          # clusterDataDir, not dataDir: CiClusterWorkerSizingTests' ConfAppend regex is keyed on the
+          # literal path "$dataDir\postgresql.conf" the 5541 cluster's step writes, and these clusters'
+          # own worker counts (8/16, not the hypertable-derived 74/85) would fail that guard as drift if
+          # this function reused the same variable name.
+          function Start-LogFormatCluster($clusterDataDir, $logFile, $port, $extraConfLines) {
+            & "$bin\initdb.exe" -D $clusterDataDir -U darling -A trust --encoding=UTF8
+            if ($LASTEXITCODE -ne 0) { throw "initdb failed for port $port ($LASTEXITCODE)" }
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "port = $port"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 8"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "max_worker_processes = 16"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "deadlock_timeout = '100ms'"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "compute_query_id = on"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "log_min_messages = notice"
+            foreach ($line in $extraConfLines) { Add-Content -Path "$clusterDataDir\postgresql.conf" -Value $line }
+            & "$bin\pg_ctl.exe" -D $clusterDataDir -l $logFile -w start
+            if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed for port $port ($LASTEXITCODE)" }
+            & "$bin\createdb.exe" -h 127.0.0.1 -p $port -U darling darling
+            if ($LASTEXITCODE -ne 0) { throw "createdb failed for port $port ($LASTEXITCODE)" }
+          }
+
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-csvlog" "$env:RUNNER_TEMP\darling-pg-csvlog.log" 5542 @(
+            "logging_collector = on",
+            "log_destination = 'csvlog'",
+            "log_timezone = 'UTC'"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-jsonlog" "$env:RUNNER_TEMP\darling-pg-jsonlog.log" 5543 @(
+            "logging_collector = on",
+            "log_destination = 'jsonlog'"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-stderrcsvlog" "$env:RUNNER_TEMP\darling-pg-stderrcsvlog.log" 5544 @(
+            "logging_collector = on",
+            "log_destination = 'stderr,csvlog'",
+            "log_line_prefix = '%m [%p] %Q '"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-logtarget" "$env:RUNNER_TEMP\darling-pg-logtarget.log" 5545 @(
+            "logging_collector = on",
+            "log_destination = 'stderr'",
+            "log_timezone = 'UTC'",
+            "log_line_prefix = '%m %u@%d [%p] '",
+            "log_connections = on",
+            "log_disconnections = on",
+            "log_lock_waits = on"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-rotate-stderr" "$env:RUNNER_TEMP\darling-pg-rotate-stderr.log" 5546 @(
+            "logging_collector = on",
+            "log_destination = 'stderr'",
+            "log_timezone = 'UTC'",
+            "log_line_prefix = '%m [%p] %Q '",
+            "log_lock_waits = on"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-rotate-csvlog" "$env:RUNNER_TEMP\darling-pg-rotate-csvlog.log" 5547 @(
+            "logging_collector = on",
+            "log_destination = 'csvlog'",
+            "log_timezone = 'UTC'",
+            "log_lock_waits = on"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-rotate-jsonlog" "$env:RUNNER_TEMP\darling-pg-rotate-jsonlog.log" 5548 @(
+            "logging_collector = on",
+            "log_destination = 'jsonlog'",
+            "log_timezone = 'UTC'",
+            "log_lock_waits = on"
+          )
+
+          # The workload the first test's doc comment promises: one real event of each family — error,
+          # connection, lock_wait — written by the server itself before the tests read the log. Bounded and
+          # loud: every step has its own timeout, and a missing precondition throws rather than leaving the
+          # log quiet and the later test assertion to fail with no explanation of why.
+          # psql takes libpq flags, not an Npgsql-style connection string (the tests' own env vars below
+          # stay in Npgsql form; they're read by Npgsql, not psql).
+          $logTargetArgs = @("-h", "127.0.0.1", "-p", "5545", "-U", "darling", "-d", "darling")
+
+          # Connection + disconnection: an ordinary short-lived connection, which with log_connections/
+          # log_disconnections on writes both a "connection received"/"connection authorized" pair and a
+          # "disconnection" line.
+          & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "SELECT 1"
+          if ($LASTEXITCODE -ne 0) { throw "5545 connection-event workload failed ($LASTEXITCODE)" }
+
+          # Error: a division by zero the server itself reports at ERROR.
+          & "$bin\psql.exe" @logTargetArgs -c "SELECT 1/0"
+          if ($LASTEXITCODE -eq 0) { throw "5545 error-event workload: SELECT 1/0 unexpectedly succeeded" }
+
+          # Lock wait: one background session holds LOCK TABLE inside a transaction and sleeps past
+          # deadlock_timeout (100ms on this cluster, see Start-LogFormatCluster) while a second session
+          # requests the same table and blocks, so log_lock_waits fires a "still waiting for"/"acquired" pair.
+          # Both are bounded jobs so a stuck lock can never hang the workflow.
+          & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS lock_target_5545 (id int)"
+          if ($LASTEXITCODE -ne 0) { throw "5545 lock-wait workload: table setup failed ($LASTEXITCODE)" }
+          $holder = Start-Job -ScriptBlock {
+            param($bin, $connArgs)
+            & "$bin\psql.exe" @connArgs -v ON_ERROR_STOP=1 -c "BEGIN; LOCK TABLE lock_target_5545; SELECT pg_sleep(3); COMMIT;"
+          } -ArgumentList $bin, $logTargetArgs
+          Start-Sleep -Milliseconds 500
+          & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "BEGIN; LOCK TABLE lock_target_5545; COMMIT;"
+          if ($LASTEXITCODE -ne 0) { throw "5545 lock-wait workload: waiter session failed ($LASTEXITCODE)" }
+          Wait-Job $holder -Timeout 15 | Out-Null
+          if ($holder.State -ne 'Completed') { throw "5545 lock-wait workload: holder job did not complete ($($holder.State))" }
+          Receive-Job $holder | Out-Null
+          Remove-Job $holder
+
+          # Failed login: a FATAL the target's own authentication path writes, distinct from the ERROR above.
+          # Targets a deliberately nonexistent database.
+          & "$bin\psql.exe" "-h" "127.0.0.1" "-p" "5545" "-U" "darling" "-d" "does_not_exist_5545" -c "SELECT 1" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "5545 failed-login workload: connecting to a nonexistent database unexpectedly succeeded" }
+          # the failed login is expected; don't let its exit code end the step
+          $global:LASTEXITCODE = 0
 
       # DARLING_TEST_PG lights up the [Collection("live-postgres")] classes; DARLING_TEST_PGRUNTIME
       # lights up the managed-bootstrap E2E. DARLING_TEST_SQL is intentionally unset — the one
       # live-SQL-Server E2E stays skipped (no SQL Server on the runner). Full suite (not a filtered
       # subset): the ungated ~3s overlap with the build job is negligible and a filter could hide a
       # test the way narrow filters have bitten before.
+      #
+      # DARLING_TEST_PG_CSVLOG/_CSVLOG_AUTOEXPLAIN point at the 5542 csvlog cluster,
+      # DARLING_TEST_PG_JSONLOG at the 5543 jsonlog cluster, DARLING_TEST_PG_AUTOEXPLAIN/
+      # _CSVLOG_SIBLING at the 5544 stderr+csvlog cluster, and DARLING_TEST_PG_LOG_TARGET/
+      # _UTC_LOG_TARGET at the 5545 cluster (the two self-hosted log end-to-end tests). DARLING_TEST_PG
+      # (5541) stays the store for the classes that read one target's log while writing to a separate store.
       - name: Run Darling PG tests
         if: steps.filter.outputs.darling == 'true'
         shell: pwsh
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
           DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
-        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -trx TestResults/darling-pr.trx
+          DARLING_TEST_PG_CSVLOG: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          # csvlog-only from its first start, with log_timezone = 'UTC': PgLogTailStderrSiblingLiveTests' #4019 case.
+          DARLING_TEST_PG_CSVLOG_ONLY: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          # store-upgrade-gated, exactly as nightly.yml sets them (#1706, #3906); empty when the fixture
+          # above did not run, which the consuming tests treat as "not set" (Environment.GetEnvironmentVariable
+          # returns null for an empty value read this way, and every one of them guards with
+          # string.IsNullOrWhiteSpace before touching the path), so they SkipWhen on a PR where the gate did
+          # not match rather than fail on a missing fixture. Set on every shard: a class's shard must never
+          # decide whether it runs.
+          DARLING_TEST_PGRUNTIME_OLD: ${{ steps.filter.outputs.store-upgrade == 'true' && format('{0}\Darling\artifacts\upgrade-fixture\old\pg-runtime', github.workspace) || '' }}
+          DARLING_TEST_PGRUNTIME_NEWZIP: ${{ steps.filter.outputs.store-upgrade == 'true' && format('{0}\Darling\artifacts\pg-runtime.zip', github.workspace) || '' }}
+          DARLING_TEST_PGRUNTIME_PREVIOUS: ${{ steps.filter.outputs.store-upgrade == 'true' && format('{0}\Darling\artifacts\upgrade-fixture\previous\pg-runtime', github.workspace) || '' }}
+          DARLING_TEST_PG_JSONLOG: "Host=127.0.0.1;Port=5543;Username=darling;Database=darling"
+          DARLING_TEST_PG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
+          DARLING_TEST_PG_CSVLOG_SIBLING: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
+          DARLING_TEST_PG_LOG_TARGET: "Host=127.0.0.1;Port=5545;Username=darling;Database=darling"
+          DARLING_TEST_PG_UTC_LOG_TARGET: "Host=127.0.0.1;Port=5545;Username=darling;Database=darling"
+          # #4704: dedicated rotation clusters (5546 stderr, 5547 csvlog, 5548 jsonlog), set on every shard.
+          DARLING_TEST_PG_LOGROTATE: "Host=127.0.0.1;Port=5546;Username=darling;Database=darling"
+          DARLING_TEST_PG_LOGROTATE_CSV: "Host=127.0.0.1;Port=5547;Username=darling;Database=darling"
+          DARLING_TEST_PG_LOGROTATE_JSON: "Host=127.0.0.1;Port=5548;Username=darling;Database=darling"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json)
+          if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
+          # Only the runner's one-line JSON array is parsed: the dotnet CLI can print its own notice on stdout,
+          # and a line starting "W" after the array failed a shard's ConvertFrom-Json on 2026-09-23.
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
+          $classes = @($json[0] | ConvertFrom-Json)
+          if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $mine = @($classes | Where-Object {
+              ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))[0] % 3) -eq ${{ matrix.shard }}
+          })
+          Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
+          if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
+
+          $shardArgs = foreach ($class in $mine) { '-class'; $class }
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @shardArgs -trx TestResults/darling-pr-${{ matrix.shard }}.trx
+          exit $LASTEXITCODE
+
+      # #4160: stop all four clusters (the 5541 store plus the three 5542/5543/5544 log-format
+      # clusters started above). Each stop is independent and best-effort: a cluster that never
+      # started (an earlier step threw) has no data dir to stop, and one shard's stop failing must
+      # not skip the others' cleanup.
       - name: Stop PostgreSQL
         if: always() && steps.filter.outputs.darling == 'true'
         shell: pwsh
         run: |
-          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
-          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
-          if (Test-Path "$bin\pg_ctl.exe") { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+          $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          if (Test-Path "$bin\pg_ctl.exe") {
+            foreach ($dataDir in @(
+              "$env:RUNNER_TEMP\darling-pgdata",
+              "$env:RUNNER_TEMP\darling-pgdata-csvlog",
+              "$env:RUNNER_TEMP\darling-pgdata-jsonlog",
+              "$env:RUNNER_TEMP\darling-pgdata-stderrcsvlog",
+              "$env:RUNNER_TEMP\darling-pgdata-logtarget",
+              "$env:RUNNER_TEMP\darling-pgdata-rotate-stderr",
+              "$env:RUNNER_TEMP\darling-pgdata-rotate-csvlog",
+              "$env:RUNNER_TEMP\darling-pgdata-rotate-jsonlog"
+            )) {
+              if (Test-Path $dataDir) { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+            }
+          }
           exit 0
 
       - name: Upload PG log and test results on failure
         if: failure() && steps.filter.outputs.darling == 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: darling-pg-failure
+          # Per-shard: matrix legs sharing one artifact name collide and fail the upload.
+          name: darling-pg-failure-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/darling-pg.log
+            ${{ runner.temp }}/darling-pg-csvlog.log
+            ${{ runner.temp }}/darling-pg-jsonlog.log
+            ${{ runner.temp }}/darling-pg-stderrcsvlog.log
+            ${{ runner.temp }}/darling-pg-logtarget.log
+            ${{ runner.temp }}/darling-pg-rotate-stderr.log
+            ${{ runner.temp }}/darling-pg-rotate-csvlog.log
+            ${{ runner.temp }}/darling-pg-rotate-jsonlog.log
             TestResults/
           if-no-files-found: ignore
+
+  # The single answer branch protection already requires. Matrixing darling-pg renames its own
+  # checks to "Darling PG tests (0/1/2)", so the context dev has required since this job existed -
+  # "Darling PostgreSQL tests" - would have stopped reporting and blocked every pull request on a
+  # check that never runs, including the one making this change. Rather than a protection edit with
+  # a deadlock window for every branch cut before the merge, the join job INHERITS that name: the
+  # required context keeps reporting, and it now means "every shard passed" instead of "the one
+  # sequential run passed". Nothing in repo settings has to change.
+  #
+  # It reports on every non-cancelled event, so it cannot be the silent-green shape the whole-tree
+  # guards job exists to prevent: a leg that never starts leaves needs.darling-pg.result at
+  # something other than success, and this fails loudly and says which.
+  darling-pg-result:
+    name: Darling PostgreSQL tests
+    needs: darling-pg
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Report the shards' one answer
+        shell: bash
+        env:
+          RESULT: ${{ needs.darling-pg.result }}
+        run: |
+          set -euo pipefail
+          case "${RESULT}" in
+            success)
+              echo "::notice title=Darling PG shards green::Every shard succeeded, or the Darling gate skipped the suite on all of them." ;;
+            skipped)
+              echo "::notice title=Darling PG shards skipped::The matrix job did not run at all." ;;
+            *)
+              echo "::error title=Darling PG shards failed::needs.darling-pg.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit; read the failing shard's log."
+              exit 1 ;;
+          esac
 
   # ── Linux service build + container image (#1804) ────────────────────────────────────────────────
   # The Darling service is cross-platform .NET on purpose, but until this job nothing PROVED it on
@@ -1041,9 +1362,13 @@ jobs:
         env:
           DARLING: ${{ steps.filter.outputs.darling }}
           DARLING_COUNT: ${{ steps.filter.outputs.darling_count }}
-          DARLING_FILES: ${{ steps.filter.outputs.darling_files }}
+          # A list goes into the environment only up to 1,000 files. Linux refuses to start a process whose
+          # single environment string passes 128 KiB, so the 2,843-file dev-to-main release PR failed here
+          # before the script ran ("Argument list too long"). The counts always print; the Detect changed
+          # paths step above lists every file either way.
+          DARLING_FILES: ${{ fromJSON(steps.filter.outputs.darling_count || '0') <= 1000 && steps.filter.outputs.darling_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
           ALL_COUNT: ${{ steps.filter.outputs.all_count }}
-          ALL_FILES: ${{ steps.filter.outputs.all_files }}
+          ALL_FILES: ${{ fromJSON(steps.filter.outputs.all_count || '0') <= 1000 && steps.filter.outputs.all_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
         run: |
           set -euo pipefail
 
@@ -1219,6 +1544,7 @@ jobs:
         shell: bash
         env:
           DARLING_TESTS: ${{ needs.build.outputs.darling-tests }}
+          DOCS_FASTPATH: ${{ needs.build.outputs.docs-fastpath }}
           WORKFLOW: ${{ steps.filter.outputs.workflow }}
         run: |
           set -euo pipefail
@@ -1226,6 +1552,9 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Whole-tree guards skipped::Release event - the build job compiles and runs every suite unconditionally."
+          elif [ "${DOCS_FASTPATH:-}" = "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Whole-tree guards skipped::The build job took the docs fast path - every changed file is on the documentation allowlist, so there is no code change for the whole-tree guards to catch. They still run on the next code PR and in the nightly."
           elif [ "${DARLING_TESTS:-}" = "skipped" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "::notice title=Whole-tree guards running::The build job's path filters left Darling.Tests unrun, so the guards that read the whole repository run here."
@@ -1263,3 +1592,156 @@ jobs:
       - name: Run the whole-tree guards
         if: steps.gate.outputs.run == 'true'
         run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
+
+  # The Lite suite on pull requests and pushes: four shards cut by CLASS-NAME HASH (#3887). The
+  # build job's single "Run Lite tests" step had grown to ~9½ minutes of a ~15-minute job — 62% of
+  # the PR wall's critical path over the eight runs measured — and it is release-only there now.
+  #
+  # The cut is a SHA-256 over the class name, modulo four: arithmetic, not a list and not a
+  # semantic filter. This job's own history is the argument (see the retired lite_analysis split
+  # this file documents above the release-only step): any filter somebody has to MAINTAIN drifts,
+  # and a class added tomorrow is exactly the class such a filter misses. A hash cannot drift —
+  # every class lands in exactly one shard, additions included, and the partition is total by
+  # construction. SHA-256 rather than string.GetHashCode() because the latter is randomized per
+  # process ON PURPOSE and would send the same class to a different shard on every run.
+  #
+  # FOUR and not three, decided on measurement rather than taste: the hash balances CLASSES, and
+  # Lite's classes carry uneven test counts, so a 3-way cut left one shard holding 42% of the tests
+  # (~6½ minutes with setup) while another held 25%. At four the worst shard holds 27% (~5 minutes);
+  # five would buy 0.4 minutes more for another Windows runner out of the shared pool this file's
+  # own comments blame for serializing everyone's CI, and six is worse than five. Four is the knee.
+  #
+  # Each shard pays its own checkout/setup/restore/build (~2½ minutes measured on a warm NuGet
+  # cache) — the price of taking ~10 minutes off the PR wall. They run in parallel with the build
+  # job, off its critical path. The filter predicates below are BYTE-FOR-BYTE copies of
+  # the build job's lite/core/root (renamed *_shard so the census can find each set unambiguously);
+  # CrossAppGuardCiGateTests pins the copies equal, so they cannot drift apart silently.
+  lite-tests:
+    name: Lite tests
+    if: github.event_name != 'release'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    # A shard is at most ~27% of a ~9½-minute suite plus ~2½ minutes of setup; 20 minutes is ~4x that,
+    # past which something is hung and a shared-pool Windows runner is being held for nothing.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: |
+            # COPIES of the build job's root/core/lite predicates, generated from them and pinned
+            # byte-equal by CrossAppGuardCiGateTests.TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs.
+            # The REASONING for every entry lives at the build job's own filter block and is not
+            # duplicated here — duplicated prose is prose that rots out of step. What matters is that
+            # the sets stay identical: the shards must run the Lite suite in exactly the cases the
+            # build job's step used to, or the split loses coverage silently. That includes the
+            # entries that look foreign to Lite (the two READMEs, the three Darling trees) — Lite.Tests
+            # reads those files in its cross-app and docs guards, so an edit there has to reach this
+            # suite. A hand-typed copy of this block dropped two of them and was caught by the pin
+            # above before CI ever ran (#3887).
+            root_shard:
+              - 'PerformanceMonitor.sln'
+              - 'Directory.Build.props'
+              - 'global.json'
+              - 'nuget.config'
+              - 'NuGet.config'
+              - '.github/workflows/build.yml'
+            core_shard:
+              - 'PerformanceMonitor.Alerting/**/!(*.md)'
+              - 'PerformanceMonitor.Analysis/**/!(*.md)'
+              - 'PerformanceMonitor.Collectors/**/!(*.md)'
+              - 'PerformanceMonitor.Common/**/!(*.md)'
+              - 'PerformanceMonitor.Notifications/**/!(*.md)'
+              - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
+              - 'PerformanceMonitor.Ui/**/!(*.md)'
+            lite_shard:
+              - 'Lite/**/!(*.md)'
+              - 'Lite.Tests/**/!(*.md)'
+              - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
+              - 'Darling/Darling.Tests/**/!(*.md)'
+              - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
+      - name: Setup .NET 10.0
+        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore Lite.Tests
+        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        run: dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      - name: Build Lite.Tests
+        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      # The class list comes off the built assembly itself (-list classes/json), so the population is
+      # whatever exists on THIS commit — no roster. An empty selection is a hard error, not a skip:
+      # with zero -class arguments the runner executes the WHOLE suite, so "my shard is empty" and
+      # "run everything" are one argument-list apart — the loudest possible difference to get wrong
+      # quietly. (394 classes across four shards make an empty one arithmetically implausible; the
+      # measured split is 27/26/25/22% of tests, so the arm is a guard, not an expectation.)
+      - name: Run Lite tests (shard)
+        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lines = @(dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json)
+          if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
+          # Only the runner's one-line JSON array is parsed; see the Darling shard step (a CLI notice on stdout).
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
+          $classes = @($json[0] | ConvertFrom-Json)
+          if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
+
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $mine = @($classes | Where-Object {
+              $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))
+              ($hash[0] % 4) -eq ${{ matrix.shard }}
+          })
+          Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
+          if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
+
+          $shardArgs = foreach ($class in $mine) { '-class'; $class }
+          dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @shardArgs
+          exit $LASTEXITCODE
+
+  # The one result branch protection can require. Four matrix legs cannot each be a required check
+  # without hard-coding the shard count into repo settings, and a leg that never starts reports
+  # nothing — the same silent green the whole-tree guards job exists to prevent. This job always
+  # reports: success when every leg succeeded or the filters skipped the suite everywhere, failure
+  # for anything else, and it says which out loud. (Branch protection must list "Lite tests
+  # (result)" for the shards to gate merges — noted on #3887.)
+  lite-tests-result:
+    name: Lite tests (result)
+    needs: lite-tests
+    if: ${{ !cancelled() && github.event_name != 'release' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Report the shards' one answer
+        shell: bash
+        env:
+          RESULT: ${{ needs.lite-tests.result }}
+        run: |
+          set -euo pipefail
+          case "${RESULT}" in
+            success)
+              echo "::notice title=Lite shards green::All four class-hash shards succeeded (or every leg's filters said the Lite suite is untouched by this diff)." ;;
+            skipped)
+              echo "::notice title=Lite shards skipped::The matrix job itself was skipped, which only the release guard does - and releases run the whole suite unsharded in the build job." ;;
+            *)
+              echo "::error title=Lite shards failed::needs.lite-tests.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit."
+              exit 1 ;;
+          esac

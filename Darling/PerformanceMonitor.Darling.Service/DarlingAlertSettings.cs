@@ -56,12 +56,27 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool ForcePlanFailureEnabled => true;
 
     public int CpuThresholdPercent => _config.Alerts.CpuThresholdPercent;
-    public int BlockingCountThreshold => _config.Alerts.BlockingCountThreshold;
+
+    /// <summary>#3528: floored at the same named constant as its PostgreSQL twin below, for the identical
+    /// reason — a store row hand-edited to 0 makes the gate's <c>count &gt;= threshold</c> test true for a
+    /// count of zero and fires on a server with no blocking. The floor is also the
+    /// <c>update_alert_settings</c> lower write bound and the Settings window's save gate, so no value any
+    /// writer accepts is a value this clamp then rewrites.</summary>
+    public int BlockingCountThreshold => Math.Max(
+        PostgresAlertEvaluator.CountThresholdFloor,
+        _config.Alerts.BlockingCountThreshold);
 
     /* #1839: floored at 0 (= off) so a negative in darling.json or the store can't make the
        "is it above threshold" test true for every snapshot. */
     public int BlockingWaitSecondsThreshold => Math.Max(0, _config.Alerts.BlockingWaitSecondsThreshold);
-    public int DeadlockCountThreshold => _config.Alerts.DeadlockCountThreshold;
+
+    /// <summary>#3528: floored like <see cref="BlockingCountThreshold"/> above and
+    /// <see cref="PgDeadlockCountThreshold"/> below — the constant lives on
+    /// <see cref="PostgresAlertEvaluator"/> only by birthplace; the failure it closes is engine-neutral.</summary>
+    public int DeadlockCountThreshold => Math.Max(
+        PostgresAlertEvaluator.CountThresholdFloor,
+        _config.Alerts.DeadlockCountThreshold);
+    /* #3539 A4: pass-through of a knob the engine no longer reads — see the interface member's doc. */
     public int PoisonWaitThresholdMs => _config.Alerts.PoisonWaitThresholdMs;
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
@@ -75,6 +90,12 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int DiskCriticalFreePercent => Math.Clamp(_config.Alerts.DiskCriticalFreePercent, 0, 100);
     public int DiskCriticalFreeGb => Math.Max(0, _config.Alerts.DiskCriticalFreeGb);
     public int SelfDiskFreeWarnPercent => Math.Clamp(_config.Alerts.SelfDiskFreeWarnPercent, 0, 100);
+
+    /// <summary>#3528: the store warning's GB floor — Store Disk Pressure fires only when the percent above
+    /// is breached AND free space is below this many GB, so a large volume at a low percent (400 GB free on
+    /// a 4 TB store) stops paging CRITICAL. Zero removes the floor (the percent-only pre-#3528 condition);
+    /// the 0-floor GB shape is <see cref="PvsFloorGb"/>'s, whose AND-qualifier composition this mirrors.</summary>
+    public int SelfDiskFreeWarnGb => Math.Max(0, _config.Alerts.SelfDiskFreeWarnGb);
     public int CollectionStaleMinutes => Math.Clamp(_config.Alerts.CollectionStaleMinutes, 5, 1440);
 
     /// <summary>#2136: the Store Job Over Cadence warning percent. Clamped [5, 100].
@@ -122,16 +143,13 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         TimescaleSupport.RetentionHoldRatioFloor,
         TimescaleSupport.RetentionHoldRatioCeiling);
 
-    /// <summary>#3444 (V122): the PostgreSQL Deadlocks alert's rolling-window count threshold.
-    ///
-    /// <para><b>Floored, where its SQL Server twin is not.</b> <see cref="DeadlockCountThreshold"/> passes
-    /// <c>_config.Alerts</c> through raw, so a store row hand-edited to 0 makes the gate's
-    /// <c>count &gt;= threshold</c> test true for a count of zero and fires on a server with no deadlocks.
-    /// That is a pre-existing gap on the twin rather than a shape to copy: the floor here matches
-    /// <see cref="BlockingWaitSecondsThreshold"/> two screens up, which floors for the identical reason.
-    /// The floor is also the <c>update_alert_settings</c> lower write bound, so no value the write path
-    /// accepts is a value this clamp then rewrites — the "setting did not stick" failure the write-bound
-    /// parity pins exist for.</para></summary>
+    /// <summary>#3444 (V122): the PostgreSQL Deadlocks alert's rolling-window count threshold, floored so a
+    /// store row hand-edited to 0 cannot make the gate's <c>count &gt;= threshold</c> test true for a count
+    /// of zero and fire on a server with no deadlocks. Its SQL Server twin
+    /// (<see cref="DeadlockCountThreshold"/>) floors at the same constant since #3528, so the two engines'
+    /// gates are now the one shape. The floor is also the <c>update_alert_settings</c> lower write bound,
+    /// so no value the write path accepts is a value this clamp then rewrites — the "setting did not stick"
+    /// failure the write-bound parity pins exist for.</summary>
     public int PgDeadlockCountThreshold => Math.Max(
         PostgresAlertEvaluator.CountThresholdFloor,
         _config.Alerts.PgDeadlockCountThreshold);
@@ -165,7 +183,8 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /* #2349: the file-growth gates. Clamped the same way the neighbours are -- a negative threshold would
        make the comparison always true, which for a gate whose whole job is to be quiet until something moves
        is the worst possible default. A ZERO is meaningful here rather than nonsense: it disables that one
-       gate, so an operator can run rise-only or level-only without a second switch. */
+       gate, so an operator can run rise-only or level-only without a second switch. The rise is MB per HOUR
+       averaged over the lookback (#3539 A8c); the clamp does not care about the unit, the builder does. */
     public bool FileGrowthEnabled => _config.Alerts.FileGrowthEnabled;
     public int FileGrowthRiseMb => Math.Max(0, _config.Alerts.FileGrowthRiseMb);
     public int FileGrowthVolumePercent => Math.Clamp(_config.Alerts.FileGrowthVolumePercent, 0, 100);
@@ -240,13 +259,25 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool LongRunningQueryExcludeBackups => _config.Alerts.LongRunningQueryExcludeBackups;
     public bool LongRunningQueryExcludeMiscWaits => _config.Alerts.LongRunningQueryExcludeMiscWaits;
     public bool LongRunningQueryExcludeCdc => _config.Alerts.LongRunningQueryExcludeCdc;
+    /* #3653 (A5, Q5): the opt-out knob's two lists, by reference like ExcludedDatabases so the store's
+       hot-reload (ApplyToConfig swaps config.Alerts) reaches the engine on its next sweep. Two text[] columns
+       on config_alert_settings (long_running_query_excluded_program_name_prefixes / _logins, V135), read and
+       seeded by StoreConfigProvider like every appended knob — a column selected but not read there would
+       reset the knob on every worker start. The rung's DEFAULT and the AlertsConfig initialisers are the
+       production read's seeds (the job-step program prefix; the two NT AUTHORITY logins), so a pre-rung row
+       and a fresh darling.json both read as the same population Lite ships with; an operator clearing a list
+       stores an empty array, which is honoured — present-and-empty excludes nothing on that arm. */
+    public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes => _config.Alerts.LongRunningQueryExcludedProgramNamePrefixes;
+    public IReadOnlyList<string> LongRunningQueryExcludedLogins => _config.Alerts.LongRunningQueryExcludedLogins;
 
     /* ---------------- IAlertSettings (delivery) ---------------- */
 
+    /* #4751: host + from only. The default recipient list is no longer part of "SMTP is set up": a notification
+       route can name the recipients on its own, and the parent supplies only the host, the from address and the
+       credentials. A firing that resolves to no recipients at all is skipped by EmailSendCore, not sent. */
     public bool SmtpEnabled =>
         !string.IsNullOrWhiteSpace(_config.Smtp.Host)
-        && !string.IsNullOrWhiteSpace(_config.Smtp.From)
-        && !string.IsNullOrWhiteSpace(_config.Smtp.To);
+        && !string.IsNullOrWhiteSpace(_config.Smtp.From);
 
     public string SmtpServer => _config.Smtp.Host;
     public int SmtpPort => _config.Smtp.Port;
@@ -308,6 +339,13 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool PagerDutyUseEuRegion => _config.Webhooks.PagerDutyUseEuRegion;
     public string PagerDutyProxyAddress => _config.Webhooks.PagerDutyProxy;
 
+    /// <summary>#3598 (V131): the sparse notification routes, read live through the by-reference config seam
+    /// like every sibling — <c>StoreConfigProvider.ApplyToConfig</c> swaps the list on every beacon change,
+    /// which the routes table's own trigger bumps, so a route authored in the Viewer lands on the next firing
+    /// with no restart. The ONLY adapter that overrides the interface's empty default: Lite has no routes
+    /// table and resolves every firing to its parent channels.</summary>
+    public IReadOnlyList<NotificationRoute> NotificationRoutes => _config.NotificationRoutes;
+
     /* Scheduled-analysis notifications (AN3): the shared AnalysisNotificationService's severity floor
        + per-finding re-notify cooldown. The severity floor is now a control-plane knob (config Stage
        1) read through the by-reference config seam — a store reload reflects it immediately; clamped
@@ -316,9 +354,99 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /* #2107: was a hardcoded 360 while the shared engine accepts a clamped [30, 10080] value and
        Lite always passed a configured one through — the Darling parity gap gotqn called out. */
     public int AnalysisNotifyCooldownMinutes => Math.Clamp(_config.Alerts.AnalysisNotifyCooldownMinutes, 30, 10080);
+    /// <summary>#3916: the analysis page cap per hold-back window IS the per-event cap — the same "how many
+    /// separate messages before they batch" knob, so one operator setting governs both.</summary>
+    public int AnalysisPageCap => PerEventMax;
+
+    /// <summary>
+    /// #3712: where an uncorroborated finding goes — resolved from the knob's TWO homes with <b>store non-NULL
+    /// wins over file</b>: <c>config_alert_settings.analysis_uncorroborated_route</c> (V137, read into
+    /// <see cref="AnalysisConfig.StoreUncorroboratedRoute"/>) when it holds a route, else darling.json's
+    /// <c>analysis.uncorroboratedRoute</c> (<see cref="AnalysisConfig.UncorroboratedRoute"/>, carried across the
+    /// store swap), else the shipped <c>digest</c>, which is the interface's default. Read live through the
+    /// by-reference seam like every sibling, so the store's hot-reload (<c>ApplyToConfig</c> swaps
+    /// <c>config.Analysis</c>) reaches the gate without reconstruction.
+    ///
+    /// <para><b>Why the store wins.</b> An operator who flips the Viewer's Settings toggle or calls
+    /// <c>update_alert_settings</c> expects the change to take effect — without a restart, without a file edit
+    /// on the service box, and without knowing which of two places holds the losing value. The file is the
+    /// INSTALL-TIME default: it is read once at start, is not hot-reloaded, and on a container install may be
+    /// nobody's to edit. The store is the surface the product already hot-reloads for every other alert knob
+    /// (V17's statement-level <c>trg_bump_alert_settings</c> bumps <c>config_version</c> on any write to the
+    /// row), so a value written there is live within one 15 s beacon tick and is consulted by
+    /// <c>AnalysisNotificationService</c> on the next scheduled-analysis delivery. NULL in the store is the
+    /// third state — "the file governs" — which is what every existing store reads after the V137 upgrade, so
+    /// nothing moved on upgrade day; <c>get_alert_settings</c> says which home decided under
+    /// <c>analysis.uncorroborated_route_source</c>. The resolver is <see cref="ResolveUncorroboratedRoute"/>,
+    /// shared with that tool so the two never disagree about one row.</para>
+    /// </summary>
+    public FindingRoute UncorroboratedFindingRoute =>
+        ResolveUncorroboratedRoute(_config.Analysis.StoreUncorroboratedRoute, _config.Analysis.UncorroboratedRoute).Route;
+
+    /// <summary>The <c>analysis.uncorroborated_route_source</c> wire word for a route the STORE column decided
+    /// (#3712, V137): the column held <c>digest</c> or <c>page</c>.</summary>
+    public const string RouteSourceStore = "store";
+
+    /// <summary>The wire word for a route darling.json's <c>analysis.uncorroboratedRoute</c> decided: the store
+    /// column was NULL (or, on a store whose CHECK was dropped, unparseable) and the file held a route.</summary>
+    public const string RouteSourceFile = "file";
+
+    /// <summary>The wire word for the shipped <c>digest</c> deciding: neither home held a parseable route — the
+    /// store column NULL and the file's value missing or misspelled (an MCP host that has not published its file
+    /// value reads here too, deliberately: "default" is a true statement there where "file" would not be).</summary>
+    public const string RouteSourceDefault = "default";
+
+    /// <summary>
+    /// The one resolver for the #3712 route knob's two homes, pure so both the engine seam above and
+    /// <c>get_alert_settings</c> / <c>update_alert_settings</c> read one row the same way. Precedence: a store
+    /// value that parses (<see cref="FindingRouting.TryParseRoute"/>, case-insensitive) wins; else a file value
+    /// that parses; else <see cref="FindingRoute.Digest"/>. <c>StoreValueIgnored</c> is true when the store
+    /// held something that is neither route — impossible under the V137 CHECK, possible on a store whose CHECK
+    /// was dropped by hand — so the caller that has a logger (<c>StoreConfigProvider.LoadViewAsync</c>) can say
+    /// so rather than let a misspelling silently turn an operator's PAGE back into the digest, which is the one
+    /// failure the knob exists to make impossible and the reason the rung carries a CHECK at all.
+    /// </summary>
+    public static UncorroboratedRouteResolution ResolveUncorroboratedRoute(string? storeValue, string? fileValue)
+    {
+        if (FindingRouting.TryParseRoute(storeValue) is { } fromStore)
+        {
+            return new UncorroboratedRouteResolution(fromStore, RouteSourceStore, StoreValueIgnored: false);
+        }
+
+        var storeValueIgnored = !string.IsNullOrWhiteSpace(storeValue);
+        if (FindingRouting.TryParseRoute(fileValue) is { } fromFile)
+        {
+            return new UncorroboratedRouteResolution(fromFile, RouteSourceFile, storeValueIgnored);
+        }
+
+        return new UncorroboratedRouteResolution(FindingRoute.Digest, RouteSourceDefault, storeValueIgnored);
+    }
 
     /// <summary>#2710: the triage-link base — <c>web.publicBaseUrl</c>, read live through the by-reference
     /// config seam like every sibling. File-authoritative on purpose (see the WebConfig doc comment): a store
-    /// config reload overwrites only Web.Enabled/Web.Port, so this survives it.</summary>
-    public string TriageBaseUrl => _config.Web.PublicBaseUrl ?? "";
+    /// config reload overwrites only Web.Enabled/Web.Port, so this survives it.
+    ///
+    /// <para>Ruled (#4220, 2026-09-25): the only reason to omit the link is that there is nothing to open, so
+    /// this gates on <c>Web.Enabled</c> (live, for the same reason above) and nothing else. A loopback-only
+    /// bind, a host the Host guard would otherwise have rejected (fixed at the guard instead — see
+    /// <see cref="PerformanceMonitor.Common.HostHeaderGuard"/>), and a base shaped like it carries a
+    /// credential are the operator's own configuration and still get a link; the last of those gets a
+    /// one-time startup warning instead (<c>PerformanceMonitor.Notifications.TriageLink.DescribeCredentialShapedBaseWarning</c>).</para>
+    /// </summary>
+    public string TriageBaseUrl => _config.Web.Enabled ? (_config.Web.PublicBaseUrl ?? "") : "";
+}
+
+/// <summary>
+/// The outcome of <see cref="DarlingAlertSettings.ResolveUncorroboratedRoute"/> (#3712): the route the gate
+/// applies, the wire word for WHICH home decided it (<see cref="DarlingAlertSettings.RouteSourceStore"/> /
+/// <see cref="DarlingAlertSettings.RouteSourceFile"/> / <see cref="DarlingAlertSettings.RouteSourceDefault"/>),
+/// and whether the store held a value the resolver had to ignore. <c>Source</c> is what
+/// <c>get_alert_settings</c> publishes as <c>analysis.uncorroborated_route_source</c>; <c>Route</c> is what it
+/// publishes as <c>analysis.uncorroborated_route</c> and what <c>AnalysisNotificationService</c> reads.
+/// </summary>
+public readonly record struct UncorroboratedRouteResolution(FindingRoute Route, string Source, bool StoreValueIgnored)
+{
+    /// <summary>The effective route's wire spelling (<c>digest</c> / <c>page</c>) — never null, unlike the
+    /// pre-V137 publish, because a resolution always ends somewhere.</summary>
+    public string RouteText => FindingRouting.RouteText(Route);
 }

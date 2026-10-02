@@ -14,6 +14,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
@@ -33,6 +34,39 @@ public sealed record MutedStory(
     string StoryPath,
     DateTime MutedDate,
     string? Reason);
+
+/// <summary>
+/// What one <see cref="PgFindingStore.MuteStoryAsync"/> call did to the registry (#3653 A15/A16). Before this
+/// the method answered <c>true</c> for every INSERT that did not throw, so muting the same pattern twice wrote
+/// two rows and both calls reported the same success — the tool above it could not tell a caller "that was
+/// already muted". Three outcomes because the caller acts differently on each: a new row means the pattern
+/// was live until this call; an existing row means nothing changed; a failure means nothing is muted.
+/// The Lite twin (<c>FindingStore.MuteStoryAsync</c>) returns the same type by name and never returns
+/// <see cref="Failed"/>, because its store throws instead of swallowing.
+/// </summary>
+public enum MuteRegistration
+{
+    /// <summary>A new registry row was written: this (scope, hash) was not muted before the call.</summary>
+    Registered,
+
+    /// <summary>
+    /// No row was written because the registry already held this (scope, hash). The mute was in force before
+    /// the call and still is; a caller that wanted to change its reason has nothing to change it on.
+    /// </summary>
+    AlreadyMuted,
+
+    /// <summary>The INSERT failed (logged, as every read-back surface here logs); the registry is as it was.</summary>
+    Failed,
+}
+
+/// <summary>
+/// The result of <see cref="PgFindingStore.MuteStoryAsync"/>: what happened, and — when a row was written —
+/// the <c>story_path</c> it carries, or <c>null</c> when the store could not learn the path and stored the
+/// hash in its place (see the method note for why the column cannot be NULL without a rung). <c>StoryPath</c>
+/// is <c>null</c> for <see cref="MuteRegistration.AlreadyMuted"/> and <see cref="MuteRegistration.Failed"/>
+/// too — nothing was written, so there is nothing to report as written.
+/// </summary>
+public sealed record MuteWriteResult(MuteRegistration Registration, string? StoryPath);
 
 /// <summary>
 /// Persists analysis findings to Darling's Postgres store (the V4 <c>analysis_findings</c> /
@@ -82,10 +116,15 @@ public sealed class PgFindingStore
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
 
+    /* #4737: resolves the target's clock over the prior-weeks read window; the once-per-process notes (a zone id
+       this host cannot resolve) go to the same log as the store's own lines. */
+    private readonly BaselineLocalClock _localClock;
+
     public PgFindingStore(NpgsqlDataSource postgres, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        _localClock = new BaselineLocalClock(message => _logger?.LogInformation("{Message}", message));
     }
 
     /* SQL is exposed const so Darling.Tests can pin the dialect ungated ($N positional
@@ -179,13 +218,110 @@ SELECT mute_id, server_id, story_path_hash, story_path, muted_date, reason
 FROM analysis_muted
 WHERE server_id = $1 OR server_id IS NULL OR server_id = 0";
 
+    /* #3653 A15/A16: one statement does three things the old VALUES form did not, and the reasons live on
+       MuteStoryAsync. (1) story_path is the caller's when it has one ($4), else the newest retained finding's
+       path for the hash (the hash is a function of the path alone — InferenceEngine.ComputeHash — so any row
+       carrying it names the same path; ORDER BY only makes the choice stable), else the hash itself, because
+       the column is NOT NULL and the hash is the placeholder the viewer's own mute button already writes for an
+       empty path. (2) NOT EXISTS makes the write idempotent per (scope, hash): a scope is one server_id, with
+       NULL and the legacy 0 both meaning "every server" (COALESCE folds them together, the way every reader
+       here treats them). analysis_muted has no unique key over the pair and adding one is a rung, so this is
+       a guarded INSERT, not a constraint; two callers muting the same pattern in the same instant can still
+       both land, which is exactly the duplicate the readers already tolerate (hash-set semantics; the viewer
+       unmutes the smallest mute_id). (3) RETURNING tells the caller whether a row was written at all and
+       what path it carries — zero rows back is "already muted", not a failure. The hash predicate rides
+       idx_analysis_muted_hash; the path subquery rides idx_analysis_findings_hash. */
     public const string MuteStorySql = @"
 INSERT INTO analysis_muted (mute_id, server_id, story_path_hash, story_path, muted_date, reason)
-VALUES ($1, $2, $3, $4, $5, $6)";
+SELECT $1, $2, $3,
+       COALESCE(
+           $4,
+           (SELECT f.story_path FROM analysis_findings f
+            WHERE f.story_path_hash = $3
+            ORDER BY f.analysis_time DESC
+            LIMIT 1),
+           $3),
+       $5, $6
+WHERE NOT EXISTS (
+    SELECT 1 FROM analysis_muted m
+    WHERE m.story_path_hash = $3
+      AND COALESCE(m.server_id, 0) = COALESCE($2, 0))
+RETURNING story_path";
 
     public const string UnmuteStorySql = "DELETE FROM analysis_muted WHERE mute_id = $1";
 
+    /* #3541 A14: how many STORED findings a mute's story_path_hash matches right now, so the mute verb can
+       report what it matched rather than only that it wrote. Two statements rather than one with a nullable
+       parameter, so the all-servers form is a plain equality on the hash index (idx_analysis_findings_hash)
+       and the scoped form is that plus server_id, both sub-second by shape on the retained population. */
+    public const string CountFindingsWithHashSql = @"
+SELECT count(*) FROM analysis_findings
+WHERE story_path_hash = $1";
+
+    public const string CountFindingsWithHashForServerSql = @"
+SELECT count(*) FROM analysis_findings
+WHERE story_path_hash = $1 AND server_id = $2";
+
     public const string CleanupOldFindingsSql = "DELETE FROM analysis_findings WHERE analysis_time < $1";
+
+    /* #3653 item 3 (Q3): the prior weeks, for RecurrenceLabeler — ONE statement per analysis pass, not one per
+       story. $1 server, $2 the lower bound (RecurrenceLabeler.ReadLowerBoundUtc — three weeks and an hour of
+       slack), $3 the pass's reference instant, which is the exclusive upper bound: this pass has not persisted
+       yet, and earlier passes inside this hour are this week, not a prior one.
+
+       The slot is on the TARGET's clock (#4737). analysis_time is naive UTC (this store's discipline), so each row is shifted by
+       BaselineLocalClock.LocalAnalysisTimeSql — the offset in force AT THAT ROW — before the hour and weekday
+       are taken: $4 is the instant the offset changed (the window's end when it did not), $5 the offset in
+       minutes before it, $6 from it on, the same three numbers the baseline statements bind, resolved by the
+       caller over [$2, $3) from the zone id when the server has one. $7 and $8 are the reference's own local
+       hour and weekday (0 = Sunday), taken by the caller from that same clock, so the rows and the slot they
+       are compared with cannot sit on different offsets. The read used to apply ONE utc_offset_minutes to all
+       21 days, and a clock change inside them left every older row an hour off the slot: "Recurring at this
+       hour" disappeared for up to three weeks, and a job that had not moved could read as moved.
+
+       The zone id is filled only on SQL Server 2022 and later and on Azure. A server without one (SQL Server
+       before 2022) has only its offset, so the caller binds that fixed offset with $5 = $6 — the behaviour
+       before the zone was read, wrong by an hour across a clock change and no worse — and a server with no
+       offset row at all (a PostgreSQL target) binds 0/0, which is UTC. The caller keeps the raw offset (NULL when
+       there is none) to tell the labeler which wording to write.
+
+       Two row families come back from one scan of idx_analysis_findings_time: every chain that fired in the
+       SAME slot (the recurrence arm), and every RUNNING_JOBS-rooted card in ANY slot (the moved-window arm — a
+       job that slid is by definition in a different slot). Rows collapse to one per (chain, root key, local
+       hour bucket): the engine re-persists every story every cycle (FindingOccurrences: 27.9x mean), and
+       "fired in that hour" is one fact however many passes ran inside it. story_text is read for the job rows
+       ONLY — the frozen job card is the one place a prior week's job NAME survives (Fact.ObjectName is not a
+       finding-row column) — through the CASE; MAX over the hour is a deterministic pick when two passes in one
+       hour named different jobs, and the labeler compares the name it recovers against this pass's, so a
+       wrong pick labels nothing rather than the wrong job.
+
+       Byte-identical to Lite's FindingStore.GetPriorOccurrencesSql: the server's clock is a separate
+       one-row read (PgBaselineProvider.ServerClockSql here, BaselineProvider.ServerClockSql there), so nothing
+       in this statement names a table the two products spell differently. A source pin in Darling.Tests holds
+       the two equal. */
+    public const string GetPriorOccurrencesSql = @"
+WITH local_rows AS
+(
+    SELECT
+        f.story_path_hash,
+        f.root_fact_key,
+        f.story_text,
+        date_trunc('hour', " + BaselineLocalClock.LocalAnalysisTimeSql + @") AS local_bucket
+    FROM analysis_findings AS f
+    WHERE f.server_id = $1
+    AND   f.analysis_time >= $2
+    AND   f.analysis_time <  $3
+)
+SELECT
+    story_path_hash,
+    root_fact_key,
+    local_bucket,
+    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text
+FROM local_rows
+WHERE (EXTRACT(HOUR FROM local_bucket) = $7 AND EXTRACT(DOW FROM local_bucket) = $8)
+OR    root_fact_key = 'RUNNING_JOBS'
+GROUP BY story_path_hash, root_fact_key, local_bucket
+ORDER BY local_bucket, story_path_hash";
 
     /// <summary>
     /// Mute-filters the stories and materializes the SURVIVING findings, WITHOUT inserting
@@ -193,10 +329,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// survivors and builds + attaches each finding's RemediationAction before calling
     /// <see cref="InsertFindingsAsync"/>, so the BUILT action is persisted on the row.
     /// Absolution stories (severity 0) and muted hashes are dropped here and never enriched.
-    /// The context window arrives in the SERVER's local clock (Dashboard semantics — windowed
-    /// reads match the collectors' SYSDATETIME rows); ServerUtcOffset converts it back to UTC
-    /// for persistence. A Lite-shaped caller that leaves ServerUtcOffset at Zero (host-UTC
-    /// windows) gets an identity conversion, so both twins' callers are served.
+    /// The context window is persisted as it arrives: Darling's analysis window is already the naive UTC
+    /// the store keeps, and <c>AnalysisContext.ServerUtcOffset</c> stays zero here (#4737).
     /// </summary>
     public async Task<List<AnalysisFinding>> FilterMutedFindingsAsync(
         List<AnalysisStory> stories, AnalysisContext context)
@@ -238,8 +372,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                     ServerId = context.ServerId,
                     ServerName = context.ServerName,
                     DatabaseName = story.DatabaseName,
-                    TimeRangeStart = context.TimeRangeStart - context.ServerUtcOffset,
-                    TimeRangeEnd = context.TimeRangeEnd - context.ServerUtcOffset,
+                    TimeRangeStart = context.TimeRangeStart,
+                    TimeRangeEnd = context.TimeRangeEnd,
                     Severity = story.Severity,
                     Confidence = story.Confidence,
                     Category = story.Category,
@@ -252,8 +386,22 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                     LeafFactKey = story.LeafFactKey,
                     LeafFactValue = story.LeafFactValue,
                     FactCount = story.FactCount,
+                    /* #3712: the corroboration components the notification layer routes on — in memory
+                       only, like the root metadata below. */
+                    MatchedAmplifiers = story.MatchedAmplifiers,
+                    DefinedAmplifiers = story.DefinedAmplifiers,
+                    /* #3691: the config levers the greedy walk skipped, so analyze_server can render their cards
+                       beside this chain. In memory only, like the two above. */
+                    SideLeafKeys = story.SideLeafKeys,
+                    /* #3859: the typed chain beside the levers, in memory only like them — the drill-down
+                       collectors and next_tools read THIS instead of splitting the rendered StoryPath on the
+                       arrow, which is the six-site corruption surface the issue names. StoryPath is unchanged. */
+                    PathKeys = story.Path,
                     /* Carried in-memory only; no analysis_findings column for it. */
-                    RootFactMetadata = story.RootFactMetadata
+                    RootFactMetadata = story.RootFactMetadata,
+                    /* #3691 lane 43: the root fact's ranked objects, in memory only like the metadata above —
+                       analyze_server's root_fact renders them; a read-back finding has none. */
+                    RootFactRanked = story.RootFactRanked
                 });
             }
         }
@@ -400,16 +548,102 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
+    /// #3653 item 3 (Q3): the prior three weeks' occurrences the <see cref="RecurrenceLabeler"/> labels this
+    /// pass's stories from — one statement (<see cref="GetPriorOccurrencesSql"/>), on the pass token, returning
+    /// every chain that fired in the reference instant's hour×weekday slot on the target's clock plus every
+    /// <c>RUNNING_JOBS</c>-rooted card in any slot, collapsed to one row per hour, the reference instant on that
+    /// same clock, and the UTC offset the server reports (null when the store had none and the read fell back to
+    /// UTC). Each row is shifted by the offset in force at its own <c>analysis_time</c> (#4737).
+    /// <paramref name="referenceUtc"/> is the pass's window end (<see cref="AnalysisContext.TimeRangeEnd"/>).
+    ///
+    /// <para>Reads log and return <see cref="PriorOccurrenceRead.Empty"/>, the class's discipline — and the right
+    /// one here for a reason beyond consistency: the label is presentation. A history the store could not read
+    /// must not cost the pass its findings, and a pass that labels nothing this cycle labels correctly next
+    /// cycle, because the rows it would have read are still there. An abandonment (#2443) is not swallowed.
+    /// The returned buckets are the target's LOCAL hours and are left Kind-Unspecified: tagging them Utc would
+    /// be the lie the shift exists to remove.</para>
+    /// </summary>
+    public async Task<PriorOccurrenceRead> GetPriorOccurrencesAsync(AnalysisContext context, DateTime referenceUtc)
+    {
+        if (context is null)
+        {
+            throw new ArgumentNullException(nameof(context));
+        }
+
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+            /* #4737: the target's clock over the read window, resolved the way the baselines resolve theirs — the
+               zone id when the server reports one (SQL Server 2022 and later, Azure), else its one offset for every
+               row (SQL Server before 2022 has no zone id), else UTC (no server_properties row, which is what a
+               PostgreSQL target has). Read on this connection, inside this try: a store that cannot answer the
+               one-row clock read cannot answer the history read either, and one catch is the right place to say
+               "no labels this pass". */
+            var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, context.ServerId, context.CancellationToken);
+            var lowerBoundUtc = RecurrenceLabeler.ReadLowerBoundUtc(referenceUtc);
+            var clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, lowerBoundUtc, referenceUtc);
+            var referenceLocal = clock.ToLocal(referenceUtc);
+
+            using var command = new NpgsqlCommand(GetPriorOccurrencesSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(context.ServerId);
+            command.Parameters.AddWithValue(AsNaive(lowerBoundUtc));
+            command.Parameters.AddWithValue(AsNaive(referenceUtc));
+            /* $4..$6: the clock BaselineLocalClock.LocalAnalysisTimeSql shifts each row by. $7, $8: the reference's
+               local hour and weekday, from the same clock. */
+            command.Parameters.AddWithValue(clock.TransitionAtUtc);
+            command.Parameters.AddWithValue(clock.OffsetBeforeMinutes);
+            command.Parameters.AddWithValue(clock.OffsetAfterMinutes);
+            command.Parameters.AddWithValue(referenceLocal.Hour);
+            command.Parameters.AddWithValue((int)referenceLocal.DayOfWeek);
+
+            var occurrences = new List<PriorOccurrence>();
+            using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                occurrences.Add(new PriorOccurrence(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetDateTime(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3)));
+            }
+
+            return new PriorOccurrenceRead(utcOffsetMinutes, referenceLocal, occurrences);
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            _logger?.LogError("[PgFindingStore] GetPriorOccurrencesAsync failed — this pass's findings are persisted unlabelled and the next pass reads the same history: {Message}", ex.Message);
+            return PriorOccurrenceRead.Empty;
+        }
+    }
+
+    /// <summary>
+    /// The newest <c>server_properties</c> row that carries an offset (<see cref="PgBaselineProvider.ServerClockSql"/>,
+    /// the read the baselines make): the offset in force at the snapshot and, on SQL Server 2022 and later and on
+    /// Azure, the zone id. No row — a PostgreSQL target has none — reads (null, null), which
+    /// <see cref="BaselineLocalClock.Resolve"/> turns into UTC.
+    /// </summary>
+    private static async Task<(int? UtcOffsetMinutes, string? TimeZoneId)> ReadServerClockAsync(
+        NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
+    {
+        using var command = new NpgsqlCommand(PgBaselineProvider.ServerClockSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, null);
+        }
+
+        return (reader.IsDBNull(0) ? null : Convert.ToInt32(reader.GetValue(0)),
+                reader.IsDBNull(1) ? null : reader.GetString(1));
+    }
+
+    /// <summary>
     /// Returns the most recent findings for a server within the given time range, newest and
     /// most severe first, including each finding's persisted remediation action.
-    ///
-    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
-    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
-    /// its store calls take no pass token. Threading one here would mean inventing a caller that
-    /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
-        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
         var findings = new List<AnalysisFinding>();
 
@@ -421,20 +655,20 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                zone-shifted. */
             var windowEnd = DateTime.SpecifyKind(asOfUtc ?? DateTime.UtcNow, DateTimeKind.Unspecified);
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(GetRecentFindingsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(windowEnd.AddHours(-hoursBack));
             command.Parameters.AddWithValue(asOfUtc is null ? NoUpperBound : windowEnd);
             command.Parameters.AddWithValue(limit);
 
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
                 findings.Add(ReadFinding(reader));
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger?.LogError("[PgFindingStore] GetRecentFindingsAsync failed: {Message}", ex.Message);
         }
@@ -477,14 +711,38 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Mutes a story pattern so it won't appear in future analysis runs.
+    /// Mutes a story pattern so it won't appear in future analysis runs, and reports what the write did:
+    /// <see cref="MuteRegistration.Registered"/> when a new row landed, <see cref="MuteRegistration.AlreadyMuted"/>
+    /// when the registry already held this (scope, hash) and nothing was written, <see cref="MuteRegistration.Failed"/>
+    /// when the INSERT failed (logged, as every read-back surface here logs).
+    ///
+    /// <para>The <c>bool</c> this replaces was #3541 A14: the method had swallowed its failure and returned
+    /// <c>Task</c>, so the MCP mute verb reported <c>status: "muted"</c> whether or not a row exists. The three-way
+    /// answer is #3653 A15/A16, which found two more lies the same verb told. First, it wrote the HASH into the
+    /// <c>story_path</c> column, because the MCP entry point knows only the hash: a registry row that claims to
+    /// name a diagnostic chain and names a checksum instead. Second, muting the same hash twice registered two
+    /// rows and reported success twice; the readers were never confused by that (they fold by hash, and the
+    /// viewer unmutes the smallest <c>mute_id</c>), but the caller was, because "registered" was true for a write
+    /// that changed nothing.</para>
+    ///
+    /// <para><paramref name="storyPath"/> is therefore nullable now: pass the path when you hold the finding (the
+    /// viewer does), pass <c>null</c> when you hold only the hash (the MCP does), and <see cref="MuteStorySql"/>
+    /// resolves it from the newest retained finding carrying the hash. When no retained finding carries it —
+    /// the pattern's history has been purged, or the hash is mistyped — the hash goes into the column as a
+    /// placeholder, the same placeholder the viewer's own mute button writes for an empty path, because the
+    /// column is NOT NULL and relaxing it is a rung. The result's <see cref="MuteWriteResult.StoryPath"/> is
+    /// <c>null</c> in that case so the caller can say so instead of echoing the checksum as a path.</para>
+    ///
+    /// <para>Idempotence is a guarded INSERT, not a constraint (see the SQL note): a duplicate can still land
+    /// when two callers mute the same pattern in the same instant, and that duplicate is harmless by the readers'
+    /// contract. Promoting it to a unique index is a rung this change deliberately does not take.</para>
     ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
     /// does not exist.</para>
     /// </summary>
-    public async Task MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
+    public async Task<MuteWriteResult> MuteStoryAsync(int serverId, string storyPathHash, string? storyPath, string? reason = null)
     {
         try
         {
@@ -495,16 +753,64 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             // canonical global marker every reader filters on (legacy 0 rows are still honored).
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId == 0 ? (object)DBNull.Value : serverId });
             command.Parameters.AddWithValue(storyPathHash);
-            command.Parameters.AddWithValue(storyPath);
+            // An empty path is "unknown" too: AnalysisFinding.StoryPath defaults to empty, and the viewer's
+            // pre-#3653 fallback wrote the hash for exactly that case.
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = string.IsNullOrEmpty(storyPath) ? DBNull.Value : storyPath });
             command.Parameters.AddWithValue(NaiveUtcNow());
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)reason ?? DBNull.Value });
 
-            await command.ExecuteNonQueryAsync();
+            /* RETURNING yields one row when the guarded INSERT wrote, none when the registry already held the
+               pair — ExecuteScalar reads that as null. A written path equal to the hash is the NOT NULL
+               placeholder, reported as "no path known" rather than as a path. */
+            var written = await command.ExecuteScalarAsync();
+            if (written is not string storedPath)
+            {
+                return new MuteWriteResult(MuteRegistration.AlreadyMuted, null);
+            }
+
+            return new MuteWriteResult(
+                MuteRegistration.Registered,
+                string.Equals(storedPath, storyPathHash, StringComparison.Ordinal) ? null : storedPath);
         }
         catch (Exception ex)
         {
             _logger?.LogError("[PgFindingStore] MuteStoryAsync failed: {Message}", ex.Message);
+            return new MuteWriteResult(MuteRegistration.Failed, null);
         }
+    }
+
+    /// <summary>
+    /// How many STORED findings currently carry <paramref name="storyPathHash"/> — for one server, or across
+    /// the fleet when <paramref name="serverId"/> is null or the all-servers sentinel 0 — so a mute can say what
+    /// it matched at the moment it was registered (#3541 A14).
+    ///
+    /// <para><b>This is a disclosure, not a gate.</b> The mute registry is a PATTERN registry: nothing in it
+    /// references a finding row, and <see cref="FilterMutedFindingsAsync"/> consults it by hash on every future
+    /// pass. A hash that matches nothing today is therefore a legitimate registration (the pattern may return
+    /// after the retention sweep has purged its history) AND the most likely shape of a mistyped hash, which is
+    /// why the count is reported beside the write rather than used to refuse it. Throws on a store failure —
+    /// the MCP caller owns the error envelope; a count that silently read as 0 would be the very
+    /// zero-vs-unknown confusion the payload contract forbids.</para>
+    /// </summary>
+    public async Task<long> CountStoredFindingsAsync(int? serverId, string storyPathHash, CancellationToken cancellationToken = default)
+    {
+        /* Scoped unless null or the all-servers sentinel 0 — and ONLY those two: a server_id is an FNV hash cast
+           to int, so roughly half of all real ids are negative and a `> 0` test here would silently count half the
+           fleet's scoped mutes fleet-wide. */
+        var scoped = serverId is not (null or 0);
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(scoped ? CountFindingsWithHashForServerSql : CountFindingsWithHashSql, connection)
+        {
+            CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds,
+        };
+        command.Parameters.AddWithValue(storyPathHash);
+        if (scoped)
+        {
+            command.Parameters.AddWithValue(serverId!.Value);
+        }
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is long count ? count : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /// <summary>
@@ -600,6 +906,26 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         catch (Exception ex)
         {
             _logger?.LogError("[PgFindingStore] CleanupOldFindingsAsync failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #3916 PR B: the muted story hashes for one server on a connection of its own — the read the shared
+    /// <c>AnalysisNotificationService</c> re-checks at its hold-back flush, so a mute applied inside the
+    /// window drops the queued page. Fails OPEN (an empty set, logged): the finding already passed the
+    /// queue-time mute filter, so an unreadable registry means "not muted", never "suppress the page".
+    /// </summary>
+    public async Task<IReadOnlySet<string>> GetMutedStoryHashesAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            return await GetMutedHashesAsync(connection, serverId, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("[PgFindingStore] GetMutedStoryHashesAsync failed (treated as not muted): {Message}", ex.Message);
+            return new HashSet<string>();
         }
     }
 
@@ -711,7 +1037,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// </summary>
     private static AnalysisFinding ReadFinding(NpgsqlDataReader reader)
     {
-        return new AnalysisFinding
+        var finding = new AnalysisFinding
         {
             FindingId = reader.GetInt64(0),
             AnalysisTime = AsUtc(reader.GetDateTime(1)),
@@ -739,6 +1065,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                "no drill-down" inside the serializer, mirroring the action's discipline. */
             DrillDown = reader.IsDBNull(20) ? null : DrillDownSerializer.Deserialize(reader.GetString(20))
         };
+
+        /* #4005: a deadlock exemplar stored before its SQL was normalized comes back normalized, and names its
+           report by timestamp and pid rather than by a hash that may be over the raw graph. */
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding);
+        return finding;
     }
 
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>

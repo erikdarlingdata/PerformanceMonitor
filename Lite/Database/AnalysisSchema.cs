@@ -77,7 +77,7 @@ CREATE INDEX IF NOT EXISTS idx_analysis_muted_hash
     {
         if (fromVersion < 2)
         {
-            // v2: Add server metadata columns for edition-aware analysis
+            // v2: the server-metadata columns the config audit reads (reported for context; no check branches on them)
             yield return "ALTER TABLE servers ADD COLUMN IF NOT EXISTS sql_engine_edition INTEGER DEFAULT 0";
             yield return "ALTER TABLE servers ADD COLUMN IF NOT EXISTS sql_major_version INTEGER DEFAULT 0";
         }

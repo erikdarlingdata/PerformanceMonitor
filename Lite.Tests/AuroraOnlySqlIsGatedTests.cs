@@ -84,6 +84,26 @@ public class AuroraOnlySqlIsGatedTests
             "aurora_stat_statements(), every other PostgreSQL the vanilla view with the Aurora-only columns " +
             "null. The tool reads the STORE, never the target; the dependency itself is " +
             "PgStatementStatsCollector's PAIRED entry above.",
+
+        ["DarlingMcpPgWaitTools.cs"] =
+            "PROSE (#3604). get_pg_wait_stats' instrument_note tells the caller which source fed the rows — " +
+            "Aurora's aurora_stat_system_waits() — so a count can be read beside its grain. The tool reads " +
+            "the STORE, never the target; the collector it describes is PgWaitStatsCollector's GATED entry.",
+
+        ["PgTargetAdvice.Anomaly.cs"] =
+            "PROSE (#3542). The ANOMALY_PG_WAIT_PROFILE advice block tells the operator which instrument the " +
+            "baselined wait rate came from — Aurora's aurora_stat_system_waits() deltas as stored in pg_wait_stats " +
+            "— because that anomaly exists only where the engine measured waits: stock PostgreSQL's sampled waits " +
+            "get no anomaly baseline in v1, and the advice must not read as if they did. The advice reads facts, " +
+            "never the target; the dependency itself is PgWaitStatsCollector's GATED entry, and the detector " +
+            "that emits the fact baselines pg_wait_stats, which is empty off Aurora.",
+
+        ["PgTargetFactCollector.Queries.cs"] =
+            "PROSE. PgTargetTopStatementsSql selects MAX(max_exec_peakmem_bytes), a STORED column in " +
+            "collect.pg_statement_stats, never an Aurora function. PgStatementStatsCollector's vanilla path " +
+            "writes that column NULL off Aurora, so off Aurora the value is NULL, the fact metadata key is " +
+            "absent, and the advice sentence is omitted — never emitted as 0. The dependency itself is " +
+            "PgStatementStatsCollector's PAIRED entry above.",
     };
 
     [Fact]
@@ -207,14 +227,25 @@ public class AuroraOnlySqlIsGatedTests
         }
     }
 
+    /// <summary>The file's path below the repo root, led by a separator so a first-level directory matches too.</summary>
+    private static string InRepo(string root, string file) =>
+        Path.DirectorySeparatorChar + Path.GetRelativePath(root, file);
+
     private static string[] FilesNamingAuroraSurfaces()
     {
         var root = RepoRoot();
 
+        /* The three exclusions are judged on the path BELOW the repo root: a checkout that itself lives under a
+           `.claude` directory (an agent's isolated copy at .claude/worktrees/<name>) would otherwise exclude every
+           file and fail as "nothing names the surface". Only the unpublished part of the root's own `.claude` is
+           skipped (#4004's review): other checkouts in .claude/worktrees and local state, never the committed
+           .claude/skills, the line .gitignore draws. Darling.Tests/FleetIdentifierScrubTests spells the same rule. */
+        var claude = $"{Path.DirectorySeparatorChar}.claude{Path.DirectorySeparatorChar}";
         return Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}.claude{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(root, f).Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(root, f).Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !(InRepo(root, f).Contains(claude, StringComparison.Ordinal)
+                && !InRepo(root, f).StartsWith($"{claude}skills{Path.DirectorySeparatorChar}", StringComparison.Ordinal)))
             /* Tests are excluded deliberately: a test naming the surface is asserting ABOUT it, which is
                the opposite of depending on it. */
             .Where(f => !f.Contains(".Tests", StringComparison.OrdinalIgnoreCase))

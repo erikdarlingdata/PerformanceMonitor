@@ -18,10 +18,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// Stats / Spinlock Stats into the Darling viewer, consolidated into ONE tab: the latch and spinlock
 /// per-second trend charts for the TOP 5 contenders (latch classes by delta wait time, spinlocks by delta
 /// collisions) stack vertically, each above a collapsed Expander holding its latest-snapshot grid of the
-/// most recent collection in the settable window. The Darling cumulative-delta tables carry no stored
-/// <c>sample_interval_seconds</c> (unlike the Dashboard's), so the ms/sec and collisions/sec rates are
-/// computed in SQL from the per-contender <c>LAG</c> interval — the same idiom the Wait Stats trend uses.
-/// Both charts and grids (re)load together on the parent tab's activation (mirroring the Memory tab's
+/// most recent collection in the settable window. Both tables carry a stored <c>sample_interval_seconds</c>
+/// since V127 (#3595; the per-contender <c>LAG</c> interval is the fallback for pre-V127 rows only), so the
+/// ms/sec and collisions/sec rates are computed in SQL from the row's own interval — the same idiom the Wait
+/// Stats trend uses — and the snapshot grids render a restart's (0, 0) as "—" with an Interval (sec) column
+/// saying why, never as a delta of 0 (#3653 A7; the rule is <c>DeltaSeriesShaping.ReadableDelta</c>, shared
+/// with Lite). Both charts and grids (re)load together on the parent tab's activation (mirroring the Memory tab's
 /// full-refresh branch), so the tab needs no SelectionChanged handler. Chart chrome / legend / line polish
 /// flow through the shared <see cref="ChartStyle"/> / <see cref="ChartPalette"/> and the
 /// <c>ViewerServerTab.ChartHelpers.cs</c> bridge, so the Y-floor-at-0 fix applies; series ride the cycling
@@ -33,10 +35,10 @@ public partial class ViewerServerTab
     private ChartHoverHelper? _spinlockStatsHover;
 
     /* One shared grouped-trend renderer serves BOTH the latch and spinlock charts; built lazily with the
-       viewer's ForDisplay projection (mirrors the CpuScheduler renderer's per-app wiring). */
+       identity projection and the viewer's display zone (mirrors the CpuScheduler renderer's per-app wiring). */
     private GroupedTrendChartRenderer? _latchSpinlockRendererField;
     private GroupedTrendChartRenderer LatchSpinlockRenderer =>
-        _latchSpinlockRendererField ??= new GroupedTrendChartRenderer(_chartHelper, ViewerTimeHelper.ForDisplay);
+        _latchSpinlockRendererField ??= new GroupedTrendChartRenderer(_chartHelper, static utc => utc, ViewerTimeHelper.CurrentDisplayZone);
 
     /// <summary>Applies the shared chrome + hover to the latch/spinlock charts up front (constructor),
     /// so they don't flash white before the tab's first load — matching the CPU/Memory charts.</summary>
@@ -47,8 +49,8 @@ public partial class ViewerServerTab
         ApplyTheme(SpinlockStatsChart);
         SpinlockStatsChart.Refresh();
 
-        _latchStatsHover = new ChartHoverHelper(LatchStatsChart, "ms/sec");
-        _spinlockStatsHover = new ChartHoverHelper(SpinlockStatsChart, "/sec");
+        _latchStatsHover = new ChartHoverHelper(LatchStatsChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _spinlockStatsHover = new ChartHoverHelper(SpinlockStatsChart, "/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -81,7 +83,7 @@ public partial class ViewerServerTab
         LatchSpinlockRenderer.Render(LatchStatsChart, _latchStatsHover, data,
             d => d.CollectionTime, d => d.LatchClass, d => d.WaitTimeMsPerSecond,
             "Latch Waits", "Wait Time (ms/sec)",
-            ViewerTimeHelper.ForDisplay(startUtc).ToOADate(), ViewerTimeHelper.ForDisplay(endUtc).ToOADate());
+            startUtc.ToOADate(), endUtc.ToOADate());
     }
 
     private void RenderSpinlockStatsChart(List<SpinlockStatsTrendPoint> data)
@@ -90,7 +92,7 @@ public partial class ViewerServerTab
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,
             d => d.CollectionTime, d => d.SpinlockName, d => d.CollisionsPerSecond,
             "Spinlock Collisions", "Collisions/sec",
-            ViewerTimeHelper.ForDisplay(startUtc).ToOADate(), ViewerTimeHelper.ForDisplay(endUtc).ToOADate());
+            startUtc.ToOADate(), endUtc.ToOADate());
     }
 
     /// <summary>Tears down the latch/spinlock hover helpers (mirrors the other tabs' dispose) so their

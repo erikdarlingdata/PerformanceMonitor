@@ -8,6 +8,7 @@ using PerformanceMonitor.Analysis;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Analysis;
 
 public partial class DuckDbFactCollector
@@ -121,6 +122,9 @@ AND   v.delta_execution_count > 0";
         }
     }
 
+    /// <summary>The most offenders the PARAMETER_SENSITIVITY fact counts. Applied after the exact creation-time test (#4821), not in SQL.</summary>
+    private const int ParameterSensitivityOffenderCap = 20;
+
     /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose
     /// per-execution worker time varies wildly — one plan serving very different
@@ -150,18 +154,25 @@ WITH svr AS
     -- on-load collector, so an absent offset is the state every server passes through on its first
     -- cycle -- refusing the read there would pre-empt the two answers that outrank any window. The
     -- CTE returns exactly one row, so no plan is lost to it.
-    SELECT COALESCE
+    --
+    -- #4821: this offset is now only the ROUGH first filter. One offset for every row is an hour off for a
+    -- plan compiled before the last daylight-saving change, so the read also returns the raw creation_time
+    -- beside the zone (time_zone_id, SQL Server 2022 and later, from the same newest row) and the exact
+    -- test runs in C# with the offset in force when each plan was compiled (PlanCreationClock).
+    SELECT
+        COALESCE(p.utc_offset_minutes, 0) AS offset_minutes,
+        p.time_zone_id
+    FROM (SELECT 1) AS one
+    LEFT JOIN
     (
-        (
-            SELECT utc_offset_minutes
-            FROM v_server_properties
-            WHERE server_id = $1
-            AND   utc_offset_minutes IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+        SELECT utc_offset_minutes, time_zone_id
+        FROM v_server_properties
+        WHERE server_id = $1
+        AND   utc_offset_minutes IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+    ) AS p
+      ON 1 = 1
 ),
 latest AS
 (
@@ -170,7 +181,10 @@ latest AS
         query_plan_hash,
         database_name,
         execution_count,
+        creation_time,
         creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
+        svr.offset_minutes AS server_offset_minutes,
+        svr.time_zone_id AS server_time_zone_id,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -193,20 +207,24 @@ SELECT
     max_worker_time,
     max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
     max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
-    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence
+    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
+    creation_time,
+    server_offset_minutes,
+    server_time_zone_id
 FROM latest
 WHERE rn = 1
 AND   min_worker_time >= 10000
 AND   max_worker_time >= 250000
 AND   execution_count >= 20
-AND   creation_time_utc <= $2
+AND   creation_time_utc <= $4
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC
-LIMIT 20";
+ORDER BY worker_ratio DESC";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            /* $4: the first filter's bound, opened by an hour (#4821). The exact test is made below, per row. */
+            cmd.Parameters.Add(new DuckDBParameter { Value = PlanCreationClock.RoughBound(context.TimeRangeStart) });
 
             var offenderCount = 0;
             var worstRatio = 0.0;
@@ -218,6 +236,21 @@ LIMIT 20";
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
+                /* The exact compiled-before-the-window test, with the offset in force when the plan was
+                   created (#4821). The SQL's own filter is only the rough first pass, so the cap of twenty
+                   is applied here, after it. */
+                if (reader.IsDBNull(5)
+                    || !PlanCreationClock.CompiledBeforeWindow(
+                        PlanCreationClock.ClockFrom(reader, 6, 7), reader.GetDateTime(5), context.TimeRangeStart))
+                {
+                    continue;
+                }
+
+                if (offenderCount >= ParameterSensitivityOffenderCap)
+                {
+                    break;
+                }
+
                 // Rows arrive ordered by worker_ratio DESC — the first row is the worst offender.
                 if (offenderCount == 0)
                 {
@@ -269,6 +302,10 @@ LIMIT 20";
     /// </summary>
     private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        /* #3902: cleared first, so a read that fails below leaves "not known" for the drill-down rather
+           than a list some earlier pass stamped on a reused context. */
+        context.PlanRegressionOffenders = null;
+
         try
         {
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
@@ -394,7 +431,11 @@ compared AS
         END AS regression_factor,
         -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
         -- over the window. The exec-count floor above only counts; this weighs.
-        l.execs * l.cpu_per_exec AS latest_total_cpu_us
+        l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        l.database_name,
+        -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
+        -- on both SKUs, so a best plan can be two weeks old.
+        b.last_exec AS best_last_exec
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -412,7 +453,12 @@ SELECT
     force_failure_count,
     best_cpu,
     best_dur,
-    regression_factor
+    regression_factor,
+    -- #3902: appended, so the ordinals above are untouched. With query_id it names each offender for the
+    -- regressed-queries drill-down (AnalysisContext.PlanRegressionOffenders).
+    database_name,
+    -- #3953: appended for the same reason.
+    best_last_exec
 FROM compared
 WHERE regression_factor >= 2
 -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
@@ -433,6 +479,8 @@ LIMIT 20";
             var worstDimension = 1;
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
+            DateTime? worstBestLastExec = null;
+            var offenders = new List<PlanRegressionOffender>();
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
@@ -449,6 +497,7 @@ LIMIT 20";
 
                     worstLatestCpu = latestCpu;
                     worstBestCpu = bestCpu;
+                    worstBestLastExec = reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9));
                     // Which CASE branch fired, not which raw ratio is larger (review catch on #2138):
                     // CPU has PRECEDENCE in the scoring, so a row with cpu 2.5x and duration 10x is a
                     // CPU-detected regression at 2.5 — comparing magnitudes would mislabel it duration.
@@ -456,11 +505,19 @@ LIMIT 20";
                     worstDimension = cpuRatio >= 2 ? 1 : 2; // 1 = cpu, 2 = duration
                 }
                 offenderCount++;
+
+                /* #3902: both keys are join keys of the comparison above, so neither is ever NULL here. Two
+                   replicas of one query are two rows and one offender. */
+                var offender = new PlanRegressionOffender(reader.GetString(8), ToInt64(reader.GetValue(0)));
+                if (!offenders.Contains(offender))
+                    offenders.Add(offender);
             }
+
+            context.PlanRegressionOffenders = offenders;
 
             if (offenderCount == 0) return;
 
-            facts.Add(new Fact
+            var fact = new Fact
             {
                 Source = "queries",
                 Key = "PLAN_REGRESSION",
@@ -475,9 +532,20 @@ LIMIT 20";
                     ["best_cpu_per_exec_us"] = worstBestCpu,
                     ["regressed_dimension"] = worstDimension,
                     ["latest_is_forced"] = worstLatestForced,
-                    ["force_failure_count"] = worstForceFailures
+                    ["force_failure_count"] = worstForceFailures,
+                    /* #3953 parity: Lite reads its raw slice (0); Darling's 1 is the interval table. */
+                    ["plan_regression_source"] = 0,
                 }
-            });
+            };
+
+            /* #3953: the worst offender's best plan's age at the window's end, in days. Absent only if the read
+               returned no timestamp, which a plan with executions in the window cannot do. */
+            if (worstBestLastExec is DateTime bestLastExec)
+            {
+                fact.Metadata["best_plan_age_days"] = Math.Max(0.0, (context.TimeRangeEnd - bestLastExec).TotalDays);
+            }
+
+            facts.Add(fact);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -598,7 +666,7 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var summary = PlanAdvisoryAggregator.Summarize(planXmls);
+            var summary = PlanAdvisoryAggregator.SummarizeCancellable(planXmls, App.AnalyzerConfig, context.CancellationToken);
 
             if (summary.MissingIndexCount > 0)
             {

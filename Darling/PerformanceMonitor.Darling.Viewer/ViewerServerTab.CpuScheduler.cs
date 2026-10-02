@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
@@ -37,7 +39,7 @@ public partial class ViewerServerTab
     {
         ApplyTheme(CpuSchedulerChart);
         CpuSchedulerChart.Refresh();
-        _cpuSchedulerHover = new ChartHoverHelper(CpuSchedulerChart, "tasks");
+        _cpuSchedulerHover = new ChartHoverHelper(CpuSchedulerChart, "tasks", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -56,17 +58,26 @@ public partial class ViewerServerTab
 
         RenderCpuSchedulerChart(trendTask.Result);
         CpuSchedulerGrid.ItemsSource = CpuSchedulerMetrics.BuildMetrics(snapshotTask.Result);
+
+        var gap = CpuSchedulerGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind);
+        CpuSchedulerNoDataMessage.Text = gap ?? "";
+        CpuSchedulerNoDataMessage.Visibility = gap is null ? Visibility.Collapsed : Visibility.Visible;
     }
+
+    /// <summary>The CPU Scheduler tab's note where the cpu_scheduler_stats collector cannot run (Azure SQL Database),
+    /// the same sentence <see cref="PanelNote"/> gives; null anywhere else, where the tab shows no note.</summary>
+    internal static string? CpuSchedulerGapNote(string serverName, int engineEdition, string? engineKind) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "cpu_scheduler_stats");
 
     private CpuSchedulerChartRenderer? _cpuSchedRendererField;
     private CpuSchedulerChartRenderer CpuSchedRenderer =>
-        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, ViewerTimeHelper.ForDisplay);
+        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, static utc => utc, ViewerTimeHelper.CurrentDisplayZone);
 
     private void RenderCpuSchedulerChart(List<CpuSchedulerTrendPoint> data)
     {
         var (startUtc, endUtc) = GetWindowUtc();
         CpuSchedRenderer.Render(CpuSchedulerChart, _cpuSchedulerHover, data,
-            ViewerTimeHelper.ForDisplay(startUtc).ToOADate(), ViewerTimeHelper.ForDisplay(endUtc).ToOADate());
+            startUtc.ToOADate(), endUtc.ToOADate());
     }
 
     /// <summary>Tears down the scheduler hover helper (mirrors the other tabs' dispose).</summary>

@@ -144,15 +144,60 @@ export function noticeStrip(message) {
  * a tab cannot show a friendly notice on one panel and the raw string on its neighbour.
  */
 export function readErrorStrip(message) {
-  const m = /exceeds maximum of (\d+) hours/.exec(message || "");
-  if (m) {
-    const hours = Number(m[1]);
-    const days = Math.round(hours / 24);
-    return noticeStrip(
-      "This view keeps up to " + hours + " hours (" + days + " day" + (days === 1 ? "" : "s") +
-      ") of history — pick a shorter range.");
+  const hours = keptHoursOf(message);
+  if (hours != null) {
+    return noticeStrip(keptHistoryText(hours) + " — pick a shorter range.");
   }
   return errorStrip(message);
+}
+
+/* The M of a "window too wide" refusal (`... exceeds maximum of M hours ...`), or null for any other message.
+   A `top` refusal (`exceeds maximum of 1000.`) carries no " hours" and so is never one. */
+function keptHoursOf(message) {
+  const m = /exceeds maximum of (\d+) hours/.exec(message || "");
+  return m ? Number(m[1]) : null;
+}
+
+function daysText(hours) {
+  const days = Math.round(hours / 24);
+  return days + " day" + (days === 1 ? "" : "s");
+}
+
+function keptHistoryText(hours) {
+  return "This view keeps up to " + hours + " hours (" + daysText(hours) + ") of history";
+}
+
+/**
+ * Run a read, and when it refuses the page's window because it keeps less history than that, ask it again ONCE
+ * for the history it does keep. The Range select offers 30 days, and most reads keep 7: before this, each of
+ * those panels showed only readErrorStrip's "pick a shorter range" notice and no data, beside panels whose reads
+ * accept 30 days. Now the panel shows the last M hours with keptWindowStrip's notice saying so.
+ *
+ * `fetchWith(params)` is the read itself (readTool, or apiGet over a raw path), so the descriptor loader and the
+ * hand-built server-tab composites share this one rule. The retry happens only for the window refusal and only
+ * when `params.hours` asked for more than M, so a read that accepts the window makes one call, a second refusal
+ * is never retried again, and every other error comes back unchanged. A successful retry carries
+ * `keptHours: M`: the caller shows the notice and draws its chart axis over M hours, not the asked window.
+ */
+export async function readWithinKeptHistory(fetchWith, params) {
+  const res = await fetchWith(params);
+  if (res.kind !== "error") return res;
+  const kept = keptHoursOf(res.message);
+  const asked = Number(params && params.hours);
+  if (kept == null || !(kept >= 1 && asked > kept)) return res;
+  const retry = await fetchWith({ ...params, hours: kept });
+  return retry.kind === "data" || retry.kind === "empty" ? { ...retry, keptHours: kept } : retry;
+}
+
+/** readWithinKeptHistory over a read-only tool by its MCP name. `signal`: see apiGet (#4191). */
+export function readToolWithinKeptHistory(tool, params, signal) {
+  return readWithinKeptHistory((p) => readTool(tool, p, signal), params);
+}
+
+/** The notice for a read readWithinKeptHistory narrowed to the history it keeps, or null for any other result. */
+export function keptWindowStrip(res) {
+  if (!res || !res.keptHours) return null;
+  return noticeStrip(keptHistoryText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
 }
 export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
@@ -238,6 +283,17 @@ export function fmtNum(v, d = 1) {
   const n = Number(v);
   return isFinite(n) ? n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
 }
+/* A per-second rate. From 1 up it reads as fmtNum does without padding (66, 1,234.57). Below 1 it keeps two
+   significant digits (0.22, 0.0033, 0.000012), so a real rate never reads as 0: one deadlock in a 300 s collection
+   is 0.0033 a second, and one count over a day-wide bucket is 0.000012. Only a true 0 reads 0. */
+export function fmtRate(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  return Math.abs(n) >= 1 || n === 0
+    ? n.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    : n.toLocaleString(undefined, { maximumSignificantDigits: 2 });
+}
 export function fmtPct(v) {
   if (v == null) return "—";
   const n = Number(v);
@@ -271,6 +327,7 @@ export const FORMATTERS = {
   int: fmtInt,
   num1: (v) => fmtNum(v, 1),
   num2: (v) => fmtNum(v, 2),
+  rate: fmtRate,
   pct: fmtPct,
   ms: fmtMs,
   mb: fmtMb,
@@ -287,13 +344,25 @@ export function applyFormat(name, value) {
 
 /* ─────────────────────────── band / severity classes ─────────────────────────── */
 
+/* The band vocabulary on the wire is ONE spelling — the PascalCase enum token (HealthSeverity / FleetHealthBand /
+   DailyHealthBand: Healthy, Warning, Critical, Unknown, Offline, NoData) — and the CSS classes below are keyed on it.
+   #3653 (one vocabulary) made every MCP band spell it that way; this map is the belt to that brace: a class
+   builder that compares strings case-insensitively, so a band that arrives as "warning" or "WARNING" from a
+   surface the census does not sweep still colours, instead of silently producing a class no rule matches.
+   Anything outside the vocabulary passes through unchanged (a caller that maps "No Data" itself keeps working). */
+const CANONICAL_BANDS = ["Healthy", "Warning", "Critical", "Unknown", "Offline", "NoData"];
+export function canonicalBand(band) {
+  if (band == null || band === "") return "Unknown";
+  const wanted = String(band).toLowerCase();
+  return CANONICAL_BANDS.find((b) => b.toLowerCase() === wanted) || String(band);
+}
 /** CSS class for a fleet band ("Healthy"/"Warning"/"Critical"/"Offline") — colors live in CSS. */
 export function bandClass(band) {
-  return "band-" + (band || "Unknown");
+  return "band-" + canonicalBand(band);
 }
 /** CSS class for a per-metric severity ("Unknown"/"Healthy"/"Warning"/"Critical"). */
 export function sevClass(sev) {
-  return "sev-" + (sev || "Unknown");
+  return "sev-" + canonicalBand(sev);
 }
 
 /* ─────────────────────────── object access ─────────────────────────── */
@@ -318,23 +387,81 @@ export function buildQuery(params) {
   return parts.length ? "?" + parts.join("&") : "";
 }
 
+/* In-flight read counter (#4191): every apiGet/readTool call counts itself while its fetch is outstanding, so
+   the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
+   before firing a whole new set of the same reads on top of it. apiSendRead (a read that must travel as a POST,
+   the composed-panel run) IS counted, so a slow panel holds the poll off and the refresh back-off measures it.
+   apiGetFleet and apiSend are deliberately NOT counted here — the fleet read is the one request every caller
+   already shares regardless of render (#3895), and a mutation is not a "page read" a poll tick should wait out. */
+let inFlightReads = 0;
+
+/** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
+export function hasInFlightReads() {
+  return inFlightReads > 0;
+}
+
 /**
- * GET a same-origin API path and classify the response into one of three kinds, mirroring the service's
- * three response shapes (DarlingWebEndpoints):
+ * GET a same-origin API path and classify the response into one of four kinds, mirroring the service's
+ * response shapes (DarlingWebEndpoints):
  *   { kind: "data",  data }                 — a data object/array (HTTP 200 JSON passthrough)
  *   { kind: "empty", status, message, ... } — the {status,message[,hints]} empty envelope (HTTP 200)
  *   { kind: "error", message, status }      — { "error": ... } (HTTP 400/500) or a transport failure
- * Auth is handled entirely server-side (loopback is tokenless; network mode sets the session cookie before
- * the SPA loads), so requests carry it automatically — nothing to do here.
+ *   { kind: "auth",  message, login }       — the session is gone (#4187); see classifyResponse
+ * `signal` (#4191) is an optional AbortSignal for a superseded render's reads — see panels.js's setPanelSignal
+ * and server.js's redrawPanels, which own creating and aborting it. A caller with no render to supersede (the
+ * sidebar, the view list) simply omits it, exactly as before.
  */
-export async function apiGet(path) {
-  let resp;
+export async function apiGet(path, signal) {
+  inFlightReads++;
   try {
-    resp = await fetch(path, { headers: { Accept: "application/json" } });
-  } catch (e) {
-    return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    let resp;
+    try {
+      resp = await fetch(path, { headers: { Accept: "application/json" }, signal });
+    } catch (e) {
+      if (e && e.name === "AbortError") return { kind: "aborted" };
+      return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    }
+    return await classifyResponse(resp);
+  } finally {
+    inFlightReads--;
   }
-  return classifyResponse(resp);
+}
+
+/* The /api/fleet request every caller in flight at the same moment shares — see apiGetFleet. */
+let fleetRequest = null;
+
+/**
+ * GET /api/fleet, classified exactly like apiGet, with ONE request shared by every caller that asks while it is
+ * in flight (#3895). The 60s poll re-renders the sidebar and the current page in one synchronous pass, and the
+ * sidebar, the fleet page, the server page and a saved view each read the fleet roll-up — the store's widest
+ * read — so every visible tab computed the whole overview twice a minute. The second caller of a tick now joins
+ * the first's request instead of sending its own.
+ *
+ * Nothing outlives the response: a caller that starts after it has landed sends a fresh request, exactly as
+ * before, so no page renders an older roll-up than it would have — only the duplicate is gone. And each caller
+ * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
+ */
+export async function apiGetFleet() {
+  if (!fleetRequest) {
+    fleetRequest = fetchBody("/api/fleet").finally(() => {
+      fleetRequest = null;
+    });
+  }
+
+  const shared = await fleetRequest;
+  if (shared.transportError) return { kind: "error", message: shared.transportError };
+  return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+}
+
+/** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
+    value rather than a rejection, so one lost request cannot surface as an unhandled rejection per caller. */
+async function fetchBody(path) {
+  try {
+    const resp = await fetch(path, { headers: { Accept: "application/json" } });
+    return { ok: resp.ok, status: resp.status, raw: await resp.text() };
+  } catch (e) {
+    return { transportError: "Network error: " + (e && e.message ? e.message : String(e)) };
+  }
 }
 
 /**
@@ -361,10 +488,59 @@ export async function apiSend(method, path, body) {
   return classifyResponse(resp);
 }
 
+/** #4666: a READ that has to travel as a POST (the composed-panel run, /api/compose/run). Counted in inFlightReads
+    exactly like apiGet, so the poll's overlap guard (#4191) waits it out and the refresh back-off measures the render
+    that contains it. Mutations (saves, deletes, alert validate/test) keep using apiSend, uncounted. */
+export async function apiSendRead(method, path, body) {
+  inFlightReads++;
+  try {
+    return await apiSend(method, path, body);
+  } finally {
+    inFlightReads--;
+  }
+}
+
+/* Session-expired takeover (#4187). A module-level one-shot latch: the FIRST read that reports the session is
+   gone rewrites the whole shell into a sign-in prompt (app.js registers the one listener that does it) rather
+   than leaving every open panel to separately render its own "signed out" guess as an unrelated-looking error.
+   One-shot because the only way out is the sign-in link, which reloads the page — nothing here ever un-latches
+   it, and a page reload starts every module fresh anyway. */
+let sessionExpired = false;
+const sessionExpiredListeners = [];
+
+/** True once a read has reported the session is gone — see classifyResponse's 401 / non-JSON-200 arms. */
+export function isSessionExpired() {
+  return sessionExpired;
+}
+
+/** Register a callback for the FIRST detected session expiry. Fired at most once per page load. */
+export function onSessionExpired(fn) {
+  sessionExpiredListeners.push(fn);
+}
+
+function reportSessionExpired(message, login) {
+  if (sessionExpired) return;
+  sessionExpired = true;
+  for (const fn of sessionExpiredListeners) fn(message, login);
+}
+
 /**
- * Classify a completed Response into the same three-kind shape apiGet returns (shared by apiGet + apiSend):
- * an { "error": ... } body / non-2xx -> "error"; the {status, message[, hints]} envelope -> "empty"; anything
- * else (including a 204/empty body -> data:null) -> "data".
+ * Classify a completed Response into the same shape apiGet returns (shared by apiGet + apiGetFleet + apiSend):
+ * a 401 -> "auth" (#4187: the network-mode auth gate's answer to an /api/* call with no valid session — a
+ * service restart rotates the cookie signing key, so an open tab's every read starts failing this way); a
+ * non-2xx -> "error", with the message read from an { "error": ... } body (the 500 arm and the bare-string
+ * 400 arm) or from the {status:"invalid", message} envelope (#3739: a REFUSAL — a parameter the tool cannot
+ * honor, a server name that resolves to nothing — is the envelope itself as a 400 body on /api/read/*, exactly
+ * as the mute-rule write routes have always answered invalid; its `message` is the sentence readErrorStrip and
+ * the tab error strips render, so the "window too wide" degrade keeps working); the {status, message[, hints]}
+ * envelope under 2xx -> "empty" for the four miss words and "error" for status "error" or "invalid" (#3653 Q11:
+ * every tool's caught exception is that envelope on the MCP wire; the service maps error to a 500 and invalid to
+ * a 400 before either reaches this page, so the 2xx arm below is the belt-and-braces for a body that arrived
+ * unmapped — a failure or a refusal must never render as a quiet "nothing here" card); a 200 whose body is NOT
+ * JSON -> also "auth" (#4187: before the server could tell an /api/* call apart from a page load, an expired
+ * session answered every /api/* call with the 200 HTML login form — this is that shape, kept as a second, belt-
+ * and-braces detector in case a future gate answers the same way again); anything else (including a 204/empty
+ * body -> data:null) -> "data".
  */
 async function classifyResponse(resp) {
   const raw = await resp.text();
@@ -377,15 +553,35 @@ async function classifyResponse(resp) {
     }
   }
 
+  if (resp.status === 401) {
+    const message = body && typeof body.error === "string" ? body.error : "Session expired";
+    const login = body && typeof body.login === "string" ? body.login : "/";
+    reportSessionExpired(message, login);
+    return { kind: "auth", message, login };
+  }
+
+  const isEnvelope = body && !Array.isArray(body) && typeof body.status === "string" && typeof body.message === "string";
+
   if (!resp.ok) {
-    const msg = body && typeof body.error === "string" ? body.error : "Request failed (HTTP " + resp.status + ")";
+    const msg = body && typeof body.error === "string" ? body.error
+      : isEnvelope ? body.message
+      : "Request failed (HTTP " + resp.status + ")";
     return { kind: "error", message: msg, status: resp.status };
   }
 
-  /* The empty envelope is exactly {status, message[, hints]}: a top-level string status AND string message.
+  /* The envelope is exactly {status, message[, hints]}: a top-level string status AND string message.
      Data payloads never carry a top-level message, so this never misfires on real data. */
-  if (body && !Array.isArray(body) && typeof body.status === "string" && typeof body.message === "string") {
+  if (isEnvelope) {
+    if (body.status === "error" || body.status === "invalid") {
+      return { kind: "error", message: body.message, status: resp.status };
+    }
     return { kind: "empty", status: body.status, message: body.message, hints: body.hints || null, data: body };
+  }
+
+  if (resp.ok && raw && body === null) {
+    const message = "Session expired";
+    reportSessionExpired(message, "/");
+    return { kind: "auth", message, login: "/" };
   }
 
   return { kind: "data", data: body };
@@ -402,6 +598,9 @@ async function classifyResponse(resp) {
  * "tray" is a state here rather than a channel because this surface is HEADLESS - no system tray, no toast
  * code - so a stored tray row records nothing that happened. #2781/#2814 established that and chose
  * "Logged"; #3169 stopped the service writing it at all, so only rows recorded before then reach it.
+ *
+ * "digest" (#3712) is an analysis finding the corroboration gate routed to the daily digest and this surface
+ * instead of a paging channel - reported, not paged; the row's routing_reason says why.
  */
 export const ALERT_STATE_LABELS = {
   none: "No channel",
@@ -412,6 +611,7 @@ export const ALERT_STATE_LABELS = {
   throttled: "Throttled",
   folded: "Reported elsewhere",
   failed: "Failed",
+  digest: "Digest",
 };
 
 /**
@@ -432,7 +632,7 @@ export function alertDeliveryState(a) {
   return ALERT_STATE_LABELS[a.notification_type] || null;
 }
 
-/** GET a read-only tool by its MCP name with query-string params. */
-export function readTool(tool, params) {
-  return apiGet("/api/read/" + tool + buildQuery(params));
+/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
+export function readTool(tool, params, signal) {
+  return apiGet("/api/read/" + tool + buildQuery(params), signal);
 }

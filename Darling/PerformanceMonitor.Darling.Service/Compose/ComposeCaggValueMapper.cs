@@ -124,7 +124,7 @@ public static class ComposeCaggValueMapper
             ComposeAggregate.Max => $"CAST(MAX({F}.{baseColumn}_max) AS double precision)",
             /* AVG(delta) == SUM(delta)/COUNT(delta) == SUM(x_sum)/SUM(sample_count), exact (deltas never NULL). */
             ComposeAggregate.Avg =>
-                $"(CAST(SUM({F}.{baseColumn}_sum) AS double precision) / NULLIF(SUM({F}.sample_count), 0))",
+                $"CAST(SUM({F}.{baseColumn}_sum)::numeric / NULLIF(SUM({F}.sample_count), 0) AS double precision)",
             _ => throw NotRemappable(aggregate),
         };
     }
@@ -158,7 +158,7 @@ public static class ComposeCaggValueMapper
         {
             ComposeAggregate.Sum => $"CAST(SUM({F}.{measure.Column}_sum) AS double precision)",
             ComposeAggregate.Avg =>
-                $"(CAST(SUM({F}.{measure.Column}_sum) AS double precision) / NULLIF(SUM({F}.sample_count), 0))",
+                $"CAST(SUM({F}.{measure.Column}_sum)::numeric / NULLIF(SUM({F}.sample_count), 0) AS double precision)",
             _ => throw NotRemappable(aggregate),
         };
     }

@@ -74,26 +74,50 @@ public interface IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// The poison-wait deltas at or above <paramref name="thresholdMs"/> average ms/wait. Mirrors
-    /// Lite's read exactly: the newest wait_stats rows (max 3, collected within the last 10
-    /// minutes) for THREADPOOL / RESOURCE_SEMAPHORE / RESOURCE_SEMAPHORE_QUERY_COMPILE with
-    /// delta_waiting_tasks &gt; 0, THEN the threshold filter applied client-side — the row window
-    /// is selected BEFORE thresholding, so a sub-threshold poison wait still occupies its slot,
-    /// exactly like the pre-extraction loop's fetch-then-FindAll.
+    /// Accumulated wait per poison wait type over the last <paramref name="windowMinutes"/> of collector
+    /// rows (#3539 A4) — one <see cref="PoisonWaitAccumulation"/> per THREADPOOL / RESOURCE_SEMAPHORE /
+    /// RESOURCE_SEMAPHORE_QUERY_COMPILE type that has ANY wait_stats row inside the window, whatever its
+    /// sum. An ACCUMULATION, the one departure from this interface's "current state" convention, for the
+    /// reason <see cref="IPostgresAlertReadAdapter.GetPoisonWaitPressureAsync"/> gives: the poison
+    /// condition is defined by recent accrual, not a level.
+    /// <para>
+    /// <b>Dumb by contract.</b> No threshold is applied here and no row filter beyond the wait-type list
+    /// and the window: the engine grades against <see cref="PoisonWaitEvaluator"/>'s shared bars, and it
+    /// needs the under-bar rows too, because "observed and quiet" and "not observed" are different answers
+    /// (an empty list holds a standing alert open; a row summing under the bar clears it). In particular
+    /// the old read's <c>delta_waiting_tasks &gt; 0</c> filter is GONE — a task still waiting across an
+    /// interval boundary accrues time with no completed task, and that time is evidence.
+    /// </para>
+    /// <para>
+    /// <paramref name="windowMinutes"/> is passed rather than read from the constant so the read's cutoff
+    /// and the engine's denominator are the same number by construction: the window IS what the bars
+    /// normalize against, and a read over a different span would make "average tasks stuck" silently mean
+    /// something else.
+    /// </para>
     /// </summary>
-    Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(
-        string serverKey, double thresholdMs, CancellationToken cancellationToken = default);
+    Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(
+        string serverKey, int windowMinutes, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Currently-running queries over <paramref name="thresholdMinutes"/> elapsed, longest first,
     /// from the LATEST collection snapshot only (and only if that snapshot is under 10 minutes
     /// old — a stale store must not alert). Mirrors Lite's read exactly: user sessions only
-    /// (session_id &gt; 50), the five opt-out noise filters, capped at
-    /// <paramref name="maxResults"/> (clamped 1–1000), then rows in
-    /// <paramref name="excludedDatabases"/> dropped client-side (case-insensitive; rows with no
-    /// database name always pass) — the loop's post-fetch exclusion, moved behind the seam.
+    /// (session_id &gt; 50), the five opt-out noise filters, rows in <paramref name="excludedDatabases"/>
+    /// removed (exact, case-insensitive; rows with no database name always pass), capped at
+    /// <paramref name="maxResults"/> (clamped 1–1000) — in that order.
+    /// <para>
+    /// Since #3653 (A5, Q5) the <paramref name="exclusions"/> knob is applied IN THE READ, ahead of the row
+    /// cap, because the sessions it removes are the longest-running on the server by construction and would
+    /// otherwise fill the cap on every sweep (see <see cref="LongRunningQueryExclusions"/>). Since #3742 the
+    /// database list is applied the same way, in the same statement, for the same reason: it was dropped
+    /// client-side AFTER the cap on both SKUs, so an excluded database whose sessions were the five longest
+    /// consumed the page and the alert came back short or empty while matches existed. The result carries how
+    /// many candidates each removed — the knob's two arms and the database list as a third count — so the fire
+    /// payload can show what the page does not. <see cref="LongRunningQueryExclusions.None"/> with an empty
+    /// database list reads exactly as the pre-knob read did.
+    /// </para>
     /// </summary>
-    Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+    Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,
         int maxResults,
@@ -103,6 +127,7 @@ public interface IAlertReadAdapter
         bool excludeMiscWaits,
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
+        LongRunningQueryExclusions exclusions,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -182,13 +207,20 @@ public interface IAlertReadAdapter
     /// Seeding is idempotent (insert-if-absent) and never overwrites a user override or an existing baseline.
     /// </para>
     /// <para>
-    /// Empty when the store has no snapshot for this server. Unlike the anomalous-jobs read this is
-    /// NOT freshness-gated: a database-state problem is a standing condition, so a stale "still
-    /// OFFLINE" snapshot correctly keeps the alert active (cooldown throttles re-fires) rather than
-    /// fabricating a recovery.
+    /// Null means NO VERDICT: the store has too little current evidence to judge this pass. Lite returns it
+    /// when it holds fewer than two snapshots to compare, or when its newest snapshot is older than the age at
+    /// which archival moves rows out of the hot tables. The engine then fires nothing, resolves nothing and
+    /// records no read failure, so a database that is active stays active. An empty list is a verdict:
+    /// nothing deviates, and an active database that is missing from it is resolved. A host that always has a
+    /// verdict (Darling) never returns null.
+    /// </para>
+    /// <para>
+    /// Apart from that no-verdict case this read has no freshness limit, unlike the anomalous-jobs read: a
+    /// database-state problem is a standing condition, so a stale "still OFFLINE" snapshot correctly keeps
+    /// the alert active (cooldown throttles re-fires) rather than fabricating a recovery.
     /// </para>
     /// </summary>
-    Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
+    Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(
         string serverKey, CancellationToken cancellationToken = default);
 
     /// <summary>

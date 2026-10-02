@@ -2,6 +2,7 @@
 // Licensed under the terms in the LICENSE file in the repository root.
 
 using System;
+using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -92,6 +93,36 @@ public sealed class PgTrendReaderTests
 
         Assert.Contains("ELSE NULL", sql, StringComparison.Ordinal);
         Assert.Contains("WHEN coalesce(calls, 0) > 0", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3540 (V128): the same reasoning the trend already applied to the DELTAS now applies to the INTERVAL.
+    /// pg_statement_stats stores <c>sample_interval_seconds</c> beside its deltas — the span the delta accrued
+    /// over, which for a collector that skips idle rows is NOT the gap between the rows it left behind. Per
+    /// snapshot the interval is MAX over the queryid's rows (0 only when every row was the unknowable marker),
+    /// 0 → NULL through NULLIF, NULL (pre-V128) → the LAG this read always used. No ELSE 0 on
+    /// calls_per_second: a NULL rate is dropped by the reader rather than plotted as 0.00 calls/sec at a
+    /// restart, and the first pre-V128 snapshot is absent rather than a fabricated 0.0.
+    /// </summary>
+    [Fact]
+    public void TheQueryTrendPrefersTheStoredInterval_AndNeverFabricatesZeroCallsPerSecond()
+    {
+        var sql = DarlingPgTrendReader.QueryDurationTrendSql;
+
+        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("THEN extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time)))", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN interval_seconds > 0", sql, StringComparison.Ordinal);
+        Assert.Contains("/ interval_seconds", sql, StringComparison.Ordinal);
+
+        /* The reader drops the NULL-rate point; it does not read it as 0. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgTrendReader.cs");
+        var reader = source[source.IndexOf("GetQueryDurationTrendAsync(", StringComparison.Ordinal)..];
+        reader = reader[..reader.IndexOf("return points;", StringComparison.Ordinal)];
+        Assert.Contains("if (reader.IsDBNull(4))", reader, StringComparison.Ordinal);
+        Assert.Contains("continue;", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("reader.IsDBNull(4) ? 0", reader, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -212,6 +243,80 @@ public sealed class PgTrendReaderTests
     }
 
     /// <summary>
+    /// #3653 (#3540 rule 1, readers NULL-not-0 on unknowable): every per-second rate arm in the three
+    /// LAG-differenced trends ends at <c>END</c> — NULL for an interval that is not positive — rather than
+    /// <c>ELSE 0</c>, and the reader carries that NULL into a nullable field rather than reading it back as
+    /// 0. The statements' own guards keep the NULL arm unreachable today (the wait and I/O intervals are
+    /// LAGs over distinct collection times, the database trend's over one series), so nothing a point reports
+    /// changes; the pin is on the spelling, because the census that rostered these nine as dead text is what
+    /// found the two <c>PgBaselineProvider</c> siblings were not. Proven on a PG18 rig: a planted duplicate
+    /// collection time on <c>pg_database_stats</c> (the one way a 0 can be derived) came through
+    /// <c>GetDatabaseTrendAsync</c> as <c>TransactionsPerSecond = null</c> where the old text said 0.
+    /// </summary>
+    [Fact]
+    public void TheNineRateArms_YieldNullNotZero_AndTheReadersCarryIt()
+    {
+        var wait = Code(DarlingPgTrendReader.WaitTrendSql);
+        var io = Code(DarlingPgTrendReader.IoTrendSql);
+        var db = Code(DarlingPgTrendReader.DatabaseTrendSql);
+
+        foreach (var sql in new[] { wait, io, db })
+        {
+            Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        }
+
+        /* Every rate alias is the tail of a guarded CASE that has no ELSE: `... / interval_seconds` then
+           optional whitespace then END then AS <alias>. Nine aliases, both directions. */
+        var rateArm = new Regex(@"/\s*interval_seconds\s+END\s+AS\s+(\w+_per_second)\b", RegexOptions.IgnoreCase);
+        var aliases = new[] { wait, io, db }.SelectMany(sql => rateArm.Matches(sql).Select(m => m.Groups[1].Value)).OrderBy(a => a, StringComparer.Ordinal).ToArray();
+        Assert.Equal(
+            new[]
+            {
+                "estimated_wait_ms_per_second", "extends_per_second", "hits_per_second", "read_bytes_per_second",
+                "reads_per_second", "temp_bytes_per_second", "transactions_per_second", "write_bytes_per_second",
+                "writes_per_second",
+            },
+            aliases);
+
+        /* The reader side: each of the nine is a nullable double on its point record, and the readers read
+           DBNull as null on those ordinals rather than as 0. */
+        foreach (var (type, field) in new (Type Type, string Field)[]
+        {
+            (typeof(DarlingPgTrendReader.PgWaitTrendPoint), "EstimatedWaitMsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "ReadsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "WritesPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "ExtendsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "HitsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "ReadBytesPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "WriteBytesPerSecond"),
+            (typeof(DarlingPgTrendReader.PgDatabaseTrendPoint), "TransactionsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgDatabaseTrendPoint), "TempBytesPerSecond"),
+        })
+        {
+            var property = type.GetProperty(field);
+            Assert.True(property is not null, $"{type.Name}.{field} is not a property");
+            Assert.Equal(typeof(double?), property!.PropertyType);
+        }
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgTrendReader.cs");
+        foreach (var (method, ordinals) in new (string Method, int[] Ordinals)[]
+        {
+            ("GetWaitTrendAsync(", new[] { 2 }),
+            ("GetIoTrendAsync(", new[] { 11, 12, 13, 14, 15, 16 }),
+            ("GetDatabaseTrendAsync(", new[] { 4, 10 }),
+        })
+        {
+            var body = source[source.IndexOf(method, StringComparison.Ordinal)..];
+            body = body[..body.IndexOf("return points;", StringComparison.Ordinal)];
+            foreach (var ordinal in ordinals)
+            {
+                Assert.Contains($"reader.IsDBNull({ordinal}) ? (double?)null : reader.GetDouble({ordinal})", body, StringComparison.Ordinal);
+                Assert.DoesNotContain($"reader.IsDBNull({ordinal}) ? 0 : reader.GetDouble({ordinal})", body, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    /// <summary>
     /// The automatic I/O subject ranks on OPERATIONS, never on read time.
     ///
     /// <para>This is the pin that matters most here, because ranking on read time is the reasonable-looking
@@ -247,6 +352,51 @@ public sealed class PgTrendReaderTests
         /* The clamp is legitimate HERE and only here: this ranks a window rather than reporting an
            interval, so bounding a reset's contribution beats letting one restart hand over the default. */
         Assert.Contains("GREATEST(reads", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3961: the endpoint reading of the automatic I/O choice ranks the same sums the same way. Its HAVING /
+    /// ORDER BY tail is the LAG form's (comments and whitespace aside), its filters are the LAG form's, each
+    /// series is read as last minus first, and it reports <c>any_rewound</c> — a moved <c>stats_reset</c>, a
+    /// partly-NULL counter, a counter below its first value or ending below its peak — so the reader can hand a
+    /// rewound window to the LAG form rather than trust the endpoints. A NULL comparison (a counter NULL on every
+    /// row) must NOT flag: the live DARLING01 run found half the series flagged for exactly that until the
+    /// comparisons were coalesced.
+    /// </summary>
+    [Fact]
+    public void TheEndpointChoice_RanksTheLagFormsSums_AndFlagsAWindowThatRewound()
+    {
+        var lag = Code(DarlingPgTrendReader.DominantIoSubjectSql);
+        var endpoints = Code(DarlingPgTrendReader.DominantIoSubjectEndpointsSql);
+
+        static string Tail(string sql) => Regex.Replace(sql[sql.IndexOf("HAVING", StringComparison.Ordinal)..sql.IndexOf("LIMIT 1", StringComparison.Ordinal)], @"\s+", " ").Trim();
+        Assert.Equal(Tail(lag), Tail(endpoints));
+        Assert.Contains("($4::text IS NULL OR backend_type = $4)", endpoints, StringComparison.Ordinal);
+        Assert.Contains("($5::text IS NULL OR context = $5)", endpoints, StringComparison.Ordinal);
+
+        foreach (var counter in new[] { "reads", "writes", "extends", "hits" })
+        {
+            Assert.Contains($"last({counter}, collection_time)", endpoints, StringComparison.Ordinal);
+            Assert.Contains($"bool_or({counter} IS NULL)", endpoints, StringComparison.Ordinal);
+            Assert.Matches(new Regex(@"coalesce\(MIN\(" + counter + @"\)\s+< first\(" + counter + @", collection_time\)\s+OR last\(" + counter + @", collection_time\)\s+< MAX\(" + counter + @"\), false\)"), endpoints);
+        }
+
+        Assert.Contains("MIN(stats_reset) IS DISTINCT FROM MAX(stats_reset)", endpoints, StringComparison.Ordinal);
+        Assert.Contains("coalesce(bool_or(rewound), false) AS any_rewound", endpoints, StringComparison.Ordinal);
+        Assert.DoesNotContain("LAG(", endpoints, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3961: the capability probe that gates the endpoint reading asks exactly what
+    /// <see cref="TimescaleSupport.DetectAsync"/> asks of a live connection - the same catalog, the same column -
+    /// so the two can never disagree about whether a store has the extension.
+    /// </summary>
+    [Fact]
+    public void TimescaleExtensionPresentSql_AsksTheSameQuestion_AsTimescaleSupportDetectAsync()
+    {
+        Assert.Equal(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')",
+            DarlingPgTrendReader.TimescaleExtensionPresentSql);
     }
 
     /// <summary>

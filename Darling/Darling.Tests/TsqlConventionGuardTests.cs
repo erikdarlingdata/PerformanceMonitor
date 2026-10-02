@@ -515,6 +515,20 @@ public sealed class TsqlConventionGuardTests
                    this would mean resolving concatenation rather than reading literals. */
                 "FactRemediation.cs: FETCH NEXT FROM plan_cursor INTO @plan_handle;",
                 "FactRemediation.cs: FETCH NEXT FROM plan_cursor INTO @plan_handle;",
+                /* The self-hosted PostgreSQL log tail's opening CTEs (PgServerLogTail.cs), read and confirmed
+                   PostgreSQL, not T-SQL: they read the monitored PostgreSQL target's log directory through
+                   pg_ls_logdir(). Npgsql binds @name parameters, so the @log_resume_file / @log_resume_offset
+                   spelling alone cannot tell the dialects apart here, and nothing else in the first chunk
+                   is a T-SQL marker. SIX entries, three distinct strings: the stderr, csvlog and jsonlog
+                   routes each have a plain and a binary-read constant, and each pair opens with the same
+                   chunk (the pair differs only after the TailBytesLiteral splice, and those later chunks
+                   open no statement, so they are outside this enumeration). */
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name !~* '\\.(csv|json)$' AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name !~* '\\.(csv|json)$' AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name ~* '\\.csv$' AND 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name ~* '\\.csv$' AND 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name ~* '\\.json$' AND 'jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name ~* '\\.json$' AND 'jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
             },
             candidates.OrderBy(c => c, StringComparer.Ordinal).ToArray());
     }
@@ -1431,14 +1445,53 @@ public sealed class TsqlConventionGuardTests
         "PerformanceMonitor.Collectors/StallWaitProbe.cs FitsUnderBudget",
         "PerformanceMonitor.Common/SystemHealthParser.cs GbFromBytes",
         "PerformanceMonitor.Common/SystemHealthParser.cs GbFromKb",
+        /* #4452: the same expression-bodied one-liner shape as GbFromBytes/GbFromKb just above — it strands
+           only its own numeric literals (1048576, the rounding precision), not T-SQL or a tempdb label, so
+           no census reads a site of that kind here. */
+        "PerformanceMonitor.Common/SystemHealthParser.cs MbFromBytes",
         "PerformanceMonitor.Notifications/WebhookAlertService.cs DeriveResourceDatabase",
         "Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs IsCommandTimeout",
+        /* #4276: the same expression-bodied classifier shape as IsCommandTimeout just above — it strands
+           only its own SqlState literal ("57014"), not T-SQL or a tempdb label, so no census reads a site
+           of that kind here. */
+        "Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingWebFailureLog.cs IsStatementTimeout",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs ToSettings",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs IsConfigured",
+        /* #4253: an expression-bodied member whose body opens with a property pattern
+           (`marker is { State: ... }`) before the rest of the expression. The walk's brace match closes the
+           range at the pattern's own closing brace, stranding the trailing `&& !cancellationToken.
+           IsCancellationRequested`, a boolean check on the token, not T-SQL and not a tempdb label, so no
+           census reads a site of that kind here. */
+        "Darling/PerformanceMonitor.Darling.Service/DarlingManagedPostgres.cs ShouldFallBackToHeaderOnly",
         "Darling/PerformanceMonitor.Darling.Service/HypotheticalIndexRequest.cs IsComplete",
+        /* #4214: an expression-bodied one-liner, same shape as the pairs elsewhere in this list — it strands
+           only its own ternary, not T-SQL or a tempdb label, so no census reads a site of that kind here. */
+        "Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs ComputeEffectiveMemoryLimitBytes",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs OutputFinding",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TriggerMbPerSecond",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TerminalSilenceMs",
+        /* #3582: two expression-bodied formatters of the same shape as the Figure/Count/Tally lines above.
+           Stamp strands the "o" round-trip format and "(unknown instant)"; Window strands the "0.##" format.
+           Neither is T-SQL and neither is a tempdb label, so no census reads a site of that kind here. */
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Stamp",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Window",
+        /* #3691 line 70: audit_config's PostgreSQL projection row serializes through an expression-bodied
+           `ObjectName is null ? new { … } : new { … }` — the two anonymous-object initializers are where the
+           walk stops, the same shape as the property-pattern derivations below. What falls outside the range
+           is the payload's own KEY NAMES (setting, fact_key, current_value, status, recommendation,
+           threshold_lineage, object_name): not T-SQL, not a tempdb label, and read by the contract censuses
+           from the SERIALIZED payload and the tool's description rather than from a member-scoped literal
+           sweep — PgTargetAuditConfigTests executes both arms of the ternary against a live store, which is
+           the only reading of those keys that could go wrong. */
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs ToPayload",
+        /* #3541 A12: four expression-bodied derivations on the growth row, each `Baseline is { } b ? … : null`
+           — the property pattern's braces are where the walk stops. Every one is arithmetic over the row's
+           own fields and strands NO string literal at all, so no census reads a site of that kind here. The
+           Lite twin (LocalDataService.FinOps.IndexObjects.cs, below) derives the same four the same way. */
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs DailyGrowthRateMb",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs Growth30dMb",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs Growth7dMb",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs GrowthOverAvailableHistoryMb",
         "Darling/PerformanceMonitor.Darling.Service/Targets/PostgresTargetProvider.cs WithDatabase",
         "Darling/PerformanceMonitor.Darling.Service/Targets/SqlServerTargetProvider.cs WithDatabase",
         "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.ServerManagement.cs SelectedTabCollectorScope",
@@ -1455,6 +1508,30 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs Local",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs Timestamp",
         "Lite/Services/LocalDataService.CollectionHealth.cs OutputFinding",
+        /* #4917: an expression-bodied property whose body opens with a property pattern
+           (`Newest is { } newest`) before the rest of the expression. The walk's brace match closes the
+           range at the pattern's own closing brace, stranding the trailing `newest && DateTime.UtcNow -
+           newest > TimeSpan.FromDays(ArchiveService.HotDataDays)`, an age comparison on the newest snapshot
+           time, not T-SQL and not a tempdb label, so no census reads a site of that kind here. */
+        "Lite/Services/LocalDataService.DatabaseStates.cs IsStale",
+        /* #3541 A12: the Lite twin of the four DarlingObjectStatsReader growth derivations above — the same
+           `is { } b ? … : null` shape, the same absence of any string literal. */
+        "Lite/Services/LocalDataService.FinOps.IndexObjects.cs DailyGrowthRateMb",
+        "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth30dMb",
+        "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth7dMb",
+        "Lite/Services/LocalDataService.FinOps.IndexObjects.cs GrowthOverAvailableHistoryMb",
+        /* #4766: the history rows' expression-bodied formatter, `naiveUtc is not { } instant ? "" : ...`. The
+           property pattern's braces are where the walk stops. What it strands is the "yyyy-MM-dd HH:mm:ss" grid
+           format and nothing else: not T-SQL and not a tempdb label, so no census reads a site of that kind here. */
+        "Lite/Services/LocalDataService.QueryStats.cs Worded",
+        "Lite/Services/LocalDataService.QueryStore.cs Worded",
+        /* #3691 lane 27 (#3798): the plan-flip record's expression-bodied `Ratio` property (`MeanAfter / MeanBefore`,
+           null unless both sides exist) — the same expression-shaped member as the formatter lines above. What its
+           range strands is the pattern-matched quotient and nothing else: no T-SQL, no tempdb label, no SQL literal a
+           census reads, so the member scan stopping short of it loses no counted site. ARRIVED with #3798 (surfaced
+           on dev's 291e15f8 run); the buffer drill-down's `Round` LEFT on the same run — #3799 reshaped it into a
+           block the walk reads whole — so its #3804 line comes off here. */
+        "Darling/PerformanceMonitor.Darling.Analysis/PgTargetFactCollector.Plans.cs Ratio",
     ];
 
     /* ───────────────────────── the resolver, pinned on arranged source ───────────────────────── */

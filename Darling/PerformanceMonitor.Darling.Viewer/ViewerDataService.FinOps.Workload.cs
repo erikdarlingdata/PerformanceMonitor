@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -34,7 +35,7 @@ public sealed partial class ViewerDataService
        matching fragment fails loudly instead of silently leaving the panel on raw. */
 
     /// <summary>The database-grain CTE in <see cref="DatabaseResourceUsageSql"/>, verbatim.</summary>
-    private const string WorkloadCteRaw = """
+    private const string WorkloadCteRaw = $"""
         database_name,
         SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
         SUM(delta_logical_reads) AS logical_reads,
@@ -45,6 +46,7 @@ public sealed partial class ViewerDataService
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_worker_time IS NOT NULL
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
     GROUP BY database_name
 """;
 
@@ -52,22 +54,25 @@ public sealed partial class ViewerDataService
     /// The same CTE over the per-database rollup. This is the ONE reader that needs
     /// <c>query_stats_db_hourly</c>: it sums the I/O columns, which the query-grain aggregate does not carry.
     /// The rollup already applies the same <c>delta_worker_time IS NOT NULL</c> filter, so it is dropped here.
+    /// <paramref name="relationSql"/> is the FROM-clause item (#3653 A6): either <c>collect.&lt;relation&gt; AS f</c>
+    /// unchanged, or <see cref="RollupCoverage.StitchedRelationSql"/>'s stitched form when a successor applies —
+    /// either way the alias is <c>f</c>, so the rest of the CTE reads through it unqualified exactly as before.
     /// </summary>
-    private static string WorkloadCteForCagg(string relation) => $"""
+    private static string WorkloadCteForCagg(string relationSql) => $"""
         database_name,
         SUM(worker_time_sum) / 1000.0 AS cpu_time_ms,
         SUM(logical_reads_sum) AS logical_reads,
         SUM(physical_reads_sum) AS physical_reads,
         SUM(logical_writes_sum) AS logical_writes,
         SUM(execution_count_sum) AS execution_count
-    FROM collect.{relation}
+    FROM {relationSql}
     WHERE server_id = $1
     AND   bucket >= $2
     GROUP BY database_name
 """;
 
     /// <summary>The CPU/execution CTE shared by both top-consumer queries, verbatim.</summary>
-    private const string ConsumerCteRaw = """
+    private const string ConsumerCteRaw = $"""
         database_name,
         SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
         SUM(delta_execution_count) AS execution_count
@@ -75,18 +80,20 @@ public sealed partial class ViewerDataService
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_worker_time IS NOT NULL
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
     GROUP BY database_name
 """;
 
     /// <summary>
     /// The same CTE over the QUERY-grain rollup — these two need only CPU and executions, both of which
     /// <c>query_stats_hourly</c> already carries, so they route without the per-database aggregate.
+    /// <paramref name="relationSql"/> is the FROM-clause item (#3653 A6) — see <see cref="WorkloadCteForCagg"/>.
     /// </summary>
-    private static string ConsumerCteForCagg(string relation) => $"""
+    private static string ConsumerCteForCagg(string relationSql) => $"""
         database_name,
         SUM(worker_time_sum) / 1000.0 AS cpu_time_ms,
         SUM(execution_count_sum) AS execution_count
-    FROM collect.{relation}
+    FROM {relationSql}
     WHERE server_id = $1
     AND   bucket >= $2
     GROUP BY database_name
@@ -104,37 +111,56 @@ public sealed partial class ViewerDataService
         return routed;
     }
 
-    /// <summary>Database resource usage for <paramref name="tier"/>. Raw returns the constant untouched.</summary>
+    /// <summary>Database resource usage for <paramref name="tier"/>. Raw returns the constant untouched. The
+    /// one-argument form reads the legacy relation for that tier, unstitched (<see cref="RollupCoverage.Unknown"/>
+    /// carries <see cref="RollupAvailability.None"/>, so <see cref="RollupCoverage.StitchedRelationSql"/> names
+    /// the legacy alone — the same bytes as before #3653 A6 routed this through the builder); the callers below
+    /// pass the coverage/window they resolved so a successor can be stitched in instead.</summary>
     public static string DatabaseResourceUsageSqlFor(RetentionTier tier) =>
+        DatabaseResourceUsageSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
+
+    /// <summary>
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> over the relation <paramref name="coverage"/>
+    /// resolves for <paramref name="windowStartUtc"/> (#3653 A6): <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// stitches the legacy <c>query_stats_db_hourly</c>/<c>query_stats_db_daily</c> to its interval-honest
+    /// successor at the successor's floor (F for hourly, F_d for daily), or names the legacy alone where there is
+    /// no successor — the SAME single-relation text the one-argument overload builds, with an <c>AS f</c> alias
+    /// the stitch needs (harmless: neither CTE qualifies a column, so the alias changes no result). The tier
+    /// CHOICE stays on the legacy pair; only the relation within the chosen tier can stitch.
+    /// </summary>
+    public static string DatabaseResourceUsageSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
             ? DatabaseResourceUsageSql
             : RouteOrThrow(
                 DatabaseResourceUsageSql,
                 WorkloadCteRaw,
-                WorkloadCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsDbHourlyView : TimescaleSupport.QueryStatsDbDailyView),
+                WorkloadCteForCagg(tier == RetentionTier.Hourly
+                    ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDbHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
+                    : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDbDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "database resource usage");
 
-    /// <summary>Top consumers (by total) for <paramref name="tier"/>.</summary>
-    public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier) =>
-        tier == RetentionTier.Raw
-            ? TopResourceConsumersByTotalSql
-            : RouteOrThrow(
-                TopResourceConsumersByTotalSql,
-                ConsumerCteRaw,
-                ConsumerCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView),
-                "top consumers by total");
+    /// <summary>Top consumers (by total AND by average — one statement, #4227) for <paramref name="tier"/>,
+    /// over the legacy relation for that tier, unstitched (see <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/>
+    /// for why routing this through the stitch builder with <see cref="RollupCoverage.Unknown"/> reproduces that).</summary>
+    public static string TopResourceConsumersSqlFor(RetentionTier tier) =>
+        TopResourceConsumersSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
 
-    /// <summary>Top consumers (by average) for <paramref name="tier"/>.</summary>
-    public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier) =>
+    /// <summary>Top consumers (by total and by average) over the stitched relation (#3653 A6) — see
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>. The I/O side
+    /// (<c>v_file_io_stats</c>) has no rollup and is never routed, on either tier — unchanged from before #4227
+    /// merged the two statements.</summary>
+    public static string TopResourceConsumersSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
-            ? TopResourceConsumersByAvgSql
+            ? TopResourceConsumersSql
             : RouteOrThrow(
-                TopResourceConsumersByAvgSql,
+                TopResourceConsumersSql,
                 ConsumerCteRaw,
-                ConsumerCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView),
-                "top consumers by average");
+                ConsumerCteForCagg(tier == RetentionTier.Hourly
+                    ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
+                    : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
+                "top consumers");
 
-    public const string DatabaseResourceUsageSql = @"
+    public const string DatabaseResourceUsageSql = $@"
 WITH workload AS (
     SELECT
         database_name,
@@ -147,6 +173,7 @@ WITH workload AS (
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_worker_time IS NOT NULL
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
     GROUP BY database_name
 ),
 io AS (
@@ -206,7 +233,8 @@ ORDER BY c.cpu_time_ms DESC";
             DateTime.UtcNow, cutoff, rollups.DbGrainHourly, rollups.DbGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsDbHourlyView, TimescaleSupport.QueryStatsDbDailyView));
 
-        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(tier));
+        /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
+        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(tier, coverage, cutoff));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
@@ -271,6 +299,12 @@ ORDER BY max_connections DESC";
     {
         var cutoff = DateTime.UtcNow.AddHours(-24);
 
+        /* #4766: the rows read their times on THIS server's clock (its collected one, else the viewer machine's offset,
+           the rule every list row uses), read once per load, and not on the active server tab's: the FinOps tab lists the
+           server it was opened for. */
+        var clock = ViewerTimeHelper.ClockForServerOrMachine(
+            await GetServerClocksAsync(serverId, cancellationToken), serverId, TimeZoneInfo.Local, DateTime.UtcNow);
+
         await using var command = _dataSource.CreateCommand(ApplicationConnectionsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -300,15 +334,31 @@ ORDER BY max_connections DESC";
                 AvgLogicalReads = reader.IsDBNull(15) ? 0L : Convert.ToInt64(reader.GetValue(15)),
                 MaxLogicalReads = reader.IsDBNull(16) ? 0L : Convert.ToInt64(reader.GetValue(16)),
                 SampleCount = reader.IsDBNull(17) ? 0 : Convert.ToInt64(reader.GetValue(17)),
-                FirstSeenLocal = ViewerTimeHelper.ForDisplay(reader.GetDateTime(18)),
-                LastSeenLocal = ViewerTimeHelper.ForDisplay(reader.GetDateTime(19))
+                FirstSeenLocal = ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(18), ViewerTimeHelper.CurrentDisplayMode, clock),
+                LastSeenLocal = ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(19), ViewerTimeHelper.CurrentDisplayMode, clock),
+                /* #4766: the UTC instants too, so the columns' text can name the offset in the repeated autumn hour. */
+                FirstSeenUtc = reader.GetDateTime(18),
+                LastSeenUtc = reader.GetDateTime(19),
+                Clock = clock
             });
         }
         return items;
     }
 
-    /// <summary>Top-N databases by total CPU for the Utilization summary. $1 server_id, $2 cutoff, $3 topN.</summary>
-    public const string TopResourceConsumersByTotalSql = @"
+    /// <summary>
+    /// Top databases by total CPU AND by average CPU per execution for the Utilization summary — ONE pass
+    /// over query_stats/file_io_stats feeding BOTH grids (#4227; the two statements this replaced each
+    /// aggregated the same 24h of raw query_stats independently, ~27k buffers apiece). $1 server_id, $2 cutoff.
+    /// Returns every database with a workload or an I/O row in the window, not just the topN of either
+    /// ordering — <see cref="GetTopResourceConsumersAsync"/> ranks and slices both grids from this one row set,
+    /// since a single statement can only LIMIT one ordering and the two grids rank by different columns.
+    ///
+    /// <para>Deliberately does NOT filter out a NULL database_name (an unattributed query_stats row) here.
+    /// The old ByTotal statement did (<c>WHERE c.database_name IS NOT NULL</c>); the old ByAvg statement never
+    /// did. Baking either rule in would apply it to both grids, so the NULL-name filter is applied client-side,
+    /// per grid, in <see cref="GetTopResourceConsumersAsync"/> instead.</para>
+    /// </summary>
+    public const string TopResourceConsumersSql = $@"
 WITH workload AS (
     SELECT
         database_name,
@@ -318,6 +368,7 @@ WITH workload AS (
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_worker_time IS NOT NULL
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
     GROUP BY database_name
 ),
 io AS (
@@ -351,14 +402,21 @@ SELECT
     c.execution_count,
     CAST(c.io_total_mb AS DECIMAL(19,2)),
     CAST(c.cpu_time_ms * 100.0 / t.total_cpu AS DECIMAL(5,2)),
-    CAST(c.io_total_mb * 100.0 / t.total_io AS DECIMAL(5,2))
+    CAST(c.io_total_mb * 100.0 / t.total_io AS DECIMAL(5,2)),
+    CASE WHEN c.execution_count > 0 THEN CAST(c.cpu_time_ms * 1.0 / c.execution_count AS DECIMAL(19,2)) END,
+    CASE WHEN c.execution_count > 0 THEN CAST(c.io_total_mb * 1.0 / c.execution_count AS DECIMAL(19,4)) END
 FROM combined c
 CROSS JOIN totals t
-WHERE c.database_name IS NOT NULL
-ORDER BY c.cpu_time_ms DESC
-LIMIT $3";
+ORDER BY c.database_name";
 
-    public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByTotalAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Both top-consumer grids from the one <see cref="TopResourceConsumersSql"/> round trip. Column 6
+    /// (avg_cpu_ms) is NULL exactly when execution_count = 0, which is the old ByAvg statement's
+    /// <c>HAVING SUM(delta_execution_count) > 0</c> restated as a per-row test instead of a group filter — the
+    /// same rows survive either way, since HAVING on an aggregate is equivalent to filtering the already-grouped
+    /// result on that same aggregate.
+    /// </summary>
+    public async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> GetTopResourceConsumersAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
@@ -366,99 +424,93 @@ LIMIT $3";
             DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(tier));
+        /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersSqlFor(tier, coverage, cutoff));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
 
-        var items = new List<TopResourceConsumerRow>();
+        var totalCandidates = new List<TopResourceConsumerRow>();
+        var avgCandidates = new List<TopResourceConsumerRow>();
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new TopResourceConsumerRow
+            var dbNameIsNull = reader.IsDBNull(0);
+            var dbName = dbNameIsNull ? "" : reader.GetString(0);
+            var cpuTimeMs = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
+            var executionCount = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+            var ioTotalMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3));
+
+            /* The ByTotal grid has always excluded an unattributed (NULL) database_name — the old
+               TopResourceConsumersByTotalSql's WHERE c.database_name IS NOT NULL. */
+            if (!dbNameIsNull)
             {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                CpuTimeMs = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
-                IoTotalMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
-                PctCpu = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                PctIo = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))
-            });
+                totalCandidates.Add(new TopResourceConsumerRow
+                {
+                    DatabaseName = dbName,
+                    CpuTimeMs = cpuTimeMs,
+                    ExecutionCount = executionCount,
+                    IoTotalMb = ioTotalMb,
+                    PctCpu = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                    PctIo = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))
+                });
+            }
+
+            /* The ByAvg grid never filtered a NULL database_name, only a zero-execution one; avg_cpu_ms is
+               NULL exactly for those, so testing it here reproduces the old HAVING. */
+            if (!reader.IsDBNull(6))
+            {
+                avgCandidates.Add(new TopResourceConsumerRow
+                {
+                    DatabaseName = dbName,
+                    CpuTimeMs = Convert.ToInt64(reader.GetValue(6)),
+                    ExecutionCount = executionCount,
+                    IoTotalMb = ioTotalMb,
+                    TotalCpuTimeMs = cpuTimeMs,
+                    AvgIoMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7))
+                });
+            }
         }
-        return items;
+
+        /* Both grids were "ORDER BY <metric> DESC LIMIT $3" in SQL; ranking moves here so the one row set can
+           feed both orderings. OrderByDescending is a stable sort, so a tie now breaks by the shared
+           statement's ORDER BY c.database_name — deterministic, where the old per-grid statements left a
+           tie's order to whichever plan Postgres picked (never a documented contract, and cpu_time_ms /
+           avg_cpu_ms are sums of independent per-database deltas, so an exact tie is not expected in practice). */
+        var byTotal = totalCandidates.OrderByDescending(r => r.CpuTimeMs).Take(topN).ToList();
+        var byAvg = avgCandidates.OrderByDescending(r => r.CpuTimeMs).Take(topN).ToList();
+
+        return (byTotal, byAvg);
     }
 
-    /// <summary>Top-N databases by average CPU per execution for the Utilization summary. $1 server_id, $2 cutoff, $3 topN.</summary>
-    public const string TopResourceConsumersByAvgSql = @"
-WITH workload AS (
-    SELECT
-        database_name,
-        SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
-        SUM(delta_execution_count) AS execution_count
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   delta_worker_time IS NOT NULL
-    GROUP BY database_name
-    HAVING SUM(delta_execution_count) > 0
-),
-io AS (
-    SELECT
-        database_name,
-        SUM(delta_read_bytes + delta_write_bytes) / 1048576.0 AS io_total_mb
-    FROM v_file_io_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   delta_read_bytes IS NOT NULL
-    GROUP BY database_name
-)
-SELECT
-    w.database_name,
-    CAST(w.cpu_time_ms * 1.0 / w.execution_count AS DECIMAL(19,2)) AS avg_cpu_ms,
-    w.execution_count,
-    CAST(COALESCE(i.io_total_mb, 0) AS DECIMAL(19,2)),
-    w.cpu_time_ms,
-    CAST(COALESCE(i.io_total_mb, 0) * 1.0 / w.execution_count AS DECIMAL(19,4)) AS avg_io_mb
-FROM workload w
-LEFT JOIN io i ON i.database_name = w.database_name
-ORDER BY avg_cpu_ms DESC
-LIMIT $3";
-
-    public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByAvgAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
-    {
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
-        var tier = RetentionTierRouter.Resolve(
-            DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
-            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
-
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(tier));
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
-
-        var items = new List<TopResourceConsumerRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new TopResourceConsumerRow
-            {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                CpuTimeMs = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
-                IoTotalMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
-                TotalCpuTimeMs = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4)),
-                AvgIoMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))
-            });
-        }
-        return items;
-    }
-
-    /// <summary>Wait stats grouped by cost category over the window. $1 server_id, $2 cutoff.</summary>
+    /// <summary>Wait stats grouped by cost category over the window. A wait stored with and without the trailing
+    /// space the collector trimmed from #4884 on is one wait, with its summed time, when the category's top wait is
+    /// picked: <c>per_spelling</c> sums per stored name, <c>per_wait</c> merges the spellings on
+    /// <c>rtrim(wait_type)</c> (once per group, not per row), and the category is read from the clean name, so both
+    /// spellings always land in the same category. $1 server_id, $2 cutoff.</summary>
     public const string WaitCategorySummarySql = @"
-WITH categorized AS (
+WITH per_spelling AS (
+    SELECT
+        wait_type,
+        SUM(delta_wait_time_ms) AS wait_time_ms,
+        SUM(delta_waiting_tasks) AS waiting_tasks
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_wait_time_ms IS NOT NULL
+    AND   delta_wait_time_ms > 0
+    GROUP BY wait_type
+),
+per_wait AS (
+    SELECT
+        rtrim(wait_type) AS wait_type,
+        SUM(wait_time_ms) AS wait_time_ms,
+        SUM(waiting_tasks) AS waiting_tasks
+    FROM per_spelling
+    GROUP BY rtrim(wait_type)
+),
+categorized AS (
     SELECT
         CASE
             WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
@@ -470,24 +522,9 @@ WITH categorized AS (
             ELSE 'Other'
         END AS category,
         wait_type,
-        SUM(delta_wait_time_ms) AS wait_time_ms,
-        SUM(delta_waiting_tasks) AS waiting_tasks
-    FROM v_wait_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   delta_wait_time_ms IS NOT NULL
-    AND   delta_wait_time_ms > 0
-    GROUP BY
-        CASE
-            WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
-            WHEN wait_type ILIKE 'PAGEIOLATCH%'
-            OR   wait_type IN ('WRITELOG', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Storage'
-            WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
-            WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
-            WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
-            ELSE 'Other'
-        END,
-        wait_type
+        wait_time_ms,
+        waiting_tasks
+    FROM per_wait
 ),
 ranked AS (
     SELECT
@@ -547,7 +584,7 @@ ORDER BY bc.total_wait_time_ms DESC";
     }
 
     /// <summary>Top-N most expensive queries by total CPU over the window. $1 server_id, $2 cutoff, $3 topN.</summary>
-    public const string ExpensiveQueriesSql = @"
+    public const string ExpensiveQueriesSql = $@"
 SELECT
     database_name,
     SUM(delta_worker_time) / 1000.0 AS total_cpu_ms,
@@ -564,6 +601,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   delta_worker_time IS NOT NULL
 AND   delta_worker_time > 0
+AND   {TimescaleSupport.IntervalHonestSourceFilter}
 GROUP BY
     database_name,
     sql_handle,
@@ -616,7 +654,7 @@ LIMIT $3";
     /// to query_hash level in SQL (with correlated sample-text subqueries, as Lite does), then scores in C#
     /// via <see cref="HighImpactScorer"/>. $1 server_id, $2 cutoff.
     /// </summary>
-    public const string HighImpactQueriesSql = @"
+    public const string HighImpactQueriesSql = $@"
 SELECT
     query_hash,
     MIN(database_name) AS database_name,
@@ -659,6 +697,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   query_hash IS NOT NULL AND query_hash != ''
 AND   delta_execution_count > 0
+AND   {TimescaleSupport.IntervalHonestSourceFilter}
 GROUP BY query_hash
 HAVING SUM(delta_execution_count) > 0
 ORDER BY SUM(delta_worker_time) DESC";

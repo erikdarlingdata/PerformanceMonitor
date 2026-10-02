@@ -331,19 +331,23 @@ public class CollectionLogDrainForensicsStoreTests
 
         /* drain STAYS null on those arms: nothing was drained, so there is nothing to describe.
 
-           Ten, and the count is exactly why it is counted: #2993's log_timezone PERMISSIONS arm and
+           Eleven, and the count is exactly why it is counted: #2993's log_timezone PERMISSIONS arm and
            #2997's authored PostgreSQL command-timeout arm were developed in parallel and each landed one.
            Both are early-return fault arms that drained nothing, so both belong here - but neither lane
            could see the other, and each independently moved this literal from 7 to 8. #3410's
            logging_collector-off arm is the tenth: an early return that drained nothing because the
-           collector's own query declined to list a log that is not being written. The pin is what
-           turned that into a merge conflict to resolve rather than a wrong number nobody noticed. */
-        Assert.Equal(10, Regex.Matches(worker, @"drain: null").Count);
+           collector's own query declined to list a log that is not being written. #3997's no-stderr-file
+           arm is the eleventh, its sibling: the collector is on but writes no stderr-format file this
+           route can read. The pin is what turned that into a merge conflict to resolve rather than a
+           wrong number nobody noticed. #4053's no-csvlog-file arm is the twelfth, the csvlog route's twin of
+           the eleventh: the collector is on and csvlog is configured, but no .csv file exists yet. #4053's
+           no-jsonlog-file arm is the thirteenth, the jsonlog route's twin of the twelfth. */
+        Assert.Equal(13, Regex.Matches(worker, @"drain: null").Count);
 
-        /* And V110's fetch sums stay null on those same ten arms and for the same reason: no item completed,
-           so no fetch was performed. Counted rather than merely present, so an arm that starts passing a
-           real value - which would mean attributing another run's fetch to a failure row - is a red. */
-        Assert.Equal(10, Regex.Matches(worker, @"fetchPhases: null").Count);
+        /* And V110's fetch sums stay null on those same thirteen arms and for the same reason: no item
+           completed, so no fetch was performed. Counted rather than merely present, so an arm that starts
+           passing a real value - which would mean attributing another run's fetch to a failure row - is a red. */
+        Assert.Equal(13, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     /// <summary>

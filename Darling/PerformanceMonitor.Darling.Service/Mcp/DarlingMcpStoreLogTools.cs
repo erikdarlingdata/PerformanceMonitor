@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -34,12 +35,19 @@ public sealed class DarlingMcpStoreLogTools
     public const int DefaultRetainedLimit = 50;
 
     [McpServerTool(Name = "get_store_log"), Description(
-        "Gets what the monitoring store's OWN PostgreSQL server log recorded — not a monitored server's. The service reads its own store's log hourly, classifies every entry, and stores a per-class census rather than the lines, because a production day of that log holds roughly 1,100 'canceling statement due to user request' entries: the store's rendering of a client-side CommandTimeout cancel, which is the ordinary consequence of having timeouts and not a fault. So each class comes back with its window total, its per-hour median and max over the same window (computed over EVERY captured hour, including the ones the class did not appear in), and whether its text is retained. Classes whose text is NOT retained are the expected floor, named and counted so the exclusion is a number you can see rather than a filter you cannot: user-request cancels, administrator terminations of background workers and connections, and the Windows shared-memory-reservation retry that PostgreSQL retries itself. Classes whose text IS retained are the ones worth reading one at a time: crash recovery, data-integrity and disk complaints, background-worker slot exhaustion (the silent stopper for compression and continuous-aggregate jobs), the store deadlocking against itself, connections lost mid-statement (the signature of a refresh convoy), the store's own statement and lock timeouts, panics, and — this is the safety net — anything at WARNING or worse that no rule recognises, which keeps its text so a shape nobody anticipated is visible rather than filtered. Every answer carries the CAPTURE DENOMINATOR: how many hourly captures landed against how many the window expected, how many bytes were read, how many captures discarded a resume marker because the weekday log ring truncated the file, and how many bytes are still unread. That denominator is what separates 'the store said nothing' from 'nobody read the log'. NO health band is applied and none is intended: a quiet store with a large cancel floor is healthy and must keep reading that way. Takes no server_name — the store is the subject.")]
+        "Gets the monitoring STORE's OWN PostgreSQL log, not a monitored server's; no server_name. Returns a "
+        + "per-class CENSUS (window total, per-hour median/max over every captured hour), not raw lines. "
+        + "not_collected (captures=0) means nobody read the log, not that nothing happened. NOT-retained "
+        + "classes are named+counted as the expected floor (cancels, admin terminations, memory retries); NO "
+        + "health band — a large cancel floor is healthy. Every answer carries the capture denominator "
+        + "(captures vs expected, bytes read/unread) separating a quiet store from an unread log. <<GUIDE>> "
+        + "Gets what the monitoring store's OWN PostgreSQL server log recorded — not a monitored server's. The service reads its own store's log hourly, classifies every entry, and stores a per-class census rather than the lines, because a production day of that log holds roughly 1,100 'canceling statement due to user request' entries: the store's rendering of a client-side CommandTimeout cancel, which is the ordinary consequence of having timeouts and not a fault. So each class comes back with its window total, its per-hour median and max over the same window (computed over EVERY captured hour, including the ones the class did not appear in), and whether its text is retained. Classes whose text is NOT retained are the expected floor, named and counted so the exclusion is a number you can see rather than a filter you cannot: user-request cancels, administrator terminations of background workers and connections, and the Windows shared-memory-reservation retry that PostgreSQL retries itself. Classes whose text IS retained are the ones worth reading one at a time: crash recovery, data-integrity and disk complaints, background-worker slot exhaustion (the silent stopper for compression and continuous-aggregate jobs), the store deadlocking against itself, connections lost mid-statement (the signature of a refresh convoy), the store's own statement and lock timeouts, statements that ran past the store's slow-statement line (the statement kept with its literals masked, one row per statement however often it ran), panics, and — this is the safety net — anything at WARNING or worse that no rule recognises, which keeps its text so a shape nobody anticipated is visible rather than filtered. Messages are shown as PostgreSQL wrote them; SQL text is normalized with literals replaced by ?. Messages that differ only in a quoted value or a number count as one, shown with one sample. Every answer carries the CAPTURE DENOMINATOR: how many hourly captures landed against how many the window expected, how many bytes were read, how many captures discarded a resume marker because the weekday log ring truncated the file, and how many bytes are still unread. That denominator is what separates 'the store said nothing' from 'nobody read the log'. NO health band is applied and none is intended: a quiet store with a large cancel floor is healthy and must keep reading that way. Takes no server_name — the store is the subject.")]
     public static async Task<string> GetStoreLog(
         NpgsqlDataSource postgres,
         [Description("Hours of history. Default 24; max 168.")] int hours_back = 24,
         [Description("Maximum retained-message rows to return. Default 50.")] int limit = DefaultRetainedLimit,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null)
@@ -60,7 +68,7 @@ public sealed class DarlingMcpStoreLogTools
             /* The denominator FIRST, because it is what makes an empty answer honest — the get_pg_blocking
                ordering, for its reason. */
             var captures = await DarlingStoreLogReader.GetCaptureSummaryAsync(
-                postgres, windowStart, windowEnd, hours_back);
+                postgres, windowStart, windowEnd, hours_back, cancellationToken);
 
             if (captures.Captures == 0)
             {
@@ -82,9 +90,9 @@ public sealed class DarlingMcpStoreLogTools
                     + "The service log carries a warning naming whichever it was.");
             }
 
-            var classes = await DarlingStoreLogReader.GetClassCensusAsync(postgres, windowStart, windowEnd);
+            var classes = await DarlingStoreLogReader.GetClassCensusAsync(postgres, windowStart, windowEnd, cancellationToken);
             var retained = await DarlingStoreLogReader.GetRetainedEventsAsync(
-                postgres, windowStart, windowEnd, limit);
+                postgres, windowStart, windowEnd, limit, cancellationToken);
 
             var report = new DarlingStoreLogReader.StoreLogReport
             {
@@ -98,7 +106,7 @@ public sealed class DarlingMcpStoreLogTools
 
             return JsonSerializer.Serialize(report, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_store_log", ex);
         }

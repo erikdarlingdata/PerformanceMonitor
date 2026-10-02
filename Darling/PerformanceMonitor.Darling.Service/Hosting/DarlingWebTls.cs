@@ -24,7 +24,7 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// well-understood story for an internal CA, and the operator here supplies a certificate rather than the
 /// product minting one. If MCP ever gets TLS it is a separate decision with a separate blast radius.</para>
 ///
-/// <para><b>Split on purpose.</b> <see cref="Describe"/>, <see cref="LifetimeRefusal"/> and
+/// <para><b>Split on purpose.</b> <see cref="Describe"/>, <see cref="CheckLifetime"/> and
 /// <see cref="ExpiryWarning"/> are PURE — they decide shape and validity with no file, no clock, and no
 /// logger, so the whole matrix pins in a unit test with no certificate on disk. <see cref="Load"/> is the one
 /// effectful member. That is the same split the bind ladder uses in <see cref="DarlingHostBinding"/>.</para>
@@ -157,29 +157,65 @@ internal static class DarlingWebTls
         return new TlsPlan(TlsShape.NotConfigured, null);
     }
 
+    /// <summary>The lifetime gate's three answers. Kept as a kind rather than only the rendered refusal
+    /// string because the web host has to CARRY the decision out to the worker's self-alert sweep (#3517): the
+    /// host decides once, at load, and stays loopback-only on that decision until the next start regardless of
+    /// what the clock does afterwards — so the consumer must be told what was decided, not left to re-derive
+    /// it from the dates and reach a different answer later.</summary>
+    internal enum LifetimeStatus
+    {
+        /// <summary>Inside its validity period — serve it.</summary>
+        Usable,
+
+        /// <summary><c>NotAfter</c> has passed. Refused.</summary>
+        Expired,
+
+        /// <summary><c>NotBefore</c> is still ahead — a clock skew, or a certificate minted for a future
+        /// rotation. Refused, and its own kind on purpose: "expired" would send the operator to the wrong
+        /// problem.</summary>
+        NotYetValid,
+    }
+
+    /// <summary>The lifetime gate's verdict: the kind, and the operator-facing reason when it refuses
+    /// (<see cref="Refusal"/> is non-null exactly when <see cref="Status"/> is not
+    /// <see cref="LifetimeStatus.Usable"/>).</summary>
+    internal readonly record struct LifetimeVerdict(LifetimeStatus Status, string? Refusal);
+
     /// <summary>
-    /// PURE lifetime gate: the reason this certificate cannot be served AT ALL, or null when it is usable.
-    /// Expired and not-yet-valid both refuse, because a listener that presents either one fails every
-    /// handshake — the dashboard is down whether we refuse here or the browser refuses there, and refusing
-    /// here says why in the service log instead of leaving it to a certificate warning nobody reads.
+    /// PURE lifetime gate: whether this certificate can be served AT ALL, and when it cannot, why. Expired and
+    /// not-yet-valid both refuse, because a listener that presents either one fails every handshake — the
+    /// dashboard is down whether we refuse here or the browser refuses there, and refusing here says why in
+    /// the service log instead of leaving it to a certificate warning nobody reads.
     ///
     /// <para>Not-yet-valid is worth its own arm: it is the signature of a clock skew or a certificate issued
-    /// for a future rotation, and "expired" would be an actively misleading thing to log for it.</para>
+    /// for a future rotation, and "expired" would be an actively misleading thing to log for it. Expired is
+    /// checked FIRST, so a certificate whose window has both not opened and already closed (a nonsense
+    /// <c>NotBefore</c> past its <c>NotAfter</c>) reads as expired — the fact a restart cannot fix.</para>
     /// </summary>
-    internal static string? LifetimeRefusal(DateTimeOffset notBefore, DateTimeOffset notAfter, DateTimeOffset nowUtc)
+    internal static LifetimeVerdict CheckLifetime(DateTimeOffset notBefore, DateTimeOffset notAfter, DateTimeOffset nowUtc)
     {
         if (nowUtc >= notAfter)
         {
-            return $"the certificate expired on {notAfter.UtcDateTime:u} — TLS cannot be served with it";
+            return new LifetimeVerdict(
+                LifetimeStatus.Expired,
+                $"the certificate expired on {notAfter.UtcDateTime:u} — TLS cannot be served with it");
         }
 
         if (nowUtc < notBefore)
         {
-            return $"the certificate is not valid until {notBefore.UtcDateTime:u} (check the system clock) — TLS cannot be served with it yet";
+            return new LifetimeVerdict(
+                LifetimeStatus.NotYetValid,
+                $"the certificate is not valid until {notBefore.UtcDateTime:u} (check the system clock) — TLS cannot be served with it yet");
         }
 
-        return null;
+        return new LifetimeVerdict(LifetimeStatus.Usable, null);
     }
+
+    /// <summary>The refusal reason alone — <see cref="CheckLifetime"/>'s string half, null when usable. The
+    /// gate's original shape, kept so the message matrix stays pinned in one place; the web host itself calls
+    /// <see cref="CheckLifetime"/>, because it needs the kind as well as the line.</summary>
+    internal static string? LifetimeRefusal(DateTimeOffset notBefore, DateTimeOffset notAfter, DateTimeOffset nowUtc)
+        => CheckLifetime(notBefore, notAfter, nowUtc).Refusal;
 
     /// <summary>
     /// PURE advance warning for a certificate that is usable today and expires within

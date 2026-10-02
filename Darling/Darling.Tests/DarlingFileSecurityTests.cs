@@ -207,8 +207,57 @@ public sealed class DarlingFileSecurityTests
        darling.json carries every monitored server's encryptedPassword plus the MCP and web tokens, all under
        DPAPI LocalMachine scope with an entropy constant published in this repo, so READ access to the file IS
        the secret. It never got an ACL: it sits beside the binary, and the documented install (extract to
-       C:\PerformanceMonitorDarling) inherits BUILTIN\Users: Read & Execute from the root DACL. The service now
-       hardens it at startup and raises a Critical when it is still exposed — this is the check behind that. */
+       C:\Program Files\PerformanceMonitorDarling) inherits BUILTIN\Users: Read & Execute from Program Files. The
+       service now hardens it at startup and raises a Critical when it is still exposed — this is the check behind
+       that. */
+
+    /// <summary>
+    /// #3914 review F6: <see cref="DarlingFileSecurity.CreateHardenedFile"/> applies the harden's ACL AT creation. In
+    /// a folder whose DACL hands BUILTIN\Users an inheritable read, a file created the ordinary way is readable the
+    /// moment it exists (the control); the hardened create never is — its DACL is protected with no inherited ACE
+    /// before a byte is written — and it refuses a path that already exists rather than write through it.
+    /// </summary>
+    [Fact]
+    public void CreateHardenedFile_IsNeverReadableByOrdinaryUsers_EvenInAFolderThatWouldGiveThemRead()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var directory = Directory.CreateTempSubdirectory("darling-3914-acl-");
+        try
+        {
+            var exposed = directory.GetAccessControl();
+            exposed.AddAccessRule(new FileSystemAccessRule(
+                s_builtinUsers, FileSystemRights.Read, InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            directory.SetAccessControl(exposed);
+
+            var ordinary = Path.Combine(directory.FullName, "ordinary");
+            File.WriteAllText(ordinary, "x");
+            Assert.True(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(ordinary),
+                "the folder's inheritable Users read must reach an ordinarily created file, or this test proves nothing");
+
+            var hardened = Path.Combine(directory.FullName, "hardened");
+            using (var stream = DarlingFileSecurity.CreateHardenedFile(hardened, allowInteractiveRead: false))
+            {
+                var atCreation = new FileInfo(hardened).GetAccessControl();
+                Assert.True(atCreation.AreAccessRulesProtected, "the DACL must be protected from the moment the file exists");
+                Assert.DoesNotContain(
+                    atCreation.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>(),
+                    rule => rule.IsInherited);
+                stream.WriteByte((byte)'x');
+            }
+
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(hardened));
+            Assert.True(DarlingFileSecurity.IsTrustedOwner(hardened));
+            Assert.Equal("x", File.ReadAllText(hardened));
+            Assert.Throws<IOException>(() => DarlingFileSecurity.CreateHardenedFile(hardened, allowInteractiveRead: false).Dispose());
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(directory.FullName);
+        }
+    }
 
     [Fact]
     public void IsReadableByOrdinaryUsers_TrueWhenUsersHoldsAReadAce_FalseAfterHardening()
@@ -597,7 +646,7 @@ public sealed class DarlingFileSecurityTests
 
         /* The owner descriptor is READ from the file, and read close enough to the SetOwner to be the same
            object rather than an unrelated Get-Acl elsewhere in the script. */
-        var reRead = script.IndexOf("$owner = Get-Acl -Path $secretFile", StringComparison.Ordinal);
+        var reRead = script.IndexOf("$owner = Get-Acl -LiteralPath $secretFile", StringComparison.Ordinal);
         Assert.True(reRead >= 0 && reRead < setOwner,
             "the owner must be set on the file's CURRENT ACL ($owner = Get-Acl ...), not on a fresh " +
             "FileSecurity — Set-Acl writes the whole descriptor, so a bare one wipes the hardened DACL (#1957).");
@@ -612,7 +661,7 @@ public sealed class DarlingFileSecurityTests
             "inherited BUILTIN\\Users read come straight back.");
 
         /* And the verification must judge the FINAL state — after both the DACL and the owner. */
-        var verify = script.IndexOf("$after = Get-Acl -Path $secretFile", StringComparison.Ordinal);
+        var verify = script.IndexOf("$after = Get-Acl -LiteralPath $secretFile", StringComparison.Ordinal);
         Assert.True(verify > setOwner,
             "the per-file verification must run AFTER the owner step, or it certifies a state the installer " +
             "then changes.");

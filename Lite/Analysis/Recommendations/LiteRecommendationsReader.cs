@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorLite.Analysis.Recommendations;
 
@@ -60,7 +61,10 @@ public sealed class LiteRecommendationsReader
         int serverId, string serverName, int hoursBack = 24, int limit = 100)
     {
         var findings = await _findingStore.GetRecentFindingsAsync(serverId, hoursBack, limit);
-        return MapFindings(findings, serverName);
+        /* #3712: the two knobs the notification path applied when these findings fired, so the grid's
+           not-paged marker and the gate's decision read the same settings. */
+        var lens = new FindingRoutingLens(App.AnalysisNotifySeverity, App.AnalysisUncorroboratedRoute);
+        return MapFindings(findings, serverName, lens);
     }
 
     /// <summary>
@@ -70,7 +74,7 @@ public sealed class LiteRecommendationsReader
     /// <c>internal</c> for tests; the public entry point is <see cref="GetRecommendationsAsync"/>.
     /// </summary>
     internal static List<LiteRecommendationItem> MapFindings(
-        IReadOnlyList<AnalysisFinding> findings, string serverName)
+        IReadOnlyList<AnalysisFinding> findings, string serverName, FindingRoutingLens? lens = null)
     {
         var latest = LatestBatchOnly(findings);
 
@@ -79,7 +83,7 @@ public sealed class LiteRecommendationsReader
         {
             if (finding is null)
                 continue;
-            items.Add(MapFinding(finding, serverName));
+            items.Add(MapFinding(finding, serverName, lens));
         }
 
         items.Sort(CompareForDisplay);
@@ -142,7 +146,9 @@ public sealed class LiteRecommendationsReader
     /// for a finding still carrying its ephemeral drill-down. Null when neither applies — the card then
     /// renders advise-only.
     /// </summary>
-    internal static LiteRecommendationItem MapFinding(AnalysisFinding finding, string serverName)
+    /// <param name="lens">#3712: the notify floor and routing knob to judge the not-paged marker by; null
+    /// (the pure-mapping tests' default) computes no marker.</param>
+    internal static LiteRecommendationItem MapFinding(AnalysisFinding finding, string serverName, FindingRoutingLens? lens = null)
     {
         // Value-stated advice frozen into StoryText at analysis time (current MAXDOP/CTFP/etc.),
         // with the static block as the fallback for legacy findings. StoryText now holds advice
@@ -163,7 +169,10 @@ public sealed class LiteRecommendationsReader
             IncidentId = finding.IncidentId,
             ServerName = serverName ?? string.Empty,
             WindowStartUtc = AsUtc(finding.TimeRangeStart),
-            WindowEndUtc = AsUtc(finding.TimeRangeEnd)
+            WindowEndUtc = AsUtc(finding.TimeRangeEnd),
+            /* #3712: read off the persisted fields (root key, confidence, chain length) through the shared
+               lens; null when the finding paged, was below the floor, or no lens was supplied. */
+            NotPagedReason = lens?.NotPagedReason(finding)
         };
     }
 

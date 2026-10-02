@@ -24,6 +24,8 @@ import { el, mount, apiGet, buildQuery, loadingStrip, errorStrip, emptyStrip, no
          alertDeliveryState } from "../util.js";
 import { VIZ } from "../panels.js";
 import { suggestViz, deriveVizConfig } from "../derive.js";
+import { renderNotebookDoc } from "./views.js";
+import { getSession, getCatalog } from "../views-api.js";
 
 /* The get_alert_history wire shape's status collapse, matching the Alert History page's own cell — including
    its #2781 rule: the "tray" channel (the Lite/Dashboard system-tray toast) is meaningless on the headless web,
@@ -96,6 +98,86 @@ function sectionCard(section) {
   ]);
 }
 
+/* #4222: the alert notebook render. GET /api/alert-notebook returns {alert, status, notes, template, definition}
+   bound to this link's server/metric/at/dedup — a per-family template server-side, so the page can render the
+   forensic reads an investigation needs (v1 read cells) as a document, read-only, no fleet scope picker (the
+   server is fixed). /api/triage is NOT called first: /api/alert-notebook is tried, and only on a 404 (it isn't on
+   dev yet, or this build predates it) does the page fall back to the legacy /api/triage assembly below — so the
+   route works whichever endpoint is live. Status refresh on the 60s poll is OUT of scope here: it needs the poll
+   guard #4222(d) adds to app.js's refresh(), which is not in this slice. */
+async function renderAlertNotebook(main, box, server, metric, at, dedup) {
+  /* #4368: the same route-change guard renderView (views.js) already uses for its own await gap — captured
+     BEFORE the first await, so a hashchange between now and any later check is visible. Threaded into
+     renderNotebookDoc as `opts.isLive` so its alert-mode read cells can drop a result that lands after the
+     viewer has navigated off #/triage, without cancelling the fetch or starving the limiter's next slot. */
+  const ourHash = location.hash;
+  const isLive = () => location.hash === ourHash;
+  const res = await apiGet("/api/alert-notebook" + buildQuery({ server, metric, at, dedup }));
+  if (res.kind === "error" && res.status === 404) return false; // not on this build — caller falls back
+  if (res.kind === "error") {
+    mount(box, errorStrip(res.message));
+    return true;
+  }
+  if (!isLive()) return true; // navigated away during the fetch above — nothing left to mount into.
+
+  const t = res.data || {};
+  const notes = Array.isArray(t.notes) ? t.notes : [];
+  const [session, catalog] = await Promise.all([getSession(), getCatalog()]);
+  const canEdit = !!session.can_edit;
+  if (!isLive()) return true; // ditto, across the session/catalog await gap.
+
+  let def = t.definition || { kind: "notebook", cells: [] };
+  const provenance =
+    "from alert template " + (t.template && t.template.id) + " v" + (t.template && t.template.version) +
+    ", " + metric + " on " + server + " at " + at;
+
+  function stripAsOf(d) {
+    const cells = Array.isArray(d.cells) ? d.cells : [];
+    return {
+      ...d,
+      cells: cells.map((c) => {
+        if (c && c.type === "read" && c.params && c.params.as_of != null) {
+          const { as_of, ...rest } = c.params;
+          return { ...c, params: rest };
+        }
+        /* A chart (panel) cell pins its window with an absolute `range`; drop it too, so Open live gives the
+           charts the scope's live hours the same way it gives the read cells theirs. */
+        if (c && c.type === "panel" && c.range != null) {
+          const { range, ...rest } = c;
+          return rest;
+        }
+        return c;
+      }),
+    };
+  }
+
+  const noteBox = el("div", {});
+  const docHolder = el("div", {});
+  mount(box, [noteBox, docHolder]);
+
+  function paint() {
+    mount(noteBox, notes.map((n) => noticeStrip(n)));
+    renderNotebookDoc(docHolder, {
+      mode: "alert",
+      definition: def,
+      alert: t.alert || null,
+      /* The registry name the endpoint resolved for this firing (absent when none resolved): the page scopes the
+         charts by it, never by the alert row's display name. */
+      scopeServer: t.scope_server || "",
+      status: t.status,
+      notes,
+      canEdit,
+      catalog,
+      server,
+      provenance,
+      isLive,
+      onOpenLive: () => { def = stripAsOf(def); paint(); },
+    });
+  }
+  paint();
+  return true;
+}
+
 export async function renderTriage(main, queryString) {
   const params = new URLSearchParams(queryString || "");
   const server = params.get("server") || "";
@@ -113,6 +195,10 @@ export async function renderTriage(main, queryString) {
   ]);
 
   mount(box, loadingStrip("Assembling triage context…"));
+
+  const handled = await renderAlertNotebook(main, box, server, metric, at, dedup);
+  if (handled) return;
+
   const res = await apiGet("/api/triage" + buildQuery({ server, metric, at, dedup }));
   if (res.kind === "error") return mount(box, errorStrip(res.message));
 

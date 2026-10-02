@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
@@ -79,8 +82,12 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
 
         var writelog = facts.First(f => f.Key == "WRITELOG");
 
-        // 1.4% of period, concerning = 10% (no critical) → base = 0.014 / 0.10 ≈ 0.139
-        Assert.InRange(writelog.BaseSeverity, 0.12, 0.16);
+        // 1.4% of period against the #3538 A5 re-derived WRITELOG pair (0.25, 0.50): the sub-concerning
+        // arm is 0.5 * (0.0139 / 0.25) ≈ 0.028. (Pinned 0.12-0.16 against the inherited (0.10, null),
+        // 0.014 / 0.10 ≈ 0.139 — updated deliberately: the fleet measurement put the old bar under twice
+        // the median routine window, see GetWaitThresholds.) Still comfortably "low", which is the
+        // property this test is about.
+        Assert.InRange(writelog.BaseSeverity, 0.02, 0.035);
     }
 
     /* ── Integration: BadParallelism scenario ── */
@@ -455,6 +462,331 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
         // RS does not amplify CXPACKET; the pre-cap 1.7 is released unchanged.
         Assert.Equal(1.7, cx.Severity, precision: 4);
         Assert.True(cx.Severity >= 1.5, "a significant RESOURCE_SEMAPHORE releases the cap into CRITICAL");
+    }
+
+    /* ── Layer 3: #3526 anomaly extremity escape + the anomaly co-fire amplifier arm ── */
+
+    // Before #3526 every ANOMALY_* fact was capped at 1.49 by the tuning-class cap, had NO amplifier arm
+    // (so its final severity was its <= 1.0 base), and the shipped notify floor is 1.5: the baseline
+    // engine could never page. These tests pin the two halves of the fix — an anomaly whose deviation is
+    // EXTREME (>= 3x the cutoff it fired at) leaves the cap, and the new co-fire arm can carry an
+    // extreme, CORROBORATED anomaly past 1.5 — and, just as deliberately, everything the fix must NOT do.
+
+    // A deviation-scored anomaly on a TRUSTWORTHY baseline (baseline_low_quality = 0). fireThreshold 0
+    // means "omit the key" — a pre-#1743 fact, which the scorer anchors at the classical 2.0.
+    private static Fact TrustedAnomaly(string key, double deviationSigma, double fireThreshold = 0.0)
+    {
+        var metadata = new Dictionary<string, double>
+        {
+            ["deviation_sigma"] = deviationSigma,
+            ["baseline_low_quality"] = 0.0,
+            ["fallback_exceedance"] = 0.0,
+            ["confidence"] = 1.0
+        };
+        if (fireThreshold > 0) metadata["fire_threshold"] = fireThreshold;
+        return new Fact { Source = "anomaly", Key = key, Value = 1, Metadata = metadata };
+    }
+
+    // (a) The issue's own 3am shape: a 20σ session spike (robust 3.5 cutoff → the escape opens at 10.5σ)
+    // beside a 15σ batch-request anomaly and SQL CPU at 85%. Before the fix the best it could do was 1.0.
+    // Now: base 1.0 (saturated), extreme → cap released, two co-fires (+0.3 batch, +0.3 CPU >= 80) → 1.6.
+    // The batch anomaly is extreme too (15 >= 10.5) and is corroborated symmetrically (+0.3 sessions,
+    // +0.3 CPU) → 1.6 as well. Both clear the shipped 1.5 notify floor for the first time.
+    [Fact]
+    public void Score_ExtremeCorroboratedAnomaly_CrossesNotifyFloor()
+    {
+        var facts = new List<Fact>
+        {
+            TrustedAnomaly("ANOMALY_SESSION_SPIKE", 20.0, 3.5),
+            TrustedAnomaly("ANOMALY_BATCH_REQUESTS", 15.0, 3.5),
+            new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = 85 },
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var sessions = facts.First(f => f.Key == "ANOMALY_SESSION_SPIKE");
+        Assert.Equal(1.0, sessions.BaseSeverity, precision: 4);
+        Assert.Equal(1.6, sessions.Severity, precision: 4);
+        Assert.True(sessions.Severity >= 1.5, "an extreme, twice-corroborated anomaly must reach the CRITICAL band");
+        Assert.Contains(sessions.AmplifierResults, a => a.Matched && a.Description.StartsWith("Batch-request anomaly co-fired"));
+        Assert.Contains(sessions.AmplifierResults, a => a.Matched && a.Description.StartsWith("SQL Server CPU >= 80%"));
+
+        var batch = facts.First(f => f.Key == "ANOMALY_BATCH_REQUESTS");
+        Assert.Equal(1.6, batch.Severity, precision: 4);
+    }
+
+    // (b) The SAME fact set with the session spike at exactly its fire threshold: base 0.5, the two
+    // co-fires lift it to 0.8, and it stays far inside WARNING. Corroboration alone cannot page a
+    // fact that only just fired.
+    [Fact]
+    public void Score_AnomalyAtFireThreshold_WithCoFires_StaysWarning()
+    {
+        var facts = new List<Fact>
+        {
+            TrustedAnomaly("ANOMALY_SESSION_SPIKE", 3.5, 3.5),      // exactly at the cutoff → base 0.5
+            TrustedAnomaly("ANOMALY_BATCH_REQUESTS", 15.0, 3.5),
+            new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = 85 },
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var sessions = facts.First(f => f.Key == "ANOMALY_SESSION_SPIKE");
+        Assert.Equal(0.5, sessions.BaseSeverity, precision: 4);
+        Assert.Equal(0.8, sessions.Severity, precision: 4);   // 0.5 x (1 + 0.3 + 0.3)
+        Assert.True(sessions.Severity <= 1.49, "an anomaly at its fire threshold must stay in WARNING");
+    }
+
+    // The routine-but-saturated case the cap exists for: 7σ on the 3.5 cutoff is 2x the anchor — the
+    // ramp's saturation point (base 1.0) but NOT extreme (the escape needs 10.5σ). Three co-fires push
+    // the Layer-2 product to 1.9, and the cap holds it at 1.49: a busy evening does not page.
+    [Fact]
+    public void Score_SaturatedButRoutineAnomaly_WithThreeCoFires_CappedAtWarningCeiling()
+    {
+        var facts = new List<Fact>
+        {
+            TrustedAnomaly("ANOMALY_SESSION_SPIKE", 7.0, 3.5),      // 2x anchor → base 1.0, not extreme
+            TrustedAnomaly("ANOMALY_BATCH_REQUESTS", 7.0, 3.5),     // +0.3
+            TrustedAnomaly("ANOMALY_CPU_SPIKE", 7.0, 3.5),          // +0.3
+            new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = 85 }, // +0.3
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var sessions = facts.First(f => f.Key == "ANOMALY_SESSION_SPIKE");
+        Assert.Equal(1.0, sessions.BaseSeverity, precision: 4);
+        // 1.0 x (1 + 0.3 + 0.3 + 0.3) = 1.9 pre-cap; the anomaly is not extreme, so Layer 3 caps it.
+        Assert.Equal(1.49, sessions.Severity, precision: 4);
+        Assert.True(sessions.Severity < 1.5, "saturation is not extremity — a routine 2x-anchor anomaly must stay in WARNING");
+    }
+
+    // The escape bar is 3x the cutoff the fact FIRED at, on every path the detectors take: classical 2.0
+    // (a pre-#1743 fact with no fire_threshold) → 6σ; robust 3.5 → 10.5σ; heavy-tail 5.0 → 15σ. Each
+    // row plants the root beside the same two co-fires (+0.3 +0.3 → 1.6 when released, 1.49 when
+    // capped) and probes one side of the bar. The root's base is 1.0 in every row (all are >= 2x anchor).
+    // The last two rows pin the display-cap bound (review-caught on this PR): AnomalyGate clamps the
+    // stored deviation_sigma at SigmaDisplayCap (25σ), so an operator-scaled anchor of 10.0 (3x = 30σ,
+    // unreachable) must open at 25σ instead of going silently dead — and a hair under 25 stays capped.
+    [Theory]
+    [InlineData(6.0, 0.0, 1.6)]      // classical: 3 x 2.0 → released
+    [InlineData(5.99, 0.0, 1.49)]    // classical: a hair under → capped
+    [InlineData(10.5, 3.5, 1.6)]     // robust: 3 x 3.5 → released
+    [InlineData(10.49, 3.5, 1.49)]   // robust: a hair under → capped
+    [InlineData(15.0, 5.0, 1.6)]     // heavy-tail: 3 x 5.0 → released
+    [InlineData(14.99, 5.0, 1.49)]   // heavy-tail: a hair under → capped
+    [InlineData(25.0, 10.0, 1.6)]    // hard-tuned anchor: min(30, 25) = the display cap → released
+    [InlineData(24.99, 10.0, 1.49)]  // hard-tuned anchor: a hair under the cap → capped
+    public void Score_AnomalyExtremityEscape_OpensAtThreeTimesTheFireThreshold(
+        double deviationSigma, double fireThreshold, double expected)
+    {
+        var facts = new List<Fact>
+        {
+            TrustedAnomaly("ANOMALY_QUERY_DURATION", deviationSigma, fireThreshold),
+            TrustedAnomaly("ANOMALY_BATCH_REQUESTS", 15.0, 3.5),           // +0.3
+            new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = 85 }, // +0.3
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var root = facts.First(f => f.Key == "ANOMALY_QUERY_DURATION");
+        Assert.Equal(1.0, root.BaseSeverity, precision: 4);
+        Assert.Equal(expected, root.Severity, precision: 4);
+    }
+
+    // (c) The never-blind fallback path: on an untrustworthy baseline the stored deviation_sigma is a
+    // meaningless z the detector refused to trust, so the escape must NOT read it — a planted 30σ (far
+    // past any sigma bar) must not release the cap. The fallback path escapes only when the ABSOLUTE
+    // exceedance is equally extreme: 3x the fallback bar (for batch requests, 15,000/s against the
+    // 5,000/s bar). 2.5x saturates the base at 1.0 but stays capped; 3.0x is released.
+    [Theory]
+    [InlineData(2.5, 1.49)]   // past saturation (2x), under the 3x escape bar → capped
+    [InlineData(2.99, 1.49)]  // a hair under → capped
+    [InlineData(3.0, 1.6)]    // 3x the absolute bar → released, corroborated → pages
+    public void Score_LowQualityAnomaly_EscapesOnlyAtThreeTimesItsAbsoluteBar_NeverOnSigma(
+        double exceedance, double expected)
+    {
+        var facts = new List<Fact>
+        {
+            new()
+            {
+                Source = "anomaly",
+                Key = "ANOMALY_BATCH_REQUESTS",
+                Value = 1,
+                Metadata = new()
+                {
+                    ["deviation_sigma"] = 30.0,          // would be extreme on the trusted path; must be ignored here
+                    ["fire_threshold"] = 3.5,
+                    ["baseline_low_quality"] = 1.0,
+                    ["fallback_exceedance"] = exceedance,
+                    ["confidence"] = 1.0
+                }
+            },
+            TrustedAnomaly("ANOMALY_SESSION_SPIKE", 15.0, 3.5),           // +0.3
+            new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = 85 }, // +0.3
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var batch = facts.First(f => f.Key == "ANOMALY_BATCH_REQUESTS");
+        Assert.Equal(1.0, batch.BaseSeverity, precision: 4);   // the fallback ramp saturates at 2x the bar
+        Assert.Equal(expected, batch.Severity, precision: 4);
+    }
+
+    // (d) The cap's original target is untouched: CXPACKET with its non-impact amplifiers (1.7 pre-cap)
+    // stays at 1.49 even when two EXTREME anomalies co-fire beside it — anomalies are not impact peers,
+    // and the extremity escape is per-fact, for ANOMALY_* only. In the same fact set the anomalies
+    // themselves ARE released (each is extreme and corroborated by the other + CPU): the two escapes
+    // are independent.
+    [Fact]
+    public void Score_CxPacketWithExtremeAnomalyCoFires_StillCapped_AnomaliesReleased()
+    {
+        var facts = new List<Fact>
+        {
+            new() { Source = "waits", Key = "CXPACKET", Value = 0.80 },        // base 1.0
+            new() { Source = "config", Key = "CONFIG_CTFP", Value = 5 },       // +0.3
+            new() { Source = "config", Key = "CONFIG_MAXDOP", Value = 0 },     // +0.2
+            new() { Source = "queries", Key = "QUERY_HIGH_DOP", Value = 10 },  // +0.2
+            TrustedAnomaly("ANOMALY_SESSION_SPIKE", 20.0, 3.5),
+            TrustedAnomaly("ANOMALY_BATCH_REQUESTS", 15.0, 3.5),
+            new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = 85 },
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var cx = facts.First(f => f.Key == "CXPACKET");
+        Assert.Equal(1.49, cx.Severity, precision: 4);
+        Assert.True(cx.Severity < 1.5, "extreme anomalies are not impact peers — CXPACKET must stay capped");
+
+        Assert.Equal(1.6, facts.First(f => f.Key == "ANOMALY_SESSION_SPIKE").Severity, precision: 4);
+        Assert.Equal(1.6, facts.First(f => f.Key == "ANOMALY_BATCH_REQUESTS").Severity, precision: 4);
+    }
+
+    // (e) A LONE extreme anomaly does not page. 25σ is the detectors' display cap — the most extreme
+    // reading a fact can carry — and with nothing else moving it scores exactly its 1.0 base: the cap
+    // is released but there is nothing for the release to preserve. The CRITICAL band is earned only
+    // with corroboration (the rule every base fact follows), and a solitary extreme reading is the shape
+    // a collector hiccup or a variance-collapsed baseline pinned at the display cap produces.
+    [Fact]
+    public void Score_LoneExtremeAnomaly_StaysAtBase_DoesNotPage()
+    {
+        var facts = new List<Fact> { TrustedAnomaly("ANOMALY_SESSION_SPIKE", 25.0, 3.5) };
+
+        new FactScorer().ScoreAll(facts);
+
+        var sessions = facts[0];
+        Assert.Equal(1.0, sessions.BaseSeverity, precision: 4);
+        Assert.Equal(1.0, sessions.Severity, precision: 4);
+        Assert.True(sessions.Severity < 1.5, "a single uncorroborated anomaly must not page, however extreme");
+        Assert.All(sessions.AmplifierResults, a => Assert.False(a.Matched));
+    }
+
+    // One corroborator is not enough either: extreme + a single +0.3 co-fire = 1.3, WARNING. Two
+    // independent corroborators is the bar (see the AnomalyAmplifiers worked numbers).
+    [Fact]
+    public void Score_ExtremeAnomaly_SingleCoFire_StaysWarning()
+    {
+        var facts = new List<Fact>
+        {
+            TrustedAnomaly("ANOMALY_SESSION_SPIKE", 20.0, 3.5),
+            TrustedAnomaly("ANOMALY_BATCH_REQUESTS", 15.0, 3.5),   // the only co-fire: +0.3
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var sessions = facts.First(f => f.Key == "ANOMALY_SESSION_SPIKE");
+        Assert.Equal(1.3, sessions.Severity, precision: 4);
+        Assert.True(sessions.Severity < 1.5, "one corroborator lifts an extreme anomaly, but not into CRITICAL");
+    }
+
+    // A family never corroborates itself: the CPU anomaly's arm carries the other three load siblings and
+    // the measured-CPU confirmation, but no "CPU anomaly co-fired" entry.
+    [Fact]
+    public void Score_AnomalyCoFireArm_DoesNotSelfCorroborate()
+    {
+        var facts = new List<Fact> { TrustedAnomaly("ANOMALY_CPU_SPIKE", 12.0, 3.5) };
+
+        new FactScorer().ScoreAll(facts);
+
+        var cpu = facts[0];
+        Assert.DoesNotContain(cpu.AmplifierResults, a => a.Description.StartsWith("CPU anomaly co-fired"));
+        Assert.Contains(cpu.AmplifierResults, a => a.Description.StartsWith("Session-count anomaly co-fired"));
+        Assert.Contains(cpu.AmplifierResults, a => a.Description.StartsWith("Batch-request anomaly co-fired"));
+        Assert.Contains(cpu.AmplifierResults, a => a.Description.StartsWith("Query-duration anomaly co-fired"));
+        Assert.Contains(cpu.AmplifierResults, a => a.Description.StartsWith("SQL Server CPU >= 80%"));
+    }
+
+    // The wait-profile family: graded and escaped off the SAME statistic. On the robust trigger the
+    // escape opens at 3 x the 5.0 heavy-tail cutoff = 15σ (also the ramp's saturation point); read-
+    // latency and query-duration anomalies corroborate at +0.3 each → 1.6. A hair under 15σ stays
+    // capped at 1.49 with the same co-fires.
+    [Theory]
+    [InlineData(15.0, 1.6)]
+    [InlineData(14.99, 1.49)]
+    public void Score_WaitProfileAnomaly_EscapesAtThreeTimesTheHeavyTailCutoff(double modifiedZ, double expected)
+    {
+        var facts = new List<Fact>
+        {
+            new()
+            {
+                Source = "anomaly",
+                Key = "ANOMALY_WAIT_PROFILE",
+                Value = 1,
+                Metadata = new() { ["modified_z"] = modifiedZ, ["ratio"] = 3.0, ["is_new"] = 0 }
+            },
+            TrustedAnomaly("ANOMALY_READ_LATENCY", 12.0, 3.5),      // +0.3
+            TrustedAnomaly("ANOMALY_QUERY_DURATION", 15.0, 5.0),    // +0.3
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var profile = facts.First(f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(expected, profile.Severity, precision: 4);
+    }
+
+    // A first-occurrence wait profile (is_new) carries the NoBaselineRatio sentinel (100 — far past any
+    // ratio bar) as a scoring device, not a measurement. It must never escape: "no baseline" cannot be
+    // "extreme against baseline". With the same two co-fires the 1.6 product is capped to 1.49.
+    [Fact]
+    public void Score_IsNewWaitProfile_NeverEscapes_DespiteSentinelRatio()
+    {
+        var facts = new List<Fact>
+        {
+            new()
+            {
+                Source = "anomaly",
+                Key = "ANOMALY_WAIT_PROFILE",
+                Value = 1,
+                Metadata = new() { ["modified_z"] = 0.0, ["ratio"] = PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.NoBaselineRatio, ["is_new"] = 1 }
+            },
+            TrustedAnomaly("ANOMALY_READ_LATENCY", 12.0, 3.5),      // +0.3
+            TrustedAnomaly("ANOMALY_QUERY_DURATION", 15.0, 5.0),    // +0.3
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var profile = facts.First(f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(1.0, profile.BaseSeverity, precision: 4);   // the sentinel ratio saturates the ramp
+        Assert.Equal(1.49, profile.Severity, precision: 4);
+    }
+
+    // The ratio/count families are NOT released: a blocking spike at 50x its baseline rate (base 1.0,
+    // saturated) has no extremity arm and no co-fire arm — it scores its base, and the cap is moot. Its
+    // impact reaches CRITICAL through the never-capped BLOCKING_EVENTS / DEADLOCKS keys instead.
+    [Fact]
+    public void Score_BlockingSpikeAnomaly_NoEscape_NoArm()
+    {
+        var facts = new List<Fact>
+        {
+            new() { Source = "anomaly", Key = "ANOMALY_BLOCKING_SPIKE", Value = 1, Metadata = new() { ["ratio"] = 50.0, ["is_new"] = 0 } },
+            TrustedAnomaly("ANOMALY_SESSION_SPIKE", 20.0, 3.5),
+            new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = 85 },
+        };
+
+        new FactScorer().ScoreAll(facts);
+
+        var spike = facts.First(f => f.Key == "ANOMALY_BLOCKING_SPIKE");
+        Assert.Equal(1.0, spike.BaseSeverity, precision: 4);
+        Assert.Equal(1.0, spike.Severity, precision: 4);
+        Assert.Empty(spike.AmplifierResults);
     }
 
     // THREADPOOL is the impact-bearing escalation path and is NEVER capped. The raised CXPACKET
@@ -925,10 +1257,13 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
     }
 
     // ARM 2 — tempdb allocation / PFS-GAM-SGAM contention scored off the PAGELATCH_UP wait fact by
-    // ABSOLUTE wait_time_ms (server-wide wait_stats, the SAME data the source view reads), tripping at
-    // > 10000 ms -> MEDIUM (install/47:2515: pagelatch_up_ms > 10000 -> "MEDIUM - PAGELATCH_UP
-    // contention"). Flat 0.5 — the view has no higher PAGELATCH_UP band. Value (fraction-of-period) only
-    // has to be > 0 to clear the wait guard; the absolute wait_time_ms is what scores.
+    // wait_time_ms PER OBSERVED HOUR (server-wide wait_stats, the SAME data the source view reads),
+    // tripping at > 10000 ms/hr -> MEDIUM (install/47:2411 sums the last hour; :2515: pagelatch_up_ms >
+    // 10000 -> "MEDIUM - PAGELATCH_UP contention"). Flat 0.5 — the view has no higher PAGELATCH_UP band.
+    // Value (fraction-of-period) only has to be > 0 to clear the wait guard; the hourly wait_time_ms is
+    // what scores. These two fixtures carry no period_duration_ms, which the scorer reads as a one-hour
+    // window (#3538 A7, ObservedHours) — so 15,000 ms is 15 s/hr and 8,000 ms is 8 s/hr, and the pins
+    // hold unchanged; the windowed forms are pinned in the #3538 A7 section below.
     [Fact]
     public void Score_PageLatchUp_Over10Sec_ScoresMedium()
     {
@@ -1012,6 +1347,359 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
         // Sleeping apex, deadlocks, and THREADPOOL all amplify above the base.
         Assert.True(chain.Severity > chain.BaseSeverity,
             "BLOCKING_CHAIN should be amplified by the sleeping apex and corroborating facts");
+    }
+
+    /* ── #3538 A5/A7: the wait table carries its measurement; the absolute gates scale by observed hours ──
+       Every value below was EXECUTED against the built PerformanceMonitor.Analysis.dll from a throwaway
+       harness before being pinned (the lane brief's rule); the xunit run in CI is their first execution as
+       tests. The fleet figures quoted are MEASUREMENTS.md §E for #3538: 43 SQL Server primaries on one
+       production store class, 4 days of wait_stats, 1,075 server-4-hour windows. */
+
+    private const double FourHoursMs = 4 * 3_600_000.0;
+    private const double OneHourMs = 3_600_000.0;
+    private const double OneWeekMs = 168 * 3_600_000.0;
+
+    private static double BaseOf(Fact fact)
+    {
+        new FactScorer().ScoreAll(new List<Fact> { fact });
+        return fact.BaseSeverity;
+    }
+
+    private static Fact WaitFact(string key, double fraction, Dictionary<string, double>? metadata = null) =>
+        new() { Source = "waits", Key = key, Value = fraction, Metadata = metadata ?? new() };
+
+    // DEADLOCKS is now the alerting layer's measured (5, 20) pair, not the inherited (5, null) that saturated
+    // at the WARNING entry: 5/hr roots at 0.5, 20/hr (inside the measured empty interval [16, 89]) saturates,
+    // and 90/hr — the smallest storm the 14-day distribution holds — is no longer indistinguishable from 5.
+    [Theory]
+    [InlineData(2.0, 0.2)]     // sub-concerning arm: 0.5 * 2/5
+    [InlineData(5.0, 0.5)]     // the 99.94th-percentile server-hour — roots, does not saturate
+    [InlineData(12.5, 0.75)]   // midway up the ramp
+    [InlineData(20.0, 1.0)]    // the critical bar, inside the measured empty interval
+    [InlineData(90.0, 1.0)]    // the smallest measured storm
+    public void Score_Deadlocks_GradesFiveApartFromNinety(double perHour, double expected)
+    {
+        var fact = new Fact { Source = "blocking", Key = "DEADLOCKS", Value = perHour };
+        Assert.Equal(expected, BaseOf(fact), precision: 4);
+    }
+
+    // The scorer's deadlock pair is a DELIBERATE copy of the alerting layer's shipped defaults (the Analysis
+    // assembly does not reference Common, so the literals cannot be bound). This pins the two equal through
+    // the ramp's own landmarks: the alert WARNING tier scores exactly the 0.5 root entry, the alert CRITICAL
+    // tier scores exactly 1.0. If either side moves, this fails and the drift is a decision, not an accident.
+    [Fact]
+    public void Score_Deadlocks_TiersEqualTheAlertingLayersMeasuredBands()
+    {
+        var warn = new Fact { Source = "blocking", Key = "DEADLOCKS", Value = PerformanceMonitor.Common.ServerHealthThresholds.DeadlockWarnPerHourDefault };
+        var crit = new Fact { Source = "blocking", Key = "DEADLOCKS", Value = PerformanceMonitor.Common.ServerHealthThresholds.DeadlockCriticalPerHourDefault };
+        var justUnderCrit = new Fact { Source = "blocking", Key = "DEADLOCKS", Value = PerformanceMonitor.Common.ServerHealthThresholds.DeadlockCriticalPerHourDefault - 0.01 };
+        Assert.Equal(0.5, BaseOf(warn), precision: 6);
+        Assert.Equal(1.0, BaseOf(crit), precision: 6);
+        Assert.True(BaseOf(justUnderCrit) < 1.0, "the critical bar must be where the alerting layer's is, not below it");
+    }
+
+    // WRITELOG re-derived from the fleet: the inherited (0.10, null) saturated base 1.0 on 339 of 1,075
+    // windows (31.5%). The new pair (0.25, 0.50) puts concerning at ≈ p99 and critical above every window
+    // measured. Pins: the measured p50 and p90 score well under the 0.5 root entry, p99 lands just under it,
+    // the concerning bar roots, the fleet's worst window is a WARNING that roots (0.63), and the old bar's
+    // value (0.10) — a third of routine windows — now scores 0.2.
+    [Theory]
+    [InlineData(0.065, 0.13)]   // fleet p50
+    [InlineData(0.10, 0.20)]    // the old saturating bar — a routine window
+    [InlineData(0.163, 0.326)]  // fleet p90
+    [InlineData(0.243, 0.486)]  // fleet p99 — just under the root entry
+    [InlineData(0.25, 0.5)]     // concerning: roots
+    [InlineData(0.313, 0.626)]  // fleet max — roots, does not saturate
+    [InlineData(0.50, 1.0)]     // critical: above every measured window
+    public void Score_Writelog_StopsSaturatingOnRoutineWindows(double fraction, double expected)
+    {
+        Assert.Equal(expected, BaseOf(WaitFact("WRITELOG", fraction)), precision: 4);
+    }
+
+    // The 0.01-saturating waits are ramped to (0.01, 0.10) on the RESOURCE_SEMAPHORE_QUERY_COMPILE model:
+    // a trace (0.001) scores 0.05 instead of 0.1, the 1% floor roots at 0.5 instead of saturating, and only
+    // 10% of observed time saturates. The fleet cannot set these floors (none of these waits reached
+    // 0.0012 of period on it) — it can only justify the ramp, which is what this pins.
+    public static IEnumerable<object[]> RampedTraceWaits()
+    {
+        foreach (var key in new[]
+        {
+            "RESOURCE_SEMAPHORE", "SCH_M",
+            "LCK_M_RS_S", "LCK_M_RS_U", "LCK_M_RIn_NL", "LCK_M_RIn_S", "LCK_M_RIn_U", "LCK_M_RIn_X",
+            "LCK_M_RX_S", "LCK_M_RX_U", "LCK_M_RX_X",
+        })
+        {
+            yield return new object[] { key, 0.001, 0.05 };
+            yield return new object[] { key, 0.01, 0.5 };
+            yield return new object[] { key, 0.055, 0.75 };
+            yield return new object[] { key, 0.10, 1.0 };
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(RampedTraceWaits))]
+    public void Score_TraceSaturatingWaits_NowRampToCritical(string key, double fraction, double expected)
+    {
+        Assert.Equal(expected, BaseOf(WaitFact(key, fraction)), precision: 4);
+    }
+
+    // SOS_SCHEDULER_YIELD keeps (0.75, null): the measured p99.9 (0.744) scores just under 1.0 and the bar
+    // itself saturates — one window in 1,075. Lineage pin, not a change.
+    [Theory]
+    [InlineData(0.744, 0.992)]
+    [InlineData(0.75, 1.0)]
+    public void Score_SosSchedulerYield_BarSitsAtTheFleetsP999(double fraction, double expected)
+    {
+        Assert.Equal(expected, BaseOf(WaitFact("SOS_SCHEDULER_YIELD", fraction)), precision: 4);
+    }
+
+    // HADR_SYNC_COMMIT is new to the table: the fleet's second-largest wait had no entry and could never
+    // root a story. (0.30, 0.50) — the measured p50/p90 stay well under the root entry, p99 just under it,
+    // the p99.9 window scores 0.935, and only the single worst window measured (0.591) saturates.
+    [Theory]
+    [InlineData(0.045, 0.075)]  // fleet p50
+    [InlineData(0.129, 0.215)]  // fleet p90
+    [InlineData(0.288, 0.48)]   // fleet p99
+    [InlineData(0.30, 0.5)]     // concerning: roots
+    [InlineData(0.474, 0.935)]  // fleet p99.9
+    [InlineData(0.50, 1.0)]     // critical
+    [InlineData(0.591, 1.0)]    // fleet max
+    public void Score_HadrSyncCommit_ScoresAtTheMeasuredTiers(double fraction, double expected)
+    {
+        Assert.Equal(expected, BaseOf(WaitFact("HADR_SYNC_COMMIT", fraction)), precision: 4);
+    }
+
+    // Dead-fact guard for the new root key, plus the policy caveat: the advice must point at the replica and
+    // at which databases NEED synchronous commit, and must say in so many words that flipping to
+    // asynchronous is not the remediation. Both the static block and the evidence-composed one carry it.
+    [Fact]
+    public void HadrSyncCommit_HasAdvice_ThatNamesTheDurabilityPolicyCaveat()
+    {
+        var advice = FactAdvice.GetForFactKey("HADR_SYNC_COMMIT");
+        Assert.NotNull(advice);
+        Assert.False(string.IsNullOrWhiteSpace(advice!.Headline));
+        Assert.Contains("secondary", advice.Investigation, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Do NOT switch a database to asynchronous commit", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("recovery-point objective", advice.Remediation, StringComparison.Ordinal);
+
+        var facts = new Dictionary<string, Fact>
+        {
+            ["HADR_SYNC_COMMIT"] = WaitFact("HADR_SYNC_COMMIT", 0.35, new()
+            {
+                ["wait_time_ms"] = 5_040_000, ["waiting_tasks_count"] = 2_000_000, ["avg_ms_per_wait"] = 2.52
+            })
+        };
+        var composed = FactAdvice.Compose("HADR_SYNC_COMMIT", facts);
+        Assert.NotNull(composed);
+        Assert.StartsWith("Synchronous-commit waits totaled", composed!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("Do NOT switch a database from synchronous to asynchronous commit", composed.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("DELAYED_DURABILITY", composed.Remediation, StringComparison.Ordinal);
+    }
+
+    // The two halves of commit latency are each other's next question in the graph — but only when the
+    // destination FIRED in its own right (BaseSeverity >= 0.5). WRITELOG is in every window of an OLTP
+    // fleet; an edge on presence would append it to every HADR story and consume it from its own.
+    [Fact]
+    public void HadrSyncCommit_TraversesToWritelog_OnlyWhenWritelogFiredItself()
+    {
+        var engine = new InferenceEngine(new RelationshipGraph());
+
+        var both = new List<Fact> { WaitFact("HADR_SYNC_COMMIT", 0.40), WaitFact("WRITELOG", 0.35) };
+        new FactScorer().ScoreAll(both);
+        var stories = engine.BuildStories(both);
+        Assert.Equal("HADR_SYNC_COMMIT → WRITELOG", Assert.Single(stories).StoryPath);
+
+        var writelogRoutine = new List<Fact> { WaitFact("HADR_SYNC_COMMIT", 0.40), WaitFact("WRITELOG", 0.10) };
+        new FactScorer().ScoreAll(writelogRoutine);
+        stories = engine.BuildStories(writelogRoutine);
+        Assert.Equal("HADR_SYNC_COMMIT", Assert.Single(stories).StoryPath);
+
+        var writelogRoot = new List<Fact> { WaitFact("WRITELOG", 0.40), WaitFact("HADR_SYNC_COMMIT", 0.35) };
+        new FactScorer().ScoreAll(writelogRoot);
+        stories = engine.BuildStories(writelogRoot);
+        Assert.Equal("WRITELOG → HADR_SYNC_COMMIT", Assert.Single(stories).StoryPath);
+    }
+
+    // PREEMPTIVE_OS_QUERYREGISTRY — the fleet's #7 wait by fraction, fleet-uniform platform polling — has an
+    // EXPLICIT null entry so the measurement travels with the decision. It must score 0 at the fleet max and
+    // at any fraction: a bar on it either never fires or fires on platform noise.
+    [Theory]
+    [InlineData(0.175)]  // fleet max
+    [InlineData(5.0)]
+    public void Score_PreemptiveOsQueryRegistry_IsBenignAtAnyFraction(double fraction)
+    {
+        Assert.Equal(0.0, BaseOf(WaitFact("PREEMPTIVE_OS_QUERYREGISTRY", fraction)), precision: 6);
+    }
+
+    // #3538 A7 — PAGELATCH_UP: the same per-hour rate scores the same at 1 h, 4 h and 168 h. 12 s/hr clears
+    // the source's own 10 s-per-hour bar at every window; the same 15,000 ms that fired the old absolute
+    // gate at 168 h is 0.09 s/hr and does not.
+    [Theory]
+    [InlineData(12_000, OneHourMs, 0.5)]
+    [InlineData(48_000, FourHoursMs, 0.5)]
+    [InlineData(2_016_000, OneWeekMs, 0.5)]
+    [InlineData(40_000, FourHoursMs, 0.0)]   // exactly 10 s/hr: the bar is strict, as the source's is
+    [InlineData(15_000, OneWeekMs, 0.0)]     // the old absolute gate fired here
+    public void Score_PagelatchUp_IsWindowInvariantPerObservedHour(double waitTimeMs, double periodMs, double expected)
+    {
+        var fact = WaitFact("PAGELATCH_UP", waitTimeMs / periodMs, new()
+        {
+            ["wait_time_ms"] = waitTimeMs, ["period_duration_ms"] = periodMs
+        });
+        Assert.Equal(expected, BaseOf(fact), precision: 4);
+    }
+
+    // The measured shape: the old > 10,000 ms gate fired on 2 of 1,075 four-hour windows, the worst at
+    // 14,274 ms — 3.6 s per hour, under the source's hourly bar. Under the per-hour form it does not fire;
+    // the two windows fired only because a bar meant for one hour was applied to four.
+    [Fact]
+    public void Score_PagelatchUp_FleetMaxFourHourWindow_IsUnderTheHourlyBar()
+    {
+        var fact = WaitFact("PAGELATCH_UP", 14_274 / FourHoursMs, new()
+        {
+            ["wait_time_ms"] = 14_274, ["period_duration_ms"] = FourHoursMs
+        });
+        Assert.Equal(0.0, BaseOf(fact), precision: 6);
+    }
+
+    // The divisor is OBSERVED time (#3538 A2's coverage_fraction), not the nominal window: 12,000 ms of
+    // PAGELATCH_UP in the one hour the collector saw of a four-hour window is 12 s/hr and fires; the same
+    // total over a fully collected four hours is 3 s/hr and does not.
+    [Fact]
+    public void Score_PagelatchUp_DividesByObservedNotNominalHours()
+    {
+        var partial = WaitFact("PAGELATCH_UP", 12_000 / (FourHoursMs * 0.25), new()
+        {
+            ["wait_time_ms"] = 12_000, ["period_duration_ms"] = FourHoursMs, ["coverage_fraction"] = 0.25
+        });
+        var full = WaitFact("PAGELATCH_UP", 12_000 / FourHoursMs, new()
+        {
+            ["wait_time_ms"] = 12_000, ["period_duration_ms"] = FourHoursMs, ["coverage_fraction"] = 1.0
+        });
+        Assert.Equal(0.5, BaseOf(partial), precision: 4);
+        Assert.Equal(0.0, BaseOf(full), precision: 4);
+    }
+
+    // #3538 A7 — THREADPOOL: >= 15 min per observed hour AND >= 1 s average. At the 4 h default that is the
+    // old 1 h absolute bar exactly (identical behaviour where it was tuned); at 1 h the old gate demanded the
+    // whole window and now takes 15 min; at 168 h the old gate fired on 1 h total (0.6% of the window) and
+    // now needs 15 min of every hour. Any fact that clears the gate has fraction >= 0.25 and saturates the
+    // (0.01, null) pair, so the base is 0 or 1.0.
+    [Theory]
+    [InlineData(3_600_000, 1_500, FourHoursMs, 1.0)]    // 15 min/hr at the default window — the old bar
+    [InlineData(3_599_999, 1_500, FourHoursMs, 0.0)]    // one ms under
+    [InlineData(900_000, 1_500, OneHourMs, 1.0)]        // 15 min in a 1 h window (old gate needed 1 h)
+    [InlineData(3_600_000, 1_500, OneWeekMs, 0.0)]      // 1 h total in a week — the old gate fired here
+    [InlineData(151_200_000, 1_500, OneWeekMs, 1.0)]    // 15 min of every hour for a week
+    [InlineData(3_600_000, 999, FourHoursMs, 0.0)]      // the 1 s average gate is kept
+    [InlineData(5_801, 247.5, OneHourMs, 0.0)]          // fleet max hour (5,801 ms) and max avg (247.5 ms)
+    public void Score_Threadpool_GateIsPerObservedHour(double waitTimeMs, double avgMs, double periodMs, double expected)
+    {
+        var fact = WaitFact("THREADPOOL", waitTimeMs / periodMs, new()
+        {
+            ["wait_time_ms"] = waitTimeMs, ["avg_ms_per_wait"] = avgMs, ["period_duration_ms"] = periodMs
+        });
+        Assert.Equal(expected, BaseOf(fact), precision: 4);
+    }
+
+    // The THREADPOOL divisor is observed time too: 900,000 ms in the one observed hour of a four-hour window
+    // is 15 min/hr and clears the gate; divided by the nominal four it would have been 3.75 min/hr.
+    [Fact]
+    public void Score_Threadpool_DividesByObservedNotNominalHours()
+    {
+        var fact = WaitFact("THREADPOOL", 900_000 / (FourHoursMs * 0.25), new()
+        {
+            ["wait_time_ms"] = 900_000, ["avg_ms_per_wait"] = 1_500, ["period_duration_ms"] = FourHoursMs, ["coverage_fraction"] = 0.25
+        });
+        Assert.Equal(1.0, BaseOf(fact), precision: 4);
+    }
+
+    // A hand-built fact with no period_duration_ms (every collector stamps one) is read as a one-hour
+    // window, so the per-hour bars read as plain totals — which is why the pre-#3538 fixtures above
+    // (THREADPOOL 7,200,000 ms; PAGELATCH_UP 15,000 / 8,000 ms) hold without a period. Pinned so the
+    // fallback cannot silently become "divide by zero" or "nominal 4 h".
+    [Fact]
+    public void Score_PerHourGates_ReadAMissingPeriodAsOneHour()
+    {
+        Assert.Equal(1.0, BaseOf(WaitFact("THREADPOOL", 0.05, new() { ["wait_time_ms"] = 900_000, ["avg_ms_per_wait"] = 1_500 })), precision: 4);
+        Assert.Equal(0.0, BaseOf(WaitFact("THREADPOOL", 0.05, new() { ["wait_time_ms"] = 899_999, ["avg_ms_per_wait"] = 1_500 })), precision: 4);
+        Assert.Equal(0.5, BaseOf(WaitFact("PAGELATCH_UP", 0.01, new() { ["wait_time_ms"] = 10_001 })), precision: 4);
+        Assert.Equal(0.0, BaseOf(WaitFact("PAGELATCH_UP", 0.01, new() { ["wait_time_ms"] = 10_000 })), precision: 4);
+    }
+
+    // A coverage_fraction of exactly 0 (WindowCoverage.Unobserved's stamp) reads as the NOMINAL window, not
+    // as a near-zero divisor: no shipped collector emits a wait fact for an unobserved window, so the branch
+    // only defends 0/0 — and if a fact like that ever arrived, dividing by ~0 would fire on the artifact.
+    // 12,000 ms over a nominal 4 h is 3 s/hr → 0, the pre-#3538 reading; pinned so the choice cannot flip.
+    [Fact]
+    public void Score_PerHourGates_ReadZeroCoverageAsTheNominalWindow_NotAsNearZero()
+    {
+        var fact = WaitFact("PAGELATCH_UP", 0.01, new()
+        {
+            ["wait_time_ms"] = 12_000, ["period_duration_ms"] = FourHoursMs, ["coverage_fraction"] = 0.0
+        });
+        Assert.Equal(0.0, BaseOf(fact), precision: 6);
+    }
+
+    // Lineage census (source-text pin): every entry in GetWaitThresholds is preceded by a comment that
+    // names either a measured figure (a percentile, a max, "measured") or says "unmeasured". A new entry
+    // added without its lineage — the pre-#3538 shape of the whole table — fails here. Entries that share
+    // one comment block (the nine range-lock modes) inherit it; the block is reset only when a fresh
+    // comment starts after an entry.
+    [Fact]
+    public void GetWaitThresholds_EveryEntryCarriesItsMeasurementLineage()
+    {
+        var path = Path.Combine(RepoRoot(), "PerformanceMonitor.Analysis", "FactScorer.cs");
+        var source = File.ReadAllText(path);
+        var start = source.IndexOf("GetWaitThresholds(string waitType)", StringComparison.Ordinal);
+        Assert.True(start >= 0, "GetWaitThresholds not found in FactScorer.cs");
+        var bodyStart = source.IndexOf("return waitType switch", start, StringComparison.Ordinal);
+        var bodyEnd = source.IndexOf("_ => null", bodyStart, StringComparison.Ordinal);
+        Assert.True(bodyStart > 0 && bodyEnd > bodyStart, "GetWaitThresholds switch body not found");
+        var lines = source[bodyStart..bodyEnd].Split('\n');
+
+        var entry = new Regex("^\\s*\"([A-Za-z_]+)\"\\s*=>\\s*(\\(|null)", RegexOptions.CultureInvariant);
+        var lineage = new Regex("\\bp\\d|percentile|[Mm]easured|\\bmax\\b|[Uu]nmeasured", RegexOptions.CultureInvariant);
+        var comment = new List<string>();
+        var previousWasEntry = false;
+        var entries = new List<string>();
+        var missing = new List<string>();
+        foreach (var raw in lines)
+        {
+            var line = raw.TrimEnd('\r');
+            if (line.TrimStart().StartsWith("//", StringComparison.Ordinal))
+            {
+                if (previousWasEntry) comment.Clear();
+                comment.Add(line);
+                previousWasEntry = false;
+                continue;
+            }
+            var m = entry.Match(line);
+            if (!m.Success) continue;
+            entries.Add(m.Groups[1].Value);
+            if (!lineage.IsMatch(string.Join('\n', comment)))
+                missing.Add(m.Groups[1].Value);
+            previousWasEntry = true;
+        }
+
+        // Positive controls: the table is what this test thinks it is (a dead filter agrees with an empty list).
+        Assert.Contains("WRITELOG", entries);
+        Assert.Contains("HADR_SYNC_COMMIT", entries);
+        Assert.Contains("PREEMPTIVE_OS_QUERYREGISTRY", entries);
+        Assert.True(entries.Count >= 25, $"expected the full wait table, saw {entries.Count} entries");
+        Assert.True(missing.Count == 0, "entries without measurement lineage: " + string.Join(", ", missing));
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")) && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 
     private async Task<List<Fact>> CollectAndScoreAsync(Func<TestDataSeeder, Task> seedAction)

@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.ComponentModel;
 using System.IO;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -102,13 +104,94 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
     {
         var service = new LocalDataService(_duckDb);
 
-        AssertNeverCollected(await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4));
+        var never = await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4);
+        AssertNeverCollected(never);
 
         await SeedQueryAsync(DateTime.UtcNow.AddHours(-48));
-        AssertQuietWindow(await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 1));
+        var quiet = await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 1);
+        AssertQuietWindow(quiet);
 
-        await SeedQueryAsync(DateTime.UtcNow.AddMinutes(-10));
-        AssertPayload(await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4));
+        var seededAt = DateTime.UtcNow.AddMinutes(-10);
+        await SeedQueryAsync(seededAt);
+        var payload = await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4);
+        AssertPayload(payload);
+
+        /* #3541 A2: get_query_duration_trend's three answers all carry the same disclosure block as its
+           Darling twin — raw, the requested start standing (not truncated) on the two empty branches and the
+           first collection on the data one. #3897: the width each would serve — two minutes over four hours,
+           one over an hour. */
+        foreach (var (envelope, width) in new[] { (never, "2 minutes"), (quiet, "1 minute"), (payload, "2 minutes") })
+        {
+            var root = JsonDocument.Parse(envelope).RootElement;
+            Assert.Equal("raw", root.GetProperty("source").GetString());
+            Assert.Equal(width, root.GetProperty("bucket").GetString());
+            Assert.True(root.TryGetProperty("effective_start", out _));
+            Assert.True(root.TryGetProperty("window_truncated", out _));
+        }
+
+        Assert.False(JsonDocument.Parse(never).RootElement.GetProperty("window_truncated").GetBoolean());
+        Assert.False(JsonDocument.Parse(quiet).RootElement.GetProperty("window_truncated").GetBoolean());
+
+        /* effective_start is the collection the store held, not the two-minute boundary its point is stamped at. */
+        var data = JsonDocument.Parse(payload).RootElement;
+        Assert.StartsWith(seededAt.ToString("yyyy-MM-ddTHH:mm:ss"), data.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
+        /* #3541 A12: one collection inside the 4-hour window (the other seed is 48 hours back) — a lone
+           collection has nothing to difference against, so the point is present but UNRATED: `value` and its
+           named twin are both null (this assertion used to compare two fabricated zeros), the envelope says
+           so, and the data branch is still a data branch rather than an empty one. */
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("trend")[0].GetProperty("value").ValueKind);
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("trend")[0].GetProperty("elapsed_ms_per_second").ValueKind);
+        Assert.Equal(1, data.GetProperty("unrated_points").GetInt32());
+        Assert.False(data.TryGetProperty("status", out _));
+
+        /* And get_query_trend over the same seeded query carries the block too — the last tool where the two
+           SKUs' envelopes disagreed (Darling's has had it since #2353). */
+        var single = JsonDocument.Parse(
+            await McpQueryTools.GetQueryTrend(service, _serverManager, "0xEMPTYTRENDHASH", "AppDb", ServerName, 4)).RootElement;
+        Assert.Equal("raw", single.GetProperty("source").GetString());
+        Assert.Equal("per-collection", single.GetProperty("bucket").GetString());
+        Assert.Equal(single.GetProperty("trend")[0].GetProperty("collection_time").GetString(), single.GetProperty("effective_start").GetString());
+        Assert.True(single.GetProperty("window_truncated").GetBoolean(), "a series beginning 10 minutes ago in a 4-hour window starts past the slack");
+        Assert.Equal(1, single.GetProperty("data_points").GetInt32());
+    }
+
+    /// <summary>
+    /// #3529: the payload used to carry a hardcoded total_granted_mb of 0.0 — an agent investigating
+    /// RESOURCE_SEMAPHORE read "granted was 0 all window" and ruled out memory grants, the exact wrong
+    /// turn. With the #3548 join this is now specifically the UNCOVERED window (no memory_grant_stats
+    /// rows seeded anywhere near these points): every point stays an explicit null and the envelope's
+    /// note names the real source — never a fabricated zero. The covered arms live in
+    /// <see cref="MemoryTrendGrantJoinToolTests"/>.
+    /// </summary>
+    [Fact]
+    public async Task MemoryTrend_GrantedMemoryIsNullWithANoteNamingTheGrantsTool_NeverALiteralZero()
+    {
+        await SeedMemoryAsync(DateTime.UtcNow.AddMinutes(-10));
+
+        var payload = await McpMemoryTools.GetMemoryTrend(new LocalDataService(_duckDb), _serverManager, ServerName, 4);
+        var root = JsonDocument.Parse(payload).RootElement;
+
+        Assert.True(root.GetProperty("trend").GetArrayLength() > 0);
+        Assert.Contains("get_memory_grants", root.GetProperty("granted_note").GetString(), StringComparison.Ordinal);
+        foreach (var point in root.GetProperty("trend").EnumerateArray())
+        {
+            Assert.Equal(JsonValueKind.Null, point.GetProperty("total_granted_mb").ValueKind);
+        }
+    }
+
+    /// <summary>#3529's description half, superseded by the #3548 join: the tool now DELIVERS granted
+    /// memory (joined per point from the grants series), so the description may promise it again — but it
+    /// must name the null gap rather than promising an always-filled field, and still point at
+    /// get_memory_grants as the series' own tool.</summary>
+    [Fact]
+    public void MemoryTrend_Description_PromisesTheJoinedGrantSeries_AndNamesTheNullGap()
+    {
+        var description = typeof(McpMemoryTools).GetMethod(nameof(McpMemoryTools.GetMemoryTrend))!
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.Contains("granted memory from the memory-grant series joined per bucket", description, StringComparison.Ordinal);
+        Assert.Contains("total_granted_mb is null", description, StringComparison.Ordinal);
+        Assert.Contains("get_memory_grants", description, StringComparison.Ordinal);
     }
 
     /// <summary>Nothing has ever been stored for this server: NOT an empty window, and widening it would
@@ -175,8 +258,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
         await cmd.ExecuteNonQueryAsync();
     }
 
-    /* delta_reads above zero on purpose: the trend's top_files CTE requires read or write activity, so a
-       row with zero deltas would leave the window empty for a reason that has nothing to do with #2485. */
+    /* delta_reads above zero on purpose: the trend ranks only series that read or wrote (#3897), so a row with
+       zero deltas would leave the window empty for a reason that has nothing to do with #2485. */
     private async Task SeedFileIoAsync(DateTime collectionTimeUtc)
     {
         using var readLock = _duckDb.AcquireReadLock();

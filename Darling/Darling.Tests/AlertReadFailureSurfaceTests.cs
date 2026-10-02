@@ -244,6 +244,27 @@ public sealed class AlertReadFailureSurfaceTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
+        /* #3848's retry counts are deliberately OUTSIDE the trio rule above, and the exclusion is asserted
+           rather than achieved by the suffix filter happening to miss them. The rule exists because a count
+           of BLIND reads with nothing to date it cannot separate a healed episode from a live one (#3010);
+           a retried read did not go blind — the condition was judged on evidence that arrived late — so
+           there is no episode to attribute and a trio would invite reading a retry as a soft failure. Both
+           directions: the pair exists, and neither has a stamp, name or elapsed companion. */
+        var retries = reading
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select(p => p.Name)
+            .Where(n => n.EndsWith("RetriedReads", StringComparison.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal(new[] { "InstanceRetriedReads", "ServerRetriedReads" }, retries.ToArray());
+
+        foreach (var scope in new[] { "Retried", "InstanceRetried", "ServerRetried" })
+        {
+            Assert.Null(reading.GetProperty(scope + "LastAtUtc"));
+            Assert.Null(reading.GetProperty(scope + "ReadsLastAtUtc"));
+        }
+
         var trios = new Dictionary<string, (string At, string Read, string Elapsed)>(StringComparer.Ordinal)
         {
             ["FleetReadFailures"] =
@@ -361,6 +382,12 @@ public sealed class AlertReadFailureSurfaceTests
 
         var counter = new AlertReadFailureCounter();
 
+        /* Seeded before the writers start, as TheNewestFailuresFactsAreNeverABlendOfTwo seeds its bucket
+           (#4312): every observation then sees both parts nonzero, so the liveness check below cannot fail on
+           a reader the scheduler starved until the writers had finished. */
+        counter.RecordReadFailure(Key, "deadlocks", 10);
+        counter.RecordReadFailure(null, "deadlocks", 20);
+
         var writers = new[] { "deadlocks", "mute-rule reload" }
             .Select(name => Task.Factory.StartNew(
                 () =>
@@ -382,7 +409,7 @@ public sealed class AlertReadFailureSurfaceTests
         var observations = 0;
         var observedBothParts = 0;
 
-        while (!writers.All(w => w.IsCompleted))
+        do
         {
             var reading = counter.ReadFor(Key);
             observations++;
@@ -402,12 +429,15 @@ public sealed class AlertReadFailureSurfaceTests
                 observedBothParts++;
             }
         }
+        while (!writers.All(w => w.IsCompleted));
 
         await Task.WhenAll(writers);
 
-        /* Liveness, so a silent pass cannot be the reader never running or never seeing a populated
-           reading: the subtraction has to have been exercised over two NONZERO parts, which is the only
-           state in which a wrong sampling order can show. */
+        /* The do makes the first observation certain, so a silent pass on that count cannot be the
+           reader never running. The seed above makes every observation, including that first one, see
+           both parts nonzero, so observedBothParts cannot fail on a reader the scheduler starves until
+           the writers finish: the subtraction has been exercised over two NONZERO parts on every
+           observation, which is the only state in which a wrong sampling order can show. */
         Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
         Assert.True(
             observedBothParts > 0,
@@ -423,8 +453,8 @@ public sealed class AlertReadFailureSurfaceTests
            population is empty. An exact equality here is what proves the total is the sum of the parts and
            not an independently-maintained number that happens to track them. */
         var settled = counter.ReadFor(Key);
-        Assert.Equal(2 * WritesPerWriter, settled.ServerReadFailures);
-        Assert.Equal(2 * WritesPerWriter, settled.FleetReadFailures);
+        Assert.Equal(2 * WritesPerWriter + 1, settled.ServerReadFailures);
+        Assert.Equal(2 * WritesPerWriter + 1, settled.FleetReadFailures);
         Assert.Equal(
             settled.ServerReadFailures + settled.FleetReadFailures,
             settled.InstanceReadFailures);
@@ -752,7 +782,7 @@ public sealed class AlertReadFailureSurfaceTests
         var blends = new List<string>();
         var observations = 0;
 
-        while (!writers.All(w => w.IsCompleted))
+        do
         {
             var reading = counter.ReadFor(Key);
             observations++;
@@ -774,11 +804,12 @@ public sealed class AlertReadFailureSurfaceTests
                 blends.Add($"'{reading.LastFailureRead}' with an elapsed and no stamp");
             }
         }
+        while (!writers.All(w => w.IsCompleted));
 
         await Task.WhenAll(writers);
 
-        /* Guaranteed rather than hoped for: the bucket was seeded, so the first iteration observed a
-           complete trio whatever the scheduler did. */
+        /* Guaranteed rather than hoped for: the do makes one observation certain, and the seeded bucket
+           makes that first observation a complete trio whatever the scheduler did. */
         Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
         Assert.True(
             blends.Count == 0,
@@ -884,7 +915,14 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 11),
+        /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
+           self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
+           since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
+           self-alert's evidence (the readings) is a parameter too, with the read counted in
+           DarlingWorker. 16th exempt since #4750: EvaluateNotificationChannelsAsync's wrapper catch — the
+           webhook channels' failure counts are read from the webhook service's memory, so there is no store
+           read for the condition to swallow. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 17),
     };
 
     /// <summary>
@@ -913,6 +951,11 @@ public sealed class AlertReadFailureSurfaceTests
         "SweepStoreSelfMetricsAsync",
         "NotifyPgResolutionAsync",
         "FetchFailedJobsAsync",
+        /* #4215: the store-settings self-alert's one real store read — the
+           rejected-verdict names behind EvaluateStoreSettingsAsync. COUNTED, not exempt: unlike
+           ReadStoreSizeBytesAsync's size figure, a RejectedValue row is one of the three conditions the
+           alert fires on, so a swallowed read here leaves that condition unjudgeable, not merely undescribed. */
+        "ReadRejectedManagedConfSettingNamesAsync",
         /* #3354: the mute-rule reload. Not an alert pass — a control-plane read — but its swallowed
            failure decides what the engine suppresses on every following sweep, so it belongs to this
            population. It is also the member whose scope this list was designed to admit: an alerting read
@@ -921,8 +964,10 @@ public sealed class AlertReadFailureSurfaceTests
         "LoadMuteRulesAsync",
     };
 
-    private const int WorkerCountedSites = 10;
-    private const int WorkerExemptSites = 7;
+    /* 11th since #4215: ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
+       not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
+    private const int WorkerCountedSites = 11;
+    private const int WorkerExemptSites = 11;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -934,7 +979,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// parameter required errored at exactly 13 sites in <c>AlertEngine.cs</c>, 5 in
     /// <c>DarlingSelfAlertEvaluator.cs</c>, 9 in <c>DarlingWorker.cs</c> and 0 in Lite, which is a census
     /// that cannot miss a site or invent one. <c>DarlingWorker.cs</c> carries a tenth since #3354's
-    /// mute-rule reload, and <c>DarlingSelfAlertEvaluator.cs</c> a sixth and a seventh since #3443: the
+    /// mute-rule reload and an eleventh since #4215: the store-settings self-alert's
+    /// rejected-verdict read, whose swallowed failure leaves one of the alert's three conditions
+    /// unjudgeable rather than merely undescribed. And <c>DarlingSelfAlertEvaluator.cs</c> a sixth and a seventh since #3443: the
     /// collector-cost census read, whose swallowed failure decides that a tick routes nothing rather than
     /// guessing a channel, and the collector-cost digest read, whose swallowed failure costs a day's
     /// report. Both are the evidence an alerting decision is judged on — not context, not a write, not a
@@ -945,9 +992,27 @@ public sealed class AlertReadFailureSurfaceTests
     /// delivery end. And <c>AlertEngine.cs</c> carries a FOURTEENTH since #3495: the maintenance-annotation
     /// probe on the High CPU fire path — counted because its swallowed failure silently costs the card the
     /// one line that closes the triage, and an operator chasing a mystery backup deserves to see that the
-    /// probe went blind rather than that no maintenance ran.</para>
+    /// probe went blind rather than that no maintenance ran. And <c>DarlingSelfAlertEvaluator.cs</c> a
+    /// NINTH since #3580: the daily documents' delivered-today stamp read, ONE site serving both the digest
+    /// and the rollup (so one literal name; the warning beside it names the document) — counted because a
+    /// swallowed stamp read is the gate falling back to process memory, which is the pre-#3580
+    /// re-announce-per-restart posture returning for that tick, and a population of those under store
+    /// contention is exactly what this census exists to make visible. Its sibling WRITE is exempt. And a
+    /// TENTH since #3712: the analysis singles digest read — the third daily document's span read over the
+    /// digest-routed ledger rows — counted on the rollup's exact reasoning: its swallowed failure skips the
+    /// day's tick without consuming the interval, and a fault folded into "no singles today" would convert an
+    /// unreadable store into a permanently quiet document. And an ELEVENTH and TWELFTH since #3783: the store
+    /// TOAST-slack read (the latest-per-object rows the dimension utilisation is judged on) and the checkpointer
+    /// pair read (the two newest checkpointer rows the interval is differenced from) — each its own site with its
+    /// own clock and name, counted because both are the evidence a standing self-alert is judged on: a swallowed
+    /// read there neither fires nor RESOLVES, so a population of them would leave a real slack file or a real
+    /// fsync storm unreported for exactly as long as the store stayed unreadable, which is the quiet-is-not-clean
+    /// shape at the store's own health. And a THIRTEENTH since #4215: the store-settings
+    /// self-alert's rejected-verdict read, moved from exempt to counted because a RejectedValue row is one of
+    /// the three conditions the alert fires on — losing it leaves that condition unjudgeable, and the original
+    /// exempt classification would let one failed read write a false "Store Settings Resolved".</para>
     /// </summary>
-    private const int CountedSites = 32;
+    private const int CountedSites = 37;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -958,28 +1023,40 @@ public sealed class AlertReadFailureSurfaceTests
     {
         ["Could not load incident occurrences"] = "bookkeeping about an alert, not the condition read it is judged on",
         ["Could not persist incident occurrences"] = "a write",
-        ["Could not persist the CPU persistence gate"] = "a write (#3282); the gate has already decided the observation from its in-memory record, so a dropped save costs the streak across a restart and never an alert - the seeding LOAD beside it is the read, and it is counted",
+        ["Could not persist the {Metric} persistence gate"] = "a write (#3282; one save path for every gated built-in since #3653 A5 put tempdb Space behind the same gate as High CPU); the gate has already decided the observation from its in-memory record, so a dropped save costs the streak across a restart and never an alert - the seeding LOADs beside it are the reads, and they are counted",
         ["Alert resolution callback failed"] = "the delivery path",
         ["Connection-change self-alert delivery failed"] = "the delivery path",
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
-        ["Compression-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Store TimescaleDB self-alert failed"] = "handed its evidence as parameters; the version was read by the bootstrap (#3908)",
+        /* #3816 renamed this line with the check: the same catch, one family over — the self-heal now covers
+           every policy family, so "Compression-job health" would have named a third of what it isolates. */
+        ["Store policy-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Raw-purge-over-horizon self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Notification-channel self-alert failed"] = "reads the webhook channels' failure counts from the webhook service's memory and performs no store read at all - there is no read for this condition to be the swallowing of",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
+        ["Fleet gate self-alert failed"] = "handed its evidence (the worker's in-memory gate counts) as a parameter and performs no store read at all",
         ["Web TLS certificate self-alert failed"] = "handed its evidence (the report from the web host's in-memory WebTlsCertificateState publish) as a parameter and performs no store read at all",
+        ["Store settings self-alert failed"] = "handed its evidence as a parameter; the one store read behind it (the rejected-verdict names) is isolated in its own COUNTED catch in DarlingWorker (#4215) rather than exempted",
         ["Failed to record resolution"] = "an audit-row write",
         ["Could not record Postgres alert resolution"] = "a history write",
         ["could not read the store volume free space"] = "a local filesystem read, not a store read",
         ["could not read the recorded store size"] = "context for the alert text, not the evidence the alert is judged on",
         ["Store self-metrics sweep did not finish"] = "a metrics write sweep; no alert is judged on its result",
+        ["so this hour's size rows are missing"] = "a metrics write sweep (#3923); no alert is judged on its result, and the store-log census and collector-cost flush the same tick still run on the connection this narrow catch deliberately leaves open",
         ["Store log capture failed"] = "a telemetry write sweep (#3021); no alert is judged on its result, and the capture gap it leaves is reported by get_store_log's own denominator",
+        ["Store log: re-masking rows captured before this build failed"] = "a maintenance rewrite of stored store-log text (#3915); no alert is judged on it, it is idempotent and resumes next hour, and until it finishes the store-log reader masks every row on the way out",
+        ["PostgreSQL deadlocks: re-masking alerts, reports and findings stored before this build failed"] = "a maintenance rewrite of stored deadlock reports, deadlock-alert history and analysis findings (#4012); no alert is judged on it, it rewrites only rows still raw and resumes next hour (each stage counts and caps its own failures, #4012's review), and until it finishes every deadlock read normalizes the rows on the way out",
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
         ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
         ["CONVERTS the fault into the unreadable count"] = "a parse arm, not a read: the fleet-sweep rollup's store read is counted above it, and a document that does not parse becomes the rollup's own reportable unreadable count - the fault is evidence, not a swallow",
         ["Could not resolve Agent job names"] = "reads the monitored server's msdb through the host resolver, not the store - the Recently-failed-job precedent one seam over; the card degrades to the unresolved form whose raw marker keeps the gap visible, and the page still delivers",
+        ["delivery stamp could not be written"] = "a write (#3580): the daily document was already delivered and process memory already gates it; the dropped stamp costs one re-announcement at the next restart and never a delivery - the stamp READ beside it is the read, and it is counted",
+        ["Read-latency flush failed"] = "the read-latency histogram flush writes instrumentation; losing an hour's rows can't hide an alert condition",
     };
 
     /// <summary>
@@ -1002,15 +1079,90 @@ public sealed class AlertReadFailureSurfaceTests
     /// <summary>
     /// A counted call, with its read name and the CLOCK it took its elapsed from.
     ///
-    /// <para>The third argument is required to be <c>&lt;identifier&gt;.ElapsedMilliseconds</c> and the
+    /// <para>The ELAPSED argument is required to be <c>&lt;identifier&gt;.ElapsedMilliseconds</c> and the
     /// close paren is anchored, which is what makes this pattern a coverage check rather than a name
-    /// extractor: a site that passed a literal, a constant, a field or a computed number would not match,
-    /// and every count asserted over these matches would fall short and say which file. The narrower
+    /// extractor: a site that passed a literal, a field or a computed number THERE would not match, and
+    /// every count asserted over these matches would fall short and say which file. The narrower
     /// alternative — reading the name and separately hoping a duration went along — is the shape that lets
     /// a site ship with <c>0</c> in the slot and a log line that reads correctly.</para>
+    ///
+    /// <para>The name arm admits either a string literal or a <c>…ReadName</c> CONSTANT identifier (#3854).
+    /// It was literal-only until the seven reads the alert pass issues outside the adapter joined #3848's
+    /// retry seam: a retried read is tallied under the same name its catch arm records a failure under, and
+    /// the only way to make "the same name" a property of the source rather than of a list is to have both
+    /// sites pass ONE constant. A literal-only pattern would therefore have forced the two spellings this
+    /// file exists to prevent — so the arm widened, and
+    /// <see cref="EveryCountedSite_NamesItsReadDistinctly"/> resolves a constant to its declared value
+    /// before checking distinctness, which keeps the published names under assertion either way.</para>
+    ///
+    /// <para>The elapsed arm is UNCHANGED and still requires an <c>&lt;identifier&gt;.ElapsedMilliseconds</c>:
+    /// that is the route that otherwise ships a correct-looking log line with no measurement behind it, and
+    /// a constant or a literal there must still fail.</para>
     /// </summary>
     private const string s_recordCall =
-        @"RecordReadFailure\([^,]+,\s*""(?<name>[^""]+)""\s*,\s*(?<clock>[A-Za-z_][A-Za-z0-9_]*)\.ElapsedMilliseconds\s*\)";
+        @"RecordReadFailure\([^,]+,\s*(?:""(?<name>[^""]+)""|(?<nameConst>[A-Za-z_][A-Za-z0-9_.]*ReadName))"
+        + @"\s*,\s*(?<clock>[A-Za-z_][A-Za-z0-9_]*)\.ElapsedMilliseconds\s*\)";
+
+    /// <summary>
+    /// The read-name constants the counted sites pass by name (#3854), resolved to the values the surface
+    /// actually publishes so the distinctness census still compares real names.
+    ///
+    /// <para>Read off the product rather than restated — a literal copy here would let the pin agree with
+    /// itself while the shipped name drifted, which is the #3060 shape.</para>
+    /// </summary>
+    /// <para>Resolved from the SOURCE declaration rather than from the compiled constant, because this
+    /// whole file is a source census over files in a project it does not reference by type — so the value
+    /// is read out of the same text every other assertion here reads.</para>
+    private static readonly Dictionary<string, string> s_readNameConstants = LoadReadNameConstants();
+
+    /// <summary>
+    /// Every <c>internal const string …ReadName = "…";</c> declaration across the counted files, so a new
+    /// constant is resolvable the moment it is declared and a RENAMED value cannot drift past this census.
+    /// </summary>
+    private static Dictionary<string, string> LoadReadNameConstants()
+    {
+        var constants = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var relative in new[]
+        {
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"),
+        })
+        {
+            foreach (Match m in Regex.Matches(
+                ReadSource(relative),
+                @"const\s+string\s+(?<id>\w*ReadName)\s*=\s*""(?<value>[^""]*)""\s*;"))
+            {
+                constants[m.Groups["id"].Value] = m.Groups["value"].Value;
+            }
+        }
+
+        Assert.NotEmpty(constants);
+        return constants;
+    }
+
+    /// <summary>
+    /// The value a counted site names its read, whether it passed a literal or one of the constants above.
+    /// An unrecognised constant fails loudly rather than resolving to something empty — a census that
+    /// silently dropped a site would report clean on the site it stopped seeing.
+    /// </summary>
+    private static string ResolveReadName(Match call)
+    {
+        if (call.Groups["name"].Success)
+        {
+            return call.Groups["name"].Value;
+        }
+
+        var identifier = call.Groups["nameConst"].Value;
+        var bare = identifier[(identifier.LastIndexOf('.') + 1)..];
+
+        Assert.True(
+            s_readNameConstants.TryGetValue(bare, out var value),
+            $"a counted site names its read with the constant '{identifier}', which this census cannot "
+            + "resolve — add it to s_readNameConstants so its published name stays under assertion");
+
+        return value!;
+    }
 
     /// <summary>The one rendering of the measurement in a log line, so a log census greps one token.</summary>
     private const string ElapsedPlaceholder = "after {ElapsedMs} ms";
@@ -1070,8 +1222,27 @@ public sealed class AlertReadFailureSurfaceTests
            rollup's own unreadable count rather than a read failure. 23rd since #3497: the Agent-job
            resolver's catch, an msdb read on the monitored server degrading to the unresolved form. 24th
            since #3514: the web-dashboard TLS certificate self-alert's catch, whose evidence is the in-memory
-           WebTlsCertificateState report the web host publishes - there is no store read to swallow. */
-        Assert.Equal(24, totalExempt);
+           WebTlsCertificateState report the web host publishes - there is no store read to swallow. 25th
+           since #3580: the daily documents' delivery-stamp WRITE, a write whose loss costs one
+           re-announcement at the next restart and never a delivery. 26th since #3915: the store-log re-mask
+           pass, a maintenance rewrite of stored text that resumes next hour, with the reader masking in the
+           meantime. 27th since #3908: the store TimescaleDB self-alert's catch, whose evidence is the version
+           the bootstrap read before the alert engine existed. 28th since #3923: the sizing pass's own narrow
+           catch, mirroring the store-log capture's catch beside it - a metrics write sweep whose swallowed
+           failure costs no alert, and whose whole point is to leave the store-log census and the
+           collector-cost flush below it running on the connection this catch keeps open. 29th since #4012:
+           the deadlock re-mask pass, which rewrites only rows still raw and resumes next hour, with every
+           deadlock read normalizing in the meantime. 30th since #4215: the store-settings
+           self-alert's wrapper catch (its report is a parameter, like every sibling standing condition).
+           ReadRejectedManagedConfSettingNamesAsync's catch is NOT here: a RejectedValue row is
+           judgeable evidence, so it moved to the counted census above instead. 31st since #4299: the
+           Raw Purge Over Horizon self-alert's catch, whose evidence (the readings) is handed in as a
+           parameter, with the read counted in DarlingWorker. 32nd since #4442: the read-latency histogram
+           flush's catch, a telemetry write whose loss costs an hour's histogram rows and never an alert.
+           33rd since #4750: the Notification Channel Failing self-alert's catch, whose counts come from the
+           webhook service's memory rather than the store. 34th since #4732: the Collection Falling Behind
+           self-alert's wrapper catch, whose counts come from the worker's in-memory gate statistics. */
+        Assert.Equal(34, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
@@ -1188,7 +1359,7 @@ public sealed class AlertReadFailureSurfaceTests
             var raw = ReadSource(relative);
             foreach (Match m in Regex.Matches(raw, s_recordCall))
             {
-                names.Add((m.Groups["name"].Value, relative));
+                names.Add((ResolveReadName(m), relative));
             }
         }
 
@@ -1658,9 +1829,9 @@ public sealed class AlertReadFailureSurfaceTests
            looked adjacent and their single restart looked sufficient. */
         Assert.Equal(new[] { 1 }, Scan(
             """
-            var a = await ReadStuckCompressionJobsAsync(c, log, ct);
+            var a = await ReadStuckPolicyJobsAsync(c, log, ct);
             readClock.Restart();
-            await _selfAlerts!.EvaluateCompressionJobsAsync(a, ct);
+            await _selfAlerts!.EvaluatePolicyJobsAsync(a, ct);
             var b = await ReadJobCadenceReadingsAsync(c, log, ct);
             readClock.Restart();
             await _selfAlerts!.EvaluateStoreJobCadenceAsync(b, ct);
@@ -2231,7 +2402,8 @@ public sealed class AlertReadFailureSurfaceTests
             .Where(n => n != "EqualityContract")
             .ToList();
 
-        Assert.Equal(14, readingMembers.Count);
+        /* Sixteen since #3848 added the retry pair (ServerRetriedReads / InstanceRetriedReads). */
+        Assert.Equal(16, readingMembers.Count);
 
         foreach (var member in readingMembers)
         {
@@ -2290,8 +2462,12 @@ public sealed class AlertReadFailureSurfaceTests
             .ToList();
 
         /* Both directions, so an extractor that stopped matching cannot report clean. */
-        Assert.Equal(14, payloadFields.Count);
+        /* Sixteen since #3848: retried_reads and instance_retried_reads, both of which the panel renders
+           as their own tiles beside the failure counts they are read against. */
+        Assert.Equal(16, payloadFields.Count);
         Assert.Contains("last_failure_elapsed_ms", payloadFields);
+        Assert.Contains("retried_reads", payloadFields);
+        Assert.Contains("instance_retried_reads", payloadFields);
         Assert.Contains("fleet_last_failure_read", payloadFields);
         Assert.Contains("instance_last_failure_read", payloadFields);
 
@@ -2311,13 +2487,16 @@ public sealed class AlertReadFailureSurfaceTests
         /* #3017 kept the collector band free of its output figures because a verdict keyed on them fired
            on the healthy quiet install. The same argument is stronger here: a band over blind alert reads
            would have to guess how many make alerting unhealthy, and on THIS surface a wrong guess fails by
-           saying nothing is wrong. Read off the type so a tenth parameter fails rather than being
+           saying nothing is wrong. Read off the type so a new parameter fails rather than being
            discovered later. */
         var classify = typeof(CollectorHealthClassifier)
             .GetMethod("Classify", BindingFlags.Public | BindingFlags.Static);
 
         Assert.NotNull(classify);
-        /* 10 since #3240 added extensionMissingCount — a run-class count, not an alert-read term. */
+        /* 10 since #3240 added extensionMissingCount (a run-class count, not an alert-read term); 9 since
+           #4000 removed isOnLoad, because callers now resolve an on-load collector's cadence to daily; 10
+           since #4748 appended latestRunNote (the newest run's partial-failure note - a run outcome, not an
+           alert-read term, which the no-"alert" assertion below still holds). */
         Assert.Equal(10, classify!.GetParameters().Length);
         Assert.DoesNotContain(
             "alert",

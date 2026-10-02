@@ -29,16 +29,20 @@
                     <StackPanel>
                         <!-- Header row: severity badge + [database] -->
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <!-- #3609: the badge ink is a theme key, not a literal. The status fills are tuned to read
+                                 against the PAGE (4.5:1+), which on the light themes makes them too deep for dark text
+                                 (the old #1A1A1A measured 3.25:1 on Light's amber and was already 3.10:1 on its
+                                 Critical red); StatusForegroundBrush is white there and near-black on Dark. -->
                             <Border x:Name="SeverityBadge" CornerRadius="3" Padding="6,1"
                                     VerticalAlignment="Center"
                                     Background="{DynamicResource InfoBrush}">
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="{Binding SeverityGlyph}"
                                                FontFamily="Segoe MDL2 Assets" FontSize="11"
-                                               Foreground="#1A1A1A" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource StatusForegroundBrush}" VerticalAlignment="Center"
                                                Margin="0,0,4,0"/>
                                     <TextBlock Text="{Binding SeverityLabel}" FontWeight="Bold"
-                                               FontSize="11" Foreground="#1A1A1A"
+                                               FontSize="11" Foreground="{DynamicResource StatusForegroundBrush}"
                                                VerticalAlignment="Center"/>
                                 </StackPanel>
                             </Border>
@@ -58,6 +62,14 @@
                         <TextBlock Text="{Binding AdviceText}" TextWrapping="Wrap"
                                    Visibility="{Binding HasAdvice, Converter={StaticResource BoolToVis}}"
                                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+
+                        <!-- #3712: the corroboration gate kept this finding off email / webhooks / tray. Muted and
+                             italic like the Settings hints: a status about delivery, not more advice. Collapsed for
+                             a delivered finding and for one below the notify floor. -->
+                        <TextBlock Text="{Binding NotPagedText}" TextWrapping="Wrap"
+                                   Visibility="{Binding ShowNotPaged, Converter={StaticResource BoolToVis}}"
+                                   FontSize="11" FontStyle="Italic"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,4"/>
 
                         <!-- Affordances (advise-only): Copy fix (when derivable) + Ask AI. -->
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
@@ -157,6 +169,11 @@
 
             <!-- Insufficient data: engine has not collected its minimum window yet. -->
             <TextBlock x:Name="InsufficientDataMessage" Style="{StaticResource LiteEmptyStateMessage}"
+                       MaxWidth="520" TextWrapping="Wrap" TextAlignment="Center"/>
+
+            <!-- Window-empty: the analysis window collected nothing (a dead-collector shape,
+                 #3524/#3551) — a distinct notice, never the all-clear. Text is set from the view-model. -->
+            <TextBlock x:Name="WindowEmptyMessage" Style="{StaticResource LiteEmptyStateMessage}"
                        MaxWidth="520" TextWrapping="Wrap" TextAlignment="Center"/>
 
             <!-- Loading spinner. -->

@@ -203,6 +203,13 @@ public static class ConfigChangeDiff
                         var newVal = i < cur.Values.Count ? cur.Values[i] : null;
                         if (!string.Equals(oldVal, newVal, StringComparison.Ordinal))
                         {
+                            /* A column the engine did not report before (NULL) and reports now is a first read,
+                               not a change. Only this column: Azure SQL Database starts reporting it after an
+                               upgrade of the collector. */
+                            if (oldVal is null
+                                && string.Equals(DatabaseConfigChangeSettingNames[i], "is_optimized_locking_on", StringComparison.Ordinal))
+                                continue;
+
                             changes.Add(new DatabaseConfigChange(
                                 cur.CaptureTime, cur.DatabaseName, DatabaseConfigChangeSettingNames[i], oldVal, newVal));
                         }

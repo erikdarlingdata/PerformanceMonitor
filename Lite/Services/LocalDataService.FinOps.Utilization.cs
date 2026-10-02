@@ -52,8 +52,12 @@ mem_latest AS (
     ORDER BY collection_time DESC
     LIMIT 1
 ),
+/* cpu_count is the count CPU percent is measured against. On an Azure SQL Database (engine_edition 5) the stored cpu_count
+   is the number of schedulers the database can see (a 1-vCore serverless database read 2), not what it is given, so there it
+   is the vcore_count parsed from the service objective, and NULL for an objective that names no vCores (a DTU-model objective
+   or an elastic pool): never the scheduler count. Every other edition reads as it always did. The same CASE is in the Darling read. */
 server_info AS (
-    SELECT COALESCE(vcore_count, cpu_count) AS cpu_count
+    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, edition
     FROM v_server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -89,7 +93,9 @@ SELECT
     COALESCE(g.max_grant_waiters, 0),
     COALESCE(g.grant_timeouts, 0),
     COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0)
+    COALESCE(g.grant_utilization_pct, 0),
+    s.engine_edition,
+    s.edition
 FROM cpu_stats c
 CROSS JOIN mem_latest m
 LEFT JOIN server_info s ON true
@@ -107,19 +113,25 @@ LEFT JOIN grants g ON true";
         var memRatio = reader.IsDBNull(8) ? 0m : Convert.ToDecimal(reader.GetValue(8));
 
         var maxWorkers = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9));
-        var currentWorkers = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
+        /* NULL is "not collected" (an Azure SQL Database), not 0 workers in use: it shows as n/a and the verdict reads it as unknown. */
+        int? currentWorkers = reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10));
 
         /* memory_ratio is still SELECTed and still displayed — it is a real fact about the instance — but it
            is no longer part of the verdict: Total over Target Server Memory converges at 1.0 on any warmed
-           server, so it reported every server as under-provisioned (#2246). */
-        var status = ProvisioningVerdict.Evaluate(
+           server, so it reported every server as under-provisioned (#2246).
+
+           A window with no CPU sample at all has no verdict: its NULL average read as 0% CPU would call the
+           server OVER_PROVISIONED. The row's empty status is its no-verdict value; the tab shows "No Data". */
+        var status = reader.IsDBNull(0) ? "" : ProvisioningVerdict.Evaluate(
             avgCpu, maxCpu, p95Cpu,
             maxGrantWaiters: reader.IsDBNull(12) ? 0L : ToInt64(reader.GetValue(12)),
             grantTimeouts: reader.IsDBNull(13) ? 0L : ToInt64(reader.GetValue(13)),
             forcedGrants: reader.IsDBNull(14) ? 0L : ToInt64(reader.GetValue(14)),
             grantUtilizationPercent: reader.IsDBNull(15) ? 0m : Convert.ToDecimal(reader.GetValue(15)),
             maxWorkers: maxWorkers,
-            currentWorkers: currentWorkers);
+            currentWorkers: currentWorkers,
+            engineEdition: reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16)),
+            edition: reader.IsDBNull(17) ? null : reader.GetString(17));
 
         return new UtilizationEfficiencyRow
         {
@@ -139,7 +151,8 @@ LEFT JOIN grants g ON true";
             GrantUtilizationPct = reader.IsDBNull(15) ? 0m : Convert.ToDecimal(reader.GetValue(15)),
             MaxWorkersCount = maxWorkers,
             CurrentWorkersCount = currentWorkers,
-            CpuCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11))
+            CpuCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
+            EngineEdition = reader.IsDBNull(16) ? 0 : Convert.ToInt32(reader.GetValue(16))
         };
     }
 
@@ -201,10 +214,19 @@ SELECT
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0),
     COALESCE(m.max_workers_count, 0),
-    COALESCE(m.current_workers_count, 0)
+    m.current_workers_count,
+    sp.engine_edition,
+    sp.edition
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
 LEFT JOIN daily_grants g ON g.day = c.day
+LEFT JOIN (
+    SELECT engine_edition, edition
+    FROM v_server_properties
+    WHERE server_id = $1
+    ORDER BY collection_time DESC
+    LIMIT 1
+) sp ON true
 ORDER BY c.day";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -226,7 +248,9 @@ ORDER BY c.day";
                 forcedGrants: reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7)),
                 grantUtilizationPercent: reader.IsDBNull(8) ? 0m : Convert.ToDecimal(reader.GetValue(8)),
                 maxWorkers: reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
-                currentWorkers: reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)));
+                currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)),
+                engineEdition: reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
+                edition: reader.IsDBNull(12) ? null : reader.GetString(12));
 
             items.Add(new ProvisioningTrendRow
             {

@@ -45,7 +45,8 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
-import { el, mount, apiGet, bandClass, loadingStrip } from "../util.js";
+import { el, mount, apiGetFleet, bandClass, loadingStrip } from "../util.js";
+import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
 
@@ -76,8 +77,17 @@ let current = { server: null, tab: null };
  * paints one server's panels under the other's header and URL.
  *
  * A generation counter rather than an AbortController because the losing render must not cancel the shared
- * /api/fleet fetch out from under the winning one; the fetch is fine, it is only its RESULT that is stale. */
+ * /api/fleet fetch out from under the winning one; the fetch is fine, it is only its RESULT that is stale.
+ *
+ * This is deliberately separate from `panelAbort` below (#4191), which DOES cancel — it owns only the
+ * per-panel reads a redraw starts, never the shared fleet fetch this generation counter protects. */
 let renderGeneration = 0;
+
+/* The current panel batch's AbortController (#4191) — see redrawPanels(), which creates and aborts it. Module
+   state like renderGeneration and lastCard, for the same reason: redrawPanels can run from three places (a
+   fresh renderServer, the loadServerCard callback, and the range-select handler) and every one of them must
+   cancel the SAME previous batch, not just the one its own caller happens to remember. */
+let panelAbort = null;
 
 /* The last card seen for a server name, so a repeat render can choose its registry without a round trip. Keyed
    on the ROUTE's name (which may be either the server name or the display name — the same key loadServerCard
@@ -90,17 +100,26 @@ function rangeContext() {
   return { hours: opt.hours, label: opt.label };
 }
 
-export function renderServer(main, server, tabId) {
+/**
+ * @param {object} [opts] — `{ poll: true }` when this call is the 60s poll's own refresh (app.js's refresh(),
+ * threaded through route()), as opposed to a sub-tab click / deep link (hashchange) or the first paint. Only
+ * that case, and a server this page has no card for yet, re-fetch /api/fleet — see the comment at the call
+ * below (#4190).
+ */
+export function renderServer(main, server, tabId, opts) {
+  const isPoll = !!(opts && opts.poll === true);
   const generation = ++renderGeneration;
   current = { server, tab: null };
 
   const dot = el("span", { class: "dot" });
+  /* The route's server KEY until the fleet card is known; fillServerHead then swaps in the display name. */
+  const title = el("h2", { text: server });
   const badgeSlot = el("span", { class: "server-band" });
   const engineSlot = el("span", { class: "server-engine" });
   const whySlot = el("div", { class: "server-why" });
   const head = el("div", { class: "page-head" }, [
     el("a", { href: "#/fleet", text: "← Fleet" }),
-    el("span", { class: "server-title" }, [dot, el("h2", { text: server })]),
+    el("span", { class: "server-title" }, [dot, title]),
     badgeSlot,
     engineSlot,
     el("div", { class: "spacer" }),
@@ -118,25 +137,32 @@ export function renderServer(main, server, tabId) {
   const remembered = lastCard.get(server);
   let painted = null;
   if (remembered) {
-    fillServerHead(dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
+    fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
     painted = paintTabs(tabsSlot, server, tabId, remembered.card);
   }
 
-  loadServerCard(server, (card, reason) => {
-    /* A newer render has started since this fetch went out — everything below writes module state or mounts
-       into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
-    if (generation !== renderGeneration) return;
+  /* /api/fleet is fetched again only to place a server this page has no card for yet, or on the poll's real
+     refresh — a plain sub-tab click (isPoll false) with a remembered card reuses it instead of re-downloading
+     the whole 66-81KB roll-up for one ~1.5KB card (#4190). The synchronous paint above already put that
+     reused card on screen, so skipping the fetch here changes nothing about what a tab click shows; it only
+     stops asking the store for an answer this page already has until the poll asks again. */
+  if (!remembered || isPoll) {
+    loadServerCard(server, (card, reason) => {
+      /* A newer render has started since this fetch went out — everything below writes module state or mounts
+         into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
+      if (generation !== renderGeneration) return;
 
-    if (card) lastCard.set(server, { card, reason });
-    fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason);
+      if (card) lastCard.set(server, { card, reason });
+      fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
 
-    /* Repaint only when there is nothing painted yet, or when the fresh card chooses a DIFFERENT registry —
-       the two registries are module constants, so that comparison is exact. A null card never repaints over a
-       painted page: a fleet read that failed says nothing about which engine this server runs. */
-    if (!painted || (card && serverTabsFor(card) !== painted)) {
-      painted = paintTabs(tabsSlot, server, tabId, card);
-    }
-  });
+      /* Repaint only when there is nothing painted yet, or when the fresh card chooses a DIFFERENT registry —
+         the two registries are module constants, so that comparison is exact. A null card never repaints over a
+         painted page: a fleet read that failed says nothing about which engine this server runs. */
+      if (!painted || (card && serverTabsFor(card) !== painted)) {
+        painted = paintTabs(tabsSlot, server, tabId, card);
+      }
+    });
+  }
 }
 
 /** Put the tab bar, its note and its panels on the page for a card, and return the registry that card chose. */
@@ -152,6 +178,17 @@ function paintTabs(tabsSlot, server, tabId, card) {
 /** (Re)fill the panel grid for the current server + tab at the current range. No refetch of anything else. */
 function redrawPanels() {
   if (!gridNode || !current.tab || !current.server) return;
+
+  /* Every redraw replaces the whole panel grid — a fresh render (poll tick or sub-tab click), or the range
+     picker choosing a new window for the SAME tab — so it starts a whole new batch of panel reads and the
+     PREVIOUS batch's, if still pending, are now for nobody. #4191: aborting them here is what stopped the
+     Config tab's audit_config from running twice concurrently — the old batch is cancelled instead of left to
+     finish. setPanelSignal (panels.js) is how renderPanel picks this up without build() or table()/stat()/
+     line() threading a signal through every call — see its own comment. */
+  if (panelAbort) panelAbort.abort();
+  panelAbort = new AbortController();
+  setPanelSignal(panelAbort.signal);
+
   mount(gridNode, current.tab.build(current.server, rangeContext()));
 }
 
@@ -198,7 +235,7 @@ function rangeControl() {
  * registry, exactly as this page behaved before it could ask. */
 function loadServerCard(server, onCard) {
   (async () => {
-    const res = await apiGet("/api/fleet");
+    const res = await apiGetFleet();
     if (res.kind !== "data") return onCard(null, null);
 
     const matches = (c) => c.server_name === server || c.display_name === server;
@@ -211,7 +248,7 @@ function loadServerCard(server, onCard) {
   })();
 }
 
-/* The server header's status dot, band badge, engine badge and the WHY beneath them, all from the card above.
+/* The server header's title, status dot, band badge, engine badge and the WHY beneath them, all from the card above.
  *
  * The band word alone is not an answer. `Warning` has three unrelated causes — a genuine metric breach, a server
  * awaiting its first collection, and a collector error — so a badge reading "Warning" with no way to ask why is
@@ -220,8 +257,14 @@ function loadServerCard(server, onCard) {
  * rendered by fleet.js's own metricBands so there is one implementation rather than two, the reason is the same
  * sentence the fleet page shows, and the engine is the token the store recorded. A server outside the ranking
  * gets the chips and no sentence, because inventing one here is the second derivation this comment refuses. */
-function fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason) {
+function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason) {
   if (!card) return;
+
+  /* The title names the server the way the sidebar, the fleet cards and every other page do: by display name.
+     The route, the sidebar link and every /api/read call keep the KEY (for an Azure SQL Database that is
+     "host:database"), so only the words on screen change. A card with no display name leaves the key already
+     in the heading. */
+  if (card.display_name) title.textContent = card.display_name;
 
   dot.className = "dot " + bandClass(card.band);
   mount(

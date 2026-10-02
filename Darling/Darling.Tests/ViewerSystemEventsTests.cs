@@ -98,21 +98,24 @@ public sealed class ViewerSystemEventsTests
         }
     }
 
-    // ── Significance: Scheduler Issues (status = WARNING) ──
+    // ── Significance: Scheduler Issues (SQL CPU >= 90, other-process CPU >= 50, or memory <= 50) ──
 
     [Theory]
-    [InlineData("WARNING", true)]
-    [InlineData("OK", false)]
-    [InlineData("", false)]
-    [InlineData(null, false)]
-    public void SchedulerIssue_SignificantOnlyWhenWarning(string? status, bool expected) =>
-        Assert.Equal(expected, SystemEventSignificance.IsSignificant(new SchedulerIssueRecord { Status = status }));
+    [InlineData(90, 0, 100, true)]
+    [InlineData(89, 0, 100, false)]
+    [InlineData(0, 50, 100, true)]
+    [InlineData(0, 49, 100, false)]
+    [InlineData(0, 0, 50, true)]
+    [InlineData(0, 0, 51, false)]
+    [InlineData(null, null, null, false)]
+    public void SchedulerIssue_SignificantOnThresholds(int? sqlCpu, int? other, int? mem, bool expected) =>
+        Assert.Equal(expected, SystemEventSignificance.IsSignificant(new SchedulerIssueRecord { SqlCpuUtilization = sqlCpu, OtherProcessCpu = other, MemoryUtilization = mem }));
 
     [Fact]
     public void SchedulerIssue_Fixture_IsSignificant()
     {
-        var record = SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor.xml"))!;
-        Assert.Equal("WARNING", record.Status);
+        var record = SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor_high_sql_cpu.xml"))!;
+        Assert.Equal(94, record.SqlCpuUtilization);
         Assert.True(SystemEventSignificance.IsSignificant(record));
     }
 
@@ -350,7 +353,7 @@ public sealed class ViewerSystemEventsTests
     {
         var events = new (string?, string?)[]
         {
-            (SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor.xml")),
+            (SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor_high_sql_cpu.xml")),
             (SystemHealthParser.ErrorReportedEvent, LoadFixture("error_reported.xml")),
             (SystemHealthParser.SpServerDiagnosticsEvent, LoadFixture("sp_server_diagnostics_system.xml")),
             (SystemHealthParser.SpServerDiagnosticsEvent, LoadFixture("sp_server_diagnostics_resource.xml")),
@@ -457,7 +460,7 @@ public sealed class ViewerSystemEventsTests
     // ── Default Trace (always-on server events; the Default Trace sub-tab) ──
 
     [Fact]
-    public void DefaultTraceEventsByWindowSql_ReadsBaseTable_DeSkewsLocalEventTimeToUtc_AndWindows()
+    public void DefaultTraceEventsByWindowSql_ReadsBaseTable_ReturnsTheLocalEventTimeRaw_AndPreFiltersAnHourWide()
     {
         var sql = ViewerDataService.DefaultTraceEventsByWindowSql;
 
@@ -466,15 +469,18 @@ public sealed class ViewerSystemEventsTests
         Assert.DoesNotContain("v_default_trace_events", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE dte.server_id = $1", sql, StringComparison.Ordinal);
 
-        /* The Default Trace StartTime is server-LOCAL, so de-skew to naive-UTC via the collected offset
-           BEFORE windowing + returning — so the row shares the system_health rows' UTC frame (the cross-frame
-           caveat: system_health.event_time is UTC, default_trace.event_time is local). */
+        /* The Default Trace StartTime is server-LOCAL. #4766: the SQL returns it RAW and the C# side converts
+           it to naive-UTC with the server's ServerClock (its time zone, so the far side of a daylight-saving
+           change is not an hour off) — so the row shares the system_health rows' UTC frame (the cross-frame
+           caveat: system_health.event_time is UTC, default_trace.event_time is local). The latest offset
+           stays in the SQL only as a pre-filter an hour wider on each side, which the C# window then trims. */
         Assert.Contains("server_properties", sql, StringComparison.Ordinal);
         Assert.Contains("utc_offset_minutes", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY event_time_utc DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("dte.event_time AS event_time_local", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AS event_time_utc", sql, StringComparison.Ordinal);
+        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY event_time_local DESC", sql, StringComparison.Ordinal);
 
         /* Postgres dialect, positional params. */
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);

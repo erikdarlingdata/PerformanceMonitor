@@ -7,8 +7,24 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Collectors;
+
+/// <summary>
+/// #4428: the outcome of <see cref="ICollectorDeltaCalculator.DecideRow"/> — whether ANY counter family
+/// of one row restarted under its shared key, and, when one did, whether the #2235 series-age test places
+/// that restart inside the gap since the calculator last looked.
+/// </summary>
+/// <param name="AnyReset">True when at least one family's current value read smaller than what this
+/// calculator last cached for it — the same shrink a per-family delta call already refuses on its own.
+/// False (the default) reports no row-level restart, and every family keeps its own ordinary delta.</param>
+/// <param name="CreditedInGap">Only meaningful when <see cref="AnyReset"/> is true: whether the restart
+/// falls inside the gap since the previous pass, so the row's counters are knowably "current value since
+/// the restart" rather than unknowable.</param>
+/// <param name="IntervalSeconds">The real interval to report for the row when <see cref="CreditedInGap"/>
+/// is true (the gap the restart fell inside); 0 otherwise.</param>
+public readonly record struct RowResetDecision(bool AnyReset = false, bool CreditedInGap = false, int IntervalSeconds = 0);
 
 /// <summary>
 /// Delta computation contract for cumulative DMV counters. Definitions own WHICH fields are
@@ -60,4 +76,170 @@ public interface ICollectorDeltaCalculator
         int? seriesAgeSeconds, out int intervalSeconds, DateTime? collectionTime = null, int maxGapSeconds = 0)
         => CalculateDeltaWithInterval(serverId, collectorName, key, currentValue, out intervalSeconds,
             collectionTime, maxGapSeconds);
+
+    /// <summary>
+    /// #4428: peeks whether ANY family in <paramref name="counters"/> would restart under
+    /// <paramref name="key"/> — without updating any cached baseline — so a caller with several counters
+    /// sharing one row identity can decide the reset ROW-COHERENTLY instead of family by family.
+    ///
+    /// <para><b>The defect this exists for.</b> A cached plan's <c>dm_exec_query_stats</c> row can restart
+    /// (SQL Server reuses the plan handle for a new compile, or the counters otherwise restart under the
+    /// same key) while the counters do not all restart the same way in the same instant a per-family
+    /// <see cref="CalculateDeltaWithSeriesAge"/> call observes them: a counter that shrank is caught by the
+    /// reset branch and reported as unknowable, but a sibling counter of the SAME row that had already
+    /// re-grown PAST its pre-restart value looks like an ordinary increase to a call that only ever sees
+    /// its own family — so one row's restart was read as a shrink in one counter and a giant real increment
+    /// in another. In the field: executions 1 → 16 against a CPU counter that fell from 57,695,259 to
+    /// 703,943 read as “executions +15” rather than “16 executions since the restart”.</para>
+    ///
+    /// <para><b>The rule.</b> If ANY family in <paramref name="counters"/> would reset (its current value
+    /// is smaller than this calculator's cached value for it under <paramref name="key"/>), the WHOLE row
+    /// is a reset — not just the family that shrank. #2235's series-age test then decides what the row's
+    /// counters become: if <paramref name="seriesAgeSeconds"/> places the restart inside the gap since the
+    /// previous pass (the same test <see cref="CalculateDeltaWithSeriesAge"/> already applies per family),
+    /// every counter's delta is knowable as “current value since the restart”; otherwise every counter is
+    /// unknowable, the same (0, 0) pairing a single reset already reports.</para>
+    ///
+    /// <para>A peek, not a delta: it neither updates a cached baseline nor advances the pass window, so
+    /// calling it costs nothing a caller has not already decided to pay when it goes on to call
+    /// <see cref="CalculateDeltaWithSeriesAge"/> for each family, which performs the real update.</para>
+    ///
+    /// <para>Default-implemented to report no reset — <c>AnyReset = false</c> — so existing implementers,
+    /// including every test double in this repo, keep compiling and keep today's per-family behaviour until
+    /// they opt in by overriding it (the shared <see cref="CollectorDeltaCalculator"/> both SKUs run does).
+    /// </para>
+    /// </summary>
+    /// <param name="counters">Every family of the row, family name paired with its current value, in the
+    /// SAME collection pass and under the SAME <paramref name="key"/>.</param>
+    RowResetDecision DecideRow(int serverId, IReadOnlyList<(string Family, long Current)> counters, string key,
+        int? seriesAgeSeconds, DateTime? collectionTime, int maxGapSeconds)
+        => default;
+
+    /// <summary>
+    /// #4428: rolls a caller-named pass window forward when <paramref name="observedTime"/> is new for
+    /// (<paramref name="serverId"/>, <paramref name="group"/>), and returns the PREVIOUS value of that
+    /// window — the same bookkeeping <see cref="DecideRow"/> already keeps on the collector's own clock
+    /// (<c>collectionTime</c>), exposed generically so a definition that must place a restart on a
+    /// DIFFERENT clock — a source's own <c>now()</c>, captured in the same read, rather than the collector
+    /// host's — can track that clock's own previous pass without a second cache of its own.
+    ///
+    /// <para><paramref name="group"/> is a caller-chosen namespace. It shares nothing with any
+    /// <c>collectorName</c> a delta family uses elsewhere — the point of the method is that a target-clock
+    /// window and a collector-clock window never mix, so a caller MUST pick a name no ordinary delta call
+    /// also passes as its <c>collectorName</c>.</para>
+    ///
+    /// <para>Default-implemented to return null, like every other member here, so an implementer that
+    /// tracks no such window — every test double in this repo until it opts in — keeps compiling.</para>
+    /// </summary>
+    DateTime? PreviousPass(int serverId, string group, DateTime observedTime)
+        => null;
+
+    /// <summary>
+    /// Forgets every baseline and every pass window cached for <paramref name="serverId"/>, because the
+    /// counters behind that id are no longer the counters the baselines were read from (#3653 A5, the
+    /// identity-epoch item of #3540).
+    ///
+    /// <para><b>Why this is on the DEFINITION's contract and not only on the host's calculator.</b> The
+    /// hosts already forget a server they stop monitoring (Lite's tab close, Darling's reconcile-remove
+    /// branch, #3540 A4) and they hold the concrete calculator to do it. But the discontinuities that
+    /// happen WHILE a server stays monitored — the instance restarted, the listener or the DNS endpoint
+    /// now lands on a different replica, <c>pg_stat_statements_reset()</c> was called — are visible only
+    /// to a definition, in the row it is reading, and only that definition can act BEFORE its own
+    /// subtraction: a host that learns of the epoch after the run has already stored one interval of
+    /// <c>new instance's counter minus old instance's baseline</c>. So the definition that observes the
+    /// epoch (see <see cref="ServerEpoch"/>) forgets through the same handle it subtracts through.</para>
+    ///
+    /// <para><paramref name="discontinuity"/> is the one-line human account of what changed (old and new
+    /// value, named), which the implementation may keep for the host to log — the definition has no
+    /// logger, the host has no view of the row. Null when the caller has nothing to say (the host's own
+    /// remove path).</para>
+    ///
+    /// <para>Default-implemented as a no-op, like <see cref="CalculateDeltaWithSeriesAge"/>, so an
+    /// implementer that caches nothing per server — every test double in this repo — keeps compiling with
+    /// nothing to forget. The shared <see cref="CollectorDeltaCalculator"/> both SKUs run overrides both
+    /// members; an implementation that caches baselines and inherits these no-ops has the continuity bug
+    /// this paragraph is the only warning of.</para>
+    /// </summary>
+    void ClearServer(int serverId, string? discontinuity = null)
+    {
+    }
+
+    /// <summary>
+    /// As <see cref="ClearServer"/>, but for the named delta GROUPS only — the <c>collectorName</c> values
+    /// the family's <c>CalculateDelta*</c> calls pass — leaving every other family's baselines intact.
+    /// For an epoch that belongs to one family alone: <c>pg_stat_statements_info.stats_reset</c> moves when
+    /// the statements counters are reset or are a different instance's, and says nothing about any other
+    /// counter on the server, so forgetting the whole server for it would throw away knowable intervals
+    /// elsewhere. Same default, for the same reason.
+    /// </summary>
+    void ClearGroups(int serverId, string? discontinuity, params string[] groups)
+    {
+    }
+
+    /// <summary>
+    /// #4428: every value this calculator has cached for <paramref name="collectorName"/> under
+    /// <paramref name="serverId"/>, keyed by the same key each <c>CalculateDelta*</c> call under that
+    /// collector name uses — a PEEK, like <see cref="DecideRow"/>: it updates nothing and costs nothing a
+    /// caller was not already going to spend making its own per-key delta calls. Empty when the server or
+    /// collector has cached nothing yet (a first pass). The caller this exists for compares every row's
+    /// CURRENT value against its own cached baseline here to decide, once per pass, whether the whole
+    /// server's counters just reset together — a decision no single per-key delta call can make, because
+    /// each one sees only its own key.
+    ///
+    /// <para>Default-implemented to return an empty map, so existing implementers — including every test
+    /// double in this repo — keep compiling and report no baselines until they opt in, exactly the pattern
+    /// <see cref="DecideRow"/> and <see cref="CalculateDeltaWithSeriesAge"/> already use.</para>
+    /// </summary>
+    IReadOnlyDictionary<string, long> PeekBaselines(int serverId, string collectorName)
+        => EmptyBaselines;
+
+    /// <summary>The empty map <see cref="PeekBaselines"/> returns when nothing is cached.</summary>
+    static readonly IReadOnlyDictionary<string, long> EmptyBaselines = new Dictionary<string, long>(0);
+
+    /// <summary>
+    /// #4428: rebases every cached VALUE for the named delta groups on <paramref name="serverId"/> to zero,
+    /// KEEPING each key's cached timestamp — the counterpart to a server-wide counter clear (SQL Server's
+    /// <c>DBCC SQLPERF(@wait_stat_name, CLEAR)</c> job): every counter really did drop to (near) zero at the
+    /// same instant, so the next ordinary delta call (current value minus a zero baseline, over the real
+    /// interval since the kept timestamp) reports the row's current value as the delta since the clear —
+    /// rather than the reset branch's (0, 0), which would read the whole slice since the clear as unknowable
+    /// for every one of the (typically hundreds of) affected keys.
+    ///
+    /// <para>Only the slice between the previous pass and the clear is lost — genuinely unknowable, since
+    /// the DMV never reports the pre-clear value and the post-clear one in the same row — and this pass's
+    /// per-second rate for every rebased key is therefore slightly UNDERSTATED: its numerator is the whole
+    /// post-clear value but its denominator (the interval) still spans back to the pre-clear baseline's
+    /// timestamp, which is longer than the time the counter actually had to accrue in.</para>
+    ///
+    /// <para>Default-implemented as a no-op, like <see cref="ClearServer"/> and <see cref="ClearGroups"/>, so
+    /// an implementer that caches nothing per server keeps compiling with nothing to rebase.</para>
+    /// </summary>
+    void RebaseFamiliesToZero(int serverId, IEnumerable<string> collectorNames)
+    {
+    }
+
+    /// <summary>
+    /// #4428: queues the once-per-server-per-day account of a detected wait-stats clear (see
+    /// <see cref="RebaseFamiliesToZero"/>) for a host to log — the same waiting-room pattern
+    /// <see cref="ClearServer"/>'s discontinuity queue uses, but throttled to once per calendar day per
+    /// server (by <paramref name="nowUtc"/>'s date) rather than once per drain, because a busy clear job can
+    /// fire many times an hour and the log line's job is to tell an operator the phenomenon is happening, not
+    /// to count every occurrence. A second call the same UTC day is silently dropped.
+    ///
+    /// <para>Default-implemented as a no-op, so an implementer that caches nothing per server keeps
+    /// compiling with nothing to queue.</para>
+    /// </summary>
+    void NoteWaitStatsClear(int serverId, string serverName, DateTime nowUtc)
+    {
+    }
+
+    /// <summary>
+    /// Hands back — and forgets — every wait-stats-clear account queued for <paramref name="serverId"/> by
+    /// <see cref="NoteWaitStatsClear"/> since the last drain. A host calls this once per collector run,
+    /// after the run, and logs each line at Information exactly as given — the sentence is already complete
+    /// prose, unlike <see cref="DrainDiscontinuities"/>'s lines, which a host wraps with its own collector
+    /// and run framing. Empty in the default no-op implementation and in every ordinary run.
+    /// </summary>
+    IReadOnlyList<string> DrainWaitStatsClearWarnings(int serverId)
+        => Array.Empty<string>();
 }

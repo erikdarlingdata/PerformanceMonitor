@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -112,7 +113,36 @@ public interface IAlertEngineSettings
     /// <summary>Fire when the rolling-window deadlock count reaches this value (count-based; see class remarks).</summary>
     int DeadlockCountThreshold { get; }
 
-    /// <summary>Fire when a poison wait type's average ms-per-wait is at/above this value.</summary>
+    /// <summary>
+    /// The deadlock RATE band's two tiers (#3368) — deadlocks per hour, the pair the fleet card, the daily
+    /// calendar and <c>get_fleet_overview</c> already band a server on. <b>Not a fire threshold</b>: whether
+    /// "Deadlocks Detected" fires is <see cref="DeadlockCountThreshold"/>'s business, unchanged. Since
+    /// #3653 (A8e) the engine GRADES the fire it has already decided on with these tiers — Warning by
+    /// default, Critical when the window's rate reaches <see cref="DeadlockRateThresholds.CriticalPerHour"/>
+    /// — so the alert row wears the colour the card would show for the same hour, instead of the by-name
+    /// red every deadlock row wore before (one deadlock and a hundred rendered identically).
+    ///
+    /// <para>Plumbed rather than read from <see cref="DeadlockRateThresholds.Default"/> inside the engine
+    /// because Darling's pair is a V120 store knob (<c>deadlockWarnPerHour</c> /
+    /// <c>deadlockCriticalPerHour</c>, <c>update_alert_settings</c>): an operator who raised the card's
+    /// Critical tier must not see the alert grade Critical on the shipped one. Lite has no such knob and
+    /// returns the shipped pair — the value its own card bands on. The clamp lives on the record, on read,
+    /// for the reason its Darling accessor states.</para>
+    /// </summary>
+    DeadlockRateThresholds DeadlockRateThresholds { get; }
+
+    /// <summary>
+    /// <b>Retired as a threshold by #3539 A4; kept as a shipped setting.</b> Until then: fire when a poison
+    /// wait type's average ms-per-wait on ONE collector delta was at/above this value. The Poison Wait alert
+    /// now grades accumulated wait over a ten-minute window against the fleet-calibrated bars on
+    /// <see cref="PoisonWaitEvaluator"/> (shared with the PostgreSQL twin, which never consulted this knob),
+    /// and <c>AlertEngine.CheckPoisonWaitsAsync</c> no longer reads this member. It stays on the contract
+    /// because it is persisted on both SKUs (Lite's settings JSON, Darling's darling.json / store
+    /// control-plane row) and surfaced by their Settings windows and <c>get_alert_settings</c>; removing it
+    /// would need a schema rung and a UI change for a value nothing evaluates, and a per-wait average has no
+    /// honest meaning to repurpose it to. An operator who tuned it gets the new shape regardless — the
+    /// knob's readers report it, the engine ignores it, and this comment is the record of why.
+    /// </summary>
     int PoisonWaitThresholdMs { get; }
 
     /// <summary>Fire when a query's elapsed time is at/above this many minutes.</summary>
@@ -140,6 +170,45 @@ public interface IAlertEngineSettings
 
     /// <summary>Exclude CDC capture sessions (default true).</summary>
     bool LongRunningQueryExcludeCdc { get; }
+
+    /// <summary>
+    /// <c>program_name</c> PREFIXES whose sessions the Long-Running Query alert does NOT EVALUATE (#3653 A5,
+    /// ruling Q5) — the opt-out knob for permanent background requests, which no duration threshold and no
+    /// persistence gate can separate from a runaway query because they are over any bar forever (measured on
+    /// one production store class: 191 distinct sessions over the 30-minute bar in 7 days, the p90 of them seen
+    /// in 6,192 snapshots). Case-insensitive prefix match, no wildcard grammar; see
+    /// <see cref="LongRunningQueryExclusions"/> for the rule and for why it is applied in the read ahead of
+    /// the row cap rather than after it. Distinct from a mute rule, which silences a fire already decided: an
+    /// excluded session never reaches the decision, is not fingerprinted and does not hold an incident open.
+    ///
+    /// <para><b>Seeded default</b> (<see cref="LongRunningQueryExclusions.DefaultProgramNamePrefixes"/>):
+    /// <c>SQLAgent - TSQL JobStep</c>. Measured over 7 days on one large production store, the long-running
+    /// population fell into four classes: (1) SQL Agent job-step programs — ~460 sessions a week across 11
+    /// single-server jobs, medians 35–62 minutes — excluded here by prefix, because the rest of the value is the
+    /// job id; (2) the <c>NT AUTHORITY\SYSTEM</c> / <c>NT AUTHORITY\NETWORK SERVICE</c> logins — the permanent
+    /// multi-day background, excluded by <see cref="LongRunningQueryExcludedLogins"/>; (3) the application's
+    /// admin login — NOT excluded, because it carries the job wave AND real ad-hoc long-runners, and blinding it
+    /// would hide the second to silence the first (the job-step prefix already removes its share); (4) named
+    /// humans — 3 sessions a week, never excluded: they are what the page is for. The seed is a DEFAULT an
+    /// operator may clear: an empty list excludes nothing on this arm; a host whose settings store lacks the key
+    /// altogether reads the seed.</para>
+    /// </summary>
+    IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes { get; }
+
+    /// <summary>
+    /// Exact <c>login_name</c> values whose sessions the Long-Running Query alert does not evaluate (#3653 A5,
+    /// Q5) — the second handle a background request reliably carries, for the service principals whose
+    /// <c>program_name</c> is a generic driver string. Case-insensitive, whole value (a prefix here would let
+    /// <c>svc</c> swallow <c>svc_owner</c>); a session is excluded when EITHER arm matches, and counted once.
+    ///
+    /// <para><b>Seeded default</b> (<see cref="LongRunningQueryExclusions.DefaultLogins"/>):
+    /// <c>NT AUTHORITY\SYSTEM</c> and <c>NT AUTHORITY\NETWORK SERVICE</c> — class (2) of the production read,
+    /// ~70 sessions across 42 servers with medians of 4.8–8.6 DAYS over 300K+ snapshots, CDC-capture shaped.
+    /// The application's admin login is deliberately absent (class 3 — see
+    /// <see cref="LongRunningQueryExcludedProgramNamePrefixes"/>). A DEFAULT, not a constant: an operator
+    /// clearing the list excludes nothing by login.</para>
+    /// </summary>
+    IReadOnlyList<string> LongRunningQueryExcludedLogins { get; }
 
     /// <summary>Fire when tempdb reserved space is at/above this % of total.</summary>
     int TempDbSpaceThresholdPercent { get; }
@@ -169,6 +238,16 @@ public interface IAlertEngineSettings
     /// </summary>
     int SelfDiskFreeWarnPercent { get; }
 
+    /// <summary>
+    /// The store warning's GB floor (#3528): the percent above additionally requires free space
+    /// below this many GB before Store Disk Pressure fires — an AND qualifier so a large volume at
+    /// a low percent (400 GB free on a 4 TB store) never pages CRITICAL; 0 removes the floor and
+    /// restores the percent-only condition. The PVS floor's composition, deliberately NOT the
+    /// target-volume pair's OR: there the GB dimension ADDS fires, here it keeps them honest. On
+    /// the engine surface for the reason its percent sibling is.
+    /// </summary>
+    int SelfDiskFreeWarnGb { get; }
+
     /// <summary>How long collection may go quiet before Collection Stopped / Agent Not Running
     /// fire (#2107; was a compile-time 30 minutes). Lite returns the default.</summary>
     int CollectionStaleMinutes { get; }
@@ -196,9 +275,17 @@ public interface IAlertEngineSettings
     int PvsFloorGb { get; }
 
     /// <summary>
-    /// The RISE gate: a file that grew at least this many MB inside the lookback window (#2349). Primary
-    /// rather than the level, for #2157's reason — a level alone re-pages every cooldown about a size that has
-    /// been true for a week, which trains people to mute it, while a rise is an event.
+    /// The RISE gate: a file growing at least this many MB PER HOUR, averaged over
+    /// <see cref="FileGrowthLookbackMinutes"/> (#2349, unit fixed by #3539 A8c). Primary rather than the level,
+    /// for #2157's reason — a level alone re-pages every cooldown about a size that has been true for a week,
+    /// which trains people to mute it, while a rise is an event.
+    ///
+    /// <para>A rate, not an in-window delta. The name keeps its <c>Mb</c> suffix because the stored column
+    /// (<c>config_alert_settings.file_growth_rise_mb</c>) and the MCP key (<c>file_growth.rise_mb</c>) keep
+    /// theirs; the unit is stated where the number is shown — both Settings windows, the alert's threshold
+    /// line, the tool descriptions — with <see cref="AlertContextBuilders.FileGrowthRiseUnit"/>. Compared
+    /// through <see cref="AlertContextBuilders.FileGrowthRiseBarMb"/>, which scales it to the window; on the
+    /// shipped 60-minute lookback that is the number itself.</para>
     /// </summary>
     int FileGrowthRiseMb { get; }
 
@@ -209,8 +296,11 @@ public interface IAlertEngineSettings
     /// </summary>
     int FileGrowthVolumePercent { get; }
 
-    /// <summary>How far back the rise is measured (#2349). The window is MEASURED from the samples rather than
-    /// assumed, so a gap in collection cannot make a slow rise look fast.</summary>
+    /// <summary>The window the rise RATE is averaged over (#2349; #3539 A8c). A short window catches a burst, a
+    /// long one asks the rate to be sustained — it does not rescale the threshold, which is per hour whatever
+    /// this is set to. The span the samples actually cover inside it is MEASURED rather than assumed, so a gap
+    /// in collection cannot make a slow rise look fast; growth observed over less than the window is held to
+    /// the whole window's bar, which reads unobserved time as no growth.</summary>
     int FileGrowthLookbackMinutes { get; }
 
     /// <summary>Fire when a running job exceeds this multiple of its historical average duration.</summary>

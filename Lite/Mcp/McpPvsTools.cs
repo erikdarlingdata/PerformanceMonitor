@@ -23,7 +23,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPvsTools
 {
     [McpServerTool(Name = "get_pvs_stats"), Description(
-        "Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of.")]
+        "ADR PVS state per database: size, % of database, aborted-txn count, cleaner times (a start with no end = mid-run). LATEST IS A TIME: the newest snapshot, not a window; as_of is when it was taken. trend_hours_back (0 = off) looks back from now, not from as_of, over the top-5 databases by current size. Cleaner times are de-skewed to UTC, like as_of. pct_of_database is null only if PVS size is unmeasured (pvs_measured false) or database size is missing or 0 (pct_of_database_reason says why); else measured 0 MB = 0.00. No rows: not_collected if this engine can't collect PVS, else empty. <<GUIDE>> Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of. pvs_measured says whether the DMV reported a size for that database at all; a measured 0 MB is published as pvs_size_mb 0 and pct_of_database 0.00 (the healthy, fully-cleaned state), and pct_of_database is null only when the numerator was not measured or the denominator is absent or zero, with pct_of_database_reason saying which.")]
     public static async Task<string> GetPvsStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -42,12 +42,14 @@ public sealed class McpPvsTools
             }
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
+            string? UtcOrNull(DateTime? serverLocal) => serverLocal is { } stamp ? serverClock.ToUtc(stamp).ToString("o") : null;
 
             var rows = await dataService.GetPvsStatsLatestAsync(resolved.ServerId);
             if (rows.Count == 0)
@@ -63,10 +65,17 @@ public sealed class McpPvsTools
                 database_name = r.DatabaseName,
                 is_adr_on = r.IsAdrOn,
                 pvs_size_mb = r.PvsSizeMb,
-                /* The SAME denominator the FinOps grid and the pressure alert use, so no surface disagrees. */
-                pct_of_database = r.PvsSizeMb is > 0 && r.DatabaseDataSizeMb is > 0
-                    ? Math.Round((double)(r.PvsSizeMb.Value / r.DatabaseDataSizeMb.Value) * 100.0, 2)
+                /* Whether the DMV reported a size at all (#3541 A12, contract rule 5). A measured 0 MB — the
+                   healthy, fully-cleaned state — used to be indistinguishable from a NULL the collector
+                   could not read: both fell through to pct_of_database = null. */
+                pvs_measured = r.PvsSizeMb.HasValue,
+                /* The SAME denominator the FinOps grid and the pressure alert use, so no surface disagrees.
+                   Any MEASURED size divides — 0 MB of a 100 GB database is 0.00%, a measurement — and only an
+                   unmeasured numerator or an absent/zero denominator yields null, with the reason beside it. */
+                pct_of_database = r.PvsSizeMb is { } pvsMb && r.DatabaseDataSizeMb is > 0
+                    ? Math.Round((double)(pvsMb / r.DatabaseDataSizeMb.Value) * 100.0, 2)
                     : (double?)null,
+                pct_of_database_reason = PctReason(r.PvsSizeMb.HasValue, r.DatabaseDataSizeMb),
                 online_index_version_store_mb = r.OnlineIndexVersionStoreMb,
                 database_data_size_mb = r.DatabaseDataSizeMb,
                 aborted_transaction_count = r.AbortedTransactionCount,
@@ -74,10 +83,10 @@ public sealed class McpPvsTools
                    presented as the DMV reports it; the FRAME is not — these four are server-local in the
                    store and are de-skewed above, so they compare directly against as_of instead of reading
                    one whole UTC offset stale on a value that is usually seconds old. */
-                aborted_version_cleaner_start_time = r.AbortedCleanerStartTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                aborted_version_cleaner_end_time = r.AbortedCleanerEndTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                offrow_version_cleaner_start_time = r.OffrowCleanerStartTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                offrow_version_cleaner_end_time = r.OffrowCleanerEndTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                aborted_version_cleaner_start_time = UtcOrNull(r.AbortedCleanerStartTime),
+                aborted_version_cleaner_end_time = UtcOrNull(r.AbortedCleanerEndTime),
+                offrow_version_cleaner_start_time = UtcOrNull(r.OffrowCleanerStartTime),
+                offrow_version_cleaner_end_time = UtcOrNull(r.OffrowCleanerEndTime),
                 /* The lag between these ids is how far cleanup is behind — the gap itself, never a verdict. */
                 oldest_active_transaction_id = r.OldestActiveTransactionId,
                 oldest_aborted_transaction_id = r.OldestAbortedTransactionId,
@@ -95,7 +104,10 @@ public sealed class McpPvsTools
                         points = g.Select(p => new
                         {
                             collection_time = p.CollectionTime.ToString("o"),
+                            /* #3653: an unmeasured point is null, with the same pvs_measured flag the latest
+                               snapshot carries — never a fabricated 0 MB in the series. */
                             pvs_size_mb = p.PvsSizeMb,
+                            pvs_measured = p.PvsSizeMb.HasValue,
                             pct_of_database = p.PctOfDatabase is { } pct ? Math.Round(pct, 2) : (double?)null,
                         }),
                     });
@@ -114,5 +126,21 @@ public sealed class McpPvsTools
         {
             return McpHelpers.FormatError("get_pvs_stats", ex);
         }
+    }
+
+    /// <summary>
+    /// Why <c>pct_of_database</c> is null, when it is (#3541 A12): the numerator was not measured, or the
+    /// denominator was absent or zero. Null when the percent is defined — including a defined 0.00 — so the
+    /// healthy row carries no note. Darling's twin words it identically.
+    /// </summary>
+    internal static string? PctReason(bool pvsMeasured, decimal? databaseDataSizeMb)
+    {
+        if (!pvsMeasured)
+            return "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown — not zero.";
+        if (databaseDataSizeMb is null)
+            return "database_data_size_mb was not captured for this database, so there is no denominator — the share is unknown, not zero.";
+        if (databaseDataSizeMb <= 0)
+            return "database_data_size_mb is 0, so the share has no denominator — the share is unknown, not zero.";
+        return null;
     }
 }

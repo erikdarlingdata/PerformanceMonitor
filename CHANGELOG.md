@@ -19,6 +19,787 @@ cut it is archived and compacted like every other version:
 Releases before 3.0.0 are not archived: those entries carry no prose to move.
 <!-- changelog-layout:end -->
 
+## [Unreleased]
+
+## [3.9.0] - 2026-10-02
+
+Full entries: [docs/changelog/3.9.md](docs/changelog/3.9.md)
+
+### Important
+
+- **Collectors run at their configured interval on large fleets, in Darling and Lite** ([#4644])
+- **Upgrading from 3.8 runs the Darling store migrations V126 through V157 on the service's first start**
+
+### Added
+
+- **`--drop-xe-sessions`** ([#4852])
+- **Collection Falling Behind self-alert** ([#4851])
+- **PostgreSQL targets: a finding when pg_stat_statements keeps evicting statements** ([#4680])
+- **Per-rule plan analyzer overrides** ([#4602])
+- **Plan viewer: a Server Context card** ([#4614])
+- **Plan viewer: a Parameters card** ([#4604])
+- **Plan viewer minimap** ([#4596])
+- **Plan analysis flags a possible Standard Edition batch-mode DOP limit, and marks legacy findings** ([#4585])
+- **Plan viewer: a finding's header links to the operator it came from** ([#4559])
+- **The MCP plan tools report which operator each finding came from** ([#4556])
+- **Plan analysis turns a plan's wait statistics into findings, and gives external and preemptive waits a real benefit estimate** ([#4555])
+- **Plan analysis now flags an operator that takes a large share of a statement's run time even when no other rule has advice for it** ([#4550])
+- **Plan analysis warns on dynamic cursors and on cursors declared without `LOCAL`, and "Scan With Predicate" names a dynamic cursor when it is the likely cause** ([#4549])
+- **Plan analysis flags a query whose text was cut off by SQL Server's showplan limit** ([#4548])
+- **Plan analysis: added the "Bare Scan" finding for a full-table or full-clustered-index scan with no predicate** ([#4545])
+- **Plan analysis now marks which findings are SQL Server's own warnings and which are inferences, and duplicate missing-index suggestions are no longer merged across different databases** ([#4543])
+- **get_read_latency reports how long the web dashboard's and MCP server's reads take: p50, p95 and p99 per read over a chosen window, with timeout counts** ([#4454])
+- **Self-monitoring alerts (Collection Stopped, Capture Down, Collector Cost Regression) open a notebook with the server's collection health and the collector's log and cost** ([#4437])
+- **Analysis-finding alerts open a notebook with that finding's summary and evidence** ([#4436])
+- **Custom-rule alerts open a notebook that charts the rule's own measure with its threshold or band** ([#4433])
+- **Poison Wait alerts open an authored notebook: top waits on both engines, waiting tasks, resource-semaphore/memory-grant detail when the wait is RESOURCE_SEMAPHORE, and a trend bound to the firing wait type.** ([#4424])
+- **Server Unreachable/Restored and the Agent-job alerts (Failed Agent Job, Long-Running Job, Agent Not Running) now open an authored notebook instead of the mechanical section-list fallback, and the collection-log web read can filter by status.** ([#4422])
+- **High CPU alerts open an authored notebook: SQL Server and PostgreSQL CPU timelines, top queries/procedures by CPU, and scheduler pressure, instead of the mechanical read list.** ([#4420])
+- **PostgreSQL Wraparound Risk, Vacuum Horizon Blocked and Replication Slot Retention alerts open an authored notebook: their own drill-down reads and a 24h trend panel, instead of the mechanical fallback section list.** ([#4419])
+- **Long-Running Query and Forced Plan Failing alerts open an authored notebook: active/completed queries and a completion-duration timeline for Long-Running Query, plan corrections and a corrections timeline for Forced Plan Failing.** ([#4418])
+- **Authored Blocking and Deadlocks alert-notebook templates** ([#4395])
+- **Aurora per-query peak memory as a context fact** ([#4370])
+- **Alert-notebook read-only render on `#/triage`** ([#4368])
+- **Notebook `read` cell type** ([#4367])
+- **Alert-notebook binding endpoint** ([#4366])
+- **A shell-level pause/resume control for the web viewer's auto-refresh** ([#4365])
+- **The store host profile now reports its cloud instance type** ([#4330])
+- **Store host visibility: an MCP read and a web panel** ([#4282])
+- **`--check-settings` reports whether a managed store's sizing still matches this host** ([#4271])
+- **`--validate-config` (`--test-connection`) no longer fails a healthy store over a stale entry in darling.json** ([#4271])
+- **Darling's MCP host now serves a /core endpoint alongside /** ([#4121])
+- **get_resource_semaphore also returns interval_seconds** ([#4103])
+- **get_query_store_top takes module_name, so one stored procedure's Query Store history can be read without widening top** ([#4057])
+- **The store names its own slow queries: `get_store_query_stats` ranks the monitoring store's SQL by cost and by the role that ran it** ([#3899], [#3915], [#3914])
+- **Maintain your own theme colors, per theme, with a reset to default** ([#3577])
+- **A PostgreSQL target with every logging setting off no longer looks identical to an instrumented one** ([#3607])
+- **A stock PostgreSQL target without pg_wait_sampling now has a wait profile instead of an empty chart** ([#3604])
+- **PostgreSQL's server log is read by a classifier, not by two regexes** ([#3601])
+- **The log said what the spill cost and what the vacuum cost; the store kept the sentence and threw away the number** ([#3602], [#3603])
+- **Alert families route to their own channels** ([#3598])
+- **PostgreSQL targets enter the analysis pipeline** ([#3542])
+- **A PostgreSQL target's durability posture is stated, not inferred** ([#3542])
+- **A PostgreSQL analysis pass now names the statement** ([#3542])
+- **The two PostgreSQL knobs learn to speak** ([#3542])
+- **A PostgreSQL target's analysis pass gains its vacuum family, graded on the same bars the Tier-0 alerts page on** ([#3542])
+- **A PostgreSQL pool near its connection ceiling is graded as the outage it is** ([#3542])
+- **A PostgreSQL analysis pass now names temp-file spill and gates work_mem on it** ([#3542])
+- **A PostgreSQL analysis pass reads the wait profile — measured on Aurora, estimated on stock, and says which** ([#3542])
+- **A PostgreSQL target learns its own normal** ([#3542])
+- **The measurement contract had ten rules and two tests** ([#3653])
+- **v2 plumbing for the PostgreSQL-target engine, and the wait-profile anomaly now folds onto its wait and can page** ([#3691])
+- **Schema 133: the PostgreSQL saturation numerator and the sampler's duty cycle are stored** ([#3691])
+- **The pull-request review learns the repository's traps and stops answering LGTM by default** ([#3710])
+- **A server configuration change now has a consequence the engine states — `CONFIG_CHANGED` compares the ±4 h around it and says what moved, or that nothing did** ([#3653])
+- **PostgreSQL deadlock cards carry the captured exemplars, grouped by shape and ranked by recurrence** ([#3691])
+- **The PostgreSQL bloat family grades fourteen-day GROWTH behind a size floor, never a spot percentage** ([#3691])
+- **A chain that fired every Tuesday at the same hour was rated a fresh incident each week and nobody was told; the pass now labels it "recurring at this hour" at unchanged severity, and a weekly Agent job whose slot slid gets "maintenance window moved"** ([#3653])
+- **PostgreSQL read latency is now a graded fact, and the pass says why when it cannot know** ([#3691])
+- **Replication lag and slot retention stories for the PostgreSQL-target engine** ([#3691])
+- **The CPU sample's UTC instant and the server's time-zone id are now stored, so UTC-window readers stop deriving an offset that is an hour wrong across DST** ([#3653])
+- **PostgreSQL sessions: an operator now learns which application left a transaction open and walked away** ([#3691])
+- **The Long-Running Query opt-out knob was read-only on Darling — V135 gives it a store home with the production read's seeds as the column default, editable in the Viewer and through `update_alert_settings` on both SKUs** ([#3653])
+- **PostgreSQL blocking: the pass names the head of the chain, how long the sessions behind it really waited, and whether the log agrees** ([#3691], [#4886])
+- **A PostgreSQL table that turned autovacuum off and fell behind is its own card** ([#3691])
+- **A collector can be enabled or disabled headlessly** ([#3752], [#4809])
+- **Stock PostgreSQL's sampled waits read per second the sampler was watching, and get their own baseline and anomaly** ([#3691])
+- **Rule 6's C# half is a census, not a stated bound** ([#3653])
+- **CONFIG_CHANGED covers database options and trace flags, not only sp_configure** ([#3653])
+- **Every trend surface renders the identity-epoch discontinuity marker the store already held** ([#3653])
+- **v3 plumbing for the PostgreSQL-target engine** ([#3691])
+- **PostgreSQL targets get a per-database size series and the host's memory** ([#3691])
+- **PostgreSQL buffer-pressure cards say what the cache holds** ([#3691])
+- **A PostgreSQL pass now names the statement whose plan changed and what it cost** ([#3691])
+- **A PostgreSQL target's analysis pass measures CPU where no capacity percent exists** ([#3691])
+- **PostgreSQL targets learn whether the memory configuration fits the host** ([#3691])
+- **A baseline series can be scoped to one statement** ([#3691])
+- **A PostgreSQL operator now learns which large relation a statement reads sequentially under a selective predicate, how often, and what an index would cost** ([#3691])
+- **Darling V137 / Lite v64: eight nullable columns so the store can say what Query Store captures, where a lone finding goes, and how full the plan dimension's TOAST file is** ([#3796], [#3712], [#3783])
+- **Nothing in the product could say which databases were cluttering Query Store, why, or what it cost the servers hosting them — while every input for that answer was already in the store** ([#3797])
+- **`get_query_store_health` said "Query Store health" and skipped the one knob that names a plan-churn factory** ([#3796])
+- **The store could say how big its plan dimension's TOAST file was and not how full, and could not see its own checkpointer at all** ([#3783])
+- **The uncorroborated-finding route knob said FILE-LEVEL, edit darling.json and restart, while the rung had already given it a store column nothing read** ([#3712])
+- **A PostgreSQL operator now learns which database is growing, how fast, and when it doubles** ([#3691])
+- **The Query Store clutter view had no viewer and told every reader the capture mode was uncollected** ([#3797])
+- **The three report alerts carry their rows as structure as well as prose, so every surface that can render a table has one** ([#3834])
+- **A baseline's dispersion floor says in words that it does not cover a dead metric, a Flat-tier fact admits its distinct-day count is a ceiling proxy, and the three copies of the stamping helper are held to one key set** ([#3859])
+- **A summary card can name its top few objects, not only its worst** ([#3691])
+- **`get_collection_log` can be asked for the failures** ([#3869])
+- **`get_collection_health` now says when the analysis pass could not read one of its fact families** ([#3691])
+- **A `pg_server_config` row now says whose setting it is** ([#3691])
+- **`get_object_locking` says when its snapshot was collected** ([#3880])
+
+### Changed
+
+- **The managed store sets `random_page_cost = 1.1`** ([#4863])
+- **Per-server Query Store reads fetch fewer rows** ([#4861])
+- **SQL Server blocking and deadlock baselines count the hours collection covered** ([#4853])
+- **The plan viewer's Runtime Summary lists CE model above Optimization, with Early abort under it** ([#4849])
+- **Purge Now runs in the background and is paced like the daily purge** ([#4835])
+- **get_pg_deadlocks explains an empty answer more completely** ([#4832])
+- **Darling reads a quiet database's watermark from its cache instead of from the store every cycle** ([#4818])
+- **Query Store rows now record when each interval ended, in both apps' stores** ([#4802])
+- **Query Store backfill: the per-tick database list no longer walks the newest chunk's index** ([#4703])
+- **Query Store views over windows longer than the raw tier now show the full window from the interval table, and say how far back it reaches** ([#4700])
+- **Analyzer wording for Nested Loops outer sides and row estimate mismatches now counts rows the way the plan viewer does** ([#4698])
+- **PostgreSQL targets: the top-queries views say when pg_stat_statements evicted entries during the window** ([#4680])
+- **Web dashboard: each notebook and Custom View has its own auto-refresh setting, notebooks start with it off, and slow pages back off** ([#4671])
+- **Query Store collection: each database's watermark comes from the store only when a cached value can't be proven current** ([#4669])
+- **Alert pass: the forced-plan failure check reads the store only when its answer can have changed** ([#4667])
+- **Query Store collection: the orphaned per-database state cleanup runs at most once an hour per server** ([#4665])
+- **The Darling Viewer's Query Store trend chart and `get_query_store_duration_trend` no longer re-scan the hourly rollup's oldest and newest hour on every load** ([#4618])
+- **Custom Views Query Store panels over a recent window read the per-interval table instead of re-sorting raw snapshots** ([#4617])
+- **`get_store_metrics` reports the per-interval Query Store tables by name** ([#4616])
+- **Darling Viewer and MCP store reads can no longer spill unbounded temporary files** ([#4610])
+- **Plan viewer minimap: resize, double-click zoom, and accuracy-coloured edges** ([#4603])
+- **Rule 38 can now flag a Standard Edition DOP limit as a Warning** ([#4601])
+- **Plan viewer: one neutral card design for the insights strip** ([#4599])
+- **The plan viewer's Wait Stats rows show each wait's potential benefit and never clip** ([#4595])
+- **Plan viewer costs are formatted as in PerformanceStudio** ([#4592])
+- **The plan viewer's Wait Stats header shows the total wait time and wait-type count on hover** ([#4591])
+- **The plan viewer's runtime summary card matches PerformanceStudio's** ([#4590])
+- **The plan viewer's properties panel can be filtered and copied, and keeps its width** ([#4588])
+- **The plan viewer rolls per-thread stats into one collapsed breakdown** ([#4587])
+- **The plan viewer colours actual-plan edges by how far actual rows diverged from the estimate** ([#4586])
+- **Wait-category colours use PerformanceStudio's contrast-checked palette** ([#4583])
+- **Plan analysis drops three rules that PerformanceStudio removed** ([#4565])
+- **Dependencies: Velopack to 1.2.158, with the release packer moved to match** ([#4563])
+- **The store writes much less WAL refreshing its Query Store rollups** ([#4506])
+- **The store writes less WAL maintaining its query plan and text dimensions** ([#4502])
+- **The store's own PostgreSQL log now names the application behind each line** ([#4501])
+- **Darling and Lite now record each Availability Group's `group_id`, so two monitored secondaries of one AG count as one group even without its primary** ([#4495])
+- **The Viewer's Job History reads each server's newest runs through an index instead of sorting the whole fleet's window** ([#4493])
+- **The service's startup watermark read looks up each collector's newest run through a new index instead of scanning the recent `collection_log` chunks** ([#4489])
+- **Darling's service, Viewer, CLI and store-upgrade connections now name themselves in `application_name`** ([#4486])
+- **The Viewer's Overview runs its fleet collection-health read once per refresh however many server cards load at once, and the status bar measures the store's size at most every 5 minutes** ([#4482])
+- **The startup watermark read no longer walks every compressed `collection_log` chunk in retention** ([#4480])
+- **`get_ag_health` returns at most 11 Availability Group views by default, the least healthy first, and says when more exist** ([#4474])
+- **The Query Store stores write less WAL keeping their plan and text maps current (a quarter to a third less per touch on a test store)** ([#4472])
+- **Scheduler issues now report SQL Server CPU, other-process CPU, idle CPU, memory utilization, page faults and working-set change from each scheduler-monitor sample, flagged the way sp_HealthParser flags them** ([#4456])
+- **The store now gives the web dashboard's and MCP server's reads up to 60 s before cancelling them, instead of 15 s** ([#4447])
+- **The managed store checkpoints every 15 minutes instead of 5, cutting write-ahead log volume** ([#4426])
+- **Report alerts link to their own page: the Fleet Sweep Rollup opens the sweeps page, and the digests carry no link** ([#4421])
+- **`get_top_procedures_by_cpu` and the Top Procedures grid now route to the hourly rollup once raw ages past its retention window, instead of returning nothing** ([#4413])
+- **Sized the Linux compose store's background-worker slots and `work_mem` from the product's own
+- **Cache the server-scoped watermark read across a runner's lifetime, cutting repeated `MAX()` reads against `job_history`, `default_trace_events`, `system_health_events`, and `memory_pressure_events` to one seed per (server, collector) pair instead of one per collection cycle** ([#4399])
+- **Top-N-by-CPU queries now route to the hourly rollup once raw's retention has dropped the window, instead of returning empty** ([#4396])
+- **The Performance Trends Query Store duration chart reads the interval table for windows of 48 hours or more** ([#4382])
+- **The Darling viewer's TempDB file I/O trend now buckets like the File I/O tab's own reads** ([#4353])
+- **Raw hypertables now re-tune their own chunk interval once a day from actual ingest** ([#4344])
+- **The Queries grid and MCP's Query Store top read use a per-interval table for long windows** ([#4341])
+- **Lite's memory clerk and File I/O trend charts bucket long windows in DuckDB** ([#4340])
+- **Lite keeps one DuckDB connection open, so reads attach to it instead of reopening the database file** ([#4339])
+- **Lite's Performance Trends charts bucket long windows in DuckDB** ([#4338])
+- **Lite's Overview CPU, wait and memory lanes bucket long windows in DuckDB** ([#4337])
+- **Settings the service manages now live in one included file, not stacked append blocks** ([#4336], [#4358])
+- **Darling viewer's Performance Trends charts bucket server-side over long windows** ([#4333])
+- **Lite's Wait Stats and Perfmon charts bucket long windows instead of shipping one point per collection** ([#4331])
+- **Darling viewer's File I/O and memory clerk charts load faster over long windows** ([#4329])
+- **Darling viewer's CPU, Overview wait and Overview memory charts bucket server-side over long windows** ([#4327])
+- **PostgreSQL-target baselines recompute once a day instead of every hour** ([#4324])
+- **Three legacy query-stats rollups stop refreshing** ([#4186])
+- **llms.txt and CITATION.cff now match the shipped product** ([#4157])
+- **The MCP tool list's size limit now matches its size** ([#4141])
+- **get_spinlock_stats puts a short description in the tool list** ([#4127])
+- **analyze_query_plan puts a short description in the tool list** ([#4126])
+- **get_pvs_stats puts a short description in the tool list** ([#4125])
+- **get_deadlocks (Darling and Lite) and get_blocked_process_reports (Lite) put a short description in the tool list** ([#4123])
+- **get_long_query_completions puts a short description in the tool list** ([#4122])
+- **get_memory_pressure_events puts a short description in the tool list** ([#4120])
+- **get_latch_stats puts a short description in the tool list** ([#4119])
+- **get_index_usage puts a short description in the tool list** ([#4118])
+- **analyze_procedure_plan puts a short description in the tool list** ([#4117])
+- **validate_custom_view and run_custom_view_panel put a short description in the tool list** ([#4116])
+- **analyze_plan_xml puts a short description in the tool list** ([#4115])
+- **get_ag_health and get_store_query_stats put a short description in the tool list** ([#4114])
+- **Claude Code keeps the MCP entry tools loaded even when it defers the rest** ([#4113])
+- **get_query_store_regressions puts a short description in the tool list** ([#4109])
+- **get_blocking and get_pg_replication_slots put a short description in the tool list** ([#4108])
+- **get_active_queries puts a short description in the tool list** ([#4107])
+- **get_plan_corrections puts a short description in the tool list** ([#4105])
+- **get_query_store_duration_trend and get_perfmon_trend put a short description in the tool list** ([#4101])
+- **get_resource_semaphore and get_memory_grants put a short description in the tool list** ([#4100])
+- **get_daily_summary and get_daily_summary_range put a short description in the tool list** ([#4099])
+- **get_query_store_health and get_default_trace_events put a short description in the tool list** ([#4095])
+- **get_pg_kernel_stats, get_pg_xmin_horizon and get_pg_table_bloat put a short description in the tool list** ([#4093])
+- **get_pg_io_trend, get_pg_database_trend and get_pg_cpu_utilization put a short description in the tool list** ([#4092])
+- **get_pg_column_stats, get_pg_replication_stats and get_pg_predicate_stats put a short description in the tool list** ([#4091])
+- **The Darling service account can no longer change its own program files** ([#4090])
+- **mute_analysis_finding and audit_config put a short description in the tool list** ([#4088])
+- **get_pg_blocking, get_pg_wait_stats and get_pg_index_usage put a short description in the tool list** ([#4087])
+- **get_pg_plan_capture_readiness, get_pg_plans and get_pg_session_states put a short description in the tool list** ([#4086])
+- **get_query_duration_trend and get_procedure_duration_trend put a short description in the tool list** ([#4085])
+- **get_analysis_facts and get_analysis_findings put a short description in the tool list** ([#4083])
+- **get_pg_database_stats, get_pg_autovacuum_health and get_pg_top_queries put a short description in the tool list** ([#4082])
+- **get_pg_logging_audit, get_pg_io_stats and get_pg_wait_sampling put a short description in the tool list** ([#4081])
+- **validate_custom_alert_rule, test_custom_alert_rule, update_custom_alert_rule and list_custom_alert_templates put a short description in the tool list** ([#4079])
+- **get_alert_history, set_notification_route_enabled, create_mute_rule and set_mute_rule_enabled put a short description in the tool list** ([#4077])
+- **get_pg_extensions, get_pg_write_stats, get_pg_server_config and get_pg_server_config_changes put a short description in the tool list** ([#4078])
+- **get_collector_stall_probes, describe_custom_view_catalog and get_sweep_reports put a short description in the tool list** ([#4074])
+- **analyze_server and compare_analysis put a short description in the tool list** ([#4073])
+- **get_fleet_overview, add_servers and remove_server put a short description in the tool list** ([#4071])
+- **get_pg_log_events, get_pg_index_bloat and get_pg_deadlocks put a short description in the tool list** ([#4068])
+- **get_query_store_clutter and get_oversized_plan_backlog put a short description in the tool list** ([#4067])
+- **update_alert_settings and update_mute_rule put a short description in the tool list** ([#4066])
+- **get_collection_log and get_query_store_top put a short description in the tool list** ([#4065])
+- **Three self-monitoring MCP tools put a short description in the tool list** ([#4064])
+- **get_collection_health's tools/list entry drops from 21,026 characters to 583** ([#4063])
+- **get_alert_settings and get_notification_routes serve a short head, with the rest available from get_tool_guide** ([#4061])
+- **Seven data-read MCP tools put a short description in the tool list** ([#4055])
+- **MCP clients load less context up front, and a new get_tool_guide tool serves the long-form guidance on request** ([#4048])
+- **Darling's MCP server instructions drop from 88,532 to 7,992 characters and Lite's from 52,942 to 7,721, both now under a pinned 8,000-character budget** ([#4039])
+- **PostgreSQL log messages show as PostgreSQL wrote them, and the SQL in them is normalized with every literal replaced by ?** ([#3996])
+- **The shared `as_of` description is 167 characters instead of 379, cutting Darling's `tools/list` by 22,040 characters (6.4%) and Lite's by 14,246 (8.8%)** ([#3965], [#3898])
+- **The review guard tells a pending workflow fix from hostile drift**
+- **The tempdb Space alert stops paging on a single collected sample** ([#3653])
+- **The analysis names the Agent job that is running long instead of counting it** ([#3653])
+- **MCP tool failures were two wire shapes — a bare sentence on 214 tools and a JSON envelope on the PostgreSQL reads — and a `status`-keyed client read the sentences as successful text; now every tool on both SKUs answers a caught exception with one envelope through `McpHelpers.FormatError`** ([#3653])
+- **PostgreSQL bars the fleet measured now say so** ([#3691])
+- **Anomaly detectors fired on one hot sample and fired more the longer the window was; the gate now judges the window peak AND the window mean, and I/O reads the pair like its siblings** ([#3653])
+- **Confidence chooses the channel** ([#3712])
+- **Blocking Wait Time paged on one snapshot and cleared on the next, and Long-Running Query had no way to stop reporting the same permanent background sessions forever; blocking now fires on one snapshot at 3× the bar or on 3 consecutive collections through the shared persistence gate, and long-running queries gain an opt-out knob seeded from the production read** ([#3653])
+- **PostgreSQL saturation now tells queueing from load** ([#3691])
+- **A story's root card now names the leaves it consumed** ([#3691])
+- **The wait-profile anomaly judges the window peak AND the window mean** ([#3741])
+- **CONFIG_CHANGED now anchors on when RECONFIGURE ran, not when the snapshot first noticed** ([#3740])
+- **MCP refusals carry a status word: the invalid envelope on both SKUs, and PostgreSQL refusals answer 400 not 500** ([#3739])
+- **PostgreSQL wait standouts, the I/O admission floor and the ratio multiple carry the second fleet read's lineage** ([#3691])
+- **The managed store's WAL ceiling is derived from the data volume's headroom, not v4's fixed 4 GB on every box** ([#3802])
+- **Stock PostgreSQL's sampled wait profile fires its first-occurrence reading on the peak alone, like its Aurora and SQL Server twins** ([#3691])
+- **A PostgreSQL bad actor is graded against its OWN normal** ([#3691])
+- **Dependencies: `Microsoft.Data.SqlClient` and `Microsoft.Data.SqlClient.Extensions.Azure` to 7.1.0, `AWSSDK.PI` and `AWSSDK.RDS` to their next patch, with every lock file the bump reaches regenerated**
+- **`ANOMALY_PG_PLAN_REGRESSION` judges each plan-flipped statement against its own routine** ([#3691])
+- **The alert pass retries a store read once before counting it failed** ([#3848])
+- **Store-object convergence runs every hour, not only at start** ([#3817])
+- **The alert pass's other seven store reads retry once on a command timeout, through the same seam as the adapter's twelve** ([#3854])
+- **The compression band seats its three heaviest hypertables on spread minutes instead of the consecutive minutes registry order gave them** ([#3678], [#3781])
+- **Daily continuous-aggregate refreshes run one bucket per transaction** ([#3745])
+- **`audit_config` answers a PostgreSQL target with the target's own settings instead of redirecting it** ([#3691])
+- **The same blocking storm grades the same on every pass length** ([#3871])
+- **The Extended Events collectors use less CPU on the monitored server to filter events by time** ([#4912])
+
+### Fixed
+
+- **A shutdown during a managed PostgreSQL tool step is no longer missed** ([#4867])
+- **Rollup reads stop at the window end** ([#4859])
+- **Grid time columns sort by time** ([#4858])
+- **Six Postgres time columns follow the time display mode** ([#4858])
+- **Server times and charts are right across a daylight saving change** ([#4783], [#4829], [#4838], [#4840], [#4841], [#4847], [#4848], [#4855])
+- **Anomaly tiles agree on the window end** ([#4854])
+- **Lite shows a refused capture read as a failure** ([#4853])
+- **A backward clock step no longer pauses collection or delays repeat alerts** ([#4851])
+- **A server edited during its connect no longer runs on the old connection string** ([#4851])
+- **PostgreSQL spike advice names a baseline that measured zero** ([#4850])
+- **Lite's View Block Chain reads the Blocking slicer's window when a report has no event time** ([#4848])
+- **Fleet views show WARNING when half or more of a collector's databases fail** ([#4846])
+- **`run_custom_view_panel` runs count in read latency with the web dashboard off** ([#4839])
+- **An alert that no channel delivered is tried again a minute later instead of waiting out its cooldown** ([#4786], [#4804], [#4826], [#4827], [#4828], [#4837])
+- **A removed server no longer leaves alert state behind** ([#4837])
+- **The daily retention purge paces its deletes** ([#4835])
+- **The Store Checkpointer Pressure alert sees one long checkpoint sync** ([#4835])
+- **get_store_metrics reports the longest checkpoint sync the alert judges** ([#4835])
+- **Query Store trends no longer read low after a quiet interval** ([#4833])
+- **Editing a server's host in the Darling viewer keeps its favorite star with the server** ([#4831])
+- **get_store_metrics no longer reads two days of store growth as one** ([#4830])
+- **Darling and Lite count the I/O anomaly tiles' samples the same way** ([#4820])
+- **A tile's peak time no longer changes between runs when two samples tie** ([#4820])
+- **Lite's archive views stay readable while compaction swaps files** ([#4816])
+- **Lite no longer counts archived rows twice during an archive run** ([#4816])
+- **"Recurring at this hour" survives a daylight saving change** ([#4814])
+- **A nightly job no longer reads as "Maintenance window moved"** ([#4814])
+- **Reading a PostgreSQL log no longer records a false error when the read starts inside a multi-byte character** ([#4813])
+- **A byte that is invalid in the database encoding costs one log read per cycle, not four** ([#4813])
+- **PostgreSQL error rows under the pgBadger log prefix now carry their user and database** ([#4813])
+- **The plan-capture readiness read now reports a log prefix the log readers cannot read** ([#4813])
+- **A deadlock report cut at the end of a read waits for its last lines instead of being stored as a fragment** ([#4813])
+- **The fleet sweep bands a server outage as No Data instead of Warning** ([#4811])
+- **A collector that fails on half or more of its databases now bands Warning** ([#4811])
+- **The Darling viewer's Collection Health tab no longer re-reads the store's schema version on every refresh** ([#4811])
+- **Plan-forcing advice says when SQL Server's own recommendation names the proposed plan as the regressed one** ([#4810])
+- **Lite no longer archives the same rows twice after it is stopped in the middle of an archive run** ([#4808])
+- **Lite's Query Store repair also covers archive months that compaction split into parts** ([#4808])
+- **Darling retries a store that is at its connection limit when the service starts** ([#4806])
+- **The compose `darling` container reports unhealthy when a startup failure has stopped collection** ([#4806])
+- **The docs now name the oldest supported builds: SQL Server 2016 SP2 and SQL Server 2017 CU3** ([#4805])
+- **A webhook that never answers no longer holds up alert delivery** ([#4803])
+- **Query Store backfill now logs a warning when it cannot read its list of work** ([#4801])
+- **Query Store backfill keeps a slice size that works instead of swinging back to the size that timed out** ([#4801])
+- **PostgreSQL analysis: a configuration setting shown under another finding now carries its own advice** ([#4799])
+- **The advice for turning autovacuum back on now names the provider's parameter group** ([#4799])
+- **A webhook channel that keeps failing no longer goes unnoticed while another channel delivers** ([#4798])
+- **The configuration change card no longer calls a metric "resolved" when only minutes have passed since the change** ([#4797])
+- **A server that is down when the Darling service starts now gets a "Collection Stopped" alert once the threshold passes** ([#4796])
+- **Adding a server whose id matches a different server's no longer overwrites it in the Darling viewer, and Lite now refuses to add or edit onto it** ([#4794])
+- **`get_store_metrics` no longer reports a gap of several days in the store's size history as one day's growth, and it marks today's partial day as partial** ([#4792])
+- **The store checkpointer alert no longer tells you to raise max_wal_size for every requested checkpoint** ([#4791])
+- **`mute_analysis_finding`, in Darling and in Lite, no longer mutes the pattern on whichever matching server sorts first** ([#4790])
+- **Repeating a `create_mute_rule` call no longer creates a second identical rule** ([#4790])
+- **`add_servers` reports every server in the batch when a later entry fails to save, and no longer says "added" for a save that wrote nothing** ([#4787])
+- **The plan-force bot no longer reads a database missing from the newest automatic-tuning capture as "automatic correction off"** ([#4784])
+- **After a failed state read, the plan-force bot looks at the same plans again after 1 hour instead of holding them for a day** ([#4784])
+- **Web viewer: a page left loading in a hidden or paused tab refreshes normally again** ([#4781])
+- **The PostgreSQL plan-regression finding now reports the worst regression when more than 50 statements changed plans in the window** ([#4780])
+- **A standby that was removed or replaced no longer outranks the live standbys for the rest of the window** ([#4780])
+- **A dropped replication slot no longer grades Critical for the rest of the window** ([#4780])
+- **The alert history now records whether each notification channel delivered or failed** ([#4779])
+- **The alert notebook finds an alert's resolution even when it came late, was dismissed, or sat behind many newer alerts** ([#4778])
+- **A fleet-level store alert with no resolution reads "No resolution recorded" instead of saying collection stopped** ([#4778])
+- **Darling now sends alert email through notification routes when the default recipient list is blank, instead of treating email as not set up** ([#4777])
+- **`--configure-network` keeps the web listener's `tls` and `oidc` settings** ([#4775])
+- **A repaired hourly hole no longer leaves a partial day in the daily rollups, and days an earlier repair left short are rebuilt once after the upgrade** ([#4739], [#4763])
+- **Darling upgrade no longer says "New build in place." after copying nothing** ([#4762])
+- **An older Lite refuses to open a data file from a newer version** ([#4753])
+- **Lite re-applies its newer columns on every start** ([#4753])
+- **After the computer sleeps and resumes, Lite runs each due collector once** ([#4753])
+- **Two analyze_server calls that overlap no longer give the second one a false all-clear** ([#4742])
+- **In Lite, a server that just went down no longer holds a connection slot while its retries wait** ([#4740])
+- **The self-hosted PostgreSQL log tail no longer stays on the outgoing log file after a rotation in the same second** ([#4738])
+- **Store upgrade: copy mode is chosen from the data folder's own volume and a finished size count** ([#4725])
+- **Store upgrade: hard-link mode removes the pre-upgrade directory even when a settings carry fails, after saving the old `postgresql.conf`** ([#4725])
+- **Store settings migration: a repeated attempt restores the newest backup of `postgresql.conf`** ([#4725])
+- **Store free-space checks and reports read the data folder's own volume** ([#4725])
+- **Lite archive compaction no longer loses a month when a promote fails** ([#4718])
+- **The size-triggered Lite reset no longer deletes the database after a failed export** ([#4718])
+- **The tab Refresh button no longer runs collectors during a Lite database reset** ([#4718])
+- **Lite archive views now include compaction's part files** ([#4718])
+- **Importing a previous Lite install no longer overwrites this install's part files, and imported files now expire with retention** ([#4718])
+- **A failed archive export no longer leaves a partial file on disk** ([#4718])
+- **Reads of an archive view no longer fail after old archive files expire** ([#4718])
+- **A managed store moved aside by a failed upgrade is no longer replaced by an empty one** ([#4717])
+- **A start after an interrupted store upgrade resumes it instead of refusing every start** ([#4717])
+- **A failed store upgrade that left no startable store stops the start** ([#4717])
+- **The pre-upgrade rollback copy survives the two service starts it is kept for** ([#4717])
+- **PostgreSQL 13 servers read through csvlog are no longer reported as quiet** ([#4714])
+- **RDS and Aurora PostgreSQL log reads now collect the lines a log file received before RDS rotated it, and resume where they stopped after a restart** ([#4713])
+- **Down servers no longer use up the fleet's collection slots, and a command timeout no longer drops a healthy connection** ([#4712])
+- **A memory grant that used none of its memory now gets an Excessive Memory Grant finding** ([#4705])
+- **Estimated Plan CE Guess names the predicate behind each default guess and follows the plan's CE model version** ([#4705])
+- **Expensive Operator no longer names an exchange operator** ([#4705])
+- **Self-hosted PostgreSQL targets no longer lose the log lines written just before a log rotation** ([#4704])
+- **A Query Store backfill database that keeps failing no longer blocks the databases after it on the same server** ([#4703])
+- **The plan viewer's row label, edge colours and minimap, and analyzer rules 5 and 26, no longer misread operators in a parallel zone** ([#4632], [#4688], [#4698])
+- **Selecting the plan viewer's "+" tab through UI Automation (screen readers) adds one new sub-tab, not two** ([#4688])
+- **The Darling Viewer's server list is no longer a solid white box when the store is unavailable** ([#4685])
+- **Custom tab headers and the status-bar collector text now use readable, theme-following ink** ([#4682])
+- **Web dashboard: a slow notebook or Custom View panel is no longer re-run while its previous read is still running** ([#4671])
+- **Custom Views: window-total Query Store measures are no longer labelled "(ratio)"** ([#4664])
+- **Cool Breeze's warning text now reads clearly on the plan viewer's properties panel** ([#4658])
+- **Darling: the daily digests keep their time of day** ([#4656])
+- **Darling Viewer: the Plan Viewer opens when the viewer has no configuration or can't reach the store** ([#4649])
+- **Custom Views AVG panels read from a rollup match raw to the last digit** ([#4647])
+- **Darling Viewer: restarting as administrator during an upgrade keeps its configuration** ([#4646])
+- **Collectors run at their configured interval on large fleets, in Darling and Lite** ([#4644])
+- **The plan viewer's minimap now draws the first time you open it** ([#4643])
+- **Double-clicking a minimap node now centers it correctly** ([#4643])
+- **Jumping from a plan warning to its operator now centers the operator** ([#4643])
+- **Copy and paste no longer freeze the window for up to 9 seconds when another app holds the clipboard** ([#4634])
+- **get_store_metrics no longer reports retired store objects as a failing sweep** ([#4633])
+- **The Runtime Summary no longer says a query used "100%" of a memory grant it never got** ([#4632])
+- **Plan viewer orange text now reads clearly in the Light theme** ([#4632])
+- **Collector status text in the status bar now reads clearly in the Light theme** ([#4632])
+- **The repro script declares each parameter once** ([#4626])
+- **Collection health no longer calls an idle activity-only collector regressed** ([#4625])
+- **The daily purge of the per-interval Query Store tables no longer scans each table in full** ([#4615])
+- **A rare deadlock between a chunk drop and the alert pass's database-state check no longer fails that pass** ([#4612])
+- **Copying from Lite or the Darling Viewer no longer crashes when another program holds the clipboard** ([#4600])
+- **The plan viewer no longer crashes when another program is holding the clipboard, and "Copy Query Text" now hands back the full query on a truncated single-statement plan** ([#4593])
+- **`get_ag_health` keeps its fleet-wide answer within the 32 KB MCP budget** ([#4568])
+- **Plan analysis: the repro script matches PerformanceStudio's hardening** ([#4567])
+- **A cancelled analysis, comparison, or collection-cycle read now propagates instead of returning an empty or fallback result** ([#4562])
+- **Lite's MCP analysis tools stop reading when the client cancels the request** ([#4561])
+- **Plan analysis stops when its caller cancels** ([#4560])
+- **Plan analysis now looks inside a procedure, function or cursor body** ([#4557])
+- **Plan analysis: the non-SARGable predicate check now knows which table a function, conversion or `ISNULL`/`COALESCE` call is wrapping, so it stops flagging a Nested Loops outer reference or a parameter-side conversion, recognizes `LIKE` as a comparison, and now also catches a function or conversion on an unaliased table variable's own column** ([#4554])
+- **The rollup coverage check no longer writes about 170 MB of temp files every five minutes on a large store** ([#4553])
+- **Plan analysis now scores each finding's benefit, and the plan viewer and MCP plan tools show it** ([#4552])
+- **A deeply nested execution plan no longer crashes the Darling service, the MCP plan tools or the plan viewer** ([#4551])
+- **Plan analysis: adaptive-join memory grants, redundant UDF findings, and culture-dependent percentages** ([#4548])
+- **Plan analysis: an operator's reported self-time no longer includes the coordinator thread's wall-clock time or double-counts a batch-mode or Compute Scalar child's time, in either a parallel or a serial plan** ([#4547])
+- **The Join OR Clause plan-analysis finding no longer fires on a parameterized `IN` list** ([#4544])
+- **Plan analysis no longer flags an unexecuted operator as a row estimate mismatch, and stops recommending a rewrite for the engine's own table-valued functions (`STRING_SPLIT`, `OPENJSON`, `GENERATE_SERIES`, DMVs/DMFs)** ([#4542])
+- **The store no longer compresses every heavy table at once after midnight** ([#4541])
+- **Plan analysis rules for `MAXDOP 1`, `RECOMPILE`, `OPTIMIZE FOR UNKNOWN`, `NOT IN`, and row-goal causes ignore hints and keywords written inside a comment or a string literal** ([#4540])
+- **A managed PostgreSQL or a config load that takes more than two minutes to start no longer leaves Darling running without collecting** ([#4538], [#4509])
+- **After a long store outage at start, Darling now keeps retrying and starts collecting when the store is back** ([#4509])
+- **After a SQL Agent job-history identity reset (a reseed, a restore or a failover), Darling and Lite re-read the recent history once instead of on every collection** ([#4496])
+- **A gap of one hour in the collection-health rollup no longer makes the Viewer, web and MCP health reads scan seven days of raw collection log** ([#4494])
+- **Lite's perfmon chart and `get_perfmon_trend` also set aside a one-sample Wait Statistics spike and say how many** ([#4492])
+- **A one-sample spike in a Wait Statistics counter no longer flattens the perfmon chart** ([#4490])
+- **Lite's Job History shows that it is loading instead of an empty grid, and says when it shows only the newest rows** ([#4488])
+- **`query_store` no longer reads as "produced then stopped" between Query Store intervals** ([#4483])
+- **The Availability Groups tab and `get_ag_health`'s `distinct_ag_count` no longer count differently-owned AGs that share a name as one group** ([#4481])
+- **Job History shows that it is loading instead of an empty grid, and says when it shows only the newest rows** ([#4481])
+- **Recommendations say "queries", not "querys"** ([#4481])
+- **Plan analysis now reads the query plan inside an IF condition, and the query and plan hashes of statements that carry several plans** ([#4470])
+- **Upgrading a busy store no longer stops partway and asks for a re-run when the service's process takes a few extra seconds to exit** ([#4467])
+- **Stores that expose the managed PostgreSQL on the network re-verify a settings file left unstamped by a hand edit or an interrupted start, instead of reporting a failure on every start** ([#4465])
+- **Stores that expose the managed PostgreSQL on the network now finish the settings-file migration, instead of restoring the previous file and logging a warning on every start** ([#4464])
+- **The daily chunk-interval adjustment now shrinks a busy table's chunks on stores that hold more than 1,000 chunks in total** ([#4458])
+- **Severe-error rows from system_health now carry their database id, and no longer list errors below severity 16 or the two routine connection-error numbers sp_HealthParser ignores** ([#4455])
+- **A managed PostgreSQL 17 store whose settings carried an old 2 GB maintenance_work_mem starts again after the move to darling-managed.conf** ([#4444])
+- **After a long outage across an upgrade, repaired hourly query statistics also reach the daily rollup, so the hourly tier's retention isn't held** ([#4439])
+- **PostgreSQL statement statistics count a re-created statement entry's work since it was re-created, instead of under-counting it; on PostgreSQL 16, where the entry's creation time isn't available, such a row is recorded as unknown** ([#4435])
+- **Wait statistics on servers where a scheduled job clears them are counted from each clear instead of being recorded as unknown; only the work between the last collection and the clear stays unknown** ([#4434])
+- **The raw purge gate judges each rollup against the rows that rollup can hold, so an hour of CPU-unknown query statistics at the floor can't hold the purge forever** ([#4432])
+- **Query statistics record a restarted cached plan's executions, duration and CPU since the restart in full, instead of under-counting them; a restart the collector cannot place in time is recorded as unknown rather than estimated** ([#4431])
+- **After an outage across an upgrade, the raw purge resumes within the hour on a running store, with no second restart** ([#4430])
+- **The daily retention sweep no longer drops raw query statistics over a hole no rollup holds; the gated service-triggered purge owns those tables, and purge_now reports what it held** ([#4429])
+- **Query statistics no longer record a false zero CPU when only the CPU counter's delta is unknowable; those rows keep their executions and duration** ([#4423])
+- **FinOps no longer reports a database as idle when its only recent samples were a plan's first sighting** ([#4417])
+- **Alert notebook: the collector-freshness check now counts only successful collection runs** ([#4416])
+- **`get_store_host` now honours request cancellation** ([#4412])
+- **Web reads honour request cancellation for 2 more trend charts and 3 analysis tools** ([#4411])
+- **Web reads for PostgreSQL index bloat, column stats, CPU utilization, log events and logging audit now honour request cancellation** ([#4409])
+- **The settings redactor no longer masks a short value whole on its first call** ([#4408])
+- **darling-managed.conf is rewritten only when its settings change** ([#4407])
+- **Stop re-holding the raw retention purge for a healthy store whose successor rollup hasn't run its first refresh yet** ([#4406])
+- **Carry an operator's own `postgresql.conf` lines below the `darling-managed.conf` include across a major PostgreSQL upgrade** ([#4405])
+- **Web reads honour request cancellation (10 more tools)** ([#4402])
+- **Fixed a raw-purge gate that could hold history forever, and a repair
+- **Web reads honour request cancellation (11 more SQL Server tools)** ([#4393])
+- **The PostgreSQL settings redactor has a bounded matching time** ([#4392])
+- **An armed raw-retention purge no longer runs when PostgreSQL starts, before the service can hold it** ([#4391])
+- **PostgreSQL web reads now honour request cancellation** ([#4390])
+- **PostgreSQL-target MCP reads now cancel on client disconnect** ([#4388])
+- **Web reads now honour request cancellation for 15 more MCP tools** ([#4387])
+- **Web reads honour request cancellation for Alerts, Memory Grants and Health MCP tools** ([#4386])
+- **Threaded cancellation through 10 PostgreSQL-target web reads** ([#4373])
+- **Web reads for object-stats and config-history now honor request cancellation** ([#4372])
+- **Deprecated Dashboard's XE ring-buffer collectors no longer reshred unchanged data** ([#4371])
+- **Bucketed the memory-grant and TempDB usage viewer trend charts** ([#4364])
+- **Bucketed the blocking-trend charts' lock-wait, waiting-task, and blocked-session reads** ([#4362])
+- **Bucketed the CPU scheduler, session stats, and plan cache trend reads** ([#4361])
+- **Blocking and deadlock web reads now cancel with the request** ([#4203])
+- **Health Parser web reads now cancel with the browser request** ([#4359])
+- **Four Performance-Trends web reads now stop their store query when the request is abandoned** ([#4357])
+- **A slow first-run database create no longer fails Darling's Postgres bootstrap** ([#4352])
+- **Passwords and other secrets in stored PostgreSQL settings are now redacted** ([#4351])
+- **Eight Queries-tab reads in the web viewer stop their store query when you leave the page** ([#4350])
+- **Configuration-tab reads in the web viewer stop their store query when you leave the page** ([#4347])
+- **PostgreSQL `pending_restart` can now be trusted after a reload, on Windows targets** ([#4345])
+- **Heal the Postgres v8 hardware-sizing block on stores resized before the #4225 fix shipped** ([#4342])
+- **Fleet Sweeps reports an error instead of "no sweeps" when its store read fails** ([#4328])
+- **Lite Overview baseline bands used the wrong hour under a custom time range on a server not on UTC**
+- **Dashboard query comparison grids and Server Trends baseline bands now use the server's local time** ([#4321], [#4317])
+- **`get_collection_health`'s default reply now fits the MCP response budget** ([#4319])
+- **Dashboard Overview ghost line reads the right hours outside UTC** ([#4317])
+- **The Query Store activity slicer reads less history on each refresh** ([#4311])
+- **Lite's Overview ghost line reads the right hours outside UTC** ([#4309])
+- **Availability Groups tab no longer freezes the UI every 30 seconds** ([#4308])
+- **The Daily Summary calendar and `get_daily_summary_range` cache closed days for an hour** ([#4307])
+- **Query Store backfill's candidate check no longer reads old compressed chunks, and no longer drops a hole on a database that goes quiet** ([#4306])
+- **The Darling viewer's Wait Stats and Perfmon trend charts read time buckets, not every collection** ([#4304])
+- **The Darling viewer's Active Queries grid and wait drill-down no longer load every snapshot's plan XML up front** ([#4303])
+- **Lite's Queries-tab comparisons use the grid's time window** ([#4302])
+- **Active Queries and wait drill-down no longer load every plan's XML just to show the grid** ([#4297])
+- **The query heatmap loads much faster on large windows** ([#4295])
+- **Less write-ahead log from the query, procedure and Query Store history tables** ([#4294])
+- **Web viewer no longer shows raw error text for failed requests** ([#4293])
+- **Empty legacy baseline aggregates now drop instead of staying forever** ([#4292])
+- **CPU and I/O-latency baselines recompute once a day, not every hour** ([#4291])
+- **Fewer needless writes to the Darling store's plan and text tables** ([#4288])
+- **Managed store: less WAL, from compressed full-page images** ([#4287])
+- **Web failure handling: log batches, bad requests and error text** ([#4286])
+- **Time-based reads no longer shift on a store outside UTC** ([#4285])
+- **Web viewer timeouts now show a message and get logged** ([#4281])
+- **A major store upgrade keeps your ALTER SYSTEM settings** ([#4280])
+- **Lite says when a query window was cut short** ([#4279])
+- **Top-CPU reads disclose a short window** ([#4278])
+- **`get_query_store_top` stays under the MCP response-size budget** ([#4198])
+- **`describe_custom_view_catalog` stays under the MCP response budget** ([#4198])
+- **MCP `get_collection_health` caps its response size** ([#4198])
+- **MCP `get_blocking` (Darling) and `get_blocked_process_reports` (Lite) cap their response size** ([#4198])
+- **MCP get_collection_log stays under the response-size budget by default** ([#4198])
+- **`get_query_store_regressions` default calls stayed under the MCP response budget** ([#4198])
+- **get_pg_io_trend's default call now fits the MCP response budget** ([#4263])
+- **`get_active_queries` stays under its response-size budget by default** ([#4261])
+- **get_index_usage's default answer now fits the response budget** ([#4260])
+- **`get_query_heatmap` default call stays under the MCP response budget** ([#4259])
+- **`get_object_locking` default response stays under the MCP budget** ([#4258])
+- **`get_plan_corrections` default call stays under the MCP response budget** ([#4198])
+- **Job History loads faster and stops polling every 30 seconds** ([#4256])
+- **Availability Group reads: bounded the newest-snapshot lookup** ([#4228])
+- **`get_deadlock_detail` no longer returns oversized deadlock graphs by default** ([#4254])
+- **Database Sizes and Storage Growth load without a multi-chunk planning tax** ([#4252])
+- **Alert triage links now skip only a disabled dashboard, and email carries one too** ([#4230])
+- **PLAN_REGRESSION no longer deduplicates the whole raw Query Store slice every pass** ([#4208])
+- **Force-plan bot no longer acts on a best plan older than 4 days** ([#4208])
+- **`audit_config` no longer runs the full analysis pass** ([#4206])
+- **`get_query_store_regressions`' comparison baseline is now a fixed 7 days** ([#4206])
+- **`get_pg_cpu_utilization` now returns bucketed points instead of one row per minute** ([#4206])
+- **The desktop viewer's Query Store Regressions grid had the same unbounded-baseline shape as `get_query_store_regressions` and is now bounded the same way** ([#4206])
+- **The deadlock and plan-capture log patterns only offer a report whose ERROR: is the line's own label** ([#4042])
+- **Plan capture keeps working under a custom log prefix with fields before the process id** ([#4016])
+- **Trace flag reads no longer hide every enabled flag after an ordinary run** ([#4032])
+- **The fleet card's collection-health figures no longer reread a week of raw log rows on every call** ([#3911])
+- **The per-server collection-health summary stops leaking memory and stops going stale on a fleet with more than one active caller** ([#3900])
+- **A collector that produced then stopped no longer reads healthy with zero rows** ([#3889])
+- **job_history collection survives an msdb reseed** ([#3886])
+- **The compression-stuck self-alert no longer pages on a healthy job's own run instant** ([#3588])
+- **pg_deadlocks reads a self-hosted target's csvlog file, closing the same forged-line hole #4124 closed for pg_log_events** ([#4136])
+- **pg_plan_capture reads a self-hosted target's csvlog file** ([#4137])
+- **Darling's daily retention purge no longer holds up collection** ([#4133])
+- **Lite's get_index_usage no longer hides active indexes behind a silent cap** ([#4131])
+- **pg_log_events reads a self-hosted target's csvlog file, closing a forged-line hole** ([#4124])
+- **Two install-lock tests pass on a non-elevated machine** ([#4111])
+- **MCP tool schemas no longer list an internal service as a parameter** ([#4110])
+- **Log reads through pg_read_binary_file now decode text in the database's own encoding** ([#4106])
+- **Store Checkpointer Pressure no longer fires all the time on a healthy store** ([#4096])
+- **A planted line in a PostgreSQL server's log can no longer stop plan capture** ([#4089])
+- **A Lite Query Store test that never ran now runs** ([#4084])
+- **A PostgreSQL log in a non-UTC zone no longer reports a deadlock problem on the log events collector** ([#4070])
+- **The install and upgrade scripts name each account once in a refusal** ([#4069], [#4050])
+- **One bad byte from a failed login no longer blinds the three PostgreSQL log readers, and RDS and Aurora targets get the time-zone fix too** ([#4051])
+- **Darling's install and upgrade scripts refuse a folder that ordinary users can already write to** ([#4050])
+- **A planted log line in another time zone no longer stops a PostgreSQL server's log events and deadlocks from being read** ([#4049], [#4051])
+- **PostgreSQL servers whose log prefix puts fields before the pid now show their log events and deadlocks, and a client's port is no longer stored as an event's SQLSTATE** ([#4047])
+- **On Windows the log-hash key is refused if anyone beyond SYSTEM, Administrators and the service account holds any right to it, and it is checked and read through one held file handle** ([#4044])
+- **A PostgreSQL server that logs only to CSV is reported by name instead of looking quiet** ([#4040])
+- **Install and upgrade lock the Darling install folder, so an ordinary local user can no longer replace the service's binaries** ([#4038])
+- **The hourly re-mask of PostgreSQL deadlock data stored before #4005 now runs without a log-hash key, covers finding alerts, and never leaves a raw report hash behind** ([#4036])
+- **On compose, a log-hash key or role password planted in a credentials directory that was open to other users is discarded instead of trusted, `--harden-files` no longer follows a junction or a hard link, and the Viewer's always-empty Statement Fingerprint column is gone** ([#4031])
+- **Trace flags could show a flag as enabled days or weeks after it, and every other flag, was turned off** ([#4030])
+- **On-load collectors could read HEALTHY forever even after their daily reschedule silently broke** ([#4029])
+- **The PostgreSQL log tail could pick the csvlog or jsonlog file instead of the real log** ([#4025])
+- **PostgreSQL deadlock reports, deadlock alerts and analysis findings stored before the SQL normalization are rewritten in place** ([#4022])
+- **PostgreSQL log events are identified by hashes keyed with a per-store secret, so a store reader can no longer test guesses at the values a log line hid** ([#4020])
+- **Plan capture could be spoofed by a statement's own author** ([#4015])
+- **PostgreSQL deadlock reports store and show their SQL normalized, and no read returns a hash of the raw report** ([#4013])
+- **Analysis passes stop recomputing every 30-day baseline on every pass** ([#4011])
+- **CPU scheduler readings no longer flicker between two answers when a collection lands on a duplicate timestamp** ([#4010])
+- **The rest of the trend family now buckets to a point budget instead of returning every collection** ([#4007])
+- **get_pg_io_trend's automatic subject choice no longer scans the whole window in order** ([#4003])
+- **Custom alert rules now evaluate on the Linux compose store** ([#4002], [#3983])
+- **On-load config collectors recapture daily, so a long-lived connection keeps fresh config facts and a cleared trace flag actually clears** ([#4001])
+- **get_store_metrics reads each store object's newest sample through an index instead of sorting a year of rows** ([#3998])
+- **list_servers and the per-server summary tools no longer plan a store's whole collection history to find one timestamp** ([#3995])
+- **PostgreSQL config and logging-audit tools no longer plan a year of chunks to read one row** ([#3992])
+- **A store with no readable server-log directory keeps its hourly collector-cost flush** ([#3985])
+- **Lite's daily summary starts its retention horizon where Lite's history actually starts** ([#3984], [#3975])
+- **The web dashboard and the MCP server no longer connect to a compose or bring-your-own store as its owner** ([#3983])
+- **A fresh store's fleet overview and web Fleet page work before the collection-health aggregate materializes** ([#3981])
+- **Latest-value lookbacks follow the collector's cadence, and the PostgreSQL target's config reads stop planning every retained snapshot** ([#3980], [#3931])
+- **The top-CPU drill-down resolves statement text for the five queries it prints, not for every plan-cache row in the window** ([#3979])
+- **A server dark past the collection log's retention reads Offline everywhere, not "Awaiting first collection"** ([#3975], [#3966])
+- **The service's start-up hole scan no longer reads every aggregate's whole materialization and source table** ([#3972])
+- **The trend tools answer in time buckets sized to the window: a day of `get_file_io_trend` is 34 KB, not 1.4 MB** ([#3968])
+- **A server dark for more than two days reads Offline on the fleet card, not "Awaiting first collection"** ([#3966])
+- **A restart's shutdown checkpoint no longer counts toward checkpoint write and sync time either** ([#3964])
+- **PostgreSQL config change history reports per-database and per-role overrides being set, changed and reset** ([#3957])
+- **The plan-regression drill-down no longer re-deduplicates the whole Query Store slice, and the parameter-sensitivity drill-down stops resolving text for rows it never prints** ([#3956], [#3953])
+- **A PostgreSQL restart no longer raises a false Store Checkpointer Pressure warning or reads as a WAL-forced checkpoint on a monitored server** ([#3955])
+- **Log masking fails closed: a DETAIL or CONTEXT is read as SQL only where PostgreSQL writes SQL, a value cut before its close is masked to the end, and `get_store_query_stats` masks a raw text `pg_stat_statements` kept** ([#3952], [#3920])
+- **The web server page's Overview tab no longer waits on the daily summary** ([#3950])
+- **The fleet overview reads each server's newest sample instead of every retained row, and the web viewer asks for it once per refresh instead of twice** ([#3947])
+- **A PostgreSQL target's analysis reads its statements' own baselines once per metric, not once per statement** ([#3946])
+- **`get_store_metrics` answers with a bounded summary instead of every store object's daily series** ([#3942])
+- **Managed role provisioning never sends a role's password in a statement** ([#3940])
+- **A store without TimescaleDB re-runs its store-object convergence every hour, not only at restart** ([#3932])
+- **Analysis latest-value reads look back a day instead of scanning a server's whole history, and stop counting dropped databases** ([#3931])
+- **A store upgrade that fails before its commit point puts the old cluster back as it found it, and only claims a revert that happened** ([#3927])
+- **Log text keeps no literal: the store's own log and every PostgreSQL target's log events mask the SQL inside DETAIL and CONTEXT, every retained store-log entry is masked, and the statement reader shows only normalized DML** ([#3920], [#3915])
+- **The store's hourly self-metrics sweep works again on TimescaleDB 2.29 and later** ([#3918], [#3908])
+- **The bundled store moves to TimescaleDB 2.30.1, which closes GHSA-hcfx-29v5-2rcw, and a store's extension now moves before the store opens instead of under a live store** ([#3908])
+- **A runtime update no longer stops the store from starting when the previous runtime's folder cannot be cleared** ([#3919], [#3906])
+- **A store still on PostgreSQL 17 no longer fails to start on a host with 40 GB of RAM or more** ([#3909])
+- **The store's statement statistics, reviewed before release: the ALTER SYSTEM advice no longer bricks the store, and the reader's filter can no longer be switched off** ([#3915], [#3904])
+- **The bundled PostgreSQL moves to 18.6, and the self-contained .NET runtime to 10.0.12, closing published CVEs in both** ([#3906], [#3908])
+- **Each generated store TLS root certificate carries a unique per-generation name** ([#3557])
+- **The by-CPU tools now actually rank by CPU** ([#3523])
+- **analyze_server no longer answers "all metrics are within normal ranges" when the analysis window collected nothing** ([#3524])
+- **The Performance Calendar, daily summary, and fleet sweep band deadlocks as a measured per-hour rate, not any-deadlock-is-Critical** ([#3525])
+- **Perfmon rates are honest per-second values in analysis** ([#3527])
+- **Floor the SQL count thresholds, give Store Disk Pressure a GB floor, and count measured metrics in the fleet Healthy label** ([#3528])
+- **get_memory_trend stops reporting granted memory as a hardcoded zero** ([#3529])
+- **Lite's Query Store time slicer reads physical reads from its own column** ([#3530])
+- **LCK_M_IS advice carries the same RCSI caveats as its LCK_M_S twin** ([#3531])
+- **Collector schedules refuse cadences that would fabricate quiet** ([#3532])
+- **get_pg_plans finds the plan you asked for, not just the plans in the top page** ([#3533])
+- **get_pg_autovacuum_health classifies severity from the same axis it ranks by** ([#3534])
+- **get_pg_replication_slots headlines the worst-classified slot and never spells unknown WAL growth as stable** ([#3535])
+- **get_pg_io_stats no longer renders track_io_timing=off as an impossibly fast disk** ([#3536])
+- **The PostgreSQL xmin-horizon alert catches rotating holders and stops firing on single observations** ([#3537])
+- **QueryStore slicer's physical-reads sort plots the physical series** ([#3547])
+- **get_memory_trend joins the grants series so total_granted_mb carries real data** ([#3548])
+- **Viewer Recommendations tabs stop saying "All clear" when the analysis window collected nothing** ([#3551])
+- **Viewer pass for the Store Disk Pressure GB floor and fleet measured-metric qualifier** ([#3563])
+- **Deprecated Dashboard analysis reads perfmon counters as true per-second rates** ([#3561])
+- **Sorting the Procedures or Query Store grid by physical reads plots the physical series, in both apps** ([#3556])
+- **The Locking & Contention grid names the table as schema.table** ([#3576])
+- **Extreme, corroborated anomaly findings can now cross the notify floor, so the baseline engine is no longer notification-inert at shipped settings** ([#3526])
+- **`get_store_metrics`' `job_history` block now says whose eyes its rows are visible to, and proves rows exist where it can** ([#3574])
+- **The forced-plan-failures alert read no longer walks the whole fleet's two-hour slice of Query Store rows to find one server's** ([#3573])
+- **The viewer's tray Snooze now silences the toast itself** ([#3570])
+- **The compression-stuck self-alert no longer pages on a healthy job's run instant** ([#3575])
+- **Text on an accent fill gets a measured ink in every theme, and the FinOps row marks become theme brushes Dark can actually see** ([#3577])
+- **The duration-trend trio routes by retention tier and says what it served, so a 7-day request no longer returns 4 days labelled quiet** ([#3541])
+- **Analysis facts divide by the time the collector actually observed, and a window with a hole in it says so** ([#3538])
+- **SQL Server's Poison Wait alert measures accumulated starvation over a ten-minute window like its PostgreSQL twin, so one slow wait no longer pages and a THREADPOOL storm no longer sleeps** ([#3539], [#2711])
+- **Six MCP pages now say what bounded them, so a limited page stops passing for a complete answer** ([#3541], [#3287], [#2159])
+- **The four naked delta families store the interval their deltas accrued over, so a restart's fabricated zero reads as unknowable instead of 0.00 ms/sec** ([#3540])
+- **Blocking and CPU health bands are rates over the window they were measured in, tiered from 14 days of fleet blocking and CPU data** ([#3539])
+- **get_store_metrics stops answering for 38% of the store: continuous aggregates and the named plain tables join the inventory, every sweep is reconciled against pg_database_size, and the block says its own coverage** ([#3582])
+- **The twenty continuous aggregates join the compression ladder** ([#3581])
+- **PostgreSQL MCP percents name their denominator, so a three-row page stops summing to 100% of everything** ([#3541])
+- **Every delta family is seeded from the store at service start, and the series-age rescue finally has passes to read, so a restart no longer fabricates one interval of quiet for six families** ([#3540])
+- **MCP write tools report what happened** ([#3541])
+- **The scorer's wait thresholds carry their measurement: WRITELOG stops saturating on a third of routine windows, deadlocks grade 5/hr apart from 90/hr, and the absolute gates scale with the hours actually observed** ([#3538])
+- **Analysis pages with long compound stories now reach Slack instead of dying with invalid_attachments** ([#3612])
+- **Continuous-aggregate materializations are chunked at one raw chunk, like every raw table** ([#3620])
+- **The PostgreSQL first-target runbook stops denying three capabilities that ship** ([#3608])
+- **Slack text cuts land on whole characters, not UTF-16 indexes** ([#3622])
+- **A not-yet-valid web TLS certificate now raises the self-alert instead of reading as healthy** ([#3517])
+- **Light and Cool Breeze status colors read against their own page, and text on a status fill gets a theme ink** ([#3609])
+- **Forced Plan Failing fires once per observation, not once per cooldown** ([#3579])
+- **The compression dead-job alert now says what a -infinity row is on the store's TimescaleDB** ([#3591])
+- **Every delta family now stores the interval its deltas accrued over, and query_stats stores the statement offsets its delta key is made of** ([#3540])
+- **The File Growth threshold means one thing — megabytes per hour — at every surface that shows it** ([#3539])
+- **Story confidence measures corroboration instead of path length, and the nightly rebuild's three cards become one incident that names the job** ([#3538])
+- **The daily digest and sweep rollup no longer re-announce on a service restart** ([#3580])
+- **compare_analysis bands each delta by the server's own dispersion and folds one cause into one row, so same-hour-yesterday noise stops reading as a verdict** ([#3538])
+- **A server nothing has banded yet is Unknown, not Healthy, and the alert-history grids show the severity the alert fired at instead of the colour its name implies** ([#3539])
+- **Every latest-snapshot MCP read says when it was captured, and no tool accepts a window it does not read** ([#3541])
+- **PostgreSQL servers get a measured deadlock band from their own counters, their Long-Running Query alert skips maintenance like SQL Server's does, and every one-sided alert says why it is one-sided** ([#3539])
+- **Database File Growth's rise arm fires once per hourly observation, not once per cooldown** ([#3636])
+- **The daily summary stops painting purged months green, and every MCP filter is part of the query** ([#3541])
+- **Zero is a measurement: health parsers say whether their source was ever seen, a regression with no baseline stays null, and the first point of a differenced trend is no longer a fabricated 0** ([#3541])
+- **The interval-hourly Query Store refresh stops paying twelve index inserts per re-materialized row for eleven indexes nothing reads, and the capture-down alert read stops decompressing a server's whole collection log to learn two statuses** ([#3597])
+- **Top CPU Queries reads as one record per query on Slack, not seven fields interleaved across a two-column grid** ([#3644])
+- **Top Cpu Queries' Max Dop is the newest plan's reading, with the cross-plan maximum kept as a dated history** ([#3648])
+- **The force-plan remediation said "eligible, no blockers" for plans automatic plan correction already owned, had failed to force, or had withdrawn** ([#3652])
+- **A Claude review that posted nothing no longer finishes green** ([#3650])
+- **The deprecated Dashboard mirrors five of the brains-review honesty fixes in its own idiom** ([#3653])
+- **Six small honesty riders from the brains-review residue** ([#3653])
+- **The PostgreSQL poison-wait host holds on silence like the SQL Server engine does, and three presence-flat alerts grade their severity from the bars the health bands already measured** ([#3653])
+- **The Darling viewer's trend charts and calendar tell the same truth the MCP tools learned today** ([#3653])
+- **`get_pg_server_config` counted the page and called it the server** ([#3653])
+- **The four PostgreSQL host alerts fire with the tier they earned instead of no tier at all** ([#3653])
+- **Darling's `get_pvs_stats` trend drew an unmeasured pass as 0 MB** ([#3653])
+- **The Query Store duration chart now says what served it and where the rollup's floor cut the window** ([#3653])
+- **The analysis pass no longer says "collection appears to have stopped … NOT an all-clear" for a window the coverage witness proves the collector observed** ([#3653])
+- **The PostgreSQL analysis vocabulary absorbs what six content lanes reported back** ([#3542])
+- **A target that restarted, failed over or was re-pointed no longer keeps subtracting from the old instance's counters** ([#3653])
+- **A quiet hour no longer halves the next hour's Query Store rate** ([#3653])
+- **The query-stats trends read the interval the store has, on both SKUs** ([#3653])
+- **Compose delta aggregates exclude the restart marker** ([#3653])
+- **`mute_analysis_finding` stops writing the hash as the path and stops registering the same mute twice, `remove_server` can remove a server that never connected, and eight MCP descriptions stop saying what the code does not do** ([#3653])
+- **The web server page labelled page sums as totals, drew one instant as a trend, and four tools called their capture time by another name** ([#3653])
+- **The wait and perfmon anomaly baselines stop counting every restart's fabricated zero as a quiet sample** ([#3653])
+- **Three PostgreSQL pages stop guessing truncation from a full page, and four of the eleven payload rules stop being sentences** ([#3653])
+- **The MCP query-duration trend still divided a restart's zero into 0.00 after the viewer stopped, and two sentences that #3695/#3696 made false** ([#3653])
+- **The perfmon chart plotted deltas under a "Value" label with the divisor sitting unused on the row, and a latch/spinlock restart read as zero** ([#3653])
+- **One payload said NoData and No Data, and the page cut had five names** ([#3653])
+- **Five families subtracted from the old instance once before anyone noticed it had changed, and Aurora's wait counters had no one watching for a restart at all** ([#3653])
+- **Lite's plan-cache trend descriptions rated every point over the gap since the previous one, the shared unrated_note named one of two unrated reasons, and the latch/spinlock restart row was spelled two ways across SKUs** ([#3653])
+- **Fifteen rate arms spelled "unknowable" as 0 behind a guard that happened to hide it** ([#3653])
+- **A falling gauge read as a counter reset because the store did not know it was a gauge** ([#3653])
+- **A maintenance job's own sub-threshold anomalies fold onto the job's incident and name the job** ([#3704])
+- **PostgreSQL baselines survive a shortened retention, and pg_cpu carries the CPU dispersion floor** ([#3691])
+- **`compare_analysis` sigma-bands the PostgreSQL baselined metrics** ([#3691])
+- **`get_analysis_facts` now runs the anomaly detector on both engines** ([#3691])
+- **Full-edition `perfmon_stats.cntr_value_per_second` divided as an integer, so every counter under one event per second read 0/sec** ([#3653])
+- **The write family tells Aurora the truth** ([#3691])
+- **Three hourly rollups counted every restart's fabricated zero as a sample, and a service outage longer than a day left a two-hour hole under a floor that said covered** ([#3653])
+- **The PostgreSQL engine absorbs what the v2 lanes reported back** ([#3691])
+- **`get_fleet_overview` runs its collection-health rollup once per minute per host, however many overview calls race** ([#3735])
+- **`compare_analysis` sigma-bands the v2 PostgreSQL baselined metrics, and the write family has one definition of "WAL tracked"** ([#3691])
+- **Hour-of-week baselines key on the target's local clock, not UTC** ([#3653])
+- **PostgreSQL targets key their hour-of-week baselines on their own clock** ([#3691])
+- **The long-query completion XE session could never be created on Azure SQL DB** ([#3753])
+- **database_scoped_config collected nothing on Azure SQL DB, and said so nowhere: the three-part `[db].sys.sp_executesql` it called Azure-compatible is rejected there** ([#3755], [#3754])
+- **A pass whose fact families could not be read says so, on both SKUs** ([#3691])
+- **A collector run whose every item failed is no longer SUCCESS, and get_collection_health stops saying a faulted collector read and found nothing** ([#3754])
+- **The PostgreSQL Long-Running Query twin honours the program/login opt-out knob** ([#3743])
+- **The materialization hole scan reports on every start** ([#3756])
+- **The Long-Running Query alert applies `excludedDatabases` ahead of the row cap on both SQL Server SKUs** ([#3742])
+- **The CPU alert gate identifies a sample by equality, not order, and keys on the stored UTC instant** ([#3744])
+- **query_store_health collects per database on Azure SQL DB** ([#3764])
+- **The PostgreSQL Long-Running Query read applies `excludedDatabases` in the read, ahead of the row cap, and the Aurora wait-profile detector gates on peak AND mean** ([#3742], [#3691])
+- **PostgreSQL connection saturation now divides the real population by the ceiling** ([#3691])
+- **The rollup-routed daily calendar prints NULL, not 0, for a day the tier never materialized, and names it** ([#3653])
+- **The CPU collector's watermark and dedup key on the UTC twin where the store has it, with the frame stated** ([#3778])
+- **A quiet PostgreSQL pool is graded from numbackends alone, and the Aurora wait-profile advice names the window mean** ([#3691])
+- **The trend family's window floor is `window_truncated`, not the page dialect's `truncated`** ([#3653])
+- **Item 17's three unpinned description fixes get their pins: get_ag_health names its reader's traps, the catalogue's duration-trend line says rates not percentiles, and the server page reads every stamped tool by captured_at** ([#3653])
+- **Four census pins the V137 wave outran**
+- **The plan tools stopped saying "no CREATE INDEX text — a hint, not a design"** ([#3805])
+- **pg_statement_stats runs again on PostgreSQL clusters whose pg_stat_statements is below 1.9 or installed outside public** ([#3818])
+- **Held retention policies no longer wait for a restart: the coverage gate is re-judged on the running service's hourly store-maintenance tick** ([#3812])
+- **The PostgreSQL engine absorbs what waves 4–5 reported back, and the stock load storm can now page** ([#3691])
+- **Two counts nothing re-derived turned dev red on three checks**
+- **The companion-object remedy told twenty-three clusters to UPDATE an extension none of them had** ([#3830])
+- **A collector that STOPPED producing read as one that never produced** ([#3819])
+- **TimescaleDB availability was decided once, by a probe whose failures last a minute** ([#3815])
+- **`PG_XMIN_HOLD` grades the horizon's persistence, not one winner's** ([#3691])
+- **Store job self-heal covers every policy family, and a held retention policy is never mistaken for a dead one** ([#3816])
+- **A live store test stops racing the statistics collector**
+- **A month of zeros is the strongest baseline there is, not the absence of one** ([#3691])
+- **A configuration lever hanging off a diagnostic chain is attached to that finding instead of orphaned into a card of its own** ([#3691])
+- **Darling's Entra service-principal connections can find their authentication provider** ([#3838])
+- **Every button in every theme recognizes its access key again** ([#3835])
+- **Store self-alert triage pages stop rendering "Could not resolve server" for every metric added after #2768** ([#3833])
+- **`get_collection_health` per server no longer races the store's write bands with an unmemoized 7-day scan** ([#3856])
+- **The typed story path reaches the finding, six readers stop splitting its display string, and the lever beside an incident finally names the read that acts on it** ([#3859])
+- **An argument a tool does not declare is refused by name instead of silently dropped, on both SKUs, from one filter** ([#3870])
+- **`checkpoint_timeout` says `not_applicable` in the FACT on Aurora, not just at the tool that renders it** ([#3868])
+- **FinOps Locking & Contention stops showing databases that were renamed away** ([#3876])
+- **Darling's four object-locking reads stop showing databases that were renamed away** ([#3878])
+- **The pin that held the defect as intended behavior is renamed, which is why this was its own issue.**
+- **A census caught what no pin was watching for, and its roster grew rather than shrank.**
+- **`provision-roles.sql` stops at a role-name collision** ([#4809])
+- **Command-line verbs that open the store report an unusable store setting instead of crashing** ([#4809])
+- **Azure SQL Database and Managed Instance servers show their platform, not a SQL Server year** ([#4870])
+- **Lite's MCP plan tools say Lite keeps no plans** ([#4871])
+- **Lite's MCP tools and FinOps inventory read the collected server properties** ([#4872])
+- **Alert History's expanded rows show their labels** ([#4873])
+- **The server health starter dashboard can be created again, server pages show display names, and count charts use whole numbers** ([#4874])
+- **Darling stores Query Store text and plans for Azure SQL Database** ([#4875])
+- **Azure SQL Database no longer shows the host's hardware as its own** ([#4876], [#4882])
+- **FinOps stops advising shrinks without CPU data, or VM and memory changes on Azure SQL Database** ([#4877])
+- **File I/O shows real file sizes on Azure SQL Database, and no size for a Hyperscale log** ([#4878])
+- **Web panels show the history their read keeps when the Range asks for more** ([#4881])
+- **Azure SQL Database figures use the database's own vCores and memory limit** ([#4879])
+- **A Hyperscale log file no longer counts as ~1 TB of database storage** ([#4880])
+- **Wait names with a trailing space are trimmed, and two Hyperscale timer waits are ignored** ([#4884], [#4931], [#4939], [#4941])
+- **Lite no longer stores events twice, or loses its settings, after its 512 MB archive-and-reset** ([#4887], [#4918], [#4910])
+- **Perfmon rate counters show a per-second rate** ([#4883])
+- **On Azure SQL Database, empty tabs say their collector doesn't run there, and the page file and memory state read n/a** ([#4888])
+- **Lite keeps its saved settings through a crash during the archive-and-reset, and no longer double-counts an interrupted one** ([#4889])
+- **Azure SQL Database shows its own CPU count and calls its memory a limit** ([#4882])
+- **Other databases on an Azure SQL Database server show their allocated size, with used space beside it** ([#4890])
+- **On Azure SQL Database, an unknown volume is no longer reported as 0 MB free** ([#4892])
+- **A new Azure SQL Database Hyperscale database no longer raises a wait-profile anomaly on every analysis window for its first three days** ([#4893], [#4923])
+- **Lite's FinOps advice, High Impact Queries and the SQL Server Agent check read archived data too** ([#4921])
+- **Lite keeps its learned database states, and its database state alerts stay right, after the 512 MB archive step** ([#4917])
+- **Alert History lists analysis alerts under the server's display name** ([#4926])
+- **The Darling Viewer shows servers added or removed elsewhere without a restart** ([#4928])
+- **The Darling Viewer and Lite no longer close with an error when you check or uncheck a picker item** ([#4920])
+- **A new server no longer reports that a collector never ran, or that it's AWS RDS, before the collector is due** ([#4915])
+- **Silencing one of several databases that share a display name no longer silences the others, and their alerts no longer share a dedup key** ([#4908])
+- **Blocking and deadlock counts for a time window agree everywhere, counted by when each event happened** ([#4909], [#4913])
+- **Collection Health no longer makes a collector's latest counts look like a total for every run** ([#4914])
+- **An Azure SQL Database logical server monitored at master stores each deadlock once, and loses none** ([#4900], [#4910])
+- **On Azure SQL Database, a monitored master no longer repeats the blocking and deadlock alerts, findings and counts of databases you also monitor on their own** ([#4894], [#4906], [#4925], [#4927], [#4932])
+- **Lite's Recommendations tab says there isn't enough data yet for a newly added server, instead of "All clear"** ([#4901])
+- **FinOps no longer gives an Azure SQL Database logical server's master database a provisioning verdict or right-sizing advice** ([#4896])
+- **FinOps picks up a server added while the app is open** ([#4898])
+- **FinOps right-sizing advice says how much data it's based on, and no longer advises "reduce from 4 GB to 4 GB"** ([#4905])
+- **The Darling Viewer says when Azure SQL Database doesn't collect a tab's data, instead of showing an empty grid** ([#4904])
+- **Databases on one Azure SQL Database server no longer get mixed up** ([#4899])
+- **Lite says why a tab is empty when its collector doesn't run on Azure SQL Database** ([#4903])
+- **Optimized locking is read on Azure SQL Database, and a flag that couldn't be read shows as unknown, not off** ([#4907])
+- **Storage Growth shows n/a, not 0, when there's no earlier size to compare** ([#4902])
+- **Lite no longer stops collecting and alerting for every server some time after a crash or forced close** ([#4930], [#4929])
+- **A Darling update that brings a new PostgreSQL runtime no longer waits for the next restart when the old runtime folder is briefly locked** ([#4934], [#4935])
+
+### Security
+
+- **Scrubbed legacy plan-force-action audit text** ([#4384])
+- **Collected PostgreSQL statement text applies the same sensitive-statement filter as the store's own statements** ([#4383])
+- **Stored PostgreSQL setting values are redacted in more shapes, and the one-time scrub resumes a large server-day after a restart** ([#4380])
+- **Plan-force journal reads no longer return pre-#4326 exception text** ([#4363])
+- **Stopped `/api/ping` and the analysis notes from echoing raw exception text** ([#4326])
+
 ## [3.8.0] - 2026-09-17
 
 Full entries: [docs/changelog/3.8.md](docs/changelog/3.8.md)
@@ -1227,6 +2008,117 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 - **Failed SQL Agent job alert** ([#749])
 - **Installer: optional custom data/log file locations** ([#768])
 
+[#3517]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3517
+[#3523]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3523
+[#3524]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3524
+[#3525]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3525
+[#3526]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3526
+[#3527]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3527
+[#3528]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3528
+[#3529]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3529
+[#3530]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3530
+[#3531]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3531
+[#3532]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3532
+[#3533]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3533
+[#3534]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3534
+[#3535]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3535
+[#3536]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3536
+[#3537]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3537
+[#3538]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3538
+[#3539]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3539
+[#3540]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3540
+[#3541]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3541
+[#3542]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3542
+[#3547]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3547
+[#3548]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3548
+[#3551]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3551
+[#3556]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3556
+[#3557]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3557
+[#3561]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3561
+[#3563]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3563
+[#3570]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3570
+[#3573]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3573
+[#3574]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3574
+[#3575]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3575
+[#3576]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3576
+[#3577]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3577
+[#3579]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3579
+[#3580]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3580
+[#3581]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3581
+[#3582]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3582
+[#3588]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3588
+[#3591]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3591
+[#3597]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3597
+[#3598]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3598
+[#3601]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3601
+[#3602]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3602
+[#3603]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3603
+[#3604]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3604
+[#3607]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3607
+[#3608]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3608
+[#3609]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3609
+[#3612]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3612
+[#3620]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3620
+[#3622]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3622
+[#3636]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3636
+[#3644]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3644
+[#3648]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3648
+[#3650]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3650
+[#3652]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3652
+[#3653]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3653
+[#3678]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3678
+[#3691]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3691
+[#3704]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3704
+[#3710]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3710
+[#3712]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3712
+[#3735]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3735
+[#3739]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3739
+[#3740]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3740
+[#3741]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3741
+[#3742]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3742
+[#3743]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3743
+[#3744]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3744
+[#3745]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3745
+[#3752]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3752
+[#3753]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3753
+[#3754]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3754
+[#3755]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3755
+[#3756]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3756
+[#3764]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3764
+[#3778]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3778
+[#3781]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3781
+[#3783]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3783
+[#3796]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3796
+[#3797]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3797
+[#3802]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3802
+[#3805]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3805
+[#3812]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3812
+[#3815]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3815
+[#3816]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3816
+[#3817]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3817
+[#3818]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3818
+[#3819]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3819
+[#3830]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3830
+[#3833]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3833
+[#3834]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3834
+[#3835]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3835
+[#3838]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3838
+[#3848]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3848
+[#3854]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3854
+[#3856]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3856
+[#3859]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3859
+[#3868]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3868
+[#3869]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3869
+[#3870]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3870
+[#3871]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3871
+[#3876]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3876
+[#3878]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3878
+[#3880]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3880
+[#3898]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3898
+[#3899]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3899
+[#3904]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3904
+[#3914]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3914
+[#3915]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3915
 [#3514]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3514
 [#3477]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3477
 [#3495]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3495
@@ -3203,3 +4095,496 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#3493]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3493
 [#3496]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3496
 [#3499]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3499
+[#3906]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3906
+[#3908]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3908
+[#3909]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3909
+[#3918]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3918
+[#3919]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3919
+[#3886]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3886
+[#3889]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3889
+[#3900]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3900
+[#3911]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3911
+[#3920]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3920
+[#3927]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3927
+[#3931]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3931
+[#3932]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3932
+[#3940]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3940
+[#3942]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3942
+[#3946]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3946
+[#3947]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3947
+[#3950]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3950
+[#3952]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3952
+[#3953]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3953
+[#3955]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3955
+[#3956]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3956
+[#3957]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3957
+[#3964]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3964
+[#3965]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3965
+[#3966]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3966
+[#3968]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3968
+[#3972]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3972
+[#3975]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3975
+[#3979]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3979
+[#3980]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3980
+[#3981]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3981
+[#3983]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3983
+[#3984]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3984
+[#3985]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3985
+[#3992]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3992
+[#3995]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3995
+[#3996]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3996
+[#3998]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3998
+[#4001]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4001
+[#4002]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4002
+[#4003]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4003
+[#4007]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4007
+[#4010]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4010
+[#4011]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4011
+[#4013]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4013
+[#4015]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4015
+[#4016]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4016
+[#4020]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4020
+[#4022]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4022
+[#4025]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4025
+[#4029]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4029
+[#4030]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4030
+[#4031]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4031
+[#4032]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4032
+[#4036]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4036
+[#4038]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4038
+[#4039]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4039
+[#4040]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4040
+[#4042]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4042
+[#4044]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4044
+[#4047]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4047
+[#4048]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4048
+[#4049]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4049
+[#4050]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4050
+[#4051]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4051
+[#4055]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4055
+[#4057]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4057
+[#4061]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4061
+[#4063]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4063
+[#4064]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4064
+[#4065]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4065
+[#4066]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4066
+[#4067]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4067
+[#4068]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4068
+[#4069]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4069
+[#4070]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4070
+[#4071]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4071
+[#4073]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4073
+[#4074]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4074
+[#4077]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4077
+[#4078]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4078
+[#4079]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4079
+[#4081]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4081
+[#4082]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4082
+[#4083]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4083
+[#4084]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4084
+[#4085]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4085
+[#4086]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4086
+[#4087]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4087
+[#4088]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4088
+[#4089]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4089
+[#4090]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4090
+[#4091]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4091
+[#4092]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4092
+[#4093]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4093
+[#4095]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4095
+[#4096]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4096
+[#4099]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4099
+[#4100]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4100
+[#4101]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4101
+[#4103]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4103
+[#4105]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4105
+[#4106]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4106
+[#4107]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4107
+[#4108]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4108
+[#4109]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4109
+[#4110]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4110
+[#4111]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4111
+[#4113]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4113
+[#4114]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4114
+[#4115]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4115
+[#4116]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4116
+[#4117]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4117
+[#4118]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4118
+[#4119]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4119
+[#4120]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4120
+[#4121]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4121
+[#4122]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4122
+[#4123]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4123
+[#4124]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4124
+[#4125]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4125
+[#4126]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4126
+[#4127]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4127
+[#4131]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4131
+[#4133]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4133
+[#4136]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4136
+[#4137]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4137
+[#4141]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4141
+[#4157]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4157
+[#4186]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4186
+[#4198]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/4198
+[#4203]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/4203
+[#4206]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4206
+[#4208]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4208
+[#4228]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4228
+[#4230]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4230
+[#4252]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4252
+[#4254]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4254
+[#4256]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4256
+[#4258]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4258
+[#4259]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4259
+[#4260]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4260
+[#4261]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4261
+[#4263]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4263
+[#4271]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4271
+[#4278]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4278
+[#4279]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4279
+[#4280]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4280
+[#4281]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4281
+[#4282]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4282
+[#4285]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4285
+[#4286]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4286
+[#4287]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4287
+[#4288]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4288
+[#4291]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4291
+[#4292]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4292
+[#4293]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4293
+[#4294]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4294
+[#4295]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4295
+[#4297]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4297
+[#4302]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4302
+[#4303]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4303
+[#4304]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4304
+[#4306]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4306
+[#4307]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4307
+[#4308]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4308
+[#4309]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4309
+[#4311]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4311
+[#4317]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4317
+[#4319]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4319
+[#4321]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4321
+[#4324]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4324
+[#4325]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4325
+[#4326]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4326
+[#4327]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4327
+[#4328]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4328
+[#4329]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4329
+[#4330]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4330
+[#4331]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4331
+[#4333]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4333
+[#4336]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4336
+[#4337]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4337
+[#4338]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4338
+[#4339]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4339
+[#4340]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4340
+[#4341]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4341
+[#4342]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4342
+[#4344]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4344
+[#4345]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4345
+[#4347]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4347
+[#4350]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4350
+[#4351]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4351
+[#4352]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4352
+[#4353]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4353
+[#4357]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4357
+[#4358]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/4358
+[#4359]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4359
+[#4361]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4361
+[#4362]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4362
+[#4363]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4363
+[#4364]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4364
+[#4365]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4365
+[#4366]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4366
+[#4367]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4367
+[#4368]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4368
+[#4370]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4370
+[#4371]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4371
+[#4372]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4372
+[#4373]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4373
+[#4380]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4380
+[#4382]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4382
+[#4383]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4383
+[#4384]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4384
+[#4386]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4386
+[#4387]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4387
+[#4388]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4388
+[#4390]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4390
+[#4391]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4391
+[#4392]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4392
+[#4393]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4393
+[#4395]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4395
+[#4396]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4396
+[#4399]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4399
+[#4400]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4400
+[#4401]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4401
+[#4402]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4402
+[#4405]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4405
+[#4406]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4406
+[#4407]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4407
+[#4408]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4408
+[#4409]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4409
+[#4411]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4411
+[#4412]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4412
+[#4413]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4413
+[#4416]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4416
+[#4417]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4417
+[#4418]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4418
+[#4419]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4419
+[#4420]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4420
+[#4421]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4421
+[#4422]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4422
+[#4423]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4423
+[#4424]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4424
+[#4429]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4429
+[#4430]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4430
+[#4431]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4431
+[#4432]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4432
+[#4433]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4433
+[#4434]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4434
+[#4435]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4435
+[#4436]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4436
+[#4437]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4437
+[#4426]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4426
+[#4439]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4439
+[#4444]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4444
+[#4447]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4447
+[#4454]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4454
+[#4455]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4455
+[#4456]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4456
+[#4458]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4458
+[#4464]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4464
+[#4465]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4465
+[#4467]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4467
+[#4470]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4470
+[#4472]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4472
+[#4474]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4474
+[#4480]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4480
+[#4481]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4481
+[#4482]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4482
+[#4483]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4483
+[#4486]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4486
+[#4488]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4488
+[#4489]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4489
+[#4490]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4490
+[#4492]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4492
+[#4493]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4493
+[#4494]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4494
+[#4495]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4495
+[#4496]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4496
+[#4501]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4501
+[#4502]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4502
+[#4506]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4506
+[#4509]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4509
+[#4538]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4538
+[#4540]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4540
+[#4541]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4541
+[#4542]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4542
+[#4543]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4543
+[#4544]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4544
+[#4545]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4545
+[#4547]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4547
+[#4548]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4548
+[#4549]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4549
+[#4550]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4550
+[#4551]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4551
+[#4552]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4552
+[#4553]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4553
+[#4554]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4554
+[#4555]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4555
+[#4556]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4556
+[#4557]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4557
+[#4559]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4559
+[#4560]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4560
+[#4561]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4561
+[#4562]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4562
+[#4563]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4563
+[#4565]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4565
+[#4567]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4567
+[#4568]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4568
+[#4583]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4583
+[#4585]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4585
+[#4586]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4586
+[#4587]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4587
+[#4588]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4588
+[#4590]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4590
+[#4591]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4591
+[#4592]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4592
+[#4593]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4593
+[#4595]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4595
+[#4596]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4596
+[#4599]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4599
+[#4600]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4600
+[#4601]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4601
+[#4602]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4602
+[#4603]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4603
+[#4604]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4604
+[#4610]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4610
+[#4612]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4612
+[#4614]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4614
+[#4615]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4615
+[#4616]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4616
+[#4617]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4617
+[#4618]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4618
+[#4625]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4625
+[#4626]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4626
+[#4632]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4632
+[#4633]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4633
+[#4634]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4634
+[#4643]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4643
+[#4644]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4644
+[#4646]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4646
+[#4647]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4647
+[#4649]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4649
+[#4656]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4656
+[#4658]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4658
+[#4664]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4664
+[#4665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4665
+[#4667]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4667
+[#4669]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4669
+[#4671]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4671
+[#4680]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4680
+[#4682]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4682
+[#4685]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4685
+[#4688]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4688
+[#4698]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4698
+[#4700]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4700
+[#4703]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4703
+[#4704]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4704
+[#4705]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4705
+[#4712]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4712
+[#4713]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4713
+[#4714]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4714
+[#4717]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4717
+[#4718]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4718
+[#4725]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4725
+[#4738]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4738
+[#4739]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4739
+[#4740]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4740
+[#4742]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4742
+[#4753]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4753
+[#4762]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4762
+[#4763]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4763
+[#4775]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4775
+[#4777]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4777
+[#4778]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4778
+[#4779]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4779
+[#4780]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4780
+[#4781]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4781
+[#4783]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4783
+[#4784]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4784
+[#4786]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4786
+[#4787]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4787
+[#4790]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4790
+[#4791]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4791
+[#4792]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4792
+[#4794]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4794
+[#4796]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4796
+[#4797]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4797
+[#4798]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4798
+[#4799]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4799
+[#4801]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4801
+[#4802]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4802
+[#4803]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4803
+[#4804]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4804
+[#4805]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4805
+[#4806]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4806
+[#4808]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4808
+[#4810]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4810
+[#4811]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4811
+[#4813]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4813
+[#4814]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4814
+[#4816]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4816
+[#4818]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4818
+[#4820]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4820
+[#4826]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4826
+[#4827]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4827
+[#4828]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4828
+[#4829]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4829
+[#4830]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4830
+[#4831]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4831
+[#4832]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4832
+[#4833]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4833
+[#4835]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4835
+[#4837]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4837
+[#4838]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4838
+[#4839]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4839
+[#4840]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4840
+[#4841]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4841
+[#4846]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4846
+[#4847]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4847
+[#4848]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4848
+[#4849]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4849
+[#4850]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4850
+[#4851]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4851
+[#4852]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4852
+[#4853]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4853
+[#4854]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4854
+[#4855]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4855
+[#4858]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4858
+[#4859]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4859
+[#4861]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4861
+[#4863]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4863
+[#4867]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4867
+[#4809]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4809
+[#4870]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4870
+[#4871]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4871
+[#4872]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4872
+[#4873]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4873
+[#4874]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4874
+[#4875]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4875
+[#4876]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4876
+[#4877]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4877
+[#4878]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4878
+[#4879]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4879
+[#4880]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4880
+[#4881]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4881
+[#4882]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4882
+[#4883]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4883
+[#4884]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4884
+[#4886]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4886
+[#4887]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4887
+[#4888]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4888
+[#4889]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4889
+[#4890]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4890
+[#4892]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4892
+[#4893]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4893
+[#4894]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4894
+[#4896]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4896
+[#4898]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4898
+[#4899]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4899
+[#4900]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4900
+[#4901]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4901
+[#4902]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4902
+[#4903]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4903
+[#4904]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4904
+[#4905]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4905
+[#4906]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4906
+[#4907]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4907
+[#4908]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4908
+[#4909]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4909
+[#4910]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4910
+[#4912]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4912
+[#4913]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4913
+[#4914]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4914
+[#4915]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4915
+[#4917]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4917
+[#4918]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4918
+[#4920]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4920
+[#4921]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4921
+[#4923]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4923
+[#4925]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4925
+[#4926]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4926
+[#4927]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4927
+[#4928]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4928
+[#4929]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4929
+[#4930]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4930
+[#4931]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4931
+[#4932]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4932
+[#4934]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4934
+[#4935]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4935
+[#4939]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4939
+[#4941]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4941

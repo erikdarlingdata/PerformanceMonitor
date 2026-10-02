@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Alerting;
 
 /// <summary>
@@ -21,6 +23,16 @@ namespace PerformanceMonitor.Alerting;
 /// <para><b>Both gates come from one read.</b> The store already holds the time series, so
 /// <see cref="GrowthMb"/> is measured against a sample from the lookback window rather than tracked in memory
 /// — no per-file state to keep, survive a restart, or leak.</para>
+///
+/// <para><b>A row is an observation, and it carries its own identity (#3636).</b> "Grew ≥ X MB inside the
+/// lookback window" is a fact about two COLLECTIONS — the newest sample and the oldest one in the window —
+/// and the <c>database_size_stats</c> collector lands one per HOUR. The engine re-reads the same two rows on
+/// every ~30 s alert pass in between, with a 5-minute cooldown, so without <see cref="ObservedAtUtc"/> the
+/// rise arm could not tell "still growing" from "no new data yet": one growth event, one hourly observation,
+/// up to TWELVE cards before the next collection replaced it. #3579 found the identical mechanism in the
+/// forced-plan alert at a 5-minute cadence and gave <c>ForcePlanFailureInfo</c> its <c>ObservedAtUtc</c>;
+/// this is the same stamp one condition over, at the worse ratio. The level gate is not this — a file at
+/// 80% of its volume IS still at 80% every pass, and re-fires on the cooldown by design.</para>
 /// </summary>
 public class DatabaseFileGrowthInfo
 {
@@ -41,9 +53,12 @@ public class DatabaseFileGrowthInfo
     /// and a short window cannot masquerade as a slow one.</summary>
     public double GrowthWindowMinutes { get; set; }
 
-    public string VolumeMountPoint { get; set; } = "";
-    public double VolumeTotalMb { get; set; }
-    public double VolumeFreeMb { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public string? VolumeMountPoint { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public double? VolumeTotalMb { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public double? VolumeFreeMb { get; set; }
 
     /// <summary>Null when growth is by PERCENT — the collector reports it that way on purpose, and a percent
     /// autogrowth on a large file is itself the misconfiguration worth surfacing.</summary>
@@ -57,12 +72,32 @@ public class DatabaseFileGrowthInfo
     /// <summary>The file as a share of its volume — the self-scaling level gate. One global threshold behaves
     /// correctly across a fleet whose servers have very different normal sizes, which an absolute MB threshold
     /// cannot: set it low enough for the small instances and the large ones alert constantly.</summary>
-    public double VolumePercent => VolumeTotalMb > 0 ? TotalSizeMb / VolumeTotalMb * 100 : 0;
+    public double VolumePercent => VolumeTotalMb is double total && total > 0 ? TotalSizeMb / total * 100 : 0;
 
     public double TotalSizeGb => TotalSizeMb / 1024.0;
     public double GrowthGb => GrowthMb / 1024.0;
 
-    /// <summary>Growth per hour, for a message that distinguishes "80 GB in an hour" from "80 GB since Tuesday".</summary>
+    /// <summary>Growth per hour over the MEASURED span, for a message that distinguishes "80 GB in an hour" from
+    /// "80 GB since Tuesday". Display only: the rise gate holds <see cref="GrowthMb"/> to the threshold scaled
+    /// to the CONFIGURED window (<see cref="AlertContextBuilders.FileGrowthRiseBarMb"/>), because this figure
+    /// extrapolates — one autogrowth inside a five-minute span reads as twelve an hour (#3539 A8c).</summary>
     public double GrowthMbPerHour =>
         GrowthWindowMinutes > 0 ? GrowthMb / (GrowthWindowMinutes / 60.0) : 0;
+
+    /// <summary>
+    /// The <c>collection_time</c> of the NEWEST sample for this file — the collector's clock, not the alert
+    /// sweep's — which is the identity of the observation this row reports (#3636). Two reads that return the
+    /// same stamp for the same file are the same observation surfacing twice, not two growth events; a newer
+    /// stamp is a new collection and a new measurement. The engine keeps the stamp it last alerted on per
+    /// (server, database, file) and declines to re-fire the RISE gate on the same one regardless of cooldown
+    /// — <c>ForcePlanFailureInfo.ObservedAtUtc</c>'s guard (#3579), which was itself the poison-wait family's
+    /// #2704 unrefreshed-source-row guard, at file grain. The LEVEL gate never consults it.
+    ///
+    /// <para>Nullable so an adapter that does not supply it degrades to the pre-#3636 cooldown-repeat rather
+    /// than to silence: a <c>null</c> never equals a remembered stamp, so every read counts as new and the
+    /// cooldown alone rate-limits it — the same stated fallback <see cref="IAlertStateStore"/> gives a host
+    /// that cannot persist. Both shipped adapters always supply it; <c>collection_time</c> is NOT NULL in both
+    /// stores.</para>
+    /// </summary>
+    public DateTime? ObservedAtUtc { get; set; }
 }

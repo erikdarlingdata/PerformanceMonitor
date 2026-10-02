@@ -73,12 +73,16 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
         Assert.All(p, x => Assert.True(x.Optional));
     }
 
+    /// <summary>#3541 A10: the same (server_name, hours_back, as_of) surface Lite's twin has always had. The
+    /// tool took server_name alone here — two parameter surfaces under one tool name, on the one tool whose
+    /// answer is a CRITICAL/HIGH/MEDIUM/NORMAL verdict. <c>McpLatestSnapshotStampTests</c> pins the two SKUs'
+    /// descriptions equal; this pins the shape.</summary>
     [Fact]
-    public void ParamContract_CpuSchedulerPressure_ServerNameOnly()
+    public void ParamContract_CpuSchedulerPressure_ServerHoursAsOf_MatchesLite()
     {
         var p = McpParams("get_cpu_scheduler_pressure");
-        Assert.Equal(new[] { "server_name" }, p.Select(x => x.Name).ToArray());
-        Assert.True(p.Single().Optional);
+        Assert.Equal(new[] { "server_name", "hours_back", "as_of" }, p.Select(x => x.Name).ToArray());
+        Assert.All(p, x => Assert.True(x.Optional));
     }
 
     [Fact]
@@ -103,6 +107,9 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
         Assert.Contains("worker_thread_exhaustion_warning", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        /* #3541 A10: the newest row IN THE WINDOW, as Lite reads it — not the newest row the store ever held. */
+        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -272,6 +279,60 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
 
             await DeleteRowsAsync(connection, ct, keepServer: true);
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpPlanCacheSchedulerTools.GetPlanCacheBloat(postgres, ServerName)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #3936 regression: two cpu_scheduler_stats snapshots planted under ONE collection_time (a run-overlap or
+    /// clock-resolution collision, reproduced live in the field on DARLING01 — see the issue) must still read
+    /// deterministically as the NEWER of the two, not whichever the plan happens to return first. The lower
+    /// collection_id row (NORMAL) is inserted AFTER the higher one (CRITICAL) specifically so a physical/
+    /// insertion-order coincidence cannot make this pass without the collection_id DESC tiebreak actually
+    /// doing the work — reverting CpuSchedulerPressureSql's tiebreak turns this CRITICAL assertion into NORMAL.
+    /// </summary>
+    [Fact]
+    public async Task GetCpuSchedulerPressure_TwoSnapshotsShareOneCollectionTime_ReadsTheNewerByCollectionId()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-cache/scheduler-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var tiedCollectionTime = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            const string insertSql = @"INSERT INTO cpu_scheduler_stats (collection_id, collection_time, server_id, server_name, max_workers_count, scheduler_count, cpu_count, total_runnable_tasks_count, total_work_queue_count, total_current_workers_count, avg_runnable_tasks_count, total_active_request_count, total_queued_request_count, total_blocked_task_count, total_active_parallel_thread_count, runnable_percent, worker_thread_exhaustion_warning, runnable_tasks_warning, blocked_tasks_warning, queued_requests_warning, total_physical_memory_kb, available_physical_memory_kb, physical_memory_pressure_warning, total_node_count, nodes_online_count, offline_cpu_count, offline_cpu_warning)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)";
+
+            /* The NEWER snapshot (higher collection_id), inserted FIRST: runnable tasks 60 > 50 -> CRITICAL. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9002L, tiedCollectionTime, ServerId, ServerName, 512, 8, 8, 60, 5L, 100, 7.5m, 40, 12, 2, 20L, 12.5m, false, true, false, true, 65536000L, 32768000L, false, 1, 1, 0, false);
+
+            /* The OLDER snapshot (lower collection_id) under the SAME collection_time, inserted SECOND (i.e.
+               physically last) so a reader that trusted insertion/scan order instead of collection_id would
+               land on THIS one: runnable tasks 5, no warnings -> NORMAL. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9001L, tiedCollectionTime, ServerId, ServerName, 512, 8, 8, 5, 0L, 10, 0.5m, 0, 0, 0, 0L, 0m, false, false, false, false, 65536000L, 60000000L, false, 1, 1, 0, false);
+
+            var cpu = await DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(postgres, ServerName);
+            DarlingMcpTestData.AssertEnvelope(cpu, ServerName, "pressure_level");
+            Assert.Contains("CRITICAL - High runnable task queue", cpu, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"NORMAL\"", cpu, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

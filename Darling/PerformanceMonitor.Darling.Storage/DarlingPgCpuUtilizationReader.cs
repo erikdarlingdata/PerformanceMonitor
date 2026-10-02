@@ -163,14 +163,27 @@ public static class DarlingPgCpuUtilizationReader
                 reader.GetDouble(1),
                 reader.IsDBNull(2) ? null : reader.GetDouble(2),
                 reader.IsDBNull(3) ? null : reader.GetDouble(3),
-                reader.IsDBNull(4) ? null : reader.GetDouble(4)));
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                /* The gate does not read memory: null here means "this read does not carry it", which is
+                   a different statement from a row whose memory columns were NULL (see HostMemory). */
+                Memory: null));
         }
 
         return samples;
     }
 
+    /// <summary>
+    /// The served read carries the V136 host-memory columns beside the CPU row (#3809, the third between-waves
+    /// batch of #3691). Until then the six columns had exactly one reader — the memory family's collector in
+    /// <c>PgTargetFactCollector.Memory.cs</c> — and an operator sent to <c>get_pg_cpu_utilization</c> by the
+    /// memory facts' tool rows found no memory on it. The two ALERT reads (<see cref="LatestCpuSql"/>,
+    /// <see cref="SamplesSinceSql"/>) still select what they selected before V136: the High CPU gate is a
+    /// sub-second read on the alert path and has no memory question to answer.
+    /// </summary>
     internal const string HistorySql = """
-        SELECT sample_time, cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu
+        SELECT sample_time, cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu,
+               memory_total_bytes, memory_free_bytes, memory_cached_bytes, memory_buffers_bytes, memory_active_bytes,
+               configured_memory_bytes
         FROM pg_cpu_utilization
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -179,17 +192,37 @@ public static class DarlingPgCpuUtilizationReader
         ORDER BY sample_time
         """;
 
+    /// <summary>
+    /// One row's V136 host-memory columns, every member nullable: a pre-V136 row, or a Performance Insights
+    /// endpoint without <c>os.memory.*</c>, has them NULL, and NULL travels as "not measured" rather than 0
+    /// (a zero here would read as a host with no memory). Bytes, as stored; the collector's <c>HostMemorySample</c>
+    /// is the same six in the analysis project, which cannot see this type.
+    /// </summary>
+    public sealed record HostMemory(
+        long? TotalBytes,
+        long? FreeBytes,
+        long? CachedBytes,
+        long? BuffersBytes,
+        long? ActiveBytes,
+        long? ConfiguredBytes);
+
     /// <param name="CpuPercent">Percent of the capacity CURRENTLY ALLOCATED (#3281).</param>
     /// <param name="AcuUtilizationPercent">Percent of the CONFIGURED ceiling in use, or null where
     /// Performance Insights had no capacity sample for this minute.</param>
     /// <param name="ServerlessCapacityAcu">ACU allocated at this minute, or null.</param>
     /// <param name="MaxConfiguredAcu">The configured ACU ceiling at this minute, or null.</param>
+    /// <param name="Memory">The row's V136 host-memory columns on the SERVED read (<see cref="GetHistoryAsync"/>),
+    /// and null on the alert-gate read (<see cref="GetSamplesSinceAsync"/>), whose SQL does not select them.
+    /// Deliberately not defaulted, for the same reason the capacity trio is not: a null must mean "this read
+    /// does not carry memory" by construction, never "someone forgot", and a row that WAS read with memory
+    /// columns all NULL is a non-null record with null members — the two states stay distinguishable.</param>
     public sealed record CpuSample(
         DateTime SampleTimeUtc,
         double CpuPercent,
         double? AcuUtilizationPercent,
         double? ServerlessCapacityAcu,
-        double? MaxConfiguredAcu);
+        double? MaxConfiguredAcu,
+        HostMemory? Memory);
 
     /// <summary>The served-read side (#2629/#2719's own fix) — every reading in a window, for
     /// <c>get_pg_cpu_utilization</c>. Windowed on <c>collection_time</c> (the ingestor's own cycle time)
@@ -216,9 +249,108 @@ public static class DarlingPgCpuUtilizationReader
                 reader.GetDouble(1),
                 reader.IsDBNull(2) ? null : reader.GetDouble(2),
                 reader.IsDBNull(3) ? null : reader.GetDouble(3),
-                reader.IsDBNull(4) ? null : reader.GetDouble(4)));
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                new HostMemory(
+                    TotalBytes: reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                    FreeBytes: reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                    CachedBytes: reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                    BuffersBytes: reader.IsDBNull(8) ? null : reader.GetInt64(8),
+                    ActiveBytes: reader.IsDBNull(9) ? null : reader.GetInt64(9),
+                    ConfiguredBytes: reader.IsDBNull(10) ? null : reader.GetInt64(10))));
         }
 
         return samples;
+    }
+
+    /// <summary>One bucketed point (#4193 - the TrendBuckets contract #3897 gave the rest of the trend family).
+    /// CPU and ACU are averaged with each bucket's peak kept beside it, so a saturation minute survives a wide
+    /// bucket; the capacity trio stays averaged, on <c>Rounded</c>'s terms; the memory pressure pair
+    /// (<see cref="Memory"/>'s <c>FreeBytes</c>/<c>ActiveBytes</c>) is the bucket's WORST sample - minimum free,
+    /// maximum active - rather than an average, so a brief pressure spike is not smoothed away; the other four
+    /// memory columns stay averaged.</summary>
+    public sealed record CpuBucketPoint(
+        DateTime BucketStartUtc,
+        double CpuPercent,
+        double? PeakCpuPercent,
+        double? AcuUtilizationPercent,
+        double? PeakAcuUtilizationPercent,
+        double? ServerlessCapacityAcu,
+        double? MaxConfiguredAcu,
+        long Samples,
+        long CapacitySamples,
+        HostMemory? Memory,
+        long MemorySamples);
+
+    /// <summary>date_bin buckets on <c>sample_time</c>, windowed on <c>collection_time</c> - the same split
+    /// <see cref="HistorySql"/> takes (see its own doc comment) - and NOT clamped to the window's start, on the
+    /// same terms as the SQL Server CPU trend's own bucketed query
+    /// (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>): a collection can carry a sample from before the
+    /// window, and clamping would move it off the minute it actually landed on. $1 server_id, $2/$3 window
+    /// (naive UTC), $4 bucket width in minutes.</summary>
+    internal static readonly string HistoryBucketedSql = $"""
+        SELECT
+            date_bin(CAST($4 AS integer) * INTERVAL '1 minute', sample_time, {TrendBucketSql.OriginSql}) AS bucket_start,
+            AVG(cpu_percent) AS cpu_percent,
+            MAX(cpu_percent) AS peak_cpu_percent,
+            AVG(acu_utilization_percent) AS acu_utilization_percent,
+            MAX(acu_utilization_percent) AS peak_acu_utilization_percent,
+            AVG(serverless_capacity_acu) AS serverless_capacity_acu,
+            AVG(max_configured_acu) AS max_configured_acu,
+            COUNT(*) AS samples,
+            COUNT(acu_utilization_percent) AS capacity_samples,
+            AVG(memory_total_bytes)::double precision AS memory_total_bytes,
+            MIN(memory_free_bytes) AS memory_free_bytes,
+            AVG(memory_cached_bytes)::double precision AS memory_cached_bytes,
+            AVG(memory_buffers_bytes)::double precision AS memory_buffers_bytes,
+            MAX(memory_active_bytes) AS memory_active_bytes,
+            AVG(configured_memory_bytes)::double precision AS configured_memory_bytes,
+            COUNT(memory_total_bytes) AS memory_samples
+        FROM pg_cpu_utilization
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   cpu_percent IS NOT NULL
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="HistoryBucketedSql"/> - the served read behind <c>get_pg_cpu_utilization</c>.</summary>
+    public static async Task<System.Collections.Generic.List<CpuBucketPoint>> GetBucketedHistoryAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var points = new System.Collections.Generic.List<CpuBucketPoint>();
+        await using var command = postgres.CreateCommand(HistoryBucketedSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(bucketMinutes);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            points.Add(new CpuBucketPoint(
+                DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                reader.GetDouble(1),
+                reader.IsDBNull(2) ? null : reader.GetDouble(2),
+                reader.IsDBNull(3) ? null : reader.GetDouble(3),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                reader.IsDBNull(5) ? null : reader.GetDouble(5),
+                reader.IsDBNull(6) ? null : reader.GetDouble(6),
+                reader.GetInt64(7),
+                reader.GetInt64(8),
+                new HostMemory(
+                    TotalBytes: reader.IsDBNull(9) ? null : (long)Math.Round(reader.GetDouble(9)),
+                    FreeBytes: reader.IsDBNull(10) ? null : reader.GetInt64(10),
+                    CachedBytes: reader.IsDBNull(11) ? null : (long)Math.Round(reader.GetDouble(11)),
+                    BuffersBytes: reader.IsDBNull(12) ? null : (long)Math.Round(reader.GetDouble(12)),
+                    ActiveBytes: reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                    ConfiguredBytes: reader.IsDBNull(14) ? null : (long)Math.Round(reader.GetDouble(14))),
+                reader.GetInt64(15)));
+        }
+
+        return points;
     }
 }

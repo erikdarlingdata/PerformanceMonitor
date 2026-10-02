@@ -1,6 +1,6 @@
 # Performance Monitor CLI Installer (Full Edition)
 
-> **The "Full" edition — a `PerformanceMonitor` database installed on the target SQL Server with T-SQL collectors running via SQL Agent — is deprecated.** It still ships and is supported for existing users, but new deployments should use **[Lite](../Lite/README.md)** (portable desktop app, nothing installed on the server) or **[Darling](../Darling/README.md)** (headless service + viewer). This CLI installer remains for those who still run the Full edition. See the [root README](../README.md) for the current editions.
+> **The "Full" edition — a `PerformanceMonitor` database installed on the target SQL Server with T-SQL collectors running via SQL Agent — is deprecated.** As of v3.3.0 it is no longer included in release assets, but it is supported for existing users and remains buildable from the repo. New deployments should use **[Lite](../Lite/README.md)** (portable desktop app, nothing installed on the server) or **[Darling](../Darling/README.md)** (headless service + viewer). This CLI installer remains for those who still run the Full edition. See the [root README](../README.md) for the current editions.
 
 Self-contained console application that installs the `PerformanceMonitor` database, collector stored procedures, reporting views, and SQL Agent jobs on a target SQL Server instance. The executable bundles the .NET 10.0 runtime — nothing to install on the machine running it.
 

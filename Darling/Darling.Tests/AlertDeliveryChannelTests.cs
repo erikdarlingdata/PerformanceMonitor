@@ -360,19 +360,20 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
-    /// <b><see cref="AlertDelivery.ChannelUndelivered"/> is unreachable for a new row.</b> It is retained
-    /// for the ~8 weeks of history that holds it, where it means throttled OR folded OR failed with nothing
-    /// to say which. Over the whole representable domain the only shapes that still reach it are the ones
-    /// the send core cannot emit — every channel reporting
-    /// <see cref="AlertChannelOutcome.NotAttempted"/> while a channel is configured and the alert is not
-    /// muted, which cannot happen because a configured channel is always consulted.
+    /// <b><see cref="AlertDelivery.ChannelUndelivered"/> is reached only by a configured channel nothing
+    /// consulted.</b> It is retained for the ~8 weeks of history that holds it, where it means throttled OR
+    /// folded OR failed with nothing to say which. Over the whole representable domain the only shapes that
+    /// reach it are those with every channel reporting <see cref="AlertChannelOutcome.NotAttempted"/> while a
+    /// channel is configured and the alert is not muted. Without notification routes that cannot happen,
+    /// because a configured channel is always consulted; with routes it does (#4751), for an alert no route
+    /// covers on a deployment whose email is set up only through routes.
     ///
     /// <para>Stated as an enumeration of the surviving routes rather than as "it does not occur in these
     /// cases", because that is the form a reader can falsify: if a fourth suppression mechanism is added
     /// and not given a value, it lands here and this names it.</para>
     /// </summary>
     [Fact]
-    public void Undelivered_IsReachedOnlyByShapesTheSendCoreCannotEmit()
+    public void Undelivered_IsReachedOnlyByAConfiguredChannelNothingConsulted()
     {
         var reached = 0;
 
@@ -490,6 +491,8 @@ public sealed class AlertDeliveryChannelTests
     [InlineData(false, AlertDelivery.ChannelUndelivered, null, AlertDeliveryStatus.NotSent)]
     [InlineData(false, AlertDelivery.ChannelThrottled, null, AlertDeliveryStatus.Throttled)]
     [InlineData(false, AlertDelivery.ChannelFolded, null, AlertDeliveryStatus.ReportedElsewhere)]
+    /* #3712: routed to the digest by the corroboration gate — reported, not paged, and never "Shown". */
+    [InlineData(false, AlertDelivery.ChannelDigest, null, AlertDeliveryStatus.Digest)]
     [InlineData(false, AlertDelivery.ChannelFailed, null, AlertDeliveryStatus.Failed)]
     [InlineData(false, AlertDelivery.ChannelFailed, "Slack: 500", AlertDeliveryStatus.Failed)]
     [InlineData(false, AlertDelivery.ChannelMuted, null, AlertDeliveryStatus.Muted)]
@@ -577,6 +580,7 @@ public sealed class AlertDeliveryChannelTests
             (false, AlertDelivery.ChannelUndelivered, null),
             (false, AlertDelivery.ChannelThrottled, null),
             (false, AlertDelivery.ChannelFolded, null),
+            (false, AlertDelivery.ChannelDigest, null),
             (false, AlertDelivery.ChannelFailed, "Slack: 500 Internal Server Error"),
             (false, AlertDelivery.ChannelMuted, null),
             (false, AlertDelivery.ChannelEmail, "relay refused"),
@@ -1003,6 +1007,7 @@ public sealed class AlertDeliveryChannelTests
             NullLogger<AnalysisNotificationService>.Instance);
 
         await notifier.NotifyAsync(new[] { CpuFinding() });
+        await notifier.FlushPendingAsync();
 
         var bodies = endpoint.Bodies;
         Assert.Equal(3, bodies.Count);
@@ -1051,6 +1056,7 @@ public sealed class AlertDeliveryChannelTests
             NullLogger<AnalysisNotificationService>.Instance);
 
         await notifier.NotifyAsync(new[] { CpuFinding() });
+        await notifier.FlushPendingAsync();
 
         /* The channel saw the facts once. */
         var body = Assert.Single(endpoint.Bodies);
@@ -1121,5 +1127,37 @@ public sealed class AlertDeliveryChannelTests
         }
 
         return count;
+    }
+
+    /* ---------------- #4220: TriageBaseUrl gates on Web.Enabled ONLY ---------------- */
+
+    /// <summary>Ruled (#4220, 2026-09-25): the dashboard disabled is the ONLY reason to omit the link —
+    /// there is nothing to open. This is the byte-identity pin the coordinator asked for: a set
+    /// publicBaseUrl with Web.Enabled false must read exactly like an unset one.</summary>
+    [Fact]
+    public void TriageBaseUrl_IsEmpty_WhenTheDashboardIsDisabled_EvenWithAPublicBaseUrlConfigured()
+    {
+        var config = new DarlingConfig();
+        config.Web.Enabled = false;
+        config.Web.PublicBaseUrl = "http://10.0.0.5:5153";
+
+        var settings = new DarlingAlertSettings(config);
+
+        Assert.Equal("", settings.TriageBaseUrl);
+    }
+
+    /// <summary>The other half: enabled, the base is returned unchanged — including a DNS host, a
+    /// loopback-only deployment, or a base shaped like it carries a credential, none of which are this
+    /// seam's to second-guess per the ruling.</summary>
+    [Fact]
+    public void TriageBaseUrl_ReturnsTheConfiguredValue_WhenTheDashboardIsEnabled()
+    {
+        var config = new DarlingConfig();
+        config.Web.Enabled = true;
+        config.Web.PublicBaseUrl = "http://10.0.0.5:5153";
+
+        var settings = new DarlingAlertSettings(config);
+
+        Assert.Equal("http://10.0.0.5:5153", settings.TriageBaseUrl);
     }
 }

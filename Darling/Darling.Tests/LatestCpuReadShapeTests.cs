@@ -54,14 +54,16 @@ public sealed class LatestCpuReadShapeSqlTests
 
     /// <summary>
     /// The number of latest-CPU reads in <c>Darling/</c>: the alert sweep's, the viewer's server-summary
-    /// card, the MCP health reader's, and the MCP fleet reader's per-server-newest <c>DISTINCT ON</c>. A hard
-    /// floor rather than an exact count so adding a fifth read is allowed; what is not allowed is the scan
-    /// silently finding NOTHING and passing vacuously, which is the only way this whole class could stop
-    /// guarding without going red.
+    /// card, the MCP health reader's, and the MCP fleet reader's per-server probe (a <c>LATERAL ... LIMIT 1</c>
+    /// driven from the registry since #3895, a <c>DISTINCT ON (server_id)</c> before). A hard floor rather
+    /// than an exact count so adding a fifth read is allowed; what is not allowed is the scan silently
+    /// finding NOTHING and passing vacuously, which is the only way this whole class could stop guarding
+    /// without going red.
     ///
-    /// <para>It was 3 while the extraction keyed on <c>LIMIT 1</c> alone, and the fleet read — the only one
-    /// of the four with no <c>server_id</c> filter, so the one where a mis-framed bound would take the whole
-    /// fleet — was the copy the guard could not see.</para>
+    /// <para>It was 3 while the extraction keyed on <c>LIMIT 1</c> alone, and the fleet read — the one read
+    /// of the four that answers for the whole fleet at once, so the one where a mis-framed bound would take
+    /// every server — was the copy the guard could not see. The extraction still recognises the
+    /// <c>DISTINCT ON</c> spelling, so a revert to it is held to the same ordering rule.</para>
     /// </summary>
     private const int KnownLatestCpuReadCount = 4;
 
@@ -143,6 +145,9 @@ public sealed class LatestCpuReadShapeSqlTests
        LIMIT 1 alone left this one invisible, which is how a fourth copy already existed under a guard whose
        own doc worried about a fourth copy being added. */
     [InlineData(true, "const string S = @\"\nSELECT DISTINCT ON (server_id)\n    server_id, a\nFROM v_cpu_utilization_stats\nORDER BY server_id, collection_time DESC, sample_time DESC\";")]
+    /* The fleet read's shape since #3895: a per-server probe inside a LATERAL, driven from the registry. Its
+       LIMIT 1 and its $-free text are what make it a latest-row read to the extraction. */
+    [InlineData(true, "const string S = $@\"\nSELECT s.server_id, latest.a\nFROM servers AS s\nCROSS JOIN LATERAL\n(\n    SELECT a\n    FROM v_cpu_utilization_stats\n    WHERE server_id = s.server_id\n    ORDER BY collection_time DESC, sample_time DESC\n    LIMIT 1\n) AS latest\nWHERE s.is_enabled\";")]
     /* DISTINCT ON something OTHER than server_id is not a per-server-newest read. */
     [InlineData(false, "const string S = @\"\nSELECT DISTINCT ON (database_name)\n    database_name, a\nFROM v_cpu_utilization_stats\nORDER BY database_name, collection_time DESC\";")]
     /* The same read as a C# RAW string literal, which is how most of Darling/ writes SQL. */

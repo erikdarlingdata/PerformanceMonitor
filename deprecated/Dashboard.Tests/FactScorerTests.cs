@@ -785,10 +785,12 @@ public class FactScorerTests
     }
 
     // ARM 2 — tempdb allocation / PFS-GAM-SGAM contention scored off the PAGELATCH_UP wait fact by
-    // ABSOLUTE wait_time_ms (server-wide wait_stats, the SAME data the source view reads), tripping at
-    // > 10000 ms -> MEDIUM (install/47:2515: pagelatch_up_ms > 10000 -> "MEDIUM - PAGELATCH_UP
-    // contention"). Flat 0.5 — the view has no higher PAGELATCH_UP band. Value (fraction-of-period) only
-    // has to be > 0 to clear the wait guard; the absolute wait_time_ms is what scores.
+    // wait_time_ms PER OBSERVED HOUR (server-wide wait_stats, the SAME data the source view reads),
+    // tripping at > 10000 ms/hr -> MEDIUM (install/47:2411 sums the last hour; :2515: pagelatch_up_ms >
+    // 10000 -> "MEDIUM - PAGELATCH_UP contention"). Flat 0.5 — the view has no higher PAGELATCH_UP band.
+    // Value (fraction-of-period) only has to be > 0 to clear the wait guard; the hourly wait_time_ms is
+    // what scores. These fixtures carry no period_duration_ms, which the shared scorer reads as a one-hour
+    // window (#3538 A7), so 15,000 ms is 15 s/hr and 8,000 ms is 8 s/hr and the pins hold unchanged.
     [Fact]
     public void Score_PageLatchUp_Over10Sec_ScoresMedium()
     {
@@ -1100,10 +1102,14 @@ public class FactScorerTests
     }
 
     // WS4: plan-XML advisories. MISSING_INDEX / PLAN_WARNING (Source "queries", Value = count)
-    // score the 0.4 advisory base only when the count is > 0, and 0 otherwise. Advise-only.
+    // score only when the count is > 0, and 0 otherwise. Advise-only. PLAN_WARNING keeps the 0.4
+    // advisory base; MISSING_INDEX is demoted to the Information rung (#3805,
+    // FactScorer.MissingIndexCorroborationSeverity = 0.25) — a request is corroboration and never
+    // outranks a standing misconfiguration — and the pin reads the constant so the ORDERING, not the
+    // digit, is what a future change has to argue with.
     [Theory]
-    [InlineData("MISSING_INDEX", 1, 0.4)]
-    [InlineData("MISSING_INDEX", 5, 0.4)]
+    [InlineData("MISSING_INDEX", 1, FactScorer.MissingIndexCorroborationSeverity)]
+    [InlineData("MISSING_INDEX", 5, FactScorer.MissingIndexCorroborationSeverity)]
     [InlineData("MISSING_INDEX", 0, 0.0)]
     [InlineData("PLAN_WARNING", 1, 0.4)]
     [InlineData("PLAN_WARNING", 0, 0.0)]

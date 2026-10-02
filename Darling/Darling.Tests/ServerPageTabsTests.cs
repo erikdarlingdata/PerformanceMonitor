@@ -90,11 +90,17 @@ public sealed class ServerPageTabsTests
         ["get_pg_io_trend"] = "pg_io_stats",
         ["get_pg_database_trend"] = "pg_database_stats",
         ["get_pg_deadlock_detail"] = "pg_deadlocks",
+        ["get_pg_log_events"] = "pg_log_events",
         ["get_pg_server_config_changes"] = "pg_server_config",
         ["get_pg_replication_stats"] = "pg_replication_stats",
             ["get_pg_top_queries"] = "pg_statement_stats",
             ["get_pg_plans"] = "pg_plan_capture",
             ["get_pg_plan_capture_readiness"] = "pg_plan_capture_readiness",
+            /* #3607: a READ over the config collector's table, not a collector of its own - the audit is
+               computed from the newest pg_server_config snapshot, so its not_collected gate names that
+               collector, which is what this map records. Two reads over one collector is the same shape
+               as get_pg_server_config / get_pg_server_config_changes above. */
+            ["get_pg_logging_audit"] = "pg_server_config",
             ["get_pg_blocking"] = "pg_blocking",
             ["get_pg_io_stats"] = "pg_io_stats",
             ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
@@ -204,7 +210,14 @@ public sealed class ServerPageTabsTests
            So the exemption clause above is now unused, and that is the state to keep it in. A collector
            whose whole output is genuinely a panel is still allowed to exist — raise the constant and say why
            here — but nothing currently claims to be one, and the last thing that did was wrong about it. */
-        const int KnownUnreadable = 0;
+        /* ONE, since V136 (#3691), and deliberately: pg_database_size_stats is landed one wave AHEAD of its read so
+           the fleet accrues rows before the consumer lanes (object growth, disk-free) arrive — the rung's PR
+           says "nothing reads it yet" as an exit criterion, not an oversight. This is not the "genuinely a
+           panel" exemption the paragraph above describes; it is a sequencing exemption with a named
+           successor, and the lower-it half below is what makes it expire: when the first get_pg_* read over
+           the table lands, this number must come down with it. Do not let a second collector join under
+           this comment. */
+        const int KnownUnreadable = 1;
 
         Assert.True(
             unreadable.Length <= KnownUnreadable,
@@ -412,6 +425,96 @@ public sealed class ServerPageTabsTests
     }
 
     /// <summary>
+    /// The query-trend drill-down reads the WINDOW floor off the key the payload publishes it under (#3653 item
+    /// 17: <c>window_truncated</c>, beside <c>effective_hours_back</c>), and not off the page dialect's
+    /// <c>truncated</c> it was spelled as before. This is the one place on the web client that reads the
+    /// window floor, and the failure mode of reading the old key is silent: <c>undefined</c> is falsy, so the
+    /// "history starts N hours back" notice would simply stop appearing while the chart plotted a series that
+    /// begins later than the axis says. The sentence itself is kept word for word; only the key moved. The
+    /// stat tiles that read a bare <c>truncated</c> lower in the file read page cuts and are not this fact.
+    /// </summary>
+    [Fact]
+    public void TheQueryTrendDrillDown_ReadsTheWindowFloorOffItsOwnKey()
+    {
+        var draw = ServerTabsJs.IndexOf("async function drawQueryTrend(", StringComparison.Ordinal);
+        Assert.True(draw >= 0, "drawQueryTrend moved");
+        var end = ServerTabsJs.IndexOf("\n}\n", draw, StringComparison.Ordinal);
+        var body = ServerTabsJs[draw..end];
+
+        Assert.Contains("if (trend.data.window_truncated) {", body, StringComparison.Ordinal);
+        Assert.Contains("trend.data.effective_hours_back", body, StringComparison.Ordinal);
+        Assert.Contains("History for this query starts ", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("trend.data.truncated", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The latest-snapshot reads are read by their stamp's one spelling. #3637 made <c>captured_at</c> the
+    /// census's word for "when this snapshot was taken" and <see cref="McpLatestSnapshotStampTests"/> holds
+    /// every latest read to it; four of them (<c>get_database_sizes</c>, <c>get_running_jobs</c>,
+    /// <c>get_server_properties</c>, <c>get_session_stats</c>) had stamped themselves as <c>collection_time</c>
+    /// before that vocabulary existed, and this page's Sessions tile read the old key — the one consumer outside
+    /// that census's boundary, and the reason the four sat in a named allowance instead of the roster (#3653
+    /// A15/A16). #3697 renamed the payloads on both SKUs and moved the tile. Nothing pinned the tile, and a key
+    /// drifting back fails silently: an absent key renders as the empty dash, the tile still draws, and the
+    /// snapshot's age — the one number that says whether a Stamped read is stale — quietly stops appearing.
+    ///
+    /// <para>Derived, not listed. Every read the stamp census rosters as Stamped or SearchBound publishes its
+    /// stamp ONCE at the top as <c>captured_at</c> and nothing under <c>collection_time</c> anywhere in its
+    /// payload (the census's negative sweep refuses the top-level key, and none of those tools projects the word
+    /// into a row either), so ANY descriptor this page binds to one of those reads that names
+    /// <c>collection_time</c> is a dead read — whether a stat tile over the top-level object or a table column
+    /// over its rows. Windowed reads are excluded on purpose: their <c>grants[]</c> rows carry a per-row
+    /// <c>collection_time</c> that IS a series column. The positive half is the one tile the item named: it must
+    /// show the stamp under the new word, so the pin cannot pass by the tile being deleted.</para>
+    /// </summary>
+    [Fact]
+    public void TheStampedReads_AreReadByTheirStamp_NeverTheRetiredKey()
+    {
+        var js = ServerTabsJs;
+
+        var stamped = McpLatestSnapshotStampTests.LatestTools
+            .Where(t => t.Shape is McpLatestSnapshotStampTests.Shape.Stamped or McpLatestSnapshotStampTests.Shape.SearchBound)
+            .Select(t => t.ToolName)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.True(stamped.IsSupersetOf(["get_database_sizes", "get_running_jobs", "get_server_properties", "get_session_stats"]),
+            "the four reads this pin was written for have left the stamp roster — re-anchor before editing");
+
+        var arrays = DescriptorArraysIn(js);
+        var problems = new List<string>();
+        var examined = new List<string>();
+
+        foreach (var (read, arrayNames) in DescriptorArraysBoundIn(js))
+        {
+            if (!stamped.Contains(read)) continue;
+
+            foreach (var name in arrayNames)
+            {
+                Assert.True(arrays.TryGetValue(name, out var descriptors),
+                    $"{name}, bound to {read}, is not a top-level const array in server-tabs.js — the parser below needs re-anchoring");
+                examined.Add($"{read}/{name}");
+
+                if (Regex.IsMatch(descriptors, @"key:\s*""collection_time"""))
+                {
+                    problems.Add($"{read} is read through {name}, which names collection_time — a key no Stamped read publishes; its stamp is captured_at");
+                }
+            }
+        }
+
+        /* The four named reads must all have been reached, or the parser has silently stopped seeing the panels
+           and every assertion above passed on nothing. */
+        foreach (var read in new[] { "get_database_sizes", "get_running_jobs", "get_server_properties", "get_session_stats" })
+        {
+            Assert.Contains(examined, e => e.StartsWith(read + "/", StringComparison.Ordinal));
+        }
+
+        Assert.True(problems.Count == 0, string.Join("; ", problems));
+
+        /* The positive half: the Sessions tile shows the stamp, under the word the census uses, as an age. */
+        Assert.True(arrays.TryGetValue("SESSION_STATS", out var sessionStats), "SESSION_STATS moved — re-anchor this pin");
+        Assert.Matches(@"\{ key: ""captured_at"", label: ""Collected"", format: ""reltime""", sessionStats);
+    }
+
+    /// <summary>
     /// Every viz a descriptor names is in the shipped vocabulary. The four kinds are the whole registry; a fifth
     /// would have to be added to panels.js's VIZ, to <c>KnownVizList</c> (or the composer could not offer it), to
     /// derive.js's <c>deriveVizConfig</c> and to the editor's config arms — so a page quietly introducing one
@@ -467,7 +570,9 @@ public sealed class ServerPageTabsTests
         var backendMessage = PerformanceMonitor.Common.McpHelpers.ValidateHoursBack(
             PerformanceMonitor.Common.McpHelpers.MaxHoursBack + 1);
         Assert.NotNull(backendMessage);
-        Assert.Matches("exceeds maximum of (\\d+) hours", backendMessage!);
+        /* The validator answers the `invalid` envelope since #3739 and the page reads its `message` (util.js's
+           non-2xx arm), so the seam the regex has to match is the sentence inside it. */
+        Assert.Matches("exceeds maximum of (\\d+) hours", PerformanceMonitor.Common.McpHelpers.ErrorMessageOf(backendMessage!));
 
         /* Parity: both the loader and the composites route read errors through the helper — no read-error site
            left on the raw path, or the tab mixes friendly notices with raw API strings. */
@@ -729,9 +834,11 @@ public sealed class ServerPageTabsTests
         Assert.DoesNotContain("SERVER_TABS.map(", ServerJs, StringComparison.Ordinal);
         Assert.Contains("\"#/server/\" + encodeURIComponent(server) + \"/\" + t.id", ServerJs, StringComparison.Ordinal);
 
-        /* And the router parses that second segment back out and hands it to the page. */
+        /* And the router parses that second segment back out and hands it to the page. (#4190/#4191 added a
+           trailing opts argument — the poll flag renderServer uses to decide whether to re-fetch /api/fleet —
+           so this now matches the call's own leading args rather than the whole argument list.) */
         Assert.Contains("function serverRoute(rest)", AppJs, StringComparison.Ordinal);
-        Assert.Contains("renderServer(main, r.param, r.tab)", AppJs, StringComparison.Ordinal);
+        Assert.Contains("renderServer(main, r.param, r.tab, opts)", AppJs, StringComparison.Ordinal);
 
         /* The name is decoded AFTER the split, so an encoded '/' inside a server name survives the tab segment
            being introduced — the one way this change could have broken existing links. */
@@ -814,11 +921,12 @@ public sealed class ServerPageTabsTests
            DOM-shim run, so a table panel that forgot one cannot reach a browser. */
         /* The WHOLE signature, so emptyText is asserted to be a declared parameter rather than something
            read off an options object. #3278 appended `noteKey = null` - an opt-in server-supplied caveat,
-           unrelated to this guard - and the literal is spelled out here rather than truncated at emptyText
+           unrelated to this guard - and #4925 appended `moreNoteKeys = null` after it (further caveat fields
+           rendered the same way). The literal is spelled out here rather than truncated at emptyText
            because a prefix match would stop noticing a parameter inserted BEFORE it. */
         Assert.Contains(
             "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
-            + "noteKey = null)",
+            + "noteKey = null, moreNoteKeys = null)",
             js,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -926,6 +1034,10 @@ public sealed class ServerPageTabsTests
         {
             ["waitsPanel("] = new[] { "get_wait_stats", "get_wait_trend" },
             ["fileIoPanel("] = new[] { "get_file_io_trend" },
+            /* #3653 A6: the Daily Health Calendar became a composite so the read's days_missing[] renders as a
+               line above the grid. #3905: it also renders today's tile, from the same one fetch, where the tile
+               used to be a get_daily_summary descriptor of its own. */
+            ["dailySummaryPanels("] = new[] { "get_daily_summary_range" },
             ["perfmonPanel("] = new[] { "get_perfmon_stats", "get_perfmon_trend" },
             ["topQueriesPanel("] = new[] { "get_top_queries_by_cpu", "get_query_trend" },
         };
@@ -1060,6 +1172,66 @@ public sealed class ServerPageTabsTests
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
             yield return (m.Groups[1].Value, keys);
+        }
+    }
+
+    /// <summary>Every top-level <c>const NAME = [ ... ];</c> descriptor array in the module, by name. These are
+    /// the column and stat vocabularies the panels bind to (<c>*_COLUMNS</c>, <c>*_STATS</c>, <c>*_SERIES</c>);
+    /// the body is the text between the brackets, comments included.</summary>
+    private static Dictionary<string, string> DescriptorArraysIn(string js)
+    {
+        var arrays = Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
+            .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
+
+        /* A set that lives in the read catalog is a top-level const that points into it; its text is the catalog
+           entry for that read. */
+        var catalog = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js");
+        foreach (Match m in Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = READ_FIELDS\.(\w+)\.", RegexOptions.Multiline))
+        {
+            var entry = Regex.Match(catalog, @"^  " + m.Groups[2].Value + @": \{.*?^  \},?\r?$", RegexOptions.Multiline | RegexOptions.Singleline);
+            Assert.True(entry.Success, $"{m.Groups[2].Value} has no READ_FIELDS entry");
+            arrays[m.Groups[1].Value] = entry.Value;
+        }
+
+        return arrays;
+    }
+
+    /// <summary>
+    /// The (read, descriptor-array names) pairs the module's panel helpers bind: <c>stat("T", "read", {...},
+    /// NAME, ...)</c>, <c>table("T", "read", {...}, "rows", NAME, ...)</c> and <c>fanout("read", {...}, [{ stats:
+    /// NAME }, { columns: NAME }])</c>. Each call is sliced by bracket balance rather than by regex because a
+    /// fanout's spec array nests objects inside an array inside the call; the read is the first read-shaped
+    /// literal in the call, and the arrays are every <c>*_COLUMNS</c> / <c>*_STATS</c> token in it. The
+    /// helpers' own definitions (<c>function stat(title, read, ...)</c>) carry no literal and are skipped.
+    /// String literals are NOT skipped: a bracket inside a title or an empty-state sentence is balanced in
+    /// practice, and a lone one would end the slice early — a silent miss on the arrays after it, never a false
+    /// alarm, which the caller's reach check on its named reads bounds.
+    /// </summary>
+    private static IEnumerable<(string Read, string[] Arrays)> DescriptorArraysBoundIn(string js)
+    {
+        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|table|fanout)\("))
+        {
+            var depth = 1;
+            var i = open.Index + open.Length;
+            while (depth > 0 && i < js.Length)
+            {
+                switch (js[i])
+                {
+                    case '(' or '[' or '{': depth++; break;
+                    case ')' or ']' or '}': depth--; break;
+                }
+                i++;
+            }
+
+            var call = js[open.Index..i];
+            var read = Regex.Match(call, "\"(get_[a-z0-9_]+|audit_config)\"");
+            if (!read.Success) continue;
+
+            var arrays = Regex.Matches(call, @"\b([A-Z][A-Z0-9_]*_(?:COLUMNS|STATS))\b")
+                .Select(m => m.Groups[1].Value)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            yield return (read.Groups[1].Value, arrays);
         }
     }
 }

@@ -53,9 +53,16 @@ public class PgStatementStatsDeltaSkipTests
     /// <summary>
     /// One row's worth of reader values in ordinal order. Only the fields a scenario cares about are
     /// parameterized; everything else reads exactly as an idle statement's row would (zero counters, NULL
-    /// on the Aurora-only six).
+    /// on the Aurora-only six, and — since #3653 A5 — a NULL <c>statements_stats_reset</c> at ordinal 27,
+    /// which the epoch check reads as "unknown" and so never as a change; these tests are about the skip,
+    /// not the epoch, and a NULL keeps the epoch inert. <c>ServerEpochTests</c> drives the epoch itself.)
+    /// Since #4428, ordinal 28 is <c>stats_since</c> (NULL by default here — the row-coherent restart
+    /// placement is tested separately in <c>Darling.Tests</c>) and ordinal 29 is <c>target_now</c>, the
+    /// target's own clock, defaulted to the collection time a scenario is about to pass to <c>ReadAsync</c>.
+    /// Ordinal 30 is the pg_stat_statements eviction counter (#4677), <c>DBNull</c> here: these scenarios are about
+    /// the delta skip, and an unknown eviction count leaves it untouched.
     /// </summary>
-    private static object[] Row(long queryId, long calls, double totalExecTimeMs, long rowsReturned = 0, long databaseId = 1, long userId = 1) => new object[]
+    private static object[] Row(long queryId, long calls, double totalExecTimeMs, long rowsReturned = 0, long databaseId = 1, long userId = 1, DateTime? statsSince = null, DateTime? targetNow = null) => new object[]
     {
         queryId, databaseId, userId, true, calls, totalExecTimeMs,
         0d, 0d, 0d, rowsReturned,
@@ -64,6 +71,10 @@ public class PgStatementStatsDeltaSkipTests
         DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
         0L, 0L, 0L,
         DBNull.Value, DBNull.Value,
+        DBNull.Value,
+        statsSince.HasValue ? (object)statsSince.Value : DBNull.Value,
+        targetNow ?? T0,
+        DBNull.Value,
     };
 
     private static async Task<List<PgStatementStatsCollector.Row>> ReadAsync(
@@ -80,7 +91,9 @@ public class PgStatementStatsDeltaSkipTests
 
         var rows = await ReadAsync(Row(queryId: 1, calls: 0, totalExecTimeMs: 0), T0, deltas);
 
-        Assert.Single(rows);
+        /* #3540 (V128): and it ships as the (0, 0) marker — interval 0 is what tells a reader this row's
+           zero deltas are unknowable rather than a confirmed idle interval. */
+        Assert.Equal(0, Assert.Single(rows).SampleIntervalSeconds);
     }
 
     [Fact]
@@ -106,6 +119,8 @@ public class PgStatementStatsDeltaSkipTests
         Assert.Equal(50, row.DeltaCalls);
         Assert.Equal(500, row.DeltaTotalExecTimeMs);
         Assert.Equal(15, row.DeltaRows);
+        /* #3540 (V128): the measured span the three deltas accrued over, stored beside them. */
+        Assert.Equal(60, row.SampleIntervalSeconds);
     }
 
     /// <summary>
@@ -122,7 +137,9 @@ public class PgStatementStatsDeltaSkipTests
 
         var afterReset = await ReadAsync(Row(queryId: 4, calls: 40, totalExecTimeMs: 300), T0.AddSeconds(60), deltas);
 
-        Assert.Single(afterReset);
+        /* #3540 (V128): a reset row ships with interval 0, not the 60 s that elapsed — the elapsed span is
+           real, but no delta is knowable over it, and a stored 60 beside a 0 delta would read as idle. */
+        Assert.Equal(0, Assert.Single(afterReset).SampleIntervalSeconds);
     }
 
     /// <summary>

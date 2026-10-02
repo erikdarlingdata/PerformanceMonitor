@@ -18,7 +18,9 @@ public partial class LocalDataService
 
     private BaselineProvider GetBaselineProvider()
     {
-        return _baselineProvider ??= new BaselineProvider(_duckDb);
+        /* #3941: the store's shared tier, so the overview lanes and the analysis passes compute a series once per
+           analysis hour between them. */
+        return _baselineProvider ??= new BaselineProvider(_duckDb, sharedCache: BaselineCache.For(_duckDb));
     }
 
     /// <summary>

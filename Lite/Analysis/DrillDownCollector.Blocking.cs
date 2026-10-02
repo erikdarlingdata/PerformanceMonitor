@@ -22,24 +22,35 @@ public partial class DrillDownCollector
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
+        /* On an Azure SQL Database master target the evidence matches the count: a deadlock wholly inside a
+           separately monitored database is skipped. The newest 200 deadlocks stream until three qualify; a row
+           whose database (the event's database on the telemetry arm) is set, not master and outside the list
+           is kept without parsing its graph, and the other rows are checked by their graph. */
+        var scopeList = context.SeparatelyMonitoredDatabases is { Count: > 0 } l ? l : null;
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
+        cmd.CommandText = (@"
 SELECT collection_time, deadlock_time, victim_process_id,
        LEFT(victim_sql_text, 500) AS victim_sql,
-       deadlock_graph_xml
-FROM v_deadlocks
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-ORDER BY collection_time DESC
-LIMIT 3";
+       deadlock_graph_xml{FLAG}
+FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + @" AS dl
+ORDER BY deadlock_time DESC
+LIMIT {LIMIT}")
+            .Replace("{FLAG}", scopeList == null ? "" : ",\r\n       CASE WHEN " + SeparatelyMonitoredScope.DeadlockOutsideSql(scopeList, 4) + " THEN 1 ELSE 0 END")
+            .Replace("{LIMIT}", scopeList == null ? "3" : "200");
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        if (scopeList != null) SeparatelyMonitoredScope.AddParameters(cmd, scopeList);
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            if (items.Count >= 3) break;
+            var outsideTheList = scopeList != null && Convert.ToInt32(reader.GetValue(5)) == 1;
+            if (scopeList != null && !outsideTheList && DeadlockGraphDatabases.AllIn(reader.IsDBNull(4) ? null : reader.GetString(4), scopeList))
+                continue;
             /* #1140: parse the involved objects from the graph for the dedup fingerprint + a readable
                Objects field. The raw graph XML is NOT surfaced (it would bloat the alert detail). */
             var objects = DeadlockObjectExtractor.FromGraphXml(reader.IsDBNull(4) ? null : reader.GetString(4));
@@ -67,7 +78,7 @@ LIMIT 3";
         /* BPR + always-on DMV blocking snapshot, so the flat top-blocking list isn't empty when the
            blocked-process-report XE captured nothing (AWS RDS). Worst-by-wait surfaces regardless of
            source; on a box with both, each may contribute (this is a top-5 list, not a count). */
-        cmd.CommandText = @"
+        cmd.CommandText = (@"
 SELECT collection_time, database_name, blocked_spid, blocking_spid,
        wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object
 FROM
@@ -77,8 +88,7 @@ FROM
            LEFT(blocked_sql_text, 500) AS blocked_sql,
            LEFT(blocking_sql_text, 500) AS blocking_sql,
            contentious_object
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev
 
     UNION ALL
 
@@ -88,14 +98,15 @@ FROM
            LEFT(blocking_sql_text, 500) AS blocking_sql,
            contentious_object
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{SCOPE}
 ) AS combined
 ORDER BY wait_time_ms DESC
-LIMIT 5";
+LIMIT 5").Replace("{SCOPE}", SeparatelyMonitoredScope.BprFilter(context.SeparatelyMonitoredDatabases, 4));
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        SeparatelyMonitoredScope.AddParameters(cmd, context.SeparatelyMonitoredDatabases);
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -142,9 +153,7 @@ SELECT
     {BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {BlockingPairRowQuery.TrailingIdentityColumns}
-FROM v_blocked_process_reports
-WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
-{BlockingPairRowQuery.SpidFilter}
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter)} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -164,6 +173,10 @@ LIMIT 5000";
         await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
             connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
             context.CancellationToken);
+
+        if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
+            rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
+                && scopeList.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
 
         if (rows.Count == 0) return;
 

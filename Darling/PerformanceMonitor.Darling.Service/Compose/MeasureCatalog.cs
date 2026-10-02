@@ -157,8 +157,14 @@ public sealed record ComposeUnitFamily(string Name, IReadOnlyList<ComposeUnit> U
 /// acts on that value with ordinary text semantics. <see cref="FallbackColumn"/> must be a real payload
 /// column of <see cref="SourceTable"/> (pinned by test); it is only meaningful with
 /// <see cref="ViaModuleJoin"/>.</para>
+///
+/// <para><see cref="TrailingSpaceHistory"/> marks the SQL Server wait-name dimensions. SQL Server reports a few
+/// wait names with a trailing space, which the collector stores trimmed from #4884 on, so history from before
+/// the upgrade holds the same wait under a second spelling. The compiler groups such a dimension on
+/// <c>rtrim(column)</c> and widens each <c>eq</c>/<c>neq</c>/<c>like</c> value to also match the value plus one
+/// space, keeping the column itself bare in every filter.</para>
 /// </summary>
-public sealed record ComposeDimension(string SourceTable, string Name, string Column, bool Likeable, bool ViaModuleJoin = false, string? FallbackColumn = null);
+public sealed record ComposeDimension(string SourceTable, string Name, string Column, bool Likeable, bool ViaModuleJoin = false, string? FallbackColumn = null, bool TrailingSpaceHistory = false);
 
 /// <summary>The clock an event table's own time column is recorded in. Declared per annotation source
 /// because the store has no single answer: an XE-sourced column carries the UTC <c>@timestamp</c>, while the
@@ -170,8 +176,9 @@ public enum AnnotationClockFrame
     /// <summary>Naive UTC as stored — the XE <c>@timestamp</c> columns. Needs no conversion.</summary>
     Utc = 0,
 
-    /// <summary>The monitored server's local wall clock as stored. The compiler de-skews it to UTC by the
-    /// collected <c>server_properties.utc_offset_minutes</c> before windowing or returning it.</summary>
+    /// <summary>The monitored server's local wall clock as stored. The compiler converts it to UTC with the
+    /// server's clock (the offset in force at the row's own local time, see <c>ServerClock</c>) before
+    /// windowing or returning it.</summary>
     ServerLocal = 1,
 }
 
@@ -346,7 +353,7 @@ public static class MeasureCatalog
     /// <see cref="ComposeDimension"/> doc (#2737).</summary>
     public static readonly IReadOnlyList<ComposeDimension> Dimensions = new[]
     {
-        new ComposeDimension("wait_stats", "wait_type", "wait_type", Likeable: true),
+        new ComposeDimension("wait_stats", "wait_type", "wait_type", Likeable: true, TrailingSpaceHistory: true),
 
         new ComposeDimension("procedure_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("procedure_stats", "schema_name", "schema_name", Likeable: true),
@@ -396,12 +403,12 @@ public static class MeasureCatalog
 
         new ComposeDimension("session_stats", "program_name", "program_name", Likeable: true),
 
-        new ComposeDimension("waiting_tasks", "wait_type", "wait_type", Likeable: true),
+        new ComposeDimension("waiting_tasks", "wait_type", "wait_type", Likeable: true, TrailingSpaceHistory: true),
         new ComposeDimension("waiting_tasks", "database_name", "database_name", Likeable: true),
 
         new ComposeDimension("query_snapshots", "database_name", "database_name", Likeable: true),
         new ComposeDimension("query_snapshots", "status", "status", Likeable: true),
-        new ComposeDimension("query_snapshots", "wait_type", "wait_type", Likeable: true),
+        new ComposeDimension("query_snapshots", "wait_type", "wait_type", Likeable: true, TrailingSpaceHistory: true),
         new ComposeDimension("query_snapshots", "program_name", "program_name", Likeable: true),
         new ComposeDimension("query_snapshots", "login_name", "login_name", Likeable: true),
         new ComposeDimension("query_snapshots", "host_name", "host_name", Likeable: true),
@@ -1201,8 +1208,18 @@ public static class MeasureCatalog
             DefaultTimeAgg = ComposeAggregate.Count, ValidAggs = PerEventAggs, AllowedDimensions = JobHistoryDims,
         },
 
-        /* ── perfmon_stats (EAV: the counter value; the unit VARIES per counter — cntr_type is not stored — so
-             it is tagged 'count' as an honest placeholder, and the user picks the counter via counter_name) ── */
+        /* ── perfmon_stats (EAV: the counter value; the unit VARIES per counter, so it is tagged 'count' as an
+             honest placeholder, and the user picks the counter via counter_name). Two measures, one per stored
+             number, and the row's stored cntr_type (V132, #3653 A7) decides which is meaningful for the counter
+             picked: a GAUGE (Total Server Memory (KB)) is perfmon_value — since V132 the collector writes no
+             delta for it, so perfmon_value_delta over a gauge aggregates only NULLs and comes back empty rather
+             than inventing activity; a RATE (Batch Requests/sec) is perfmon_value_delta — its perfmon_value is
+             the cumulative count, as it always was. No cntr_type row guard is compiled here, on purpose: for
+             rows written since the rung the write path already makes it redundant (the gauge's delta IS NULL),
+             and for rows written before it the type is NULL on gauge and rate alike, so no row-level predicate
+             on the column can separate them — a guard would be dead text under both populations. The
+             MeasuredDeltaFilter on the delta measure (#3695) is unaffected: a gauge row's NULL interval passes
+             IS DISTINCT FROM 0 and its NULL delta adds nothing. ── */
         new ComposeMeasure
         {
             Key = "perfmon_value", DisplayName = "Perfmon counter value", Category = CatPerfmon, SourceTable = "perfmon_stats",
@@ -2185,6 +2202,16 @@ public static class MeasureCatalog
         value = default;
         return false;
     }
+
+    /// <summary>
+    /// The picker label suffix for a measure (#4653): " (ratio)" only for a measure that really divides — a
+    /// <see cref="MeasureKind.Ratio"/> in <see cref="MeasureRatioMode.Sum"/>, <see cref="MeasureRatioMode.Avg"/> or
+    /// <see cref="MeasureRatioMode.Weighted"/> mode. A <see cref="MeasureRatioMode.WeightedSum"/> measure is a window
+    /// TOTAL that rides the Ratio kind only because its aggregation is part of its definition (#2732), and a scalar is
+    /// no ratio at all: both get no suffix.
+    /// </summary>
+    public static string LabelSuffix(ComposeMeasure measure) =>
+        measure.Kind == MeasureKind.Ratio && measure.RatioMode != MeasureRatioMode.WeightedSum ? " (ratio)" : "";
 
     public static string WireName(ComposeAggregate value) => s_aggWire.First(x => x.Value == value).Wire;
 

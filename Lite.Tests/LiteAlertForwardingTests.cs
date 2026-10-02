@@ -45,7 +45,7 @@ namespace PerformanceMonitorLite.Tests;
 /// </para>
 /// </summary>
 [Collection("app-alert-statics")]
-public class LiteAlertForwardingTests : IDisposable
+public partial class LiteAlertForwardingTests : IDisposable
 {
     private const string Key = "101";
     private const string Name = "SRV-A";
@@ -104,7 +104,7 @@ public class LiteAlertForwardingTests : IDisposable
     {
         public List<BlockedProcessAlertRow> Blocking { get; } = new();
         public List<DeadlockAlertRow> Deadlocks { get; } = new();
-        public List<PoisonWaitDelta> PoisonWaits { get; } = new();
+        public List<PoisonWaitAccumulation> PoisonWaits { get; } = new();
         public List<LongRunningQueryInfo> LongRunning { get; } = new();
         public List<VolumeFreeSpaceInfo> Volumes { get; } = new();
         public TempDbSpaceInfo? TempDb { get; set; }
@@ -122,14 +122,14 @@ public class LiteAlertForwardingTests : IDisposable
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DeadlockAlertRow>(Deadlocks));
 
-        public Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(string serverKey, double thresholdMs, CancellationToken cancellationToken = default) =>
-            Task.FromResult(PoisonWaits.FindAll(w => w.AvgMsPerWait >= thresholdMs));
+        public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<PoisonWaitAccumulation>(PoisonWaits));
 
-        public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+        public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
-            IReadOnlyList<string> excludedDatabases, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<LongRunningQueryInfo>(LongRunning));
+            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new LongRunningQueryReadResult(new List<LongRunningQueryInfo>(LongRunning), 0, 0, 0));
 
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>(Volumes));
@@ -156,8 +156,8 @@ public class LiteAlertForwardingTests : IDisposable
 
         public List<DatabaseStateInfo> DatabaseStates { get; } = new();
 
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult<List<DatabaseStateInfo>?>(new List<DatabaseStateInfo>(DatabaseStates));
 
         /* #2157: settable so a forwarding test can plant a risen-counter row. */
         public List<ForcePlanFailureInfo> ForcePlanFailures { get; } = new();
@@ -254,6 +254,15 @@ public class LiteAlertForwardingTests : IDisposable
             Outcomes.Add(outcome);
             return Task.CompletedTask;
         }
+
+        /* #3580: DeliverAndReportAsync is REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store
+           Parity), so every fake answers it by hand. This one reports nothing: null is "unreported", which the
+           two daily documents treat as delivered, exactly as every fire before #3580 was. */
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            await DeliverAsync(outcome, cancellationToken);
+            return null;
+        }
     }
 
     /// <summary>Engine over Lite's REAL live-settings adapter + fakes + a controllable clock.</summary>
@@ -267,9 +276,13 @@ public class LiteAlertForwardingTests : IDisposable
         public bool Muted { get; set; }
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
-        public AlertEngine Build() => new(
+        public AlertEngine Build() => Build(Deliverer);
+
+        /// <summary>The same engine over a deliverer of the caller's choosing (the real
+        /// <see cref="LiteAlertDeliverer"/> on its test seams, for the tests that need its answer).</summary>
+        public AlertEngine Build(IAlertDeliverer deliverer) => new(
             new AppAlertEngineSettings(),
-            Adapter, StateStore, Deliverer,
+            Adapter, StateStore, deliverer,
             isAlertMuted: _ => Muted,
             failedJobsFetcher: (_, _, _) => Task.FromResult(new List<FailedJobInfo>(FailedJobs)),
             resolutionCallback: (r, _) => { Resolutions.Add(r); return Task.CompletedTask; },
@@ -407,6 +420,69 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.NotNull(persisted.Value.LastObservedSampleUtc);
     }
 
+    /* ---------------- CPU: the #3744 identity rule, on the Lite path ---------------- */
+
+    /// <summary>One sweep carrying one hand-picked sample instant (the #3744 fixtures run the stamp backwards,
+    /// which the increasing-instant drivers above cannot express).</summary>
+    private static Task ObserveCpuAsync(AlertEngine engine, DateTime sampleInstant, bool breaching) =>
+        engine.EvaluateServerAsync(Harness.Snapshot(
+            sqlCpu: breaching ? 70 : 20, totalCpu: breaching ? 95 : 30, cpuSampleTime: sampleInstant));
+
+    [Fact]
+    public async Task Cpu_AFallBack_RunsTheStampBackwards_AndTheStreakStillAdvances_OnLiteToo()
+    {
+        /* The Lite twin of AlertEngineTests' fall-back fixture (#3744). Lite feeds the shared gate
+           ServerSummaryItem.CpuSampleTimeUtc ?? CpuSampleTime off its overview read — the monitored server's
+           LOCAL wall clock on every pre-v63 row — and that clock repeats an hour every autumn. The gate now
+           decides "same sample" by EQUALITY of the instant rather than by order, so the sample stamped 01:00
+           after the fall-back is the new observation it is, and neither a building streak nor an open
+           incident waits an hour for the local clock to climb past 01:59 again. The arithmetic is the shared
+           engine's and is pinned in depth Darling-side; what this pins is that the Lite path reaches it
+           through its own settings, snapshot and store. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+        var engine = h.Build();
+
+        var local = new DateTime(2026, 11, 1, 1, 58, 0);
+        await ObserveCpuAsync(engine, local, breaching: true);
+        await ObserveCpuAsync(engine, local.AddMinutes(1), breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var fallenBack = new DateTime(2026, 11, 1, 1, 0, 0);
+        Assert.True(fallenBack < local, "the fixture must run the stamp backwards, or it tests nothing #3744 changed");
+        await ObserveCpuAsync(engine, fallenBack, breaching: true);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: false);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_TheUpgradeFrameSwitch_IsFreshExactlyOnce_OnLiteToo()
+    {
+        /* The identity moved from the local stamp to the row's UTC twin (#3744), so a record Lite persisted
+           before that meets a UTC instant on the first post-upgrade sweep — earlier than the local stamp east
+           of UTC, later west of it. Either way it is ONE new identity: counted once, its re-read held, then the
+           genuinely new samples the bar always needed. A new engine over the same store is the restart. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+
+        var local = new DateTime(2026, 9, 21, 12, 0, 0);
+        await ObserveCpuAsync(h.Build(), local, breaching: true);
+
+        var upgraded = h.Build();
+        var utc = local.AddHours(-3);
+        await ObserveCpuAsync(upgraded, utc, breaching: true);
+        await ObserveCpuAsync(upgraded, utc, breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
     [Fact]
     public async Task Cpu_LiteSchemaCarriesThePersistenceTable()
     {
@@ -446,10 +522,16 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal("  Total CPU: 92%\n  Threshold: 80%", fired.DetailText);
         /* :84 — the toast body minus the "{server}: " prefix. */
         Assert.Equal("Total CPU at 92% (threshold: 80%)", fired.ShortMessage);
-        /* :93-100 — CPU passes no context. #1830: the numerics are REQUIRED — without them the
-           history stores text-parsed "92% (Total CPU)", failed on the parenthesized label, and
-           stored 0 for every High CPU row. */
-        Assert.Null(fired.Context);
+        /* :93-100 passed no context; since #3653 (A8e) the context exists for the grade alone — no
+           details — because Lite's deliverer persists only the context, so a tier carried on the outcome
+           alone would never reach a Lite history row. 92% is at/over the knob and under the CPU band's
+           95% Critical bar: Warning. #1830: the numerics are REQUIRED — without them the history stores
+           text-parsed "92% (Total CPU)", failed on the parenthesized label, and stored 0 for every High
+           CPU row. */
+        Assert.NotNull(fired.Context);
+        Assert.Empty(fired.Context!.Details);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context.SeverityOverride);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
         Assert.Equal(92d, fired.NumericCurrentValue);
         Assert.Equal(80d, fired.NumericThresholdValue);
         Assert.False(fired.Muted);
@@ -779,22 +861,37 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal("1 deadlock(s) in the last hour", fired.ShortMessage);   /* :244 toast body */
     }
 
+    /// <summary>
+    /// #3539 A4: the toast body is the worst wait type's accumulated-wait sentence, and "worst" is graded
+    /// by the shared bars (severity, then accumulated ms) rather than by avg-ms-per-wait. Two types over the
+    /// bar: THREADPOOL at 900 s in the window (1.5 avg tasks stuck, Warning) leads RESOURCE_SEMAPHORE at
+    /// 600 s (exactly the Warning bar). The retired knob's value is set to a number that would have changed
+    /// the OLD outcome (999 ms would have silenced both rows' 30 ms / 60 ms averages) to pin that it is no
+    /// longer consulted.
+    /// </summary>
     [Fact]
-    public async Task PoisonWait_ToastBody_UsesTheWorstWait()
+    public async Task PoisonWait_ToastBody_UsesTheWorstWait_GradedByAccumulation_NotTheRetiredKnob()
     {
         DisableAllChecks();
         App.AlertPoisonWaitEnabled = true;
+        App.AlertPoisonWaitThresholdMs = 999;
         var h = new Harness();
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta { WaitType = "THREADPOOL", AvgMsPerWait = 750, DeltaMs = 15000, DeltaTasks = 20 });
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta { WaitType = "RESOURCE_SEMAPHORE", AvgMsPerWait = 600, DeltaMs = 6000, DeltaTasks = 10 });
+        var collected = new DateTime(2026, 9, 18, 12, 0, 0, DateTimeKind.Unspecified);
+        h.Adapter.PoisonWaits.Add(new PoisonWaitAccumulation("RESOURCE_SEMAPHORE", 600_000, 10_000, 10, collected));
+        h.Adapter.PoisonWaits.Add(new PoisonWaitAccumulation("THREADPOOL", 900_000, 30_000, 10, collected));
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("THREADPOOL (750ms), RESOURCE_SEMAPHORE (600ms)", fired.CurrentValue); /* :288/:315 */
-        Assert.Equal("500ms avg", fired.ThresholdValue);                                    /* :316 */
-        Assert.Equal("THREADPOOL avg 750ms/wait", fired.ShortMessage);                      /* :302 toast body */
-        Assert.Equal(750, fired.NumericCurrentValue);
+        Assert.Equal("THREADPOOL (900s in 10m), RESOURCE_SEMAPHORE (600s in 10m)", fired.CurrentValue);
+        Assert.Equal("600s accumulated over 10m (an average of 1 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal(
+            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 task(s) continuously stuck",
+            fired.ShortMessage);
+        Assert.Equal(900_000d, fired.NumericCurrentValue);
+        Assert.Equal(600_000d, fired.NumericThresholdValue);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context!.SeverityOverride);
     }
 
     [Fact]
@@ -827,7 +924,15 @@ public class LiteAlertForwardingTests : IDisposable
         var h = new Harness();
         h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 910, UnallocatedMb = 90 }; /* 91% used */
 
-        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        /* #3653 (A5): the fire is behind the shared persistence gate, so it takes TempDbSpaceBreachSamples
+           observations to earn. The fixture carries no CollectionTimeUtc, which is the documented every-sweep-
+           counts fallback (pinned in AlertEngineTests.TempDb_NoCollectionTime_CountsEverySweep); the strings
+           below are what this pin is about and are unchanged. */
+        var engine = h.Build();
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("91% reserved (910 MB)", fired.CurrentValue);  /* :448 */
@@ -849,15 +954,27 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal(80, App.AlertTempDbSpaceThresholdPercent);
 
         var h = new Harness();
-        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. */
+        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. Held
+           for a full gate's worth of sweeps (#3653 A5), so the silence is the ceiling's and not the gate's. */
         h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69, MaxSizeMb = 65_536 };
-        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        var withCeiling = h.Build();
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples; i++)
+        {
+            await withCeiling.EvaluateServerAsync(Harness.Snapshot());
+        }
+
         Assert.Empty(h.Deliverer.Outcomes);
 
-        /* The identical snapshot with the ceiling unmeasured is the pre-#2515 reading, and it pages. */
+        /* The identical snapshot with the ceiling unmeasured is the pre-#2515 reading, and it pages — after the
+           same number of sweeps. */
         var withoutCeiling = new Harness();
         withoutCeiling.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69 };
-        await withoutCeiling.Build().EvaluateServerAsync(Harness.Snapshot());
+        var engine = withoutCeiling.Build();
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
         var fired = Assert.Single(withoutCeiling.Deliverer.Outcomes);
         Assert.Equal("96% reserved (60 MB)", fired.CurrentValue);
         Assert.Equal("tempdb 96% reserved", fired.ShortMessage);
@@ -901,12 +1018,12 @@ public class LiteAlertForwardingTests : IDisposable
         var sends = new List<SendCall>();
         var deliverer = new LiteAlertDeliverer(
             (title, message, icon, serverName, metricName) => toasts.Add(new ToastCall(title, message, icon, serverName, metricName)),
-            (metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr, muted, detailText, deliveryMode) =>
+            (metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr, muted, detailText, deliveryMode, _) =>
             {
                 sends.Add(new SendCall(
                     metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr,
                     muted, detailText, deliveryMode));
-                return Task.CompletedTask;
+                return Task.FromResult<AlertDelivery?>(null);
             },
             _ => serverOverride);
         return (deliverer, toasts, sends);
@@ -927,7 +1044,7 @@ public class LiteAlertForwardingTests : IDisposable
            long-running job (:596), failed job (:691). Title == metric name in every branch. */
         await deliverer.DeliverAsync(Outcome("High CPU", shortMessage: "Total CPU at 92% (threshold: 80%)"));
         await deliverer.DeliverAsync(Outcome("Deadlocks Detected", shortMessage: "1 deadlock(s) in the last hour"));
-        await deliverer.DeliverAsync(Outcome("Poison Wait", shortMessage: "THREADPOOL avg 750ms/wait"));
+        await deliverer.DeliverAsync(Outcome("Poison Wait", shortMessage: "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 task(s) continuously stuck"));
         await deliverer.DeliverAsync(Outcome("Volume Free Space", shortMessage: "D:\\ 8% free (64.0 GB)"));
 
         Assert.Equal(4, toasts.Count);
@@ -1101,11 +1218,22 @@ public class LiteAlertForwardingTests : IDisposable
         App.AlertExcludedDatabases = new List<string> { "tempdb", "model" };
         Assert.Equal(new[] { "tempdb", "model" }, settings.ExcludedDatabases);
 
+        /* #3653 (A5, Q5): the Long-Running Query opt-out knob's two lists, forwarded raw (the engine normalises). */
+        App.AlertLongRunningQueryExcludedProgramNamePrefixes = new List<string> { "SQLAgent - TSQL JobStep", "HammerDB" };
+        Assert.Equal(new[] { "SQLAgent - TSQL JobStep", "HammerDB" }, settings.LongRunningQueryExcludedProgramNamePrefixes);
+        App.AlertLongRunningQueryExcludedLogins = new List<string> { @"NT AUTHORITY\SYSTEM" };
+        Assert.Equal(new[] { @"NT AUTHORITY\SYSTEM" }, settings.LongRunningQueryExcludedLogins);
+
         /* The one mapped member: Lite's persisted enum → the engine's enum. */
         App.AlertCpuMode = CpuAlertMode.Total;
         Assert.Equal(EngineCpuAlertMode.TotalServer, settings.CpuAlertMode);
         App.AlertCpuMode = CpuAlertMode.SqlOnly;
         Assert.Equal(EngineCpuAlertMode.SqlProcess, settings.CpuAlertMode);
+
+        /* #3653 (A8e): the one member with NO Lite knob behind it — the deadlock-rate pair the engine grades a
+           fire with is the shipped #3368 pair, the same pair Lite's own card bands on. Not a pass-through, and
+           pinned as such so a future knob has to come with a card that honours it. */
+        Assert.Equal(PerformanceMonitor.Common.DeadlockRateThresholds.Default, settings.DeadlockRateThresholds);
     }
 
     /* =====================================================================================

@@ -107,6 +107,25 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
     // ── read layer ──
 
     [Fact]
+    public async Task ObjectGrowthDrill_ATableWithNoEarlierSampleReadsUnknown_NotZero()
+    {
+        await SeedScenarioAsync();
+        // NewTable exists only in the latest snapshot: there is nothing earlier to compare with.
+        await InsertObjectStat(_latest, "AppDb", 900, 1, "dbo", "NewTable", "PK_NewTable", 30m, 1_000, 0, 0, 0, 0, 0, 0);
+
+        var (objects, _) = await _dataService.GetObjectGrowthHeatmapDataAsync(ServerId, "AppDb");
+
+        var big = Assert.Single(objects, o => o.TableName == "BigTable");
+        Assert.Equal(400m, big.Growth30dMb!.Value);
+        Assert.Equal(400m / 30m, big.DailyGrowthRateMb!.Value, 4);
+        var added = Assert.Single(objects, o => o.TableName == "NewTable");
+        Assert.Null(added.Growth30dMb);
+        Assert.Null(added.DailyGrowthRateMb);
+        Assert.Null(added.GrowthPct30d);
+        Assert.Equal("NewTable", objects[^1].TableName);
+    }
+
+    [Fact]
     public async Task ObjectSizeGrowth_ComputesDelta()
     {
         await SeedScenarioAsync();
@@ -115,8 +134,19 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         var big = rows.FirstOrDefault(r => r.TableName == "BigTable");
         Assert.NotNull(big);
         Assert.Equal(600m, big!.CurrentReservedMb);
-        Assert.Equal(400m, big.Growth30dMb);
-        Assert.True(big.GrowthPct30d >= 199 && big.GrowthPct30d <= 201);
+
+        /* #3541 A12: one day of history. The 400 MB / 200% this used to assert as Growth30dMb was growth over
+           ONE day labelled thirty — the store has no 30-day (or 7-day) snapshot, so those figures are null,
+           and the same delta carries its own name and its real span. */
+        Assert.Null(big.Snapshot7dTime);
+        Assert.Null(big.Snapshot30dTime);
+        Assert.Null(big.Growth7dMb);
+        Assert.Null(big.Growth30dMb);
+        Assert.Null(big.GrowthPct30d);
+        Assert.Equal(1, big.DaysOfData);
+        Assert.Equal(400m, big.GrowthOverAvailableHistoryMb);
+        Assert.Equal(200m, big.GrowthOverAvailableHistoryPct);
+        Assert.Equal(400m, big.DailyGrowthRateMb);
     }
 
     [Fact]
@@ -193,6 +223,37 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         Assert.NotEmpty(rows);
         Assert.All(rows, r => Assert.Equal("AppDb", r.DatabaseName));
         Assert.Contains(rows, r => r.TableName == "HotTable" && r.RowLockWaitInMs == 100_000);
+    }
+
+    /// <summary>
+    /// #3876, the reporter's repro: a database renamed between captures. The old name's rows exist only in
+    /// an OLDER capture; the new name's rows only in the newest. "Latest" used to be resolved PER NAME
+    /// (MAX(collection_time) GROUP BY database_name), which made the dead name its own immortal group — the
+    /// grid showed it a month later and the DB selector still offered it. Anchored on the SERVER's latest
+    /// capture, the grid and the selector both see only what the newest pass collected — the same answer
+    /// Database sizes and Storage growth always gave — while the old name's rows stay in the store untouched
+    /// as capture-time history.
+    /// </summary>
+    [Fact]
+    public async Task IndexLocking_AfterADatabaseRename_ShowsOnlyTheCurrentName_InGridAndSelector()
+    {
+        // Pre-rename capture: contended rows under the OLD name only.
+        await InsertObjectStat(_prior, "OldName", 400, 1, "dbo", "RenamedHot", "PK_RenamedHot", 90m, 100_000, 50, 2, 0, 100, 40_000, 1);
+        // Newest capture: the same workload under the NEW name; the old name is absent from this pass.
+        await InsertObjectStat(_latest, "NewName", 400, 1, "dbo", "RenamedHot", "PK_RenamedHot", 95m, 110_000, 80, 3, 0, 150, 70_000, 2);
+
+        var rows = await _dataService.GetIndexLockingAsync(ServerId);
+        Assert.Contains(rows, r => r.DatabaseName == "NewName" && r.RowLockWaitInMs == 70_000);
+        Assert.DoesNotContain(rows, r => r.DatabaseName == "OldName");
+
+        var dbs = await _dataService.GetIndexLockingDatabasesAsync(ServerId);
+        Assert.Contains("NewName", dbs);
+        Assert.DoesNotContain("OldName", dbs);
+
+        /* The dead name must not be resurrectable through the filter arm either: scoping the grid to the
+           old name finds nothing at the current capture, rather than the pre-rename rows. */
+        var oldScoped = await _dataService.GetIndexLockingAsync(ServerId, 200, "OldName");
+        Assert.Empty(oldScoped);
     }
 
     // ── anomaly detection ──

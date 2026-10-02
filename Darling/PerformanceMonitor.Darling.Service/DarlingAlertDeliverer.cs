@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -23,7 +24,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// is written per fired alert regardless of channel outcome — including muted alerts (flagged
 /// muted, channels skipped) and alerts with no channel configured at all, whose row states
 /// <see cref="AlertDelivery.ChannelNoneConfigured"/> (the headless smoke asserts the row exists).
-/// Never throws — a dead SMTP server or Postgres store must not abort the engine's sweep.
+/// Throws only the caller's own cancellation — a dead SMTP server or Postgres store must not abort the
+/// engine's sweep, but a service that is stopping must not be told its abandoned delivery failed.
 ///
 /// <para>The row's disposition comes from <see cref="AlertDelivery.FromFanout"/> with
 /// <c>trayChannelPresent: false</c>. This service is headless: it has no tray icon and no toast code, so
@@ -74,7 +76,31 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         _core = new EmailSendCore(settings, historyStore, webhookAlertService, s_branding, logger);
     }
 
-    public async Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+    public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default) =>
+        DeliverAndReportAsync(outcome, cancellationToken);
+
+    /// <summary>
+    /// The delivery, reporting its disposition (#3580). Every send goes through here —
+    /// <see cref="DeliverAsync"/> is this with the answer discarded — so there is one delivery path and
+    /// not a reporting one beside a silent one.
+    ///
+    /// <para><b>What comes back.</b> On the combined send (Summary mode, or any alert without incidents,
+    /// which is every self-alert) the exact <see cref="AlertDelivery"/> the history row was written with.
+    /// On a Per-event split there are N sends and N rows, and this returns the one
+    /// <see cref="FailedSendBackoff.ReportForSplit"/> picks (#4822): a delivery that reached a channel, else a
+    /// failed one so the engine tries the alert again, else <c>null</c> — "unreported" — when no send was
+    /// attempted; the callers that read the answer (the three daily documents) carry structured
+    /// <see cref="AlertContext.Details"/> since #3834 but no
+    /// <see cref="AlertContext.Incidents"/>, so the Per-event branch below — which is gated on incidents,
+    /// not on a context existing — remains unreachable for them and their disposition is always reported.
+    /// That is a property of what a report IS rather than an accident of how it fires: an incident-carrying
+    /// context would enter these documents into per-event splitting and the incident delivery filter, which
+    /// are paging mechanisms a once-a-day report stays outside of (#3834 states this at each builder). The
+    /// belt-and-suspenders catch below also answers <c>null</c>: both <c>TrySendAsync</c> and
+    /// <c>RecordAlertAsync</c> are failure-isolated themselves, so a throw here is something outside the
+    /// channels and says nothing about whether they delivered.</para>
+    /// </summary>
+    public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
     {
         if (outcome is null)
         {
@@ -88,6 +114,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             var mode = AlertDeliveryModeResolver.Resolve(_resolveServerOverride(outcome.ServerKey), _settings.DeliveryMode);
             if (mode == AlertNotificationMode.PerEvent && outcome.Context?.Incidents is { Count: > 0 })
             {
+                var deliveries = new List<AlertDelivery?>();
                 foreach (var message in PerEventNotification.Split(outcome.Context, _settings.PerEventMax))
                 {
                     /* Per-incident card: msg.CurrentValue is the incident's occurrence count, and
@@ -95,21 +122,22 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
                        overflow message's "+N more" text is unparseable, so the store's text fallback
                        silently recorded 0). Threshold is the outcome's, unchanged. Matches Lite's
                        per-event sends; detail text rebuilt from the split context. */
-                    await SendAndRecordAsync(
+                    deliveries.Add(await SendAndRecordAsync(
                         outcome, message.CurrentValue, message.Context,
                         AlertContextBuilders.ContextToDetailText(message.Context),
                         numericCurrentValue: message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
-                        deliveryMode: mode);
+                        deliveryMode: mode, cancellationToken: cancellationToken));
                 }
 
-                return;
+                /* N sends, N rows: the split reports the one delivery the engine acts on (#4822). */
+                return FailedSendBackoff.ReportForSplit(deliveries);
             }
 
             /* Summary mode, or an alert with no incidents (CPU/low-disk/jobs): one combined send+row, unchanged. */
-            await SendAndRecordAsync(
+            return await SendAndRecordAsync(
                 outcome, outcome.CurrentValue, outcome.Context, outcome.DetailText,
                 outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                deliveryMode: mode);
+                deliveryMode: mode, cancellationToken: cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -119,6 +147,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         {
             _logger.LogError("Alert delivery failed for {Metric} on {Server}: {Message}",
                 outcome.MetricName, outcome.ServerName, ex.Message);
+            return null;
         }
     }
 
@@ -130,21 +159,33 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     /// still record (flagged muted).
     /// </summary>
     /// <param name="deliveryMode">
-    /// The mode <see cref="DeliverAsync"/> resolved for this server, forwarded to the shared send core for
-    /// #3430's per-metric repeat ceiling. Passed rather than re-resolved so one alert's two channels and its
-    /// history row all describe the same decision, and passed FAITHFULLY on the Per-event split — those
-    /// messages must not be aggregated, which is that mode's own contract.
+    /// The mode <see cref="DeliverAndReportAsync"/> resolved for this server, forwarded to the shared send
+    /// core for #3430's per-metric repeat ceiling. Passed rather than re-resolved so one alert's two channels
+    /// and its history row all describe the same decision, and passed FAITHFULLY on the Per-event split —
+    /// those messages must not be aggregated, which is that mode's own contract.
     /// </param>
-    private async Task SendAndRecordAsync(
+    /// <param name="cancellationToken">
+    /// #4752: the token <see cref="DeliverAndReportAsync"/> received, handed to the webhook posts so a service
+    /// that is stopping does not wait out an endpoint that never answers. A cancel from this token comes out of
+    /// here as the <see cref="OperationCanceledException"/> it is, before any row is written:
+    /// <see cref="DeliverAndReportAsync"/> lets it through and records nothing for a delivery the service
+    /// abandoned. A post that merely times out is still that channel's failure, and the row is still written.
+    /// </param>
+    /// <returns>The disposition the history row was written with — the same value, so what the caller is
+    /// told and what the operator later reads in the alert log cannot disagree (#3580).</returns>
+    private async Task<AlertDelivery> SendAndRecordAsync(
         AlertOutcome outcome, string currentValue, AlertContext? context, string? detailText,
-        double? numericCurrentValue, double? numericThresholdValue, AlertNotificationMode deliveryMode)
+        double? numericCurrentValue, double? numericThresholdValue, AlertNotificationMode deliveryMode,
+        CancellationToken cancellationToken)
     {
         /* #2090: the fire site's severity rode AlertOutcome.Severity but the channel builders read
            only Context.SeverityOverride — so every self-alert (fired with Context: null) rendered
            INFO-blue in Teams/Slack/PagerDuty/webhooks while its log line said Critical. Fold the
            outcome's severity into the context here, once, upstream of every channel; ??= so an
-           explicit override set by a context builder still wins. The context also serializes into
-           alert history, so replays keep the severity too. */
+           explicit override set by a context builder still wins. The context serializes into alert
+           history below, and since #3539 A8e the serializer carries this property as the row's Severity
+           member — so the history grids and get_alert_history read the tier the alert fired at (before
+           that the projection dropped it, and this comment's "replays keep the severity" was not true). */
         if (outcome.Severity is not null)
         {
             context ??= new AlertContext();
@@ -159,13 +200,33 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         var result = await _core.TrySendAsync(
             outcome.MetricName, outcome.ServerName, currentValue, outcome.ThresholdValue,
             outcome.ServerKey, context, attemptChannels: !outcome.Muted, detailText: detailText,
-            displayName: outcome.DisplayName, deliveryMode: deliveryMode);
+            displayName: outcome.DisplayName, deliveryMode: deliveryMode, cancellationToken: cancellationToken);
 
         /* trayChannelPresent: false — this is the HEADLESS service. It has no tray icon and no toast
            code, so the taxonomy's "tray" fallback (which is Lite's, and truthful there) would assert a UI
            event that cannot occur here. Without a channel configured a fired alert is reported as
            "unconfigured", which is the state an operator can act on. */
         var delivery = AlertDelivery.FromFanout(result, outcome.Muted, trayChannelPresent: false);
+
+        /* #3598 (design point 3): the ledger says WHERE the post went. The send core reports the routing
+           decision the fan-out actually used — resolved once, after the cooldown, so it is the decision and
+           not a re-derivation that could disagree with it if the route list reloaded in between — and it
+           rides the row's context_json as the trailing Route member, beside #3539 A8e's Severity, with no
+           schema change. Null when no channel reached resolution (throttled, folded, muted, unconfigured):
+           a row that consulted no destination records none. The context is created here if the alert had
+           none (every self-alert fires with Context: null), exactly as #2090 does for the severity above;
+           the Viewer's detail window falls back to detail_text for a context with no detail items, so an
+           empty-Details context carrying only provenance costs the operator nothing.
+
+           #4750: the record also says what each channel's send DID. One success used to stand for the whole
+           fan-out, so a channel that failed beside a channel that delivered read as delivered on the row and
+           nowhere else. Only the outcome word is stored: a webhook error can carry its endpoint's URL, so the
+           reason stays in send_error and out of the context. */
+        if (result.Route is { } route)
+        {
+            context ??= new AlertContext();
+            context.Route = route.ToDto(result.ChannelOutcomes);
+        }
 
         /* Always log the alert, regardless of channel status (EmailAlertService.cs:82-94). */
         string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
@@ -175,5 +236,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             numericCurrentValue, numericThresholdValue,
             delivery,
             outcome.Muted, detailText, contextJson));
+
+        return delivery;
     }
 }

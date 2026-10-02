@@ -107,20 +107,104 @@ LIMIT 5";
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
+        /* #3648: max_dop here is sys.dm_exec_query_stats.max_dop — a PER-PLAN high-water mark since the
+           plan entered the cache, not a per-execution reading and not a per-statement one. This read
+           groups by (database, query_hash), so the old MAX(max_dop) folded every plan the statement
+           text had inside the window into one number and kept the largest: the highest DOP ANY plan for
+           the hash ever ran at, with nothing saying which plan, when, or whether that plan still exists.
+           Live consequence: a High CPU card read 16 for the #1 query on an instance whose MAXDOP had
+           been 1 across its whole 14-day config history and whose stored plan for that hash was serial
+           (NonParallelPlanReason="MaxDOPSetToOne") — a plan compiled before the pin, still cached with
+           its old counter. A reader recommended a MAXDOP 1 Query Store hint from the field and had to
+           retract it after reading the plan. The same card's row #3 said 1, honestly, for a hash with
+           one serial plan — so the field was self-consistent and wrong.
+
+           Now: max_dop is the NEWEST plan's reading (the row with the latest collection_time among the
+           rows that spent CPU in the window; ties broken by compile time, then by CPU spent), because
+           the card's question is what the query is doing to the CPU at this moment. The cross-plan
+           maximum survives as max_dop_any_plan with max_dop_any_plan_last_seen and plan_count beside
+           it — a history with provenance — and the reader coerces NULL to null, not 0: the DMV never
+           reports 0, so 0 was "no reading" rendered as a degree of parallelism. dop_note is the
+           shared sentence (PerformanceMonitor.Common.QueryDopProvenance) a renderer prints verbatim
+           when the history disagrees with the headline. New columns are appended after the old ones so
+           the existing ordinals are untouched; the SQL is byte-identical to Darling's TopCpuQueriesSql.
+
+           #3959: ranked and cut to five without the statement text, which is read afterwards for the
+           five that print. Most of the saving is Darling's, whose v_query_stats resolves text from a
+           dimension per row; here it stops every row's inline text riding through the window, and the
+           two SKUs keep one text of the read. */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
-SELECT database_name, query_hash,
-       SUM(delta_worker_time)::BIGINT AS total_cpu_us,
-       SUM(delta_execution_count)::BIGINT AS exec_count,
-       MAX(max_dop) AS max_dop,
-       SUM(delta_spills)::BIGINT AS spills,
-       LEFT(MAX(query_text), 500) AS query_text
-FROM v_query_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   delta_worker_time > 0
-GROUP BY database_name, query_hash
-ORDER BY total_cpu_us DESC
-LIMIT 5";
+WITH windowed AS
+(
+    -- #3648: rank each hash's rows newest-first and carry the hash-wide maximum onto every row, so the
+    -- outer aggregate can name WHICH reading is current and WHEN the maximum was last seen. Explicit
+    -- NULLS LAST on the tie-breakers: DuckDB and Postgres default DESC null placement differently.
+    SELECT database_name, query_hash, query_plan_hash, collection_time, max_dop,
+           delta_worker_time, delta_execution_count, delta_spills,
+           ROW_NUMBER() OVER
+           (
+               PARTITION BY database_name, query_hash
+               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
+           ) AS newest_rn,
+           MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
+    FROM v_query_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    AND   delta_worker_time > 0
+),
+top_queries AS
+(
+    -- #3959: ranked and cut WITHOUT the statement text. The text used to ride the window above for every
+    -- row it read, to print five, and on Darling v_query_stats resolves it from the fleet's text dimension
+    -- row by row. The final SELECT reads it for the five that print.
+    SELECT database_name, query_hash,
+           SUM(delta_worker_time)::BIGINT AS total_cpu_us,
+           SUM(delta_execution_count)::BIGINT AS exec_count,
+           MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
+           SUM(delta_spills)::BIGINT AS spills,
+           COUNT(DISTINCT query_plan_hash) AS plan_count,
+           MAX(max_dop_any_plan) AS max_dop_any_plan,
+           MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
+    FROM windowed
+    GROUP BY database_name, query_hash
+    ORDER BY total_cpu_us DESC
+    LIMIT 5
+)
+SELECT t.database_name, t.query_hash,
+       t.total_cpu_us,
+       t.exec_count,
+       t.max_dop,
+       t.spills,
+       -- #3959: the same MAX over the same rows the single pass took it over (this group's window rows,
+       -- under the window's own filter). Equality first, which the (server_id, query_hash, collection_time)
+       -- index serves. GROUP BY puts a NULL key's rows in one group that equality cannot match, so only
+       -- a group with a NULL key reads them NULL-safe.
+       COALESCE
+       (
+           (
+               SELECT LEFT(MAX(v.query_text), 500)
+               FROM v_query_stats AS v
+               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
+               AND   v.delta_worker_time > 0
+               AND   v.database_name = t.database_name
+               AND   v.query_hash = t.query_hash
+           ),
+           CASE WHEN t.database_name IS NULL OR t.query_hash IS NULL THEN
+           (
+               SELECT LEFT(MAX(v.query_text), 500)
+               FROM v_query_stats AS v
+               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
+               AND   v.delta_worker_time > 0
+               AND   v.database_name IS NOT DISTINCT FROM t.database_name
+               AND   v.query_hash IS NOT DISTINCT FROM t.query_hash
+           )
+           END
+       ) AS query_text,
+       t.plan_count,
+       t.max_dop_any_plan,
+       t.max_dop_any_plan_last_seen
+FROM top_queries AS t
+ORDER BY t.total_cpu_us DESC";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
@@ -130,15 +214,24 @@ LIMIT 5";
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            var maxDop = reader.IsDBNull(4) ? (int?)null : Convert.ToInt32(reader.GetValue(4));
+            var planCount = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7));
+            var maxDopAnyPlan = reader.IsDBNull(8) ? (int?)null : Convert.ToInt32(reader.GetValue(8));
+            var maxDopAnyPlanLastSeen = reader.IsDBNull(9) ? (DateTime?)null : reader.GetDateTime(9);
             items.Add(new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 query_hash = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 total_cpu_ms = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2)) / 1000.0,
                 execution_count = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
-                max_dop = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
+                /* #3648: newest plan's reading, null when unknown — never 0. History fields follow. */
+                max_dop = maxDop,
                 spills = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
-                query_text = reader.IsDBNull(6) ? "" : reader.GetString(6)
+                query_text = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                plan_count = planCount,
+                max_dop_any_plan = maxDopAnyPlan,
+                max_dop_any_plan_last_seen = maxDopAnyPlanLastSeen?.ToString("o"),
+                dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)
             });
         }
 
@@ -187,6 +280,9 @@ LIMIT 5";
             finding.DrillDown!["top_spilling_queries"] = items;
     }
 
+    /// <summary>The most parameter-sensitive plans the drill-down lists. Applied after the exact creation-time test (#4821), not in SQL.</summary>
+    private const int ParameterSensitiveQueryCap = 5;
+
     /// <summary>
     /// Top parameter-sensitive plans behind a PARAMETER_SENSITIVITY finding.
     /// Re-runs Detector A's detection (standard analysis window) for the top 5 offenders.
@@ -204,18 +300,23 @@ WITH svr AS
     -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
     -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
     -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
-    SELECT COALESCE
+    -- #4821: the offset is only the ROUGH first filter now; the zone (time_zone_id, from the same newest
+    -- row) rides beside it and the exact test runs in C# with the offset in force when each plan was
+    -- compiled (PlanCreationClock).
+    SELECT
+        COALESCE(p.utc_offset_minutes, 0) AS offset_minutes,
+        p.time_zone_id
+    FROM (SELECT 1) AS one
+    LEFT JOIN
     (
-        (
-            SELECT utc_offset_minutes
-            FROM v_server_properties
-            WHERE server_id = $1
-            AND   utc_offset_minutes IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+        SELECT utc_offset_minutes, time_zone_id
+        FROM v_server_properties
+        WHERE server_id = $1
+        AND   utc_offset_minutes IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+    ) AS p
+      ON 1 = 1
 ),
 latest AS
 (
@@ -224,7 +325,10 @@ latest AS
         query_hash,
         query_plan_hash,
         execution_count,
+        creation_time,
         creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
+        svr.offset_minutes AS server_offset_minutes,
+        svr.time_zone_id AS server_time_zone_id,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -253,25 +357,43 @@ SELECT
     max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
     max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
     CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
-    LEFT(query_text, 500) AS query_text
+    LEFT(query_text, 500) AS query_text,
+    creation_time,
+    server_offset_minutes,
+    server_time_zone_id
 FROM latest
 WHERE rn = 1
 AND   min_worker_time >= 10000
 AND   max_worker_time >= 250000
 AND   execution_count >= 20
-AND   creation_time_utc <= $2
+AND   creation_time_utc <= $4
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC
-LIMIT 5";
+ORDER BY worker_ratio DESC";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        /* $4: the first filter's bound, opened by an hour (#4821). The exact test is made below, per row. */
+        cmd.Parameters.Add(new DuckDBParameter { Value = PlanCreationClock.RoughBound(context.TimeRangeStart) });
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            /* The exact compiled-before-the-window test with the offset in force when the plan was compiled
+               (#4821); the five-row cap is applied after it, not in SQL. */
+            if (reader.IsDBNull(10)
+                || !PlanCreationClock.CompiledBeforeWindow(
+                    PlanCreationClock.ClockFrom(reader, 11, 12), reader.GetDateTime(10), context.TimeRangeStart))
+            {
+                continue;
+            }
+
+            if (items.Count >= ParameterSensitiveQueryCap)
+            {
+                break;
+            }
+
             items.Add(new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -295,7 +417,9 @@ LIMIT 5";
     /// Top regressed queries behind a PLAN_REGRESSION finding.
     /// Re-runs Detector B's detection for the top 5 offenders. Uses the same 14-day
     /// last_execution_time comparison window as the detector — NOT the standard analysis
-    /// window — so the days-old "best plan" baseline is present.
+    /// window — so the days-old "best plan" baseline is present. Since #3902 it re-runs it over
+    /// the queries the fact reported this pass (<see cref="AnalysisContext.PlanRegressionOffenders"/>),
+    /// and over every query only when the fact did not run.
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
@@ -310,18 +434,23 @@ WITH svr AS
     -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
     -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
     -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
-    SELECT COALESCE
+    -- #4821: the offset is only the ROUGH first filter now; the zone (time_zone_id, from the same newest
+    -- row) rides beside it and the exact test runs in C# with the offset in force when each plan was
+    -- compiled (PlanCreationClock).
+    SELECT
+        COALESCE(p.utc_offset_minutes, 0) AS offset_minutes,
+        p.time_zone_id
+    FROM (SELECT 1) AS one
+    LEFT JOIN
     (
-        (
-            SELECT utc_offset_minutes
-            FROM v_server_properties
-            WHERE server_id = $1
-            AND   utc_offset_minutes IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+        SELECT utc_offset_minutes, time_zone_id
+        FROM v_server_properties
+        WHERE server_id = $1
+        AND   utc_offset_minutes IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+    ) AS p
+      ON 1 = 1
 ),
 psp_signature AS
 (
@@ -330,9 +459,12 @@ psp_signature AS
     -- the detector's own thresholds is what keeps the flag honest: a query flagged here IS one the
     -- detector counts when it fires, never a looser lookalike. Grant/spill divergence stay metadata
     -- on the PSP side — they do not fire the detector alone, so they do not fire this flag alone.
-    SELECT DISTINCT
+    -- #4821: the earliest creation_time per (database, query_hash) rides out so C# can make the exact
+    -- compiled-before-the-window test; the creation_time_utc filter below is only the rough first pass.
+    SELECT
         database_name,
-        query_hash
+        query_hash,
+        MIN(creation_time) AS creation_time
     FROM
     (
         SELECT
@@ -340,6 +472,7 @@ psp_signature AS
             query_hash,
             query_plan_hash,
             execution_count,
+            creation_time,
             creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
             min_worker_time,
             max_worker_time,
@@ -358,8 +491,9 @@ psp_signature AS
     AND   min_worker_time >= 10000
     AND   max_worker_time >= 250000
     AND   execution_count >= 20
-    AND   creation_time_utc <= $3
+    AND   creation_time_utc <= $7
     AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+    GROUP BY database_name, query_hash
 ),
 deduped AS
 (
@@ -394,6 +528,16 @@ deduped AS
     WHERE server_id = $1
     AND   execution_type_desc = 'Regular'
     AND   last_execution_time >= $2
+    -- #3902: the PLAN_REGRESSION fact's offenders when the fact ran this pass ($5/$6, from
+    -- AnalysisContext.PlanRegressionOffenders), otherwise every query ($5 NULL). The top five this read
+    -- returns are the head of the ranking the fact has already computed -- the same detection over the same
+    -- window -- so deduplicating the server's whole slice again to find them was the pass's most expensive
+    -- read run twice. The two reads fold plans the same way (plan_agg, then plan_dedup) and rank the same
+    -- way, so this read's top five are among the fact's twenty. The lists are matched independently, which
+    -- admits every pairing of the listed databases and query ids: a superset of the offenders, never a
+    -- subset.
+    AND   ($5::VARCHAR[] IS NULL
+           OR (list_contains($5::VARCHAR[], database_name) AND list_contains($6::BIGINT[], query_id)))
 ),
 plan_agg AS
 (
@@ -464,6 +608,9 @@ compared AS
         b.plan_id AS best_plan_id,
         b.cpu_per_exec AS best_cpu,
         b.dur_per_exec AS best_dur,
+        -- #3953 parity with Darling: when the best plan last ran, which the shared force-plan remediation and
+        -- advice read. Lite already reads a true 14-day window, so its best plans could always be this old.
+        b.last_exec AS best_plan_last_seen,
         l.query_text,
         -- #2138: the SAME CPU-primary scoring as the PLAN_REGRESSION fact (DuckDbFactCollector.QueryPerf.cs,
         -- where the rationale lives). The drill-down must agree with the fact that displays it: under the
@@ -480,13 +627,12 @@ compared AS
         -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
         -- plan cache? Keyed on (database, query_hash) — the hash bridges Query Store and the cache.
         -- Steers the force-plan remediation's caution text; the future bot never auto-forces on true.
-        EXISTS
         (
-            SELECT 1
+            SELECT MIN(p.creation_time)
             FROM psp_signature AS p
             WHERE p.database_name = l.database_name
             AND   p.query_hash = l.query_hash
-        ) AS parameter_sensitivity_cofired
+        ) AS psp_creation_time
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -509,8 +655,12 @@ SELECT
     regression_factor,
     LEFT(query_text, 500) AS query_text,
     replica_role,
-    parameter_sensitivity_cofired
+    psp_creation_time,
+    best_plan_last_seen,
+    svr.offset_minutes AS server_offset_minutes,
+    svr.time_zone_id AS server_time_zone_id
 FROM compared
+CROSS JOIN svr
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
 ORDER BY regression_factor DESC
@@ -523,6 +673,23 @@ LIMIT 5";
            would report for this run. */
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+
+        /* $5/$6 (#3902): the fact's offenders, or NULL when it did not run, failed, or reported none. An
+           empty list is read as unrestricted rather than as "nothing": a pass whose fact found no regression
+           raises no PLAN_REGRESSION finding to drill into, so a caller that drills anyway is not following a
+           fact. */
+        var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
+        cmd.Parameters.Add(new DuckDBParameter
+        {
+            Value = offenders is null ? DBNull.Value : offenders.Select(o => o.DatabaseName).ToList()
+        });
+        cmd.Parameters.Add(new DuckDBParameter
+        {
+            Value = offenders is null ? DBNull.Value : offenders.Select(o => o.QueryId).ToList()
+        });
+        /* $7 (#4821): the psp_signature filter's first-pass bound, opened by an hour. The exact
+           compiled-before-the-window test for the co-fired flag is made below, per row. */
+        cmd.Parameters.Add(new DuckDBParameter { Value = PlanCreationClock.RoughBound(context.TimeRangeStart) });
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -549,7 +716,12 @@ LIMIT 5";
                 replica_role = reader.IsDBNull(11) ? "" : reader.GetString(11),
                 /* #2138 gap 3: the plan-cache PSP signature co-fired for this query's hash. Steers the
                    force-plan caution text; the future bot never auto-forces a flagged target. */
-                parameter_sensitivity_cofired = !reader.IsDBNull(12) && Convert.ToBoolean(reader.GetValue(12))
+                parameter_sensitivity_cofired = !reader.IsDBNull(12)
+                    && PlanCreationClock.CompiledBeforeWindow(
+                        PlanCreationClock.ClockFrom(reader, 14, 15), Convert.ToDateTime(reader.GetValue(12)), context.TimeRangeStart),
+                /* #3953 parity with Darling: when the best plan last ran, appended so the ordinals above are
+                   untouched. */
+                best_plan_last_seen = reader.IsDBNull(13) ? (DateTime?)null : Convert.ToDateTime(reader.GetValue(13))
             });
         }
 
@@ -567,8 +739,30 @@ LIMIT 5";
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
+        /* #3648: the same per-plan max_dop provenance as CollectTopCpuQueries — see the essay there. This
+           read is one hash, unfiltered by CPU spent, so the newest-plan tie-break (compile time, then CPU
+           spent) is what separates a stale parallel plan still sitting in the cache from the serial one
+           doing the work at the same collection_time. Byte-identical to Darling's BadActorDetailSql. */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
+WITH windowed AS
+(
+    -- #3648: see CollectTopCpuQueries' windowed CTE; same ranking, same hash-wide maximum.
+    SELECT database_name, query_hash, query_plan_hash, collection_time, max_dop,
+           delta_worker_time, delta_execution_count, delta_elapsed_time, delta_logical_reads, delta_spills,
+           query_text,
+           ROW_NUMBER() OVER
+           (
+               PARTITION BY database_name, query_hash
+               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
+           ) AS newest_rn,
+           MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   query_hash = $4
+)
 SELECT database_name, query_hash,
        LEFT(MAX(query_text), 500) AS query_text,
        SUM(delta_execution_count)::BIGINT AS exec_count,
@@ -584,12 +778,11 @@ SELECT database_name, query_hash,
        SUM(delta_worker_time)::BIGINT AS total_cpu_us,
        SUM(delta_logical_reads)::BIGINT AS total_reads,
        SUM(delta_spills)::BIGINT AS total_spills,
-       MAX(max_dop) AS max_dop
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   query_hash = $4
+       MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
+       COUNT(DISTINCT query_plan_hash) AS plan_count,
+       MAX(max_dop_any_plan) AS max_dop_any_plan,
+       MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
+FROM windowed
 GROUP BY database_name, query_hash";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -600,6 +793,10 @@ GROUP BY database_name, query_hash";
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (await reader.ReadAsync(context.CancellationToken))
         {
+            var maxDop = reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10));
+            var planCount = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11));
+            var maxDopAnyPlan = reader.IsDBNull(12) ? (int?)null : Convert.ToInt32(reader.GetValue(12));
+            var maxDopAnyPlanLastSeen = reader.IsDBNull(13) ? (DateTime?)null : reader.GetDateTime(13);
             finding.DrillDown!["bad_actor_query"] = new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -612,7 +809,12 @@ GROUP BY database_name, query_hash";
                 total_cpu_ms = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)) / 1000.0,
                 total_reads = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
                 total_spills = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
-                max_dop = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10))
+                /* #3648: newest plan's reading, null when unknown — never 0. History fields follow. */
+                max_dop = maxDop,
+                plan_count = planCount,
+                max_dop_any_plan = maxDopAnyPlan,
+                max_dop_any_plan_last_seen = maxDopAnyPlanLastSeen?.ToString("o"),
+                dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)
             };
         }
     }

@@ -176,7 +176,10 @@
                         <Border x:Name="Bd" Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
                                 CornerRadius="3" Padding="{TemplateBinding Padding}">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <!-- #3835: RecognizesAccessKey, because a CUSTOM template does not inherit the stock Button
+                                 template's true - without it the access-key marker in Content renders as a literal
+                                 underscore and the Alt combination binds to nothing. -->
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -307,7 +310,7 @@
                         BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
                         Margin="0,8,0,0" Padding="0,8,0,0">
                     <StackPanel>
-                        <Button Click="AddServerButton_Click"
+                        <Button x:Name="AddServerSidebarButton" Click="AddServerButton_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 ToolTip="Add a monitored SQL Server to the viewer's registry">
@@ -317,7 +320,7 @@
                                 <TextBlock Text="Add Server" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
-                        <Button Click="AddMultipleServersButton_Click"
+                        <Button x:Name="AddMultipleServersSidebarButton" Click="AddMultipleServersButton_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
@@ -328,7 +331,7 @@
                                 <TextBlock Text="Add Multiple" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
-                        <Button Click="ManageServersButton_Click"
+                        <Button x:Name="ManageServersSidebarButton" Click="ManageServersButton_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
@@ -346,7 +349,7 @@
                              carried a visible Manage Tags button in this same footer all along, so this is a
                              parity gap rather than a new surface. ManageTags_Click already carries its own
                              read-only backstop (#2008), so the button needs no gating of its own. -->
-                        <Button Click="ManageTags_Click"
+                        <Button x:Name="ManageTagsSidebarButton" Click="ManageTags_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
@@ -368,7 +371,7 @@
                                 <TextBlock Text="Open Plan Viewer" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
-                        <Button Click="ImportSettingsButton_Click"
+                        <Button x:Name="ImportSettingsSidebarButton" Click="ImportSettingsButton_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
@@ -401,7 +404,7 @@
                                 <TextBlock Text="Open Log Folder" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
-                        <Button Click="SettingsButton_Click"
+                        <Button x:Name="SettingsSidebarButton" Click="SettingsButton_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
@@ -641,8 +644,9 @@
                                                 </Style.Triggers>
                                             </Style>
                                         </Border.Style>
+                                        <!-- #3609: the ink on a status fill is a theme key. White was 1.41:1 on Dark's amber. -->
                                         <TextBlock Text="{Binding Server.AttentionText}"
-                                                   Foreground="White" FontSize="9" FontWeight="Bold"
+                                                   Foreground="{DynamicResource StatusForegroundBrush}" FontSize="9" FontWeight="Bold"
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                     </Border>
 
@@ -1191,16 +1195,19 @@
                                 <StackPanel>
                                     <!-- Header row: severity badge + [database] -->
                                     <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                        <!-- #3609: badge ink is StatusForegroundBrush (white on the light themes, near-black
+                                             on Dark) because the status fills now read against the page and dark text no
+                                             longer reads on them. Same key as Lite's RecommendationsTab. -->
                                         <Border x:Name="SeverityBadge" CornerRadius="3" Padding="6,1"
                                                 VerticalAlignment="Center"
                                                 Background="{DynamicResource InfoBrush}">
                                             <StackPanel Orientation="Horizontal">
                                                 <TextBlock Text="{Binding SeverityGlyph}"
                                                            FontFamily="Segoe MDL2 Assets" FontSize="11"
-                                                           Foreground="#1A1A1A" VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource StatusForegroundBrush}" VerticalAlignment="Center"
                                                            Margin="0,0,4,0"/>
                                                 <TextBlock Text="{Binding SeverityLabel}" FontWeight="Bold"
-                                                           FontSize="11" Foreground="#1A1A1A"
+                                                           FontSize="11" Foreground="{DynamicResource StatusForegroundBrush}"
                                                            VerticalAlignment="Center"/>
                                             </StackPanel>
                                         </Border>
@@ -1329,6 +1336,14 @@
                                        MaxWidth="520" TextWrapping="Wrap" TextAlignment="Center"
                                        Visibility="Collapsed"/>
 
+                            <!-- Window-empty: the analysis window collected nothing (a dead-collector
+                                 shape, #3524/#3551 — the marker's false-with-a-message encoding) — a
+                                 distinct notice, never the all-clear. Text is set from the view-model. -->
+                            <TextBlock x:Name="RecommendationsWindowEmptyText"
+                                       Style="{StaticResource EmptyHint}"
+                                       MaxWidth="520" TextWrapping="Wrap" TextAlignment="Center"
+                                       Visibility="Collapsed"/>
+
                             <TextBlock x:Name="RecommendationsLoadingText"
                                        Style="{StaticResource EmptyHint}"
                                        Text="Loading recommendations…"/>
@@ -1381,74 +1396,76 @@
                                TextAlignment="Center" MaxWidth="480" TextWrapping="Wrap"/>
                 </StackPanel>
             </Border>
-        </Grid>
 
-        <!-- Full-window message state: missing config / unreachable store. Carries the #1954 diagnostics
-             block (which darling.json was read, and the non-secret parse summary) so a field operator can
-             tell "wrong file" from "right file, wrong value" without going to find the log. -->
-        <Border x:Name="MessageOverlay"
-                Grid.Row="0"
-                Background="{DynamicResource BackgroundLightBrush}"
-                Visibility="Collapsed">
-            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="760" Margin="24">
-                <TextBlock x:Name="MessageText"
-                           HorizontalAlignment="Center"
-                           TextWrapping="Wrap"
-                           TextAlignment="Center"
-                           FontSize="14"
-                           Foreground="{DynamicResource ForegroundBrush}"/>
+            <!-- Message state for a missing config / unreachable store. It covers the content column only, so the
+                 sidebar entries that need no store (Open Plan Viewer, View Log, Open Log Folder, About) stay usable.
+                 Carries the #1954 diagnostics
+                 block (which darling.json was read, and the non-secret parse summary) so a field operator can
+                 tell "wrong file" from "right file, wrong value" without going to find the log. -->
+            <Border x:Name="MessageOverlay"
+                    Grid.Column="1"
+                    Background="{DynamicResource BackgroundLightBrush}"
+                    Visibility="Collapsed">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="760" Margin="24">
+                    <TextBlock x:Name="MessageText"
+                               HorizontalAlignment="Center"
+                               TextWrapping="Wrap"
+                               TextAlignment="Center"
+                               FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
 
-                <StackPanel x:Name="MessageDetailsPanel" Visibility="Collapsed" Margin="0,20,0,0">
-                    <TextBlock Text="Configuration this viewer used"
-                               FontSize="12"
-                               FontWeight="SemiBold"
-                               Foreground="{DynamicResource ForegroundMutedBrush}"
-                               Margin="0,0,0,6"/>
-                    <Border Background="{DynamicResource BackgroundDarkBrush}"
-                            BorderBrush="{DynamicResource BorderBrush}"
-                            BorderThickness="1"
-                            CornerRadius="4"
-                            Padding="12,10">
-                        <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                            <!-- A read-only TextBox rather than a TextBlock: WPF text blocks are not
-                                 selectable, and the whole point is that the operator can lift these lines
-                                 into a bug report. Wrapped rather than side-scrolled, because the longest
-                                 lines are the resolved PATHS — the one thing that must be readable without
-                                 dragging a scrollbar. -->
-                            <TextBox x:Name="MessageDetailsText"
-                                     IsReadOnly="True"
-                                     BorderThickness="0"
-                                     Background="Transparent"
-                                     Foreground="{DynamicResource ForegroundBrush}"
-                                     FontFamily="Consolas"
-                                     FontSize="12"
-                                     TextWrapping="Wrap"/>
-                        </ScrollViewer>
-                    </Border>
-                    <!-- The overlay covers the sidebar, so its View Log button is unreachable exactly when
-                         it is most wanted; carry one here. The log holds what this block deliberately
-                         omits — the exception and its inner chain. -->
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
-                        <!-- #1954 bullet 3: the layered self-test (DNS → TCP → TLS → auth → schema),
-                             run against the SAME connection string the failed connect used; results
-                             append to the details block above and go to the log. -->
-                        <Button x:Name="RunSelfTestButton"
-                                Content="Run self-test"
-                                Style="{StaticResource DarkButton}"
-                                Click="OnRunSelfTestClick"/>
-                        <Button x:Name="CopyDiagnosticsButton"
-                                Content="Copy details"
-                                Style="{StaticResource DarkButton}"
-                                Margin="8,0,0,0"
-                                Click="OnCopyDiagnosticsClick"/>
-                        <Button Content="View Log"
-                                Style="{StaticResource DarkButton}"
-                                Margin="8,0,0,0"
-                                Click="ViewLogButton_Click"/>
+                    <StackPanel x:Name="MessageDetailsPanel" Visibility="Collapsed" Margin="0,20,0,0">
+                        <TextBlock Text="Configuration this viewer used"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"
+                                   Margin="0,0,0,6"/>
+                        <Border Background="{DynamicResource BackgroundDarkBrush}"
+                                BorderBrush="{DynamicResource BorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                Padding="12,10">
+                            <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <!-- A read-only TextBox rather than a TextBlock: WPF text blocks are not
+                                     selectable, and the whole point is that the operator can lift these lines
+                                     into a bug report. Wrapped rather than side-scrolled, because the longest
+                                     lines are the resolved PATHS — the one thing that must be readable without
+                                     dragging a scrollbar. -->
+                                <TextBox x:Name="MessageDetailsText"
+                                         IsReadOnly="True"
+                                         BorderThickness="0"
+                                         Background="Transparent"
+                                         Foreground="{DynamicResource ForegroundBrush}"
+                                         FontFamily="Consolas"
+                                         FontSize="12"
+                                         TextWrapping="Wrap"/>
+                            </ScrollViewer>
+                        </Border>
+                        <!-- The sidebar View Log stays reachable; this one sits next to the message it explains.
+                             The log holds what this block deliberately omits — the exception and its inner chain. -->
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                            <!-- #1954 bullet 3: the layered self-test (DNS → TCP → TLS → auth → schema),
+                                 run against the SAME connection string the failed connect used; results
+                                 append to the details block above and go to the log. -->
+                            <Button x:Name="RunSelfTestButton"
+                                    Content="Run self-test"
+                                    Style="{StaticResource DarkButton}"
+                                    Click="OnRunSelfTestClick"/>
+                            <Button x:Name="CopyDiagnosticsButton"
+                                    Content="Copy details"
+                                    Style="{StaticResource DarkButton}"
+                                    Margin="8,0,0,0"
+                                    Click="OnCopyDiagnosticsClick"/>
+                            <Button Content="View Log"
+                                    Style="{StaticResource DarkButton}"
+                                    Margin="8,0,0,0"
+                                    Click="ViewLogButton_Click"/>
+                        </StackPanel>
                     </StackPanel>
                 </StackPanel>
-            </StackPanel>
-        </Border>
+            </Border>
+        </Grid>
+
 
         <!-- Multi-field status bar (ported from Lite, adapted to what the viewer knows): general status,
              which SEAT this viewer holds, collector health across all servers (from collection freshness),

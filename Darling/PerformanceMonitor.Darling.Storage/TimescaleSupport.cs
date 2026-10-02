@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -8,8 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -23,7 +25,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// store must work with or without the extension (plain PostgreSQL remains fully supported), so
 /// the versioned <see cref="PgMigrations"/> scripts stay engine-plain and every Timescale feature
 /// here is gated on extension presence, detected at runtime, never assumed. The service calls
-/// <see cref="TryEnableAsync"/> once at startup right after migration; when the extension is
+/// <see cref="TryEnableAsync"/> at startup right after migration, and again on its hourly
+/// store-maintenance tick for as long as the answer is no (#3815 — the detection records whether an
+/// ATTEMPT succeeded, and the conditions that fail it are transient); when the extension is
 /// present it converts the collector tables to hypertables and applies compression policies —
 /// all idempotent (<c>if_not_exists</c> everywhere), so every restart re-converges, and a store
 /// that grew new collector tables since the last start picks them up on the next.
@@ -52,18 +56,26 @@ namespace PerformanceMonitor.Darling.Storage;
 /// contract, so create_hypertable emits an advisory use-TIMESTAMPTZ WARNING — expected and
 /// accepted (validated live on TimescaleDB 2.28.1).
 /// </summary>
-public static class TimescaleSupport
+public static partial class TimescaleSupport
 {
     /// <summary>
     /// Compress chunks older than this many days — hardcoded (defaults over speculative config).
     /// Compressed chunks remain fully queryable, just columnar and ~10-20x smaller: this IS
     /// Darling's archival tier, the centralized-store answer to Lite's parquet archive, keeping the
-    /// full retention horizon cheap instead of splitting hot/cold stores. Kept short (1 day) to
-    /// match <see cref="ChunkIntervalDays"/>: at the collectors' 1-minute cadence a longer lag left
-    /// the whole store uncompressed (a chunk cannot compress until it closes AND then ages past
-    /// this), so even a near-idle fleet grew ~1 GB in a couple of days of hot data. Collectors only
-    /// ever append current-time rows, so a day-old chunk never takes another write — safe to
-    /// compress. Measured on this data: perfmon ~16.7x, plan-XML-heavy query_stats ~6.4x.
+    /// full retention horizon cheap instead of splitting hot/cold stores. Kept short (1 day):
+    /// at the collectors' 1-minute cadence a longer lag left the whole store uncompressed (a chunk
+    /// cannot compress until it closes AND then ages past this), so even a near-idle fleet grew
+    /// ~1 GB in a couple of days of hot data. Collectors only ever append current-time rows, so a
+    /// day-old chunk never takes another write — safe to compress. Measured on this data: perfmon
+    /// ~16.7x, plan-XML-heavy query_stats ~6.4x.
+    ///
+    /// <para><b>Fixed at 1 day on EVERY table, even where <see cref="RawChunkIntervalPlanner"/> narrows a raw
+    /// table's <c>chunk_time_interval</c> below a day (#4211).</b> This is the ladder's CEILING now, not "the"
+    /// delay tied one-for-one to chunk width: the #4211 ruling (issuecomment-5836205190, decision 1) keeps
+    /// <c>compress_after</c> here regardless of I, because a shorter delay below
+    /// <see cref="HourlyRefreshStartOffset"/> removes the gap the product's lock safety relies on, and
+    /// lowering it needs its own design built from field reads. Pinned at least
+    /// <see cref="HourlyRefreshStartOffset"/> by <c>TimescaleSupportTests</c> for exactly that reason.</para>
     /// </summary>
     public const int CompressAfterDays = 1;
 
@@ -77,10 +89,13 @@ public static class TimescaleSupport
     /// 2.28.1, a hypertable with <see cref="ChunkIntervalDays"/> = 1 gets exactly <c>12:00:00</c>. The rule is
     /// half the chunk interval CAPPED at 12 hours, not floored at it: a 6-hour chunk interval gets
     /// <c>03:00:00</c>, while 2-day and 7-day intervals both get <c>12:00:00</c> rather than 24h or 84h. The cap
-    /// is what makes 12 hours the default on EVERY store shape this product can produce — the 1-day chunks it
-    /// creates today, and the 7-day-chunk hypertables an adopted store may still carry from before
-    /// <see cref="ChunkIntervalDays"/> was passed (existing chunks keep their original width). That is the
-    /// field's "twice-daily fixed tick": a chunk that had already aged
+    /// is what makes 12 hours the default on every DAY-OR-WIDER store shape this product can produce — the
+    /// 1-day chunks a fresh hypertable still starts at, and the 7-day-chunk hypertables an adopted store may
+    /// still carry from before <see cref="ChunkIntervalDays"/> was passed (existing chunks keep their original
+    /// width). Below a day the cap stops applying and the rule floors instead: since #4211, a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed to 12h or 6h chunks would compute a 6h or 3h
+    /// automatic default, one more reason this is passed explicitly rather than left to fall out of chunk
+    /// width. That is the field's "twice-daily fixed tick", from before narrowing existed: a chunk that had already aged
     /// past the delay still sat uncompressed for up to another half-day, and on a pre-dedup field store the
     /// newest closed chunk reached 81 GB before its scheduled compression ever reached it. The newest closed
     /// chunk is always the least-compressed data on disk, so the tick is the width of that exposure.</para>
@@ -106,11 +121,22 @@ public static class TimescaleSupport
     public static readonly TimeSpan CompressScheduleSpan = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// Hypertable chunk width in days. TimescaleDB's 7-day default is far too coarse for
-    /// 1-minute-cadence monitoring data: a chunk stays open (and uncompressible) for its whole
-    /// span, so 7-day chunks meant nothing compressed for ~2 weeks. 1-day chunks close daily and
-    /// become compressible within <see cref="CompressAfterDays"/>, keeping the store compact.
-    /// Applies at hypertable creation (fresh stores); existing chunks keep their original width.
+    /// Hypertable chunk width in days at CREATION (fresh stores; existing chunks keep their original width).
+    /// TimescaleDB's 7-day default is far too coarse for 1-minute-cadence monitoring data: a chunk stays open
+    /// (and uncompressible) for its whole span, so 7-day chunks meant nothing compressed for ~2 weeks. 1-day
+    /// chunks close daily and become compressible within <see cref="CompressAfterDays"/>, keeping the store
+    /// compact.
+    ///
+    /// <para><b>Since #4211, this is the ladder's CEILING, not every raw table's actual width.</b>
+    /// <see cref="RawChunkIntervalPlanner"/> derives a narrower <c>chunk_time_interval</c> — 12 or 6 hours —
+    /// for whichever raw hypertables' own ingest rate needs it to keep the store's open-chunk bytes under a
+    /// RAM budget, using this constant only as the widest rung. Every OTHER dependent still reads this as a
+    /// safe upper bound / margin rather than an exact width, and stays correct as chunks narrow:
+    /// <c>DarlingDimensionGcBound</c>, <c>QueryStorePlanMap.MarginOrderingHolds</c>,
+    /// <c>RollupBackfill.SliceWidth</c> and the aggregate compress margin. <see cref="CompressAfterDays"/>
+    /// does NOT follow the derived width down — it stays fixed at 1 day on every table (#4211 ruling decision
+    /// 1). <see cref="EventWindowFloor.SkewAllowance"/> has its own 1-day constant rather than reading this
+    /// one, since it is a clock-skew tolerance that only happens to equal this value today.</para>
     /// </summary>
     public const int ChunkIntervalDays = 1;
 
@@ -268,7 +294,16 @@ public static class TimescaleSupport
     /// <summary>The raw-name compression-enable overload — the collection_log path (see
     /// <see cref="CreateHypertableSql(string, string)"/>).</summary>
     public static string EnableCompressionSql(string table)
-        => $"ALTER TABLE {table} SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')";
+        => $"ALTER TABLE {table} SET (timescaledb.compress, timescaledb.compress_segmentby = '{CompressionSegmentByColumn}')";
+
+    /// <summary>
+    /// The segmentby column every collector hypertable compresses on. Promoted to a constant by #3817 so the
+    /// statement above and the catalog comparison that decides whether to ISSUE it
+    /// (<see cref="ReadTablesNeedingCompressionEnableAsync"/>) read the same name: a guard that skipped the
+    /// ALTER by comparing against a second spelling of this would be exactly as wrong as no guard, and
+    /// silently so.
+    /// </summary>
+    public const string CompressionSegmentByColumn = "server_id";
 
     /// <summary>
     /// One collector table's background compression policy — chunks older than
@@ -333,7 +368,97 @@ public static class TimescaleSupport
             ? $", initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '{phase.ToString(CultureInfo.InvariantCulture)} minutes'"
             : string.Empty;
 
-        return $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true{initialStart})";
+        return $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterFor(table)}', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true{initialStart})";
+    }
+
+    /// <summary>
+    /// #4510: how many EXTRA hours past <see cref="CompressAfterDays"/> each of the heaviest raw hypertables
+    /// waits before it becomes eligible to compress, keyed by bare table name. Everyone else gets 0 — the
+    /// unchanged one-day delay.
+    ///
+    /// <para><b>Why this exists.</b> Every table shared <see cref="CompressAfterDays"/> exactly, so every
+    /// table's midnight-plus-a-day chunk became eligible at once, and the nightly compression band
+    /// (<see cref="CompressionPhaseMinutes"/>) does not by itself keep two LONG runs from overlapping —
+    /// only the START minute is spread, not the runtime. The heaviest tables run long enough (measured on
+    /// one production store class: <c>query_store_stats</c> 552 s, <c>query_stats</c> 360 s,
+    /// <c>query_snapshots</c> 198 s — <see cref="HeaviestCompressionTables"/>'s own reading) that a shared
+    /// eligibility instant convoyed them into the same post-midnight hour and starved reads for minutes at a
+    /// time (#4510). Staggering WHEN each one becomes eligible, on top of the existing per-minute START
+    /// stagger, spreads the runs across separate hours instead of separate minutes of the same hour.</para>
+    ///
+    /// <para><b>Ordered longest-run first, smallest offset to the biggest cost</b> — the same reasoning
+    /// <see cref="HeaviestCompressionTables"/> already uses for its minute assignment: the table whose
+    /// backlog is most expensive to leave uncompressed carries the smallest extra delay.</para>
+    ///
+    /// <para><b>The cost side, so raising a value here is not free.</b> A table's own hourly chunk stays
+    /// uncompressed for up to N more hours than <see cref="CompressAfterDays"/> alone would leave it — more
+    /// disk, and a slower read of that hour until it compresses. Safe because every dependent that reads
+    /// "raw data this recent must exist" tolerates a LONGER delay, never a shorter one: the hourly
+    /// aggregate refresh's <see cref="HourlyRefreshStartOffset"/> reaches back only one day, the Query Store
+    /// backfill horizon (<c>QueryStoreBackfill.RollupStoreHorizon</c>) is under a day, and
+    /// <see cref="CompressionActivitySql"/> reads each job's OWN <c>compress_after</c> back from its config
+    /// rather than assuming <see cref="CompressAfterDays"/>, so the backlog count stays correct per table.</para>
+    ///
+    /// <para><b>Half-day-aware, not just day-aware.</b> A table narrowed to 12-hour chunks
+    /// (<see cref="RawChunkIntervalPlanner"/>) becomes eligible twice a day, at hours N and N+12 past
+    /// midnight — see <see cref="CompressAfterFor"/>'s remarks for why the offset stays the SAME number
+    /// either way. The nine values below (1–9) keep both {N, N+12} sets disjoint from each other and off
+    /// hour 0, so a 12-hour table never collides with a 24-hour table's slot. A table narrowed to 6-hour
+    /// chunks becomes eligible four times a day (N, N+6, N+12, N+18): the N+6 member can land on another
+    /// heavy table's hour, which <see cref="WarnIfHeavyTableOnNarrowChunksAsync"/> logs rather than silently
+    /// tolerating, since fixing it needs the field's actual chunk widths rather than a compile-time table.</para>
+    ///
+    /// <para>Max value 9, pinned <![CDATA[<=]]> 11 by test — the largest offset must stay well inside a day, or
+    /// it starts to look like a second <see cref="CompressAfterDays"/> rather than a stagger.</para>
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, int> HeavyCompressAfterOffsetHours =
+        new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["query_store_stats"] = 1,
+            ["query_stats"] = 2,
+            ["perfmon_stats"] = 3,
+            ["plan_correction"] = 4,
+            ["query_snapshots"] = 5,
+            ["spinlock_stats"] = 6,
+            ["job_history"] = 7,
+            ["latch_stats"] = 8,
+            ["wait_stats"] = 9,
+        };
+
+    /// <summary>
+    /// <c>compress_after</c> for <paramref name="table"/> as an INTERVAL literal: <see cref="CompressAfterDays"/>
+    /// plus this table's <see cref="HeavyCompressAfterOffsetHours"/> entry (0 for every table not in the
+    /// map, which renders byte-identical to the pre-#4510 literal). Accepts a bare or
+    /// <c>collect.</c>-qualified name, the same contract <see cref="TryCompressionPhaseMinutesFor"/> uses,
+    /// since <see cref="AddCompressionPolicySql(string)"/> is reachable with either.
+    ///
+    /// <para>Rendered as <c>'N days M hours'</c> rather than as a hundred-and-something-hour scalar, so an
+    /// operator reading <c>timescaledb_information.jobs.config</c> sees the day and the stagger as two
+    /// separate facts instead of doing the division back in their head. A zero-hour table renders exactly
+    /// <c>'{CompressAfterDays} days'</c>, the literal every pin before #4510 already expects.</para>
+    /// </summary>
+    public static string CompressAfterFor(string table)
+    {
+        var extraHours = HeavyOffsetHoursFor(table);
+
+        if (extraHours != 0)
+        {
+            return $"{CompressAfterDays} days {extraHours.ToString("00", CultureInfo.InvariantCulture)}:00:00";
+        }
+
+        return $"{CompressAfterDays} days";
+    }
+
+    /// <summary>The <see cref="HeavyCompressAfterOffsetHours"/> lookup, shared by <see cref="CompressAfterFor"/>
+    /// (the SQL literal) and <see cref="ConvergeCompressionScheduleAsync(NpgsqlConnection, ILogger, string, CancellationToken)"/>
+    /// (the C# comparison), so the two can never read a different offset for the same table. Accepts a bare
+    /// or <c>collect.</c>-qualified name, the same contract every reader of this map already uses.</summary>
+    public static int HeavyOffsetHoursFor(string table)
+    {
+        var dot = table?.LastIndexOf('.') ?? -1;
+        var bare = dot >= 0 ? table![(dot + 1)..] : table;
+
+        return bare is not null && HeavyCompressAfterOffsetHours.TryGetValue(bare, out var extraHours) ? extraHours : 0;
     }
 
     /* ─────────────────────────── continuous aggregates (query acceleration) ─────────────────────────── */
@@ -362,7 +487,11 @@ public static class TimescaleSupport
        INSIDE. Baking is safe because every baseline filter is a literal constant or an immutable sanity
        bound -- the provider takes no settings dependency at all, so nothing here can freeze a configurable
        behavior. The restart-exclusion prior_* predicates deliberately stay in the provider: they apply
-       AFTER the collapse, over the collapsed series.
+       AFTER the collapse, over the collapsed series. Since #3653 the perfmon and wait-stats supplies also
+       bake in the collector's own restart verdict (sample_interval_seconds IS DISTINCT FROM 0) and carry the
+       interval, so for a collection with a measured interval the provider's prior_* heuristic is redundant
+       and is applied only to pre-column (NULL-interval) collections -- see SupersededBaselineRelations for
+       why that took a new aggregate under a new name rather than an edit.
 
        file_io is the one family whose unit is NOT the collection: IoLatency averages a per-FILE ratio
        across file rows, so a per-collection total would be a different statistic. It stores that ratio's
@@ -377,8 +506,25 @@ public static class TimescaleSupport
     /// <summary><see cref="TimeSpan"/> twin of <see cref="BaselineRetentionInterval"/>, pinned equal by test.</summary>
     public static readonly TimeSpan BaselineRetentionSpan = TimeSpan.FromDays(35);
 
-    public const string PerfmonBaselineView = "perfmon_baseline";
-    public const string WaitStatsBaselineView = "wait_stats_baseline";
+    /// <summary>The INTERVAL-HONEST perfmon and wait-stats baseline supplies (#3653, A6): the registered,
+    /// live relations. "interval" names the <c>sample_interval_seconds</c> column they carry and filter on — the
+    /// collector's own per-row verdict on whether a delta was knowable — and has nothing to do with the Query
+    /// Store <c>runtime_stats_interval</c> that <see cref="QueryStoreStatsIntervalHourlyView"/> is named for.</summary>
+    public const string PerfmonIntervalBaselineView = "perfmon_interval_baseline";
+    public const string WaitStatsIntervalBaselineView = "wait_stats_interval_baseline";
+
+    /// <summary>
+    /// The SUPERSEDED perfmon and wait-stats baseline supplies (#1757 shape, replaced by #3653's interval-honest
+    /// pair). Not registered: they are no longer in <see cref="BaselineAggregates"/>, so the ensure sweep never
+    /// creates or re-creates them, the phase grid does not phase them and the retention list does not arm them.
+    /// They exist only on stores that ran a build before #3653, where they hold up to <see cref="BaselineRetentionInterval"/>
+    /// of materialized history their successors were backfilled with at most the raw horizon of — which is why
+    /// <see cref="SupersededBaselineRelations"/> retires them by a COVERAGE condition rather than on sight, and
+    /// why <c>PgBaselineProvider</c> still reads them for the part of its window the successor does not yet reach.
+    /// </summary>
+    public const string LegacyPerfmonBaselineView = "perfmon_baseline";
+    public const string LegacyWaitStatsBaselineView = "wait_stats_baseline";
+
     public const string SessionStatsBaselineView = "session_stats_baseline";
     public const string QueryStatsBaselineView = "query_stats_baseline";
     public const string BlockedProcessBaselineView = "blocked_process_baseline";
@@ -402,11 +548,128 @@ public static class TimescaleSupport
         "file_io_baseline",
     };
 
-    /// <summary>BatchRequests baseline supply -- the counter_name and non-negative filters bake in. Unlike
-    /// cpu, one row per collection here is a property of the DMV (Batch Requests/sec is a single instance)
-    /// rather than something the collector guarantees -- it applies no object_name/instance_name predicate.
-    /// sum() over a one-row group is that row, so this stays exact either way.</summary>
-    public const string CreatePerfmonBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.perfmon_baseline
+    /// <summary>
+    /// Baseline relations SUPERSEDED by an interval-honest successor (#3653, A6): each legacy aggregate is
+    /// dropped only once its successor COVERS the baseline tier, or it holds no rows (#4289), and
+    /// <see cref="DropRetiredBaselineAggregatesAsync"/> evaluates that condition on every service start until it holds.
+    ///
+    /// <para><b>Why a condition and not the #2007 list.</b> <see cref="RetiredBaselineRelations"/> drops on
+    /// sight, which was right for aggregates nothing read. These two ARE read: they hold up to
+    /// <see cref="BaselineRetentionInterval"/> (35 days) of per-collection history, while a successor created
+    /// <c>WITH NO DATA</c> and backfilled by <see cref="BackfillBaselineAggregatesAsync"/> starts with at most
+    /// what raw still holds (30 days by the collectors' default horizon) and reaches the tier only after five
+    /// more days of live refresh. Dropping the legacy relation on day one would forfeit exactly the history
+    /// #3527 declined to forfeit when it left <c>perfmon_baseline</c> un-rebuilt. So the drop waits for
+    /// <c>min(bucket)</c> of the successor to reach the tier horizon (the host clock minus
+    /// <see cref="BaselineRetentionSpan"/>, bound as a parameter — never <c>now()</c> in store SQL), which
+    /// on a store with the default raw horizon is about five days after the first start that carries this
+    /// build. Until then <c>PgBaselineProvider</c> reads whichever of the pair covers its window.</para>
+    ///
+    /// <para><b>A legacy relation that is a PLAIN VIEW drops as soon as its successor exists.</b> On a
+    /// plain-PostgreSQL store both are ordinary views over the same raw table; neither holds history of its
+    /// own, so there is nothing to wait for and the tier condition (which a raw-backed view can never meet at a
+    /// 30-day raw horizon) would leave the old name standing forever.</para>
+    ///
+    /// <para><b>The transitional cost, stated rather than hidden.</b> The legacy aggregate's own refresh,
+    /// retention and compression jobs stay on the store until the drop cascades them, on the minute and hour the
+    /// registry gave that position — the same minute its successor now takes. For those days two light
+    /// refreshes (sub-3 s each on the measured fleet) hold <c>AccessShareLock</c> on the same raw hypertable
+    /// at the same minute, and two small materializations compress in the same nightly hour. That is the
+    /// lock-ADJACENCY the phase grid separates, but it is two share locks that both clear inside the
+    /// 4-minute compression guard, not the exclusive-lock convoy #3012 recorded; it was preferred to removing
+    /// the legacy policies on sight, which would leave the legacy relation frozen at its watermark and make
+    /// every provider read of it union in up to five days of raw <c>wait_stats</c>.</para>
+    ///
+    /// <para><b>Why the successors REPLACED the legacy pair in <see cref="BaselineAggregates"/> instead of
+    /// joining it.</b> Appending two members moves the hourly refresh phase grid: <see cref="HourlyRefreshPhaseOrder"/>
+    /// derives from that list, so the light band widens by two minutes, <see cref="HeaviestRefreshStartMinute"/>
+    /// moves 15→17, <see cref="HeaviestRefreshWindowMinutes"/> shrinks 21→19 and <see cref="RefreshSlotWarningSeconds"/>
+    /// drops from 1,050 s to 950 s against the 896 s recorded ceiling — a permanent 100 s of lost lead time on
+    /// the one refresh with a measured growth series, bought for a five-day transition. Replacing in place
+    /// keeps every position, minute and hour where it was.</para>
+    ///
+    /// <para>Once the fleet has passed the condition these names can move to <see cref="RetiredBaselineRelations"/>
+    /// as pure hygiene (so no future aggregate reuses them); nothing depends on that move, because a dropped
+    /// legacy relation is never re-created — the ensure sweep no longer knows its name.</para>
+    ///
+    /// <para><b>The wait is for HISTORY, and an empty legacy aggregate has none (#4289).</b> A store where
+    /// nothing ever fed the legacy aggregate's source (no <c>wait_stats</c> or <c>perfmon_stats</c> rows for
+    /// this collector) leaves it holding zero rows forever, and its successor — backfilled from the same empty
+    /// source — empty too. The coverage condition above can never resolve against a <c>NULL</c> successor
+    /// oldest bucket, so without a separate check the legacy relation, its refresh job, its retention job and
+    /// its compression job would all outlive every store that has data. <see cref="JudgeSupersededBaselineRelationAsync"/>
+    /// therefore asks whether the legacy relation holds any rows of its own BEFORE it asks about coverage: an
+    /// empty one drops on sight, whatever the successor holds, because there is nothing in it to protect.</para>
+    /// </summary>
+    public static readonly (string Legacy, string Successor)[] SupersededBaselineRelations =
+    {
+        (LegacyPerfmonBaselineView,   PerfmonIntervalBaselineView),
+        (LegacyWaitStatsBaselineView, WaitStatsIntervalBaselineView),
+    };
+
+    /// <summary>BatchRequests baseline supply (#3653, A6/A10) -- the counter_name and non-negative filters bake in,
+    /// and so does the collector's own knowability verdict: <c>sample_interval_seconds IS DISTINCT FROM 0</c>
+    /// drops the rows whose delta was never knowable (first sighting, counter reset -- a restart -- or a gap
+    /// past the policy), which the collector marks with a stored 0 (<c>CollectorDeltaCalculator</c>: interval
+    /// 0 &lt;=&gt; no delta knowable). A restart collection therefore produces NO row here rather than a
+    /// <c>delta_cntr_value = 0</c> row that reads as a quiet sample. Pre-column rows (NULL interval) pass the
+    /// filter, which is the three-state rule: 0 = unknowable, NULL = never recorded (keep, and the provider's
+    /// magnitude heuristic still guards it), n = measured and authoritative.
+    /// <para>The interval itself is carried -- <c>max(sample_interval_seconds)</c> over the collection, which
+    /// for this counter is the one row's own value -- so the provider divides by the MEASURED interval, in
+    /// Lite's unit, rather than deriving one from <c>LAG(collection_time)</c> as it had to over
+    /// <see cref="LegacyCreatePerfmonBaselineSql"/>.</para>
+    /// <para>Unlike cpu, one row per collection here is a property of the DMV (Batch Requests/sec is a single
+    /// instance) rather than something the collector guarantees -- it applies no object_name/instance_name
+    /// predicate. sum() over a one-row group is that row, so this stays exact either way.</para></summary>
+    public const string CreatePerfmonIntervalBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.perfmon_interval_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_cntr_value) AS delta_cntr_value,
+    max(sample_interval_seconds) AS sample_interval_seconds
+FROM collect.perfmon_stats
+WHERE counter_name = 'Batch Requests/sec'
+AND   delta_cntr_value >= 0
+AND   sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>WaitStats AND WaitMsPerSec baseline supply (#3653, A6/A10). Both families share this source and
+    /// share the identical row-level filter (delta_wait_time_ms >= 0 AND sample_interval_seconds IS DISTINCT
+    /// FROM 0), which is what lets one aggregate serve both; Darling.Tests pins that sharing so a future
+    /// family-specific filter cannot silently poison its sibling's supply.
+    /// <para>The interval filter is the collector's knowability verdict baked in (see
+    /// <see cref="CreatePerfmonIntervalBaselineSql"/>): a restart collection, whose every row is (0, 0),
+    /// produces no per-collection row at all instead of a <c>total_wait_ms = 0</c> sample that drags the mean
+    /// down and the stddev up -- the contamination #3653 A6 names. It is Lite's <c>BaselineProvider</c> WHERE,
+    /// verbatim, which <see cref="LegacyCreateWaitStatsBaselineSql"/> could not carry: a continuous aggregate's
+    /// query cannot be altered in place, and a rebuild forfeits the 35-day tier. The interval is carried too
+    /// (<c>max</c> over the collection's rows, Lite's WaitMsPerSec idiom) so the rate arm divides by the
+    /// measured interval and falls back to <c>LAG(collection_time)</c> only for pre-column collections.</para></summary>
+    public const string CreateWaitStatsIntervalBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_interval_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_wait_time_ms) AS total_wait_ms,
+    max(sample_interval_seconds) AS sample_interval_seconds
+FROM collect.wait_stats
+WHERE delta_wait_time_ms >= 0
+AND   sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>The SUPERSEDED BatchRequests supply, as every pre-#3653 store still carries it: no interval
+    /// filter, so a restart's fabricated zero is summed and counted as a quiet sample, and no interval column,
+    /// so the provider derived one from <c>LAG(collection_time)</c>. Retained, not registered: nothing in the
+    /// product runs this CREATE any more. It is the record of what <see cref="LegacyPerfmonBaselineView"/>
+    /// computes on the fleet, the text the live retirement test builds its fixture from, and what
+    /// <c>PgBaselineProvider</c>'s legacy arm is written against.</summary>
+    public const string LegacyCreatePerfmonBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.perfmon_baseline
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
     server_id,
@@ -419,12 +682,10 @@ AND   delta_cntr_value >= 0
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
-    /// <summary>WaitStats AND WaitMsPerSec baseline supply. Both families share this source and share the
-    /// identical row-level filter (delta_wait_time_ms >= 0), which is what lets one aggregate serve both;
-    /// Darling.Tests pins that sharing so a future family-specific filter cannot silently poison its
-    /// sibling's supply. WaitMsPerSec's interval_sec comes from LAG(collection_time) over the COLLAPSED
-    /// series, so the provider computes it and nothing extra is stored here.</summary>
-    public const string CreateWaitStatsBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_baseline
+    /// <summary>The SUPERSEDED WaitStats/WaitMsPerSec supply (#1757 shape; see <see cref="LegacyCreatePerfmonBaselineSql"/>
+    /// for why the text is retained). Its <c>delta_wait_time_ms >= 0</c> filter admits the restart
+    /// collection's zeros, which is the defect #3653 A6 records.</summary>
+    public const string LegacyCreateWaitStatsBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_baseline
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
     server_id,
@@ -538,7 +799,10 @@ WITH NO DATA";
             {
                 var source = SourceTableFor(view);
 
-                var probeSql = BaselineBackfillProbeSql(view, source);
+                /* Coverage off the materialization hypertable when there is one (#3653): through the view a
+                   fresh WITH NO DATA aggregate reports raw's whole reach and the gate never fires on the start
+                   that created it — see BaselineBackfillProbeSql. */
+                var probeSql = BaselineBackfillProbeSql(view, source, await ResolveMaterializationAsync(connection, view, cancellationToken));
 
                 DateTime? sourceOldest = null;
                 DateTime? coverageOldest = null;
@@ -795,15 +1059,73 @@ WITH NO DATA";
     /// west of UTC it over-asks and materializes buckets the tier's own retention policy then drops. The
     /// caller passes <see cref="BaselineRetentionSpan"/> off the service clock, the same clock that stamped
     /// every <c>collection_time</c> it is compared against.</para>
+    ///
+    /// <para><b>COVERAGE IS READ OFF THE MATERIALIZATION, NOT THROUGH THE VIEW (#3653).</b> Measured on a
+    /// TimescaleDB 2.28.1 rig while proving the interval-honest successors' rollout: a continuous aggregate
+    /// created <c>WITH NO DATA</c> has its watermark at the minimum timestamp (4714-11-24 BC — finite, not
+    /// <c>-infinity</c>, which is what #3973 tripped over), so its real-time branch serves EVERY raw row and
+    /// <c>min(bucket)</c> through the view is raw's own oldest bucket. The gate then reads
+    /// "already covers" on the very start that created the aggregate and skips the backfill; one policy
+    /// refresh later the watermark jumps to the trailing window's end and everything older than that window is
+    /// served by neither branch — nineteen of twenty planted days went invisible on the rig — until the NEXT
+    /// start's gate, now looking at a real materialized floor, finally backfills. Every #1757 aggregate
+    /// rolled out through that two-start delay. The <paramref name="materialization"/> overload reads the
+    /// floor from the materialization hypertable itself, which is empty (NULL) on a fresh aggregate and is
+    /// exactly the region a refresh can no longer reach back over, so the gate fires on the first start. The
+    /// two-argument form remains for the plain-view shape, where there is no materialization and the view IS
+    /// the coverage.</para>
     /// </summary>
     public static string BaselineBackfillProbeSql(string view, string source)
-        => $@"
+        => BaselineBackfillProbeSql(view, source, materialization: null);
+
+    /// <summary>
+    /// <see cref="BaselineBackfillProbeSql(string, string)"/> with the aggregate's materialization hypertable
+    /// (<c>timescaledb_information.continuous_aggregates.materialization_hypertable_schema/_name</c>) as the
+    /// coverage relation. Null means "no materialization to read" and the view is probed instead.
+    /// </summary>
+    public static string BaselineBackfillProbeSql(string view, string source, (string Schema, string Name)? materialization)
+    {
+        var coverage = materialization is { } m
+            ? $"{QuoteIdentifier(m.Schema)}.{QuoteIdentifier(m.Name)}"
+            : $"collect.{view}";
+
+        return $@"
 SELECT
     (SELECT min(collection_time) FROM collect.{source}) AS source_oldest,
-    (SELECT min(bucket) FROM collect.{view}) AS coverage_oldest,
+    (SELECT min(bucket) FROM {coverage}) AS coverage_oldest,
     time_bucket('1 hour', GREATEST(
         (SELECT min(collection_time) FROM collect.{source}),
         $1)) AS need_from";
+    }
+
+    /// <summary>The materialization hypertable behind a continuous aggregate, or null when the relation is not
+    /// one (a plain fallback view, or a store without the extension). Two statements so the information view
+    /// is only named once the extension is known to exist — the <see cref="JudgeSupersededBaselineRelationAsync"/>
+    /// reasoning.</summary>
+    public static async Task<(string Schema, string Name)?> ResolveMaterializationAsync(
+        NpgsqlConnection connection, string view, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        if (!await DetectAsync(connection, cancellationToken))
+        {
+            return null;
+        }
+
+        using var probe = new NpgsqlCommand(
+            $"SELECT materialization_hypertable_schema, materialization_hypertable_name FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '{view}'",
+            connection) { CommandTimeout = SetupTimeoutSeconds };
+        await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1))
+        {
+            return null;
+        }
+
+        return (reader.GetString(0), reader.GetString(1));
+    }
 
     /// <summary>
     /// Drops a baseline relation ONLY when it is a plain fallback view and NOT a continuous aggregate — the
@@ -887,9 +1209,28 @@ $do$";
     /// views, and on fresh stores it no-ops. Failure-isolated per relation, like every other
     /// startup sweep — a failed drop is retried on the next start and never kills the service.
     /// Returns how many relations were actually dropped.
+    ///
+    /// <para>Since #3653 the same pass also walks <see cref="SupersededBaselineRelations"/>, dropping each
+    /// legacy relation once its successor covers the baseline tier, or once the legacy holds no rows of its
+    /// own (#4289) — see <see cref="SupersededBaselineRelationDropsAt"/>. The two lists ride one sweep because they need the
+    /// same connection, the same ordering against the ensure (before it) and the same failure isolation; the
+    /// worker's call site is unchanged. This overload takes the host clock itself, which is what the
+    /// production call site wants; the tests pass a clock to walk the condition across time.</para>
+    /// </summary>
+    public static Task<int> DropRetiredBaselineAggregatesAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        => DropRetiredBaselineAggregatesAsync(connection, logger, DateTime.UtcNow, cancellationToken);
+
+    /// <summary>
+    /// <see cref="DropRetiredBaselineAggregatesAsync(NpgsqlConnection, ILogger?, CancellationToken)"/> with the
+    /// clock the superseded pass judges coverage against. <paramref name="utcNow"/> is the service's UTC clock,
+    /// the clock that stamped every <c>collection_time</c> the successor's buckets derive from; the horizon it
+    /// implies is bound as a parameter, never written as <c>now()</c> in store SQL (the
+    /// <see cref="BaselineBackfillProbeSql"/> reasoning: <c>now()::timestamp</c> renders in the session zone,
+    /// <c>bucket</c> is naive UTC, and PostgreSQL would compare the two without a word).
     /// </summary>
     public static async Task<int> DropRetiredBaselineAggregatesAsync(
-        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
@@ -897,6 +1238,47 @@ $do$";
         }
 
         var dropped = 0;
+
+        foreach (var (legacy, successor) in SupersededBaselineRelations)
+        {
+            try
+            {
+                var verdict = await JudgeSupersededBaselineRelationAsync(connection, legacy, successor, utcNow, cancellationToken);
+                if (verdict.Decision != SupersededBaselineDecision.Drop)
+                {
+                    if (verdict.Decision == SupersededBaselineDecision.SuccessorShort)
+                    {
+                        logger?.LogInformation(
+                            "Superseded baseline relation {Legacy} stays for now (#3653): its successor {Successor} covers from {SuccessorOldest} and the baseline tier's horizon is {Horizon} — the legacy aggregate still holds history the successor has not yet materialized, and this start's read of it is what the provider falls back on for that part of its window. Re-judged on every start; expected to drop about five days after the first start that carried the successor.",
+                            legacy, successor, verdict.SuccessorOldest, verdict.Horizon);
+                    }
+
+                    continue;
+                }
+
+                using (var drop = new NpgsqlCommand(DropRetiredBaselineRelationSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await drop.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                dropped++;
+                logger?.LogInformation(
+                    "Dropped superseded baseline relation {Legacy} (#3653) — {Reason}, so nothing reads it any more; its refresh, retention and compression jobs went with it.",
+                    legacy,
+                    verdict.LegacyIsContinuousAggregate
+                        ? verdict.LegacyHoldsRows
+                            ? $"its interval-honest successor {successor} covers the baseline tier (from {verdict.SuccessorOldest:O}, horizon {verdict.Horizon:O})"
+                            : "it held no rows through its own view (#4289) — an empty aggregate has no baseline history to protect, whatever its successor holds"
+                        : $"its interval-honest successor {successor} exists and, like this plain view, reads raw directly");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not judge or drop superseded baseline relation {Legacy} — it lingers (harmlessly, but materializing) until the next restart retries: {Message}",
+                    legacy, ex.Message);
+            }
+        }
+
         foreach (var view in RetiredBaselineRelations)
         {
             try
@@ -933,11 +1315,186 @@ $do$";
         return dropped;
     }
 
+    /// <summary>What the superseded pass decided for one legacy relation, and why.</summary>
+    public enum SupersededBaselineDecision
+    {
+        /// <summary>The legacy relation does not exist on this store (fresh store, or already retired).</summary>
+        LegacyAbsent,
+
+        /// <summary>The successor does not exist yet, so there is nothing to hand the readers over to. On the
+        /// first start that carries this build the drop pass runs BEFORE the ensure that creates the successor,
+        /// so this is the expected verdict of that one start; the next start finds the successor.</summary>
+        SuccessorAbsent,
+
+        /// <summary>The legacy relation is a continuous aggregate that holds rows of its own, and the successor's
+        /// oldest bucket is later than the tier horizon (or the successor is empty) — the legacy still holds
+        /// history the successor lacks.</summary>
+        SuccessorShort,
+
+        /// <summary>Drop: the successor covers the tier, the legacy relation is a plain view (nothing of its
+        /// own to lose), or the legacy is a continuous aggregate that holds no rows of its own (#4289 — it has
+        /// no history to protect, whatever the successor holds).</summary>
+        Drop,
+    }
+
+    /// <summary>The superseded pass's evidence for one legacy relation: the decision plus the four facts it
+    /// rests on, so the log line can show its working and the live test can assert each fact.
+    /// <see cref="LegacyHoldsRows"/> is meaningful only when <see cref="LegacyIsContinuousAggregate"/> is
+    /// true (#4289) — a plain view is never asked, so it reads <c>true</c> (the neutral, non-triggering
+    /// value) on that path and on <see cref="SupersededBaselineDecision.LegacyAbsent"/> /
+    /// <see cref="SupersededBaselineDecision.SuccessorAbsent"/>, where nothing asked it either.</summary>
+    public readonly record struct SupersededBaselineVerdict(
+        SupersededBaselineDecision Decision,
+        bool LegacyIsContinuousAggregate,
+        bool LegacyHoldsRows,
+        DateTime? SuccessorOldest,
+        DateTime Horizon);
+
+    /// <summary>
+    /// THE RETIREMENT CONDITION (#3653, #4289), as a pure predicate so the tests can walk it across time without
+    /// a store: a legacy CONTINUOUS AGGREGATE that holds no rows of its own (<paramref name="legacyHoldsRows"/>
+    /// false) drops on sight, whatever the successor holds — it has no history to protect. A legacy CONTINUOUS
+    /// AGGREGATE that DOES hold rows drops once its successor's oldest bucket is at or before the tier horizon
+    /// (<paramref name="utcNow"/> minus <see cref="BaselineRetentionSpan"/>); an EMPTY successor (<c>null</c>
+    /// oldest) never releases it: an un-backfilled successor covers nothing, whatever the clock says. A legacy
+    /// PLAIN VIEW drops as soon as a successor exists (<paramref name="legacyHoldsRows"/> and
+    /// <paramref name="successorOldest"/> are both ignored — a raw-backed view has nothing of its own to hand
+    /// over, empty or not).
+    ///
+    /// <para><b>Why the TIER horizon and not the provider's 30-day window.</b> The window is the weaker sufficient
+    /// condition — once the successor reaches it, nothing reads the legacy relation — but "covers the tier" is
+    /// the claim that dropping the legacy loses NOTHING it held, and that is the claim a retirement should be
+    /// able to make. On a store with the collectors' default 30-day raw horizon the two conditions are met
+    /// about one and five days after the successor's backfill respectively; the provider switches on the
+    /// first, the drop waits for the second.</para>
+    ///
+    /// <para><b>Chunk-edge arithmetic, so the condition is known to be REACHABLE and STABLE.</b> The successor's
+    /// retention policy drops whole materialization chunks whose END is older than the horizon, so the oldest
+    /// surviving chunk always straddles it and <c>min(bucket)</c> sits at or before the horizon from the first
+    /// day the successor has held a full tier onward — the condition, once true, stays true, and a one-shot drop
+    /// on any start is enough. <c>&lt;=</c> rather than <c>&lt;</c> so a bucket that lands exactly on the horizon
+    /// counts as coverage.</para>
+    /// </summary>
+    public static bool SupersededBaselineRelationDropsAt(bool legacyIsContinuousAggregate, bool legacyHoldsRows, DateTime? successorOldest, DateTime utcNow)
+    {
+        if (!legacyIsContinuousAggregate)
+        {
+            return true;
+        }
+
+        if (!legacyHoldsRows)
+        {
+            return true;
+        }
+
+        return successorOldest is DateTime oldest && oldest <= utcNow - BaselineRetentionSpan;
+    }
+
+    /// <summary>
+    /// Reads the four facts <see cref="SupersededBaselineRelationDropsAt"/> needs off the store and returns the
+    /// verdict. Five small catalog reads at most, once per start; the two that touch data are the legacy's own
+    /// <c>EXISTS</c> probe (<see cref="BaselineRelationHasRowsSql"/>, #4289) and the successor's <c>min(bucket)</c>
+    /// — the same probe <see cref="BaselineBackfillProbeSql"/> already runs for every registered aggregate on
+    /// every start — and the second runs ONLY when the first found rows: an empty legacy aggregate drops before
+    /// the coverage read, so that read (and the query plan it costs) never fires for it.
+    ///
+    /// <para>The continuous-aggregate question is asked in two statements on purpose:
+    /// <c>timescaledb_information</c> does not exist on a store that never created the extension, and a
+    /// reference to it fails at PARSE time regardless of any short-circuit in the same statement — the reason
+    /// <see cref="DropRetiredBaselineRelationSql"/> reaches it through <c>EXECUTE</c>. Here the extension is
+    /// probed first (<c>pg_extension</c>, the authoritative per-database check <see cref="DetectAsync"/> uses)
+    /// and the information view is read only when it resolves.</para>
+    /// </summary>
+    public static async Task<SupersededBaselineVerdict> JudgeSupersededBaselineRelationAsync(
+        NpgsqlConnection connection, string legacy, string successor, DateTime utcNow, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var horizon = utcNow - BaselineRetentionSpan;
+
+        using (var probe = new NpgsqlCommand(BaselineRelationExistsSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds })
+        {
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return new SupersededBaselineVerdict(SupersededBaselineDecision.LegacyAbsent, false, true, null, horizon);
+            }
+        }
+
+        using (var probe = new NpgsqlCommand(BaselineRelationExistsSql(successor), connection) { CommandTimeout = SetupTimeoutSeconds })
+        {
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return new SupersededBaselineVerdict(SupersededBaselineDecision.SuccessorAbsent, false, true, null, horizon);
+            }
+        }
+
+        var legacyIsContinuousAggregate = false;
+        if (await DetectAsync(connection, cancellationToken))
+        {
+            using var probe = new NpgsqlCommand(BaselineRelationIsContinuousAggregateSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds };
+            legacyIsContinuousAggregate = await probe.ExecuteScalarAsync(cancellationToken) is true;
+        }
+
+        /* #4289: asked BEFORE the coverage read, and only for a CAGG — a plain view has nothing of its own to
+           lose either way, so SupersededBaselineRelationDropsAt never consults this for one. */
+        var legacyHoldsRows = true;
+        if (legacyIsContinuousAggregate)
+        {
+            using var probe = new NpgsqlCommand(BaselineRelationHasRowsSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds };
+            /* is not false, not is true: only a definite false answer means empty. A later edit that lets this
+               read return null (a swallowed error, or SQL changed to return no row) must NOT read as "empty"
+               and drop a legacy that holds rows -- the safe default for an unrecognized answer is "holds rows". */
+            legacyHoldsRows = await probe.ExecuteScalarAsync(cancellationToken) is not false;
+        }
+
+        DateTime? successorOldest = null;
+        if (legacyIsContinuousAggregate && legacyHoldsRows)
+        {
+            using var probe = new NpgsqlCommand(BaselineCoverageOldestSql(successor), connection) { CommandTimeout = SetupTimeoutSeconds };
+            successorOldest = await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
+        }
+
+        var decision = SupersededBaselineRelationDropsAt(legacyIsContinuousAggregate, legacyHoldsRows, successorOldest, utcNow)
+            ? SupersededBaselineDecision.Drop
+            : SupersededBaselineDecision.SuccessorShort;
+
+        return new SupersededBaselineVerdict(decision, legacyIsContinuousAggregate, legacyHoldsRows, successorOldest, horizon);
+    }
+
+    /// <summary>Is this baseline relation a CONTINUOUS AGGREGATE (as opposed to the plain fallback view a
+    /// TimescaleDB-less store creates under the same name)? Valid only once <see cref="DetectAsync"/> has
+    /// answered true: the information view it reads does not exist before the extension is created.</summary>
+    public static string BaselineRelationIsContinuousAggregateSql(string view)
+        => $"SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '{view}')";
+
+    /// <summary>How far back a baseline relation reaches — its oldest hourly bucket, or NULL when it holds
+    /// nothing. On a continuous aggregate with real-time aggregation this is the materialized floor when the
+    /// materialization is non-empty, which is the coverage question the superseded pass asks.</summary>
+    public static string BaselineCoverageOldestSql(string view)
+        => $"SELECT min(bucket) FROM collect.{view}";
+
+    /// <summary>Does this baseline relation hold any rows through its own view (#4289)? Read through the VIEW
+    /// rather than the materialization hypertable, so on a legacy aggregate's <c>timescaledb.materialized_only =
+    /// false</c> shape this sees the same real-time-aggregated rows a reader — <see cref="PgBaselineProvider"/>
+    /// included — would see, not just what has materialized so far. <see cref="JudgeSupersededBaselineRelationAsync"/>
+    /// asks this ONLY of a legacy relation already known to be a CONTINUOUS AGGREGATE, before it ever reads the
+    /// successor's coverage: an empty legacy aggregate holds no history to protect, so the successor's coverage
+    /// is moot and the drop does not wait on it.</summary>
+    public static string BaselineRelationHasRowsSql(string view)
+        => $"SELECT EXISTS (SELECT 1 FROM collect.{view})";
+
     /// <summary>The raw table each baseline aggregate is sourced from, for the backfill's coverage probe.</summary>
     public static string SourceTableFor(string view) => view switch
     {
-        PerfmonBaselineView => "perfmon_stats",
-        WaitStatsBaselineView => "wait_stats",
+        PerfmonIntervalBaselineView => "perfmon_stats",
+        WaitStatsIntervalBaselineView => "wait_stats",
+        /* The superseded pair reads the same raw tables; named so the retirement fixture and any coverage probe
+           over a legacy relation resolve without a second map. */
+        LegacyPerfmonBaselineView => "perfmon_stats",
+        LegacyWaitStatsBaselineView => "wait_stats",
         SessionStatsBaselineView => "session_stats",
         QueryStatsBaselineView => "query_stats",
         BlockedProcessBaselineView => "blocked_process_reports",
@@ -958,25 +1515,315 @@ $do$";
     ///
     /// <para>Hoisted out of the ensure sweep (#3012) so that sweep, the phase order and the collision guard
     /// all read ONE list. Restating it in the guard would let the guard pass while the sweep drifted.</para>
+    ///
+    /// <para><b>Nine from #3653 (Q12) to #3653 (LC), and the three interval-honest successors were APPENDED
+    /// rather than put in their legacy's positions, which was the opposite of what #3698 did for the baseline
+    /// pair — deliberately, and the reason is on <see cref="SupersededHourlyRollups"/>.</b> Q12 could not take
+    /// the legacy trio off this list: each had an indefinite daily tier hierarchical from it, so it had to go
+    /// on being created, refreshed and phased for as long as that daily read it directly. LC is what changed
+    /// that — the three successor DAILIES (<see cref="SupersededDailyRollups"/>) now cover the daily tier
+    /// the legacy trio's own dailies used to be the only source for, so the legacy trio (and its dailies) could
+    /// move to <see cref="FrozenRollupAggregates"/>, off this list, the phase grid and the compression band,
+    /// for good. Nine members briefly meant the phase grid RE-DERIVED itself — <see cref="LightHourlyRefreshCount"/>
+    /// 12→15, <see cref="LightBandSpanMinutes"/> 11→14, <see cref="HeaviestRefreshStartMinute"/> 15→18,
+    /// <see cref="HeaviestRefreshWindowMinutes"/> 21→18 and <see cref="RefreshSlotWarningSeconds"/>
+    /// 1,050→900 s against the 896 s <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> — by the
+    /// method the grid documents, not by anyone renumbering it — and LC's freeze re-derives it AGAIN, back to
+    /// the pre-Q12 six-member figures, because six is what this list holds once more (the successors now
+    /// occupy the fourth, fifth and sixth slots the legacy trio held, rather than joining behind them); the
+    /// pins in TimescaleSupportTests and RefreshCeilingProvenancePinTests carry both derivations. The raw
+    /// source of each successor is a hypertable, so none carries an ordering requirement against the corrected
+    /// Query Store pair.</para>
     /// </summary>
     public static readonly (string CreateSql, string View)[] HourlyAggregates =
     {
-        (CreateQueryStatsHourlySql,      QueryStatsHourlyView),
-        (CreateProcedureStatsHourlySql,  ProcedureStatsHourlyView),
         (CreateQueryStoreStatsHourlySql, QueryStoreStatsHourlyView),
-        (CreateQueryStatsDbHourlySql,    QueryStatsDbHourlyView),
         /* The corrected Query Store rollups (#1849): L1 is raw-sourced and MUST precede the corrected view,
            which is hierarchical from it. */
         (CreateQueryStoreStatsIntervalHourlySql,  QueryStoreStatsIntervalHourlyView),
         (CreateQueryStoreStatsCorrectedHourlySql, QueryStoreStatsCorrectedHourlyView),
+        /* The interval-honest successors of the legacy trio (#3653, Q12) that FROZE it (#3653, LC): this list
+           held all nine from Q12 until LC moved the three legacy members — query_stats_hourly,
+           procedure_stats_hourly, query_stats_db_hourly — into FrozenRollupAggregates, off the phase grid and
+           the compression band for good (see that list, and SupersededHourlyRollups for the coverage/stitch
+           story the legacy trio still plays). Six again, exactly as before Q12 added the successors, because
+           the successors REPLACE the legacy trio's grid membership rather than merely joining it now. */
+        (CreateQueryStatsIntervalHourlySql,       QueryStatsIntervalHourlyView),
+        (CreateProcedureStatsIntervalHourlySql,   ProcedureStatsIntervalHourlyView),
+        (CreateQueryStatsDbIntervalHourlySql,     QueryStatsDbIntervalHourlyView),
     };
 
+    /// <summary>
+    /// The hourly rollups SUPERSEDED for the hourly-tier READ by an interval-honest successor (#3653, Q12):
+    /// each legacy, its successor, and the indefinite daily tier that is hierarchical from the LEGACY. Every
+    /// hourly-tier reader resolves its relation through <see cref="RollupCoverage.HourlyRelationFor"/>, which
+    /// reads this list and applies <see cref="PrefersSuccessor"/>.
+    ///
+    /// <para><b>These three do NOT retire the way #3698's baseline pair retires, and the difference is
+    /// structural rather than a choice — but from #3653's LC onward they DO leave the phase grid and the
+    /// compression band, which is a different thing from retiring.</b> <see cref="SupersededBaselineRelations"/>
+    /// drops a legacy aggregate once its successor covers the tier, because nothing else depends on it. Each
+    /// legacy here has a DAILY continuous aggregate built <c>FROM</c> it — <see cref="QueryStatsDailyView"/>,
+    /// <see cref="ProcedureStatsDailyView"/>, <see cref="QueryStatsDbDailyView"/> — and a continuous aggregate's
+    /// source is fixed at CREATE, so a <c>DROP ... CASCADE</c> of the legacy would take the daily with it, and
+    /// the daily is the tier kept INDEFINITELY, holding history no other relation has. That is why the legacy
+    /// is never DROPped. It is NOT why the legacy needs a live refresh policy forever: once the daily's own
+    /// reader routes to a successor daily above the successor's floor (<see cref="SupersededDailyRollups"/>,
+    /// LA's stitch), a legacy that stops advancing only ever serves the FIXED historical window it had reached
+    /// at the freeze, which is exactly what a read below that floor wants. LC is what draws that line:
+    /// <see cref="FrozenRollupAggregates"/> holds the legacy CREATE so a missing one is still created, but no
+    /// refresh policy, no phase-grid minute and no compression-band hour — see there for what an existing
+    /// store's already-registered policy gets on the next start.</para>
+    ///
+    /// <para><b>What Q12 cost while it lasted, and what LC gave back.</b> From Q12 to LC this list carried
+    /// three more hourly refreshes for good — two sub-3 s deployment-bounded ones and one unbounded-cardinality
+    /// one (<see cref="QueryStatsIntervalHourlyView"/> groups by statement, like its legacy, measured at 23.3 s
+    /// on the largest store) — and the grid re-derived around fifteen light members instead of twelve, taking
+    /// 180 s of window from the heaviest refresh and leaving <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>
+    /// 4 s under the re-derived <see cref="RefreshSlotWarningSeconds"/>. LC removes the legacy trio (not the
+    /// successors, which stay — see <see cref="HourlyAggregates"/>) from this list, so the grid is back to
+    /// twelve light members and the 1,050 s line Q12 narrowed away from.</para>
+    ///
+    /// <para><b>What the daily tier gets now that it did not get from Q12 alone.</b> The legacy dailies stay
+    /// hierarchical from the legacy trio and keep inheriting its day-grain contamination — one extra
+    /// <c>sample_count</c> per restart per group, a <c>min()</c> of 0 on any day with a restart — for whatever
+    /// history they had already materialized before the freeze; that history does not get retroactively
+    /// corrected, and does not need to, because it is exactly what a read below the successor daily's floor
+    /// asks for. What changed is the window ABOVE that floor: <see cref="SupersededDailyRollups"/>'s three
+    /// interval-honest successor DAILIES, hierarchical from the successors here, now cover it, which is what
+    /// let LC take the legacy trio off the grid without leaving any live window unserved.
+    /// <see cref="LogSupersededHourlyRollupCoverageAsync"/> still reports the successor's reach on every start.</para>
+    ///
+    /// <para><b>The raw purge MOVED onto the successors at LC</b> — the opposite of the Q12-era rule, which
+    /// followed the <see cref="QueryStatsDbHourlyView"/> precedent (#1661) and kept it on the legacy precisely
+    /// so a fresh successor's empty history could not hold every store's <c>query_stats</c> and
+    /// <c>procedure_stats</c> purge. That rule assumed the legacy would go on refreshing forever; once LC
+    /// freezes it, the legacy's own coverage floor stops advancing while <see cref="HourlyRetentionInterval"/>
+    /// keeps trimming its oldest chunks, so a raw-purge gate still keyed on the legacy would eventually find it
+    /// EMPTY and hold the purge forever with no self-release. <see cref="RawTierCoverage"/> now names the
+    /// successor, which is why LC ships only once every store's successor dailies are backfilled (this PR's
+    /// merge gate) — the dependency #1661 avoided is accepted here deliberately, with the backfill runbook as
+    /// its precondition rather than an unstated assumption.</para>
+    /// </summary>
+    public static readonly (string Legacy, string Successor, string DependentDaily)[] SupersededHourlyRollups =
+    {
+        (QueryStatsHourlyView,     QueryStatsIntervalHourlyView,     QueryStatsDailyView),
+        (ProcedureStatsHourlyView, ProcedureStatsIntervalHourlyView, ProcedureStatsDailyView),
+        (QueryStatsDbHourlyView,   QueryStatsDbIntervalHourlyView,   QueryStatsDbDailyView),
+    };
+
+    /// <summary>
+    /// The daily rollups SUPERSEDED for the daily-tier read by an interval-honest successor daily (#3653, A6):
+    /// each legacy daily, its successor daily, and the successor HOURLY the successor daily is hierarchical
+    /// from. Registered by the lane that added the three successor dailies (A6 LB); consumed for ROUTING by
+    /// LA's stitched reads, and consumed for RETIREMENT by LC's freeze — <see cref="FrozenRollupAggregates"/>
+    /// takes its <c>LegacyDaily</c> names from here, and <see cref="RetentionPolicies"/> takes the successor
+    /// hourlies' own coverage relation from the matching <c>SuccessorDaily</c>, matched by name to
+    /// <see cref="SupersededHourlyRollups"/>.
+    ///
+    /// <para>The successor dailies were excluded from aggregate compression (a set once named
+    /// <c>CompressionDeferredUntilFreeze</c>) until LC froze the legacy trio's own daily-band membership: the
+    /// daily compression band was full at 23 members with the legacy trio still on it, so a successor daily
+    /// joining unconditionally would have overflowed it. LC removed that set — the legacy trio's three
+    /// members are what it no longer counts, which is what frees the three slots the successors now take in
+    /// <see cref="AggregateCompressionTargets"/> (declared without the trio, rather than with them minus a
+    /// deferral).</para>
+    /// </summary>
+    public static readonly (string LegacyDaily, string SuccessorDaily, string SuccessorHourly)[] SupersededDailyRollups =
+    {
+        (QueryStatsDailyView,     QueryStatsIntervalDailyView,     QueryStatsIntervalHourlyView),
+        (ProcedureStatsDailyView, ProcedureStatsIntervalDailyView, ProcedureStatsIntervalHourlyView),
+        (QueryStatsDbDailyView,   QueryStatsDbIntervalDailyView,   QueryStatsDbIntervalHourlyView),
+    };
+
+    /// <summary>The interval-honest successor that supersedes <paramref name="legacyHourly"/> for the hourly-tier
+    /// read, or <c>null</c> for an hourly rollup that was never superseded (the Query Store family, and the
+    /// successors themselves).</summary>
+    public static string? SuccessorOf(string legacyHourly)
+    {
+        foreach (var (legacy, successor, _) in SupersededHourlyRollups)
+        {
+            if (string.Equals(legacy, legacyHourly, StringComparison.Ordinal))
+            {
+                return successor;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Same as <see cref="SuccessorOf"/>, for a caller (<see cref="RawTierCoverage"/>'s query_stats and
+    /// procedure_stats rows) that already knows <paramref name="legacyHourly"/> must be superseded — a
+    /// <c>null</c> there would only hide <see cref="SupersededHourlyRollups"/> and its caller drifting apart, so
+    /// this throws instead of handing one back.</summary>
+    private static string RequireSuccessorOf(string legacyHourly)
+        => SuccessorOf(legacyHourly) ?? throw new InvalidOperationException($"{legacyHourly} has no successor in {nameof(SupersededHourlyRollups)}.");
+
+    /// <summary>The legacy hourly that <paramref name="successor"/> supersedes, or <c>null</c> when
+    /// <paramref name="successor"/> is not a member of <see cref="SupersededHourlyRollups"/>.  Used by
+    /// <see cref="RetentionArmSafetySql"/> to generate stitched coverage SQL for frozen-legacy + successor
+    /// pairs — see that member's doc for the full rationale (#3653 high-fix, Option 4).</summary>
+    private static string? LegacyOf(string successor)
+    {
+        foreach (var (legacy, s, _) in SupersededHourlyRollups)
+        {
+            if (string.Equals(s, successor, StringComparison.Ordinal))
+            {
+                return legacy;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The interval-honest successor DAILY that covers <paramref name="successorHourly"/> once the
+    /// hourly-tier read routes past its own horizon (#3653, A6/LB's three successor dailies) — the coverage
+    /// relation <see cref="RetentionPolicies"/> arms a successor hourly's own drop_chunks against, in place of
+    /// the LEGACY daily <see cref="SupersededHourlyRollups"/> already froze off the refresh grid. <c>null</c> for
+    /// anything that is not a <c>SuccessorHourly</c> in <see cref="SupersededDailyRollups"/>.</summary>
+    public static string? SuccessorDailyOf(string successorHourly)
+    {
+        foreach (var (_, successorDaily, hourly) in SupersededDailyRollups)
+        {
+            if (string.Equals(hourly, successorHourly, StringComparison.Ordinal))
+            {
+                return successorDaily;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Same as <see cref="SuccessorDailyOf"/>, for a caller (<see cref="RetentionPolicies"/>'s three
+    /// successor-hourly rows) that already knows <paramref name="successorHourly"/> must have one — throws
+    /// rather than silently naming a policy's coverage <c>null</c>.</summary>
+    private static string RequireSuccessorDailyOf(string successorHourly)
+        => SuccessorDailyOf(successorHourly) ?? throw new InvalidOperationException($"{successorHourly} has no successor daily in {nameof(SupersededDailyRollups)}.");
+
+    /// <summary>
+    /// THE SUPPLY RULE (#3653), pure so the tests can walk it, and shared: <c>PgBaselineProvider</c> applies it
+    /// per metric against one server's reach into the baseline supplies, and
+    /// <see cref="RollupCoverage.HourlyRelationFor"/> applies it against a store's materialized floors for the
+    /// hourly rollups. One rule, two callers, because the question is the same — read the successor when the
+    /// legacy relation is absent, or when the successor reaches at least as far back into the window as the
+    /// legacy does. <paramref name="windowStart"/> bounds what "as far back" can mean: history older than the
+    /// window is never read, so a legacy reaching 90 days back buys nothing over a successor reaching 30 when the
+    /// question is a 30-day window.
+    ///
+    /// <para><b>Compared against the legacy's OWN reach, not against the window alone.</b> A relation that
+    /// began three days ago has three days in BOTH supplies; a rule of "successor covers the window" would send
+    /// that read to the legacy, contaminated supply for the rest of the window for no gain. The comparison is
+    /// <c>successorOldest &lt;= GREATEST(legacyOldest, windowStart)</c>: the successor must reach the later of
+    /// the legacy's first bucket and the window's start, which is exactly the first instant the legacy could
+    /// contribute a row the successor cannot.</para>
+    ///
+    /// <para>An EMPTY successor (<c>null</c> oldest — created but not yet refreshed or backfilled) never wins
+    /// while a legacy with rows exists; an empty legacy always loses. Both empty: successor, since there is
+    /// nothing to read either way and the successor is the relation that will fill.</para>
+    /// </summary>
+    public static bool PrefersSuccessor(bool legacyExists, DateTime? legacyOldest, DateTime? successorOldest, DateTime windowStart)
+    {
+        if (!legacyExists || legacyOldest is null)
+        {
+            return true;
+        }
+
+        if (successorOldest is null)
+        {
+            return false;
+        }
+
+        var legacyReach = legacyOldest.Value > windowStart ? legacyOldest.Value : windowStart;
+        return successorOldest.Value <= legacyReach;
+    }
+
+    /// <summary>
+    /// Does <paramref name="successorOldest"/> reach the hourly tier's horizon — <paramref name="utcNow"/> minus
+    /// <see cref="HourlyRetentionSpan"/>? The hand-over milestone for one of <see cref="SupersededHourlyRollups"/>:
+    /// past it, no hourly-tier window the router can route has a start the legacy covers and the successor does
+    /// not, so <see cref="PrefersSuccessor"/> answers the successor for every hourly read. It does NOT release the
+    /// legacy (see the registry's summary for why nothing can, yet); it is what
+    /// <see cref="LogSupersededHourlyRollupCoverageAsync"/> reports. Pure, so the tests walk it across time. An
+    /// empty successor (<c>null</c>) reaches nothing. <c>&lt;=</c> so a bucket exactly on the horizon counts, the
+    /// <see cref="SupersededBaselineRelationDropsAt"/> convention.
+    /// </summary>
+    public static bool SuccessorCoversHourlyTier(DateTime? successorOldest, DateTime utcNow)
+        => successorOldest is DateTime oldest && oldest <= utcNow - HourlyRetentionSpan;
+
+    /// <summary>
+    /// One INFORMATION line per superseded hourly rollup on every start (#3653, Q12): where the successor's
+    /// materialized floor stands against the legacy's and against the hourly tier's horizon, so an operator can
+    /// see the hand-over happening — the successor takes over each read the moment it reaches as far as the
+    /// legacy does for that read's window, and takes over every hourly read once
+    /// <see cref="SuccessorCoversHourlyTier"/> holds (about <see cref="HourlyRetentionSpan"/> after the first
+    /// refresh, or at once after a <c>--backfill-rollups</c> that reached raw's oldest row on a store whose raw
+    /// is deep enough).
+    ///
+    /// <para>An instrument, not a mechanism: it changes nothing. The two <c>min(bucket)</c> reads per pair are the
+    /// same probe <see cref="RollupCoverageProbeSql"/> runs for every reader, once each here. Failure-isolated per
+    /// pair and never fatal — a store without the extension or with an aggregate whose setup failed logs the
+    /// miss at Debug and moves on. Runs AFTER <see cref="EnsureContinuousAggregatesAsync"/> so both relations
+    /// exist on the start that creates the successors. <paramref name="utcNow"/> is the service clock, bound as
+    /// a parameter's stand-in in C# rather than written as <c>now()</c> in store SQL (the
+    /// <see cref="BaselineBackfillProbeSql(string, string)"/> zone reasoning).</para>
+    /// </summary>
+    public static async Task LogSupersededHourlyRollupCoverageAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        foreach (var (legacy, successor, dependentDaily) in SupersededHourlyRollups)
+        {
+            try
+            {
+                DateTime? legacyOldest;
+                using (var probe = new NpgsqlCommand(BaselineCoverageOldestSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    legacyOldest = await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
+                }
+
+                DateTime? successorOldest;
+                using (var probe = new NpgsqlCommand(BaselineCoverageOldestSql(successor), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    successorOldest = await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
+                }
+
+                var horizon = utcNow - HourlyRetentionSpan;
+                logger?.LogInformation(
+                    "Superseded hourly rollup {Legacy} (#3653): its interval-honest successor {Successor} covers from {SuccessorOldest} where the legacy covers from {LegacyOldest}; the hourly tier's horizon is {Horizon}. {Verdict} The legacy stays registered and refreshing: {DependentDaily} is hierarchical from it and is the indefinite tier.",
+                    legacy, successor,
+                    successorOldest is DateTime s ? s.ToString("O", CultureInfo.InvariantCulture) : "nothing yet (WITH NO DATA; the first hourly refresh or --backfill-rollups fills it)",
+                    legacyOldest is DateTime l ? l.ToString("O", CultureInfo.InvariantCulture) : "nothing",
+                    horizon.ToString("O", CultureInfo.InvariantCulture),
+                    SuccessorCoversHourlyTier(successorOldest, utcNow)
+                        ? "The successor covers the whole hourly tier, so every hourly-tier read now takes it."
+                        : "Hourly-tier reads take the successor for windows it reaches as far back into as the legacy does, and the legacy for the rest, until it covers the tier.",
+                    dependentDaily);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogDebug(
+                    "Could not read the superseded hourly rollup {Legacy} / {Successor} coverage this start: {Message}",
+                    legacy, successor, ex.Message);
+            }
+        }
+    }
+
     /// <summary>The seven baseline-tier aggregates in creation order (nine until #2007 retired the unread CPU/IO pair). Named ONCE so the ensure sweep, the
-    /// retention list and the tests read one list rather than three hand-kept copies.</summary>
+    /// retention list and the tests read one list rather than three hand-kept copies.
+    /// <para>The perfmon and wait-stats entries are the INTERVAL-HONEST pair (#3653), which took the positions
+    /// of the legacy pair they supersede rather than joining behind them: <see cref="HourlyRefreshPhaseOrder"/>,
+    /// <see cref="AggregateCompressionTargets"/> and <see cref="RetentionPolicies"/> all derive from this list by
+    /// position and count, so a replacement leaves the phase grid, the compression hours and the policy count
+    /// exactly where they were, where an append would have re-derived all three (the arithmetic is on
+    /// <see cref="SupersededBaselineRelations"/>). The legacy pair is retired by that list's coverage condition.</para></summary>
     public static readonly (string CreateSql, string View)[] BaselineAggregates =
     {
-        (CreatePerfmonBaselineSql,        PerfmonBaselineView),
-        (CreateWaitStatsBaselineSql,      WaitStatsBaselineView),
+        (CreatePerfmonIntervalBaselineSql,   PerfmonIntervalBaselineView),
+        (CreateWaitStatsIntervalBaselineSql, WaitStatsIntervalBaselineView),
         (CreateSessionStatsBaselineSql,   SessionStatsBaselineView),
         (CreateQueryStatsBaselineSql,     QueryStatsBaselineView),
         (CreateBlockedProcessBaselineSql, BlockedProcessBaselineView),
@@ -984,10 +1831,156 @@ $do$";
         (CreateMemoryBaselineSql,         MemoryBaselineView),
     };
 
+    /// <summary>
+    /// The seven DAILY continuous aggregates in CREATION order — every one of them hierarchical, sourced from
+    /// an hourly aggregate rather than from raw, which is why the ensure sweep creates them after
+    /// <see cref="HourlyAggregates"/> and why the order inside this list is load-bearing too: the day-grain
+    /// corrected daily (#1869) is THREE levels deep (L1 → L2 <see cref="QueryStoreStatsIntervalDailyView"/> →
+    /// <see cref="QueryStoreStatsDayGrainDailyView"/>), so L2 must precede its own child. The corrected DAILY
+    /// is L1's SIBLING rather than the corrected hourly's child — an identity-width hierarchical aggregate is a
+    /// leaf (see <see cref="CreateQueryStoreStatsCorrectedDailySql"/>) — so it carries no ordering requirement
+    /// against the corrected hourly and simply follows the whole hourly tier like the others.
+    ///
+    /// <para>Hoisted out of <see cref="EnsureContinuousAggregatesAsync"/> (#3581) for the reason
+    /// <see cref="HourlyAggregates"/> was hoisted at #3012: the aggregate-compression ensure needs the same
+    /// list to know which materializations it owns and which tier's <c>compress_after</c> each one takes, and
+    /// a second hand-kept copy of seven names is a copy that drifts. The ensure sweep, the compression
+    /// registry (<see cref="AggregateCompressionTargets"/>) and the tests now read ONE list.</para>
+    ///
+    /// <para><b>Seven again since #3653's LC, and not by coincidence.</b> A6 LB appended the three
+    /// interval-honest successor dailies, taking this list to ten; LC then moved the three LEGACY dailies —
+    /// <see cref="QueryStatsDailyView"/>, <see cref="ProcedureStatsDailyView"/>, <see cref="QueryStatsDbDailyView"/>
+    /// — into <see cref="FrozenRollupAggregates"/>, the same trade <see cref="HourlyAggregates"/> made for
+    /// their hourly parents: the successors REPLACE the legacy trio's membership here rather than merely
+    /// joining behind it.</para>
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] DailyAggregates =
+    {
+        (CreateQueryStoreStatsDailySql,           QueryStoreStatsDailyView),
+        (CreateQueryStoreStatsCorrectedDailySql,  QueryStoreStatsCorrectedDailyView),
+        /* The DAY-grain corrected daily (#1869), THREE levels deep: L1 (an hourly) -> L2 interval_daily ->
+           daygrain_daily. Both must follow L1 and L2 must precede its own child, which this ordered list
+           gives — the same requirement the daily tier has, one level longer. */
+        (CreateQueryStoreStatsIntervalDailySql,   QueryStoreStatsIntervalDailyView),
+        (CreateQueryStoreStatsDayGrainDailySql,   QueryStoreStatsDayGrainDailyView),
+        /* The interval-honest successor DAILIES (#3653, A6/LC), hierarchical from the interval-honest hourly
+           successors above (which must therefore precede these three) rather than from the legacy trio.
+           SupersededDailyRollups names the legacy each one replaced on this list. Compression-registered like
+           any other member here now that LC has removed the deferral that used to hold them back (see
+           SupersededDailyRollups). */
+        (CreateQueryStatsIntervalDailySql,        QueryStatsIntervalDailyView),
+        (CreateProcedureStatsIntervalDailySql,     ProcedureStatsIntervalDailyView),
+        (CreateQueryStatsDbIntervalDailySql,       QueryStatsDbIntervalDailyView),
+    };
+
+    /// <summary>
+    /// The six rollups #3653's LC freezes — three legacy hourlies and the three legacy dailies hierarchical
+    /// from them — moved OUT of <see cref="HourlyAggregates"/> and <see cref="DailyAggregates"/> (which is why
+    /// both are six and seven, not nine and ten, again) rather than merely excluded from a policy. Those two
+    /// lists are what <see cref="HourlyRefreshPhaseOrder"/> and <see cref="AggregateCompressionTargets"/>
+    /// derive from BY COUNT, so a trio left in either list would still be charged a phase-grid minute or a
+    /// compression-band hour it no longer uses.
+    ///
+    /// <para><b>Still CREATED, following the <see cref="OffGridAggregates"/> pattern that lets the sweep make
+    /// an aggregate outside the phase grid — but with no policy builder at all, which is the one way this list
+    /// differs from that one.</b> <see cref="OffGridAggregates"/> members are off the grid AND still get a
+    /// refresh policy, just not the shared one; these six get NONE, ever. A missing one is still created on a
+    /// fresh store or one upgrading past LC for the first time — the daily CAGGs that read
+    /// <see cref="SupersededHourlyRollups"/>' legacy hourlies need their source to exist — but nothing ever
+    /// calls <c>add_continuous_aggregate_policy</c> on it, so it never materializes a bucket past whatever it
+    /// already held (WITH NO DATA on a store that never had this build, a frozen tail everywhere else). An
+    /// EXISTING store's own pre-LC refresh policy is not merely left un-converged, the way an unregistered
+    /// aggregate's would be: <see cref="EnsureContinuousAggregatesAsync"/> actively detaches it every start
+    /// (<see cref="RemoveFrozenRollupRefreshPolicySql"/>), so <see cref="ConvergeContinuousAggregateRefreshAsync"/>
+    /// — which only ever touches a view still ON <see cref="HourlyRefreshPhaseOrder"/> — never has one to
+    /// re-add, and neither does any other converge: there is no policy builder anywhere in this list for one
+    /// to read.</para>
+    ///
+    /// <para><b>Everything else about these six is unchanged.</b> They stay in <see cref="RollupViews"/> (the
+    /// coverage probe and the stitch both still need their floors) and out of
+    /// <see cref="RollupBackfill.Targets"/> and the materialization-hole repair targets derived from it — there
+    /// is nothing left to backfill or repair once nothing ever advances the watermark those verbs converge
+    /// toward. Their own retention and compression are named where each already lived:
+    /// <see cref="RetentionPolicies"/> for the three still with a drop_chunks policy (the legacy hourlies
+    /// this raw purge moved off of keep their OWN retention unchanged — only <see cref="RawTierCoverage"/>'s
+    /// raw-purge COVERAGE moved to the successors), and the frozen dailies' compression drain rule
+    /// (<see cref="DrainFrozenDailyCompressionPoliciesAsync"/>) for the daily half.</para>
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] FrozenRollupAggregates =
+    {
+        (CreateQueryStatsHourlySql,     QueryStatsHourlyView),
+        (CreateProcedureStatsHourlySql, ProcedureStatsHourlyView),
+        (CreateQueryStatsDbHourlySql,   QueryStatsDbHourlyView),
+        (CreateQueryStatsDailySql,      QueryStatsDailyView),
+        (CreateProcedureStatsDailySql,  ProcedureStatsDailyView),
+        (CreateQueryStatsDbDailySql,    QueryStatsDbDailyView),
+    };
+
+    /// <summary>Is <paramref name="view"/> (bare or <c>collect.</c>-qualified) one of the six frozen legacy
+    /// rollups (<see cref="FrozenRollupAggregates"/>)? Same bare-name resolution as
+    /// <see cref="IsOffGridAggregate"/>.</summary>
+    public static bool IsFrozenRollupAggregate(string? view)
+    {
+        if (string.IsNullOrEmpty(view))
+        {
+            return false;
+        }
+
+        var dot = view.LastIndexOf('.');
+        var bare = dot >= 0 ? view[(dot + 1)..] : view;
+        return FrozenRollupAggregates.Any(a => string.Equals(a.View, bare, StringComparison.Ordinal));
+    }
+
+    /// <summary>Detaches an EXISTING refresh policy from a frozen legacy rollup, if the store still carries one
+    /// from before #3653's LC — <c>if_exists</c>, so a store that has never had one, or has already lost it,
+    /// changes nothing. Issued once per <see cref="FrozenRollupAggregates"/> member, every start, by
+    /// <see cref="EnsureContinuousAggregatesAsync"/> — the one place any continuous aggregate's refresh policy
+    /// is REMOVED in this file rather than added or converged.</summary>
+    public static string RemoveFrozenRollupRefreshPolicySql(string view)
+        => $"SELECT remove_continuous_aggregate_policy('collect.{view}', if_exists => true)";
+
+    /// <summary>The query_stats hourly rollup as #1849-era stores built it — SUPERSEDED for the hourly-tier READ by
+    /// <see cref="QueryStatsIntervalHourlyView"/> (#3653, Q12), and still REGISTERED: see
+    /// <see cref="SupersededHourlyRollups"/> for why this trio stays on the ensure sweep and the phase grid where
+    /// #3698's baseline pair left both.</summary>
     public const string QueryStatsHourlyView = "query_stats_hourly";
 
-    /// <summary><see cref="QueryStatsHourlyView"/>'s procedure_stats sibling.</summary>
+    /// <summary><see cref="QueryStatsHourlyView"/>'s procedure_stats sibling — superseded for the read by
+    /// <see cref="ProcedureStatsIntervalHourlyView"/>, registered for the daily tier that hangs off it.</summary>
     public const string ProcedureStatsHourlyView = "procedure_stats_hourly";
+
+    /// <summary>
+    /// The INTERVAL-HONEST hourly rollups over the two SQL Server delta families (#3653, Q12 — item 16's rule-5
+    /// roster): the successors of <see cref="QueryStatsHourlyView"/>, <see cref="ProcedureStatsHourlyView"/> and
+    /// <see cref="QueryStatsDbHourlyView"/>, each with the collector's own knowability verdict
+    /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>) baked into its <c>WHERE</c> and the measured interval
+    /// carried as a per-bucket SUM. "interval" names that column, exactly as it does on
+    /// <see cref="PerfmonIntervalBaselineView"/> — and, as there, has nothing to do with the Query Store
+    /// <c>runtime_stats_interval</c> that <see cref="QueryStoreStatsIntervalHourlyView"/> is named for; the two
+    /// families share a word and nothing else.
+    /// </summary>
+    public const string QueryStatsIntervalHourlyView = "query_stats_interval_hourly";
+
+    /// <summary><see cref="QueryStatsIntervalHourlyView"/>'s procedure_stats sibling.</summary>
+    public const string ProcedureStatsIntervalHourlyView = "procedure_stats_interval_hourly";
+
+    /// <summary><see cref="QueryStatsIntervalHourlyView"/>'s database-grain sibling — the successor of
+    /// <see cref="QueryStatsDbHourlyView"/>, carrying the same I/O sums FinOps reads.</summary>
+    public const string QueryStatsDbIntervalHourlyView = "query_stats_db_interval_hourly";
+
+    /// <summary>The INTERVAL-HONEST successor DAILY of <see cref="QueryStatsDailyView"/> (#3653, A6) —
+    /// hierarchical from <see cref="QueryStatsIntervalHourlyView"/>, not from the legacy hourly its sibling
+    /// reads. Named distinctly from <see cref="QueryStoreStatsIntervalDailyView"/> ("query_store_..." vs
+    /// "query_stats_...") — the two differ only in the "store_" segment, so tests must not confuse them.</summary>
+    public const string QueryStatsIntervalDailyView = "query_stats_interval_daily";
+
+    /// <summary><see cref="QueryStatsIntervalDailyView"/>'s procedure_stats sibling — the successor DAILY of
+    /// <see cref="ProcedureStatsDailyView"/>.</summary>
+    public const string ProcedureStatsIntervalDailyView = "procedure_stats_interval_daily";
+
+    /// <summary><see cref="QueryStatsIntervalDailyView"/>'s database-grain sibling — the successor DAILY of
+    /// <see cref="QueryStatsDbDailyView"/>.</summary>
+    public const string QueryStatsDbIntervalDailyView = "query_stats_db_interval_daily";
 
     /// <summary>The query_store_stats hourly continuous aggregate. Built now, ahead of any writable-Query-Store
     /// primary — on a read-only replica QS surfaces nothing new to harvest, so this sits empty until one is added,
@@ -1000,7 +1993,9 @@ $do$";
     /// "coarsened but never fully lost" tier for anything past the hourly CAGG's own horizon.</summary>
     public const string QueryStatsDailyView = "query_stats_daily";
 
-    /// <summary>The per-database query_stats rollup carrying the I/O sums FinOps needs (#1661).</summary>
+    /// <summary>The per-database query_stats rollup carrying the I/O sums FinOps needs (#1661). Superseded for the
+    /// hourly-tier read by <see cref="QueryStatsDbIntervalHourlyView"/> (#3653), registered for
+    /// <see cref="QueryStatsDbDailyView"/>, which is hierarchical from it.</summary>
     public const string QueryStatsDbHourlyView = "query_stats_db_hourly";
 
     /// <summary>The daily sibling of <see cref="QueryStatsDbHourlyView"/> — kept indefinitely.</summary>
@@ -1110,10 +2105,71 @@ FROM collect.query_stats
 GROUP BY server_id, server_name, database_name, query_hash, sql_handle, bucket
 WITH NO DATA";
 
+    /// <summary>
+    /// The INTERVAL-HONEST query_stats hourly rollup (#3653, Q12): <see cref="CreateQueryStatsHourlySql"/>'s
+    /// successor, IDENTICAL in dimensions and in every column it shares, plus the two things the legacy text
+    /// could not be altered to carry.
+    ///
+    /// <para><b>The <c>WHERE</c> is the collector's own verdict, baked in.</b> <c>CollectorDeltaCalculator</c>
+    /// stores <c>sample_interval_seconds = 0</c> on exactly the rows whose delta was NOT knowable — a first
+    /// sighting, a counter reset (a restart, a plan-cache eviction) or a gap past the policy — and writes the
+    /// deltas as 0 beside it. Those zeros cost the legacy <c>sum()</c>s nothing, but <c>count(*) AS sample_count</c>
+    /// counted each as a sample and <c>min(delta_*)</c> read it as a real minimum, so every restart hour on the
+    /// legacy rollup reports one more sample than it measured and a floor of zero it never saw. Here the row
+    /// produces nothing. Pre-column rows (NULL interval — written before the store carried the column) pass,
+    /// which is the three-state rule the baseline successors stated at #3698: 0 unknowable, NULL never recorded,
+    /// n measured.</para>
+    ///
+    /// <para><b>The interval is carried as a SUM.</b> <c>sum(sample_interval_seconds) AS sample_interval_seconds_sum</c>
+    /// is the measured seconds this bucket's samples actually span for this group, which is what a per-second
+    /// reader divides by (rule 6 of the measurement contract: per-second names are quotients over the MEASURED
+    /// interval, never over the bucket's nominal width) and what a hierarchical daily can <c>sum()</c> again
+    /// without losing the unit. A <c>max()</c>, the baseline successors' idiom, is right where one row per
+    /// collection is grouped; this rollup groups a whole hour of collections, so the per-collection interval
+    /// has to be added up rather than picked. NULL intervals add nothing to it, so on a bucket of pre-column
+    /// rows the sum is NULL and a reader dividing by it gets NULL rather than a rate over an invented width.</para>
+    ///
+    /// <para><b>Why a NEW aggregate rather than an edit, and why the legacy stays registered.</b> A continuous
+    /// aggregate's query cannot be altered in place, and a DROP + recreate forfeits the 90-day hourly tier AND
+    /// cascades <see cref="QueryStatsDailyView"/>, the indefinite tier hierarchical from it. So this is #3698's
+    /// shape: a successor under a new name, <c>WITH NO DATA</c>, backfilled by <c>--backfill-rollups</c>, read in
+    /// preference by every hourly-tier reader once it reaches as far as the legacy does for the window asked
+    /// (<see cref="PrefersSuccessor"/>). What differs from #3698 is the legacy's fate — see
+    /// <see cref="SupersededHourlyRollups"/>. Same <c>materialized_only</c> discipline as the legacy (see its
+    /// #1759 remarks): the coverage probes read <c>min(bucket)</c> as the materialized floor, and a real-time
+    /// union would report raw's oldest row as this rollup's.</para>
+    /// </summary>
+    public const string CreateQueryStatsIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_interval_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    sql_handle,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count
+FROM collect.query_stats
+WHERE sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, bucket
+WITH NO DATA";
+
     /// <summary>The procedure_stats hourly continuous aggregate — <see cref="CreateQueryStatsHourlySql"/>'s
     /// sibling, grouped by <c>schema_name</c> + <c>object_name</c> (procedure_stats' composer dimensions; a panel
     /// grouping by schema_name alone re-aggregates over its objects). Same aggregation shape, same WITH NO DATA +
-    /// IF NOT EXISTS discipline.</summary>
+    /// IF NOT EXISTS discipline. Superseded for the hourly-tier read by
+    /// <see cref="CreateProcedureStatsIntervalHourlySql"/> (#3653); registered because
+    /// <see cref="ProcedureStatsDailyView"/> is hierarchical from it.</summary>
     public const string CreateProcedureStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_hourly
 WITH (timescaledb.continuous) AS
 SELECT
@@ -1137,6 +2193,36 @@ FROM collect.procedure_stats
 GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
 WITH NO DATA";
 
+    /// <summary>The INTERVAL-HONEST procedure_stats hourly rollup (#3653, Q12) —
+    /// <see cref="CreateQueryStatsIntervalHourlySql"/>'s sibling over <c>procedure_stats</c>, which has carried
+    /// <c>sample_interval_seconds</c> since V128; the WHERE, the carried interval sum and the reasons are that
+    /// constant's. Grouped as <see cref="CreateProcedureStatsHourlySql"/> is, so a reader swaps the relation
+    /// name and nothing else.</summary>
+    public const string CreateProcedureStatsIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_interval_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    schema_name,
+    object_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count
+FROM collect.procedure_stats
+WHERE sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
+WITH NO DATA";
+
     /// <summary>
     /// The query_store_stats hourly continuous aggregate, grouped by the COMPOSER's Query Store dimensions
     /// (server / database_name / module_name / query_hash) so a composed QS panel can route here — NOT Query
@@ -1148,7 +2234,7 @@ WITH NO DATA";
     /// WITH NO DATA + IF NOT EXISTS, one statement.
     /// </summary>
     public const string CreateQueryStoreStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_hourly
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -1165,6 +2251,21 @@ SELECT
 FROM collect.query_store_stats
 GROUP BY server_id, server_name, database_name, module_name, query_hash, bucket
 WITH NO DATA";
+
+    /// <summary>
+    /// The two group indexes #4503 KEEPS on <see cref="CreateQueryStoreStatsHourlySql"/>'s materialization
+    /// now that <c>create_group_indexes = false</c> stops TimescaleDB building all five automatically:
+    /// <c>(server_id, bucket)</c> (every reader filters server + a time range) and <c>(server_name, bucket)</c>
+    /// (measured 131 lifetime scans on the production catalog this rung read from — the only non-server_id
+    /// group index either hourly view showed any read against). Built by <see cref="KeptIndexesSql"/> so a
+    /// fresh migrate lands the EXACT shape TimescaleDB's own <c>create_group_indexes</c> would have given an
+    /// upgraded store's survivors: same key order, <c>bucket DESC</c> (not the ASC a hand-typed name would
+    /// carry), and PostgreSQL's own default name for that index, not a hand-built one — see
+    /// <see cref="KeptIndexesSql"/>'s remarks for why an unnamed <c>CREATE INDEX</c> on the view is what makes
+    /// the two identical.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsHourlyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsHourlyView, "server_id", "server_name");
 
     /// <summary>
     /// The per-DATABASE query_stats rollup (#1661). Added rather than folded into
@@ -1198,6 +2299,35 @@ WHERE delta_worker_time IS NOT NULL
 GROUP BY server_id, server_name, database_name, bucket
 WITH NO DATA";
 
+    /// <summary>The INTERVAL-HONEST per-database query_stats rollup (#3653, Q12) —
+    /// <see cref="CreateQueryStatsDbHourlySql"/>'s successor. Keeps that text's <c>delta_worker_time IS NOT NULL</c>
+    /// (the pre-delta row has no work to sum) and adds the interval verdict beside it; the two predicates answer
+    /// different questions — "was a delta written" and "was the delta knowable" — and a restart row passes the
+    /// first (its deltas are written as 0) while failing the second. The only contamination the legacy carried
+    /// here was <c>count(*) AS sample_count</c> (it has no <c>min()</c>), which the WHERE now settles; the
+    /// interval sum rides along for the same per-second and hierarchical reasons
+    /// <see cref="CreateQueryStatsIntervalHourlySql"/> states.</summary>
+    public const string CreateQueryStatsDbIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_interval_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    sum(delta_logical_reads) AS logical_reads_sum,
+    sum(delta_physical_reads) AS physical_reads_sum,
+    sum(delta_logical_writes) AS logical_writes_sum,
+    sum(delta_execution_count) AS execution_count_sum,
+    max(last_execution_time) AS last_execution_time_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count
+FROM collect.query_stats
+WHERE delta_worker_time IS NOT NULL
+AND   sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, server_name, database_name, bucket
+WITH NO DATA";
+
     /// <summary>The DAILY sibling of <see cref="CreateQueryStatsDbHourlySql"/> — hierarchical (sourced from the
     /// hourly one, not raw), kept indefinitely like the other daily rollups.</summary>
     public const string CreateQueryStatsDbDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_daily
@@ -1215,6 +2345,104 @@ SELECT
     max(last_execution_time_max) AS last_execution_time_max,
     sum(sample_count) AS sample_count
 FROM collect.query_stats_db_hourly
+GROUP BY server_id, server_name, database_name, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /* ═══════════ the INTERVAL-HONEST successor DAILIES (#3653, A6) ═══════════
+
+       Hierarchical from the interval-honest hourly successors (#3653, Q12), NOT from the legacy trio their
+       daily siblings above read — that is the whole point: a daily sourced from the legacy would inherit its
+       restart-row contamination at the day grain exactly as the legacy dailies already do, and this trio
+       exists so the daily tier eventually stops inheriting it. Each carries its legacy sibling's columns
+       (SUM/MIN/MAX re-aggregate correctly across the coarser bucket, same as every other hierarchical daily
+       here) plus sum(sample_interval_seconds_sum), the successor hourly's own interval sum re-summed — a
+       hierarchical SUM of a SUM composes exactly, the same reasoning CreateQueryStatsIntervalHourlySql gives
+       for summing the per-collection interval into the hourly bucket.
+
+       WITH NO DATA: these start empty and are filled by --backfill-rollups (see
+       docs/runbooks/a6-successor-daily-backfill.md) or by their own refresh policy reaching forward from
+       creation. Compression-registered like any other member of DailyAggregates since #3653 A6 lane LC's
+       freeze retired the legacy trio's own daily-band membership and freed the three slots these take in
+       AggregateCompressionTargets (see that list's own note). Registered in DailyAggregates, RollupViews and
+       the availability probe so the ensure sweep creates them, the backfill verb and coverage probe see them,
+       and SupersededDailyRollups records which legacy daily each replaced. */
+
+    /// <summary>The INTERVAL-HONEST successor of <see cref="CreateQueryStatsDailySql"/> (#3653, A6) —
+    /// hierarchical from <see cref="CreateQueryStatsIntervalHourlySql"/>, not from the legacy
+    /// <see cref="QueryStatsHourlyView"/> its sibling reads. Same dims and re-aggregated columns as the
+    /// legacy daily, plus <c>sum(sample_interval_seconds_sum)</c> carried forward from the successor hourly.
+    /// <c>WITH NO DATA</c>; compression-registered like any other <see cref="DailyAggregates"/> member since
+    /// #3653 A6 lane LC's freeze (<see cref="AggregateCompressionTargets"/>).</summary>
+    public const string CreateQueryStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_interval_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    sql_handle,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    min(worker_time_min) AS worker_time_min,
+    max(worker_time_max) AS worker_time_max,
+    sum(elapsed_time_sum) AS elapsed_time_sum,
+    min(elapsed_time_min) AS elapsed_time_min,
+    max(elapsed_time_max) AS elapsed_time_max,
+    sum(execution_count_sum) AS execution_count_sum,
+    min(execution_count_min) AS execution_count_min,
+    max(execution_count_max) AS execution_count_max,
+    sum(sample_interval_seconds_sum) AS sample_interval_seconds_sum,
+    sum(sample_count) AS sample_count
+FROM collect.query_stats_interval_hourly
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>The INTERVAL-HONEST successor of <see cref="CreateProcedureStatsDailySql"/> (#3653, A6) —
+    /// <see cref="CreateQueryStatsIntervalDailySql"/>'s procedure_stats sibling, hierarchical from
+    /// <see cref="CreateProcedureStatsIntervalHourlySql"/>.</summary>
+    public const string CreateProcedureStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_interval_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    schema_name,
+    object_name,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    min(worker_time_min) AS worker_time_min,
+    max(worker_time_max) AS worker_time_max,
+    sum(elapsed_time_sum) AS elapsed_time_sum,
+    min(elapsed_time_min) AS elapsed_time_min,
+    max(elapsed_time_max) AS elapsed_time_max,
+    sum(execution_count_sum) AS execution_count_sum,
+    min(execution_count_min) AS execution_count_min,
+    max(execution_count_max) AS execution_count_max,
+    sum(sample_interval_seconds_sum) AS sample_interval_seconds_sum,
+    sum(sample_count) AS sample_count
+FROM collect.procedure_stats_interval_hourly
+GROUP BY server_id, server_name, database_name, schema_name, object_name, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>The INTERVAL-HONEST successor of <see cref="CreateQueryStatsDbDailySql"/> (#3653, A6) —
+    /// <see cref="CreateQueryStatsIntervalDailySql"/>'s database-grain sibling, hierarchical from
+    /// <see cref="CreateQueryStatsDbIntervalHourlySql"/>, carrying the same I/O sums FinOps reads.</summary>
+    public const string CreateQueryStatsDbIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_interval_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    sum(logical_reads_sum) AS logical_reads_sum,
+    sum(physical_reads_sum) AS physical_reads_sum,
+    sum(logical_writes_sum) AS logical_writes_sum,
+    sum(execution_count_sum) AS execution_count_sum,
+    max(last_execution_time_max) AS last_execution_time_max,
+    sum(sample_interval_seconds_sum) AS sample_interval_seconds_sum,
+    sum(sample_count) AS sample_count
+FROM collect.query_stats_db_interval_hourly
 GROUP BY server_id, server_name, database_name, time_bucket('1 day', bucket)
 WITH NO DATA";
 
@@ -1282,7 +2510,7 @@ WITH NO DATA";
     /// duration_us_weighted_sum / execution_count_sum across days) and MAX the peaks. Same column NAMES as the
     /// hourly, so <c>ComposeCaggValueMapper</c> reads both with no change. Explicit-<c>time_bucket</c> GROUP BY.</summary>
     public const string CreateQueryStoreStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daily
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -1299,6 +2527,15 @@ SELECT
 FROM collect.query_store_stats_hourly
 GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
 WITH NO DATA";
+
+    /// <summary>
+    /// The one group index #4503 KEEPS on <see cref="CreateQueryStoreStatsDailySql"/>'s materialization:
+    /// <c>(server_id, bucket)</c>. Unlike the hourly pair, the production catalog showed no read against
+    /// <c>server_name</c> on the daily tier, so only the universal server dimension survives here. Built by
+    /// <see cref="KeptIndexesSql"/>, same reason as the hourly pair above.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsDailyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsDailyView, "server_id");
 
     /* ═══════════ the CORRECTED Query Store rollups (#1849) ═══════════
 
@@ -1372,9 +2609,32 @@ WITH NO DATA";
     /// (<see cref="IntervalRetentionInterval"/>): nothing reads it, so it only has to outlive raw for the
     /// arming gate and outlive its consumers' refresh windows (<see cref="HourlyRefreshStartOffset"/> for
     /// the corrected hourly, <see cref="DailyRefreshStartOffset"/> for the corrected daily).</para>
+    ///
+    /// <para><b><c>create_group_indexes = false</c> (#3597) — no per-column index on the materialization,
+    /// because nothing reads one and every refresh paid for eleven.</b> TimescaleDB's default builds one btree
+    /// per GROUP BY column, <c>(column, bucket DESC)</c>, on a continuous aggregate's materialization hypertable;
+    /// here that was eleven of them beside the bucket index — twelve indexes on the one materialization in this
+    /// file whose row count is near-raw. Nothing reads this relation by any of those columns: its three
+    /// consumers (<see cref="CreateQueryStoreStatsCorrectedHourlySql"/>,
+    /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/>, <see cref="CreateQueryStoreStatsIntervalDailySql"/>)
+    /// refresh over it by <c>bucket</c> range, the coverage probe and the arming gate read <c>min(bucket)</c>,
+    /// and retention drops whole chunks. What the eleven indexes DID do was tax the refresh: the hourly policy
+    /// re-materializes a bucket by DELETE + INSERT, and every inserted row cost twelve index inserts. Measured
+    /// on a rig at one tenth of the largest production store's scale (PostgreSQL 18.4 / TimescaleDB 2.28.1, the
+    /// production pair), <c>EXPLAIN (ANALYZE, BUFFERS, WAL)</c> of one bucket's materialization INSERT
+    /// (36,121 rows from 216,721 raw): with the group indexes 45.5 MB of WAL over 483,689 records,
+    /// 1.64 M buffer touches, 6,040 buffers dirtied; with only the bucket index 10.7 MB over 72,735 records,
+    /// 447 K buffer touches, 56 dirtied — the indexes were 4.3x the WAL and 1.19 M of the buffer touches per
+    /// bucket. On the rig those touches are memory hits and the wall clock barely moves; on a store whose
+    /// materialization is 71.5 GiB they are the leaf pages of eleven cold indexes, which is the I/O the issue's
+    /// alert-read victims were starved by. <see cref="EnsureIntervalDedupMaterializationIndexesAsync"/> brings
+    /// an existing store to the same shape — this option only speaks at CREATE. Scoped to THIS aggregate on
+    /// purpose: the composer-grain rollups are read by <c>server_id</c> and <c>query_hash</c> through exactly
+    /// these indexes, and <see cref="CreateQueryStoreStatsIntervalDailySql"/> refreshes once a day and was not
+    /// measured — the option is earned by a measurement, not applied for symmetry.</para>
     /// </summary>
     public const string CreateQueryStoreStatsIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_hourly
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -1419,7 +2679,7 @@ WITH NO DATA";
     /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/> reads L1 rather than this view.</para>
     /// </summary>
     public const string CreateQueryStoreStatsCorrectedHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_corrected_hourly
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -1438,6 +2698,23 @@ GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bu
 WITH NO DATA";
 
     /// <summary>
+    /// The two group indexes #4503 KEEPS on <see cref="CreateQueryStoreStatsCorrectedHourlySql"/>'s
+    /// materialization: <c>(server_id, bucket)</c> for every reader's server + time-range filter, and
+    /// <c>(server_name, bucket)</c> for a scoped composer read — not the same measured-131-scan reason as
+    /// the legacy hourly view above; this materialization's own <c>server_name</c> index showed 0 lifetime
+    /// scans in the production catalog read, and is kept for the composer's scoped-panel reads instead.
+    /// <c>database_name</c>'s group index is DROPPED even though
+    /// <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> can filter on it (<c>rollupFilter</c>): that
+    /// same read also filters <c>server_id = $1</c> plus the bucket range, so it is served by the
+    /// <c>(server_id, bucket)</c> index kept here (a composed panel filtering on <c>database_name</c> gets
+    /// the same rows via that index, just without a secondary key on the dropped column) — and the
+    /// production catalog showed ZERO lifetime scans of the real <c>database_name</c> index on this view's
+    /// chunks. See the PR body's reader table.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsCorrectedHourlyView, "server_id", "server_name");
+
+    /// <summary>
     /// The corrected composer-grain DAILY rollup (#1849) — the same columns as
     /// <see cref="CreateQueryStoreStatsCorrectedHourlySql"/> at a 1-day bucket, sourced from L1 DIRECTLY.
     ///
@@ -1450,7 +2727,7 @@ WITH NO DATA";
     /// <para>Kept indefinitely (no retention policy), like the other daily rollups.</para>
     /// </summary>
     public const string CreateQueryStoreStatsCorrectedDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_corrected_daily
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -1467,6 +2744,14 @@ SELECT
 FROM collect.query_store_stats_interval_hourly
 GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
 WITH NO DATA";
+
+    /// <summary>
+    /// The one group index #4503 KEEPS on <see cref="CreateQueryStoreStatsCorrectedDailySql"/>'s
+    /// materialization: <c>(server_id, bucket)</c>. No <c>server_name</c> pair here — the daily tier showed
+    /// no reads against it on the production catalog, unlike the two hourly views.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsCorrectedDailyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsCorrectedDailyView, "server_id");
 
     /// <summary>
     /// L2 of the corrected Query Store rollups (#1869): L1 re-deduped at the DAY grain — one row per interval
@@ -1500,7 +2785,7 @@ WITH NO DATA";
     /// (<see cref="IntervalDailyRetentionInterval"/>).</para>
     /// </summary>
     public const string CreateQueryStoreStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_daily
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -1528,6 +2813,17 @@ GROUP BY server_id, server_name, database_name, module_name, query_hash, query_i
 WITH NO DATA";
 
     /// <summary>
+    /// The one group index #4503 KEEPS on <see cref="CreateQueryStoreStatsIntervalDailySql"/>'s
+    /// materialization: <c>(server_id, bucket)</c>. Every OTHER group index this view's default would have
+    /// built is dropped — this is L2, "not a read target" by its own doc comment above, and the production
+    /// catalog showed zero reads on every one of its eleven group indexes including this one, but
+    /// <c>server_id</c> is kept anyway for the same universal-dimension reason every other view here keeps
+    /// it, not because a specific reader was found.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsIntervalDailyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsIntervalDailyView, "server_id");
+
+    /// <summary>
     /// The composer-grain DAILY rollup computed from the DAY-grain dedup (#1869) —
     /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/>'s column set to the byte, sourced from L2 instead
     /// of L1 so an hour-straddling interval is counted ONCE.
@@ -1545,7 +2841,7 @@ WITH NO DATA";
     /// worth its cost: the daily tier is the one whose numbers persist and get compared year over year.</para>
     /// </summary>
     public const string CreateQueryStoreStatsDayGrainDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daygrain_daily
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -1562,6 +2858,13 @@ SELECT
 FROM collect.query_store_stats_interval_daily
 GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
 WITH NO DATA";
+
+    /// <summary>
+    /// The one group index #4503 KEEPS on <see cref="CreateQueryStoreStatsDayGrainDailySql"/>'s
+    /// materialization: <c>(server_id, bucket)</c>, same reasoning as the other daily rollups above.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsDayGrainDailyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsDayGrainDailyView, "server_id");
 
     /// <summary>
     /// The HOURLY refresh window: each hourly continuous aggregate re-materializes <c>[now - 1 day,
@@ -1638,6 +2941,39 @@ WITH NO DATA";
 
     /// <summary>The daily refresh cadence, and also the daily <c>end_offset</c>.</summary>
     public const string DailyRefreshScheduleInterval = "1 day";
+
+    /// <summary>
+    /// ONE BUCKET PER TRANSACTION for the daily refreshes (#3745) — the structural half of an incident the
+    /// WAL knob only bounded.
+    ///
+    /// <para><b>What went wrong, and why the window was not the thing to change.</b> A daily policy's window is
+    /// <see cref="DailyRefreshStartOffset"/> wide, so one run re-materializes THREE daily buckets — and by
+    /// default TimescaleDB does that in ONE transaction. On the largest store in the measured population a
+    /// single such run wrote 8.3 million rows, overran the 1 GB <c>max_wal_size</c> into a forced second
+    /// checkpoint, and reads stalled for four minutes behind it. Nothing about the WINDOW was wrong: the 3-day
+    /// reach is what <see cref="HourlyRetentionInterval"/> leans on (a drop must never outrun the aggregate
+    /// meant to preserve that history), and the cadence was never near the runtime. What was wrong was that
+    /// three buckets' worth of writes had to commit or roll back together, so the WAL burst — and with it the
+    /// checkpoint pressure and the fsync tail every other backend queues behind — was sized by the WINDOW
+    /// rather than by a bucket.</para>
+    ///
+    /// <para><b>Why this is the fix and not the 16 GB knob.</b> Raising <c>max_wal_size</c> stopped that class
+    /// of storm and stays: it is the right size for this workload. But it moves the cliff rather than removing
+    /// it — the burst still scales with the window and with row volume, so the next store that grows three
+    /// times finds the same edge one knob further out. Slicing removes the scaling: TimescaleDB's own
+    /// documentation states that with <c>buckets_per_batch</c> set "each batch is an individual transaction",
+    /// so a 3-day window becomes three commits whose peak WAL is one bucket's worth no matter how large the
+    /// store gets. Measured on a 2.28.1 rig, the sliced policy logs one
+    /// <c>continuous aggregate refresh … (batch N of M)</c> line per bucket, which is the observable proof the
+    /// setting took.</para>
+    ///
+    /// <para><b>Daily only, and the reason is arithmetic rather than caution.</b> An hourly policy's window is
+    /// <see cref="HourlyRefreshStartOffset"/> against an hourly bucket, and since #3012 that window IS the
+    /// tier's own cadence — it already refreshes a single bucket per run, so batching it would add a config key
+    /// that changes nothing. TimescaleDB's default is 10 buckets per batch, which for a 3-bucket window is one
+    /// batch: the default is exactly the behaviour that produced the incident.</para>
+    /// </summary>
+    public const int DailyRefreshBucketsPerBatch = 1;
 
     /// <summary>
     /// The width of the hourly refresh grid in minutes, taken from
@@ -2429,9 +3765,18 @@ WITH NO DATA";
     /// is not a fleet reading. <b>#3175/#3177 has since given the GUC its own marker, so existing stores
     /// heal; that does not widen this population, because the read predates the heal.</b> A later census
     /// could be broader, and would have to say so rather than inherit this one's scope. No SHIPPED read
-    /// touches <c>job_history</c> (every product surface uses <c>job_stats</c>,
-    /// deliberately — see <see cref="CompressionActivitySql"/>), so the gap is in what an investigation can
-    /// ask, not in what the product reports. Read at <c>2026-09-08 01:37Z</c>, so the
+    /// takes a DURATION from <c>job_history</c> (every product duration surface uses <c>job_stats</c>,
+    /// deliberately — see <see cref="CompressionActivitySql"/>); the one shipped read that touches the view
+    /// at all is <c>StoreSelfMetrics.JobHistoryEvidenceSql</c> (#3574; the MCP reader's
+    /// <c>DarlingStoreMetricsReader.JobHistoryEvidenceSql</c> is an alias of that string), a bounded row
+    /// COUNT that proves the instrument is writing and evaluates the view's ownership filter for its own
+    /// connection. It has two callers since #3582: the MCP reader runs it as the connection asking, and the
+    /// hourly self-metrics sweep runs it as the job OWNER's role and persists the count as an
+    /// <c>object_kind = 'job_history'</c> row — because <c>job_history</c> shows rows only to members of the
+    /// job's owner or the database owner, a census like this one must be read as such a role, and a zero read
+    /// as any other role is the filter and not the table. So the gap is in what an investigation can ask, not
+    /// in what the product reports.
+    /// Read at <c>2026-09-08 01:37Z</c>, so the
     /// window is one that has ENDED and stays true rather than a scope read against a clock a doc comment
     /// does not have. Each side of the boundary, since a bound is only as good as what it excludes: <b>304
     /// runs</b> at or before it, median <b>1081.7 s</b>, maximum <b>13300.7 s</b>; <b>57 runs</b> after it,
@@ -2572,7 +3917,8 @@ WITH NO DATA";
     /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
     /// invalidates it is that runtime approaching <see cref="RefreshPhaseSlotSeconds"/>.</b> At 896 s
     /// against a 1260-second slot the margin is 364 seconds — the clearance the population above carries, a
-    /// property of that closed record rather than of current load; the heaviest
+    /// property of that closed record rather than of current load (it was 184 s against #3653's 1,080 s slot;
+    /// the A6 freeze re-derived the window back to 21 minutes); the heaviest
     /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
     /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
     /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
@@ -2583,7 +3929,8 @@ WITH NO DATA";
     /// <c>timescaledb_information.job_history</c> at one row per run — this job's maximum was
     /// <b>896.1 s</b>. That leaves <b>363.9 s</b> of the slot, <b>28.8%</b> of it, and sits <b>153.9 s</b>
     /// BELOW <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
-    /// <see cref="RefreshSlotHeadroom.InsideSlot"/>. #3119 had to state these figures apart from the
+    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by 153.9 s, at the A6 freeze's re-derived 1,260 s window
+    /// (183.9 s, 17.0% and 3.9 s against #3653's 1,080 s). #3119 had to state these figures apart from the
     /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it. They agree to
     /// the second — and that agreement is a COINCIDENCE ABOUT WHERE ONE RUN LANDED rather than an identity
     /// of populations (#3182). This day's runs are a SUBSET of the population above, not the whole of it:
@@ -2612,8 +3959,26 @@ WITH NO DATA";
     /// <see cref="RefreshSlotPercentOfHourlyCadence"/> off the default V57 has already applied, so no step
     /// change was available at all. #3174 re-derived the grid's SHAPE instead
     /// (<see cref="LightRefreshStepMinutes"/>): the window the hour can spare is
-    /// <see cref="HeaviestRefreshWindowMinutes"/>, which puts the watch line at 1,050 s and this constant
+    /// <see cref="HeaviestRefreshWindowMinutes"/>, which put the watch line at 1,050 s and this constant
     /// 154 s below it.</para>
+    ///
+    /// <para><b>AND THE WINDOW MOVED AGAIN at #3653 (Q12), by the same method, to the 18 minutes that
+    /// arithmetic named as the floor.</b> Three interval-honest hourly successors joined
+    /// <see cref="HourlyAggregates"/> beside the legacy trio they supersede (the legacy cannot leave the grid:
+    /// <see cref="SupersededHourlyRollups"/>), so the light band grew from twelve members to fifteen, the
+    /// heaviest refresh starts at :18, and its window is 60 - 18 - 24 = 18 minutes — 1,080 s, whose
+    /// five-sixths line is 900 s. This constant sits <b>4 s</b> under that line: the ordering the pins hold
+    /// (<c>ceiling &lt; RefreshSlotWarningSeconds &lt; RefreshPhaseSlotSeconds</c>) still holds, and it holds
+    /// by the least any integer window can give. Two consequences are on the record rather than left to be
+    /// found. First, the 900 s line coincides EXACTLY with #2136's cadence knob (25% of 3,600 s), so a run at
+    /// or past it raises both signals on the same reading (TimescaleSupportTests pins the coincidence).
+    /// Second, a run this job has ALREADY made — the 952 s clean run of <c>2026-09-08 17:00Z</c> that
+    /// RefreshCeilingStalenessTests quotes as the falsification of this constant — sits ABOVE the new line,
+    /// so a recurrence classifies <see cref="RefreshSlotHeadroom.ApproachingSlot"/> where #3174's grid
+    /// classified it routine; it stays 128 s inside the 1,080 s wall. A fourth light member, or this constant
+    /// re-derived one run higher, turns the pin red, and the repair at that point is the one every paragraph
+    /// above names: fewer compression minutes, a cheaper refresh, a longer cadence for this one aggregate, or
+    /// a daily tier of its own for the legacy trio so they can leave the grid — never a hand-tuned band.</para>
     /// </summary>
     public const int HeaviestHourlyRefreshObservedCeilingSeconds = 896;
 
@@ -2662,7 +4027,8 @@ WITH NO DATA";
 
     /// <summary>
     /// The line at which the heaviest hourly refresh's LIVE runtime is worth a warning — five sixths of
-    /// <see cref="RefreshPhaseSlotSeconds"/>, so 1,050 s against today's 1,260 s window.
+    /// <see cref="RefreshPhaseSlotSeconds"/>, so 900 s against today's 1,080 s window (1,050 s against
+    /// #3174's 1,260 s, before #3653's three hourly successors re-derived it).
     ///
     /// <para><b>Why this exists at all, which is the whole of #3044.</b> The assertion on
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> bounds a CONSTANT, and the thing it bounds is
@@ -2683,15 +4049,18 @@ WITH NO DATA";
     /// its slot and the grid's stated precondition is still TRUE.</para>
     ///
     /// <para><b>The alternative, and the reason it is rejected — which #3174 had to RE-TAKE rather than
-    /// restate, because the old reason stopped being true.</b> The alternative that tempts here is the slot
-    /// less one <see cref="CompressionPhaseGuardMinutes"/> band, 1020 s, and it now sits ABOVE
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>. It used to sit below it — that was the
-    /// whole of its rejection, since a line under the recorded ceiling warns on the very run the compression
-    /// grid is sized against — and the re-derivation took that argument away by shrinking the guard band from
-    /// half a uniform slot to the light refreshes' own ceiling. Both lines now clear the ceiling and they are
-    /// 30 s apart, so the ordering no longer discriminates and lead time argues mildly FOR the lower one.
-    /// What rejects it instead is COUPLING, a property the old geometry could not have exposed: the guard band
-    /// is a DECLARED width for the TWELVE OTHER refresh policies, so the alternative would make the
+    /// restate, because the old reason stopped being true — and which #3653 re-took once more, because it
+    /// came back.</b> The alternative that tempts here is the slot less one
+    /// <see cref="CompressionPhaseGuardMinutes"/> band, 1020 s, and it sits ABOVE
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #3653's A6 freeze's 21-minute window, as it
+    /// did NOT under #3653's 18-minute window (840 s) and did at #3174's 21-minute window (1,020 s). Above the ceiling was
+    /// whole of its original rejection, since a line under the recorded ceiling warns on the very run the
+    /// compression grid is sized against; #3174's re-derivation took that argument away by shrinking the
+    /// guard band from half a uniform slot to the light refreshes' own ceiling, leaving both lines clear of
+    /// the ceiling and 30 s apart, so the ordering no longer discriminated and lead time argued mildly FOR
+    /// the lower one. What rejected it then, and still rejects it whichever way the ordering falls, is
+    /// COUPLING, a property the old geometry could not have exposed: the guard band
+    /// is a DECLARED width for the FIFTEEN OTHER refresh policies, so the alternative would make the
     /// heaviest refresh's watch line move whenever the light class's width was re-declared. While that width
     /// was <c>ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c> the coupling was worse still — the
     /// line would have moved whenever a light refresh got slower — and #3188's inversion narrows the
@@ -2704,13 +4073,21 @@ WITH NO DATA";
     /// what makes a crossing mean something.</b> The census re-derivation (#3166) put that constant at
     /// <b>896 s</b>, which INVERTED the ordering against the 750 s line a 15-minute slot produced — and
     /// restoring it is one of the two things the re-derived grid is for. Against the window the hour can
-    /// spare, this line is 1,050 s and the ceiling is 154 s below it, so a reading in this band is again past
-    /// the whole of the record the compression grid is sized against: a different signal calling for a
-    /// different response, rather than a restatement of the grid's own sizing. <b>The relationship is what
-    /// is pinned, not the two numbers</b> — a ceiling that rose past this line would put the grid's own
-    /// sizing figure inside the warning band, and TimescaleSupportTests says so by going RED rather than
-    /// leaving a reader to notice. That pin has now fired once and been answered by re-deriving the geometry
-    /// instead of by renumbering the band, which is the only answer that changes anything.</para>
+    /// spare, this line is 1,050 s and the ceiling is 154 s below it (#3653's 18-minute window had it at 900 s
+    /// and 4 s; #3653's A6 freeze restored #3174's 21-minute window), so a
+    /// reading in this band is again past the whole of the record the compression grid is sized against: a
+    /// different signal calling for a different response, rather than a restatement of the grid's own
+    /// sizing. <b>The relationship is what is pinned, not the two numbers</b> — a ceiling that rose past
+    /// this line would put the grid's own sizing figure inside the warning band, and TimescaleSupportTests
+    /// says so by going RED rather than leaving a reader to notice. That pin has now fired once and been
+    /// answered by re-deriving the geometry instead of by renumbering the band, which is the only answer
+    /// that changes anything — and at four seconds of margin the next re-derivation has no geometry left to
+    /// give and has to take a member OFF the grid or a minute off the compression band.</para>
+    ///
+    /// <para><b>The alternative's ordering is ABOVE the ceiling at #3653's A6 freeze</b>: 1,260 - 240 = 1,020 s
+    /// sits 124 s above the 896 s constant, so coupling stands as the sole reason for the rejection — the
+    /// ordering argument is gone again, as it was at #3174's 21-minute window. TimescaleSupportTests pins both
+    /// reasons and says which one remains if a narrower window re-takes the ordering.</para>
     /// </summary>
     public static int RefreshSlotWarningSeconds =>
         RefreshPhaseSlotSeconds * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
@@ -2908,7 +4285,7 @@ WITH NO DATA";
         }
 
         logger.LogWarning(
-            "TimescaleDB: {View}'s refresh policy last ran {Seconds:F1}s, which is {Over:F1}s ABOVE {Constant} = {Ceiling:F1}s — a constant recorded as a PREFIX MAXIMUM: the largest run its regime had been recorded to make when it was read, which is no bound on the job, so a later run of the same regime joins that population and can exceed it. This run did, which makes the constant stale rather than wrong (#3188): it has to be RE-DERIVED over a population that includes this run (#3182), which is a different repair from re-deriving the compression phase grid (#3035) and is needed whatever band the slot watch puts this reading in. Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default and a store provisioned before that GUC gained its own conf marker reports nothing there until it heals, so an empty result is that gap and not a quiet hour (#3175/#3177). Reported once per constant and then only for a larger run, because what the re-derivation needs is the LARGEST reading and a repeat of one already reported adds nothing.",
+            "TimescaleDB: {View}'s refresh policy last ran {Seconds:F1}s, which is {Over:F1}s ABOVE {Constant} = {Ceiling:F1}s — a constant recorded as a PREFIX MAXIMUM: the largest run its regime had been recorded to make when it was read, which is no bound on the job, so a later run of the same regime joins that population and can exceed it. This run did, which makes the constant stale rather than wrong (#3188): it has to be RE-DERIVED over a population that includes this run (#3182), which is a different repair from re-deriving the compression phase grid (#3035) and is needed whatever band the slot watch puts this reading in. Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default, and with it off only FAILED runs are written (a failure is logged regardless of the GUC; a success needs it) — so a store provisioned before that GUC gained its own conf marker shows this job's successes there only once it heals, and a result holding no successful runs is that gap and not a quiet hour (#3175/#3177). Reported once per constant and then only for a larger run, because what the re-derivation needs is the LARGEST reading and a repeat of one already reported adds nothing.",
             view, observedSeconds, observedSeconds - recordedCeilingSeconds, constantName,
             recordedCeilingSeconds);
     }
@@ -3453,9 +4830,11 @@ WITH NO DATA";
     /// minutes a uniform refresh step left over, and how thinly 70 hypertables spread across them was a
     /// consequence nobody chose — a test asserted the resulting ceiling was 3 and would have accepted 4 or 5
     /// from a moved step. The thing that has an operational meaning is the spread: every hypertable's newest
-    /// 1-day chunk becomes eligible at the same UTC midnight (see <see cref="CompressionPhaseMinutes"/>), so
-    /// the count sharing a minute is the count of simultaneous chunk rewrites at that boundary. So the spread
-    /// is stated and the width follows from the catalog.</para>
+    /// chunk becomes eligible at a shared UTC boundary (see <see cref="CompressionPhaseMinutes"/>) — midnight
+    /// holds for every rung on the ladder, 1-day, 12h or 6h (#4211), since each divides a day evenly — so the
+    /// count sharing a minute is still the count of simultaneous chunk rewrites at that boundary; a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed only adds boundaries of its own besides it. So the
+    /// spread is stated and the width follows from the catalog.</para>
     ///
     /// <para><b>3 preserves the shipped behaviour rather than proposing new behaviour</b>, which is the
     /// reason to prefer it to any other number here: it is the spread the grid has always produced, so a
@@ -3501,7 +4880,8 @@ WITH NO DATA";
     /// <see cref="CompressionPhaseGuardMinutes"/> band is 4, so applying the ordinary band to this window
     /// would admit 11 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
     /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
-    /// 6 minutes of the window are past the refresh and are left on the table deliberately: recovering them
+    /// 6 minutes of the window are past the refresh and are left on the table deliberately (3 of #3653's
+    /// 1,080 s window; the A6 freeze re-added three): recovering them
     /// means sizing a band for one window against a bound whose population is 57 readings and still moving
     /// (194 s to 896 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen and
     /// not a renumbering. Stated in SECONDS against the window in seconds, because the occupancy is only
@@ -3512,10 +4892,13 @@ WITH NO DATA";
     /// <para><b>Why a spread rather than one shared minute.</b> All the compression policies would happily
     /// share a minute as far as LOCKS go — they compress different hypertables, so they do not contend with
     /// each other at all — but they would then do their real work simultaneously. <see cref="CompressAfterDays"/>
-    /// and <see cref="ChunkIntervalDays"/> are both 1 and TimescaleDB aligns 1-day chunks to the epoch, so
-    /// every hypertable's newest closed chunk becomes eligible at the same UTC midnight. Drifting policies
-    /// discover that eligibility at whatever minute they have drifted to, which spreads the daily rewrite
-    /// across the hour; collapsing them onto one minute would concentrate it into one. That is a burst this
+    /// is 1 day on every table (#4211 ruling decision 1) and TimescaleDB epoch-aligns every rung of the chunk
+    /// ladder — 1-day, 12h or 6h (#4211) — so every hypertable's newest closed chunk becomes eligible at the
+    /// same UTC midnight regardless of which rung it is on; a table <see cref="RawChunkIntervalPlanner"/> has
+    /// narrowed also becomes eligible at its OTHER chunk boundaries through the day, which is more spread to
+    /// account for, not less. Drifting policies discover eligibility at whatever minute they have drifted to,
+    /// which spreads the daily rewrite across the hour; collapsing them onto one minute would concentrate it
+    /// into one. That is a burst this
     /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.
     /// How thin the spread has to be is <see cref="CompressionPhaseMaxPerMinute"/>, and the band's width
     /// follows from it — so the re-derivation moves WHERE compression runs without changing how concentrated
@@ -3528,7 +4911,10 @@ WITH NO DATA";
     /// (<see cref="CompressionMinuteClearanceMinutes"/>): under the previous grid the three hypertables whose
     /// chunk-close runs were measured sat on minutes with 240 s, 180 s and 120 s of clearance against runs of
     /// 360 s, 198 s and 552 s, so every one of them ran past the refresh that followed it. On this grid the
-    /// same three hold minutes with <b>1,200 s</b>, <b>1,140 s</b> and <b>1,080 s</b>. A contiguous refresh
+    /// same three hold minutes with <b>960 s</b>, <b>480 s</b> and <b>1,440 s</b> — stated in the paragraph's
+    /// standing order (<c>query_stats</c>, <c>query_snapshots</c>, <c>query_store_stats</c>) rather than
+    /// descending, because since #3678 the largest run holds the band's widest minute and the three are no
+    /// longer in band order at all. A contiguous refresh
     /// band followed by a contiguous compression band puts most of the compression minutes a long way from
     /// the next refresh, where three chunks of a uniform grid put every compression minute within a guard
     /// band of one — so the re-derivation changed the axis the band actually ran through, as a consequence of
@@ -3593,6 +4979,158 @@ WITH NO DATA";
         HypertableTables.Select(t => t.TargetTable).Append(CollectionLogTable).ToArray();
 
     /// <summary>
+    /// The hypertables whose compression runs are long enough that WHICH minute of the band they hold is an
+    /// operational fact rather than bookkeeping — spread across the band by
+    /// <see cref="s_compressionPhaseSlots"/> instead of taking whatever three minutes their registry
+    /// positions happen to be adjacent to.
+    ///
+    /// <para><b>Measured, on one production store class, 2026-09-21 — the second night of the band at steady
+    /// state.</b> These are the three longest hourly compression runs and the three largest raw hypertables
+    /// this product has: <c>query_store_stats</c> at 552 s, <c>query_stats</c> at 360 s and
+    /// <c>query_snapshots</c> at 198 s (last-run readings, so no maximum question is answered by them —
+    /// #3119's caveat, and these are the same three readings <c>CompressionClearanceWatchTests</c> quotes).
+    /// Registry order put them at catalog indices 28, 29 and 30 — CONSECUTIVE — so an
+    /// <c>index % Count</c> assignment gave them
+    /// three CONSECUTIVE minutes of the band, they overlapped three-wide for about five minutes at the daily
+    /// chunk close, and eleven alert reads were cancelled inside four minutes. Three runs that each fit their
+    /// own clearance still convoy when they start one minute apart: that is the defect, and the minute
+    /// assignment is where it lives.</para>
+    ///
+    /// <para><b>ORDERED LONGEST-RUN FIRST, and the order is load-bearing rather than tidy.</b> Clearance
+    /// falls one minute per minute across the band (<see cref="CompressionMinuteClearanceMinutes"/>), so the
+    /// first entry takes the band's first slot — its widest clearance — and each later one takes the next
+    /// evenly spaced slot down. Longest first is therefore the only order that puts the most runtime where
+    /// the most space is: reversing this list hands <c>query_store_stats</c>' 552 s the band's tightest
+    /// evenly spaced slot, which <c>CompressionClearanceWatchTests</c> classifies
+    /// <see cref="CompressionClearanceBand.RefreshOverrun"/> and reddens, rather than accepting.</para>
+    ///
+    /// <para><b>A table joins this set by MEASUREMENT, recorded here.</b> No predicate over the catalog can
+    /// know which hypertables are big on a given install — row counts, column widths and collector cadence
+    /// all feed it and none is knowable at compile time — so membership is a recorded reading with the
+    /// reading beside it, the way <see cref="HeaviestHourlyRefreshView"/> names its view. A member that
+    /// leaves the catalog is caught by <c>CompressionPhaseAssignmentTests</c> rather than thrown for: a
+    /// static initializer on this type that throws takes every retention horizon and every compression
+    /// statement down with it for the life of the process (<see cref="LightBandHoldsUnboundedRefreshCount(int)"/>
+    /// argues that at length and measured it), so a misspelling degrades to the ordinary fill and goes red in
+    /// CI instead.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> HeaviestCompressionTables = new[]
+    {
+        "query_store_stats",
+        "query_stats",
+        "query_snapshots",
+    };
+
+    /// <summary>
+    /// Which SLOT of <see cref="CompressionPhaseMinutes"/> each hypertable's compression policy starts on,
+    /// computed once. <see cref="TryCompressionPhaseMinutesFor"/> is the only reader.
+    ///
+    /// <para><b>What this replaced, and what it kept.</b> The assignment was
+    /// <c>CompressionPhaseMinutes[index % Count]</c> over <see cref="CompressionPhaseOrder"/> — a pure
+    /// function of a table's REGISTRY POSITION, which is a fact about the order collectors were written in
+    /// and about nothing operational. The BAND is untouched: same start, same width, same minutes, same
+    /// <see cref="CompressionPhaseMaxPerMinute"/> ceiling, so every constant the grid is derived from
+    /// (<see cref="CompressionPhaseBandMinutes"/>, <see cref="HeaviestRefreshWindowMinutes"/>,
+    /// <see cref="AggregateCompressionBandMinute"/>) holds its value. Only WHICH hypertable holds which
+    /// minute moves.</para>
+    ///
+    /// <para><b>The spacing is the band divided by the set.</b> The Nth member of
+    /// <see cref="HeaviestCompressionTables"/> takes slot <c>N * Count / HeaviestCompressionTables.Count</c>
+    /// — for today's 24-minute band and three members, slots 0, 8 and 16: eight minutes apart rather than
+    /// one. Every other hypertable fills the remaining seats in registry order, advancing one slot per table
+    /// and skipping full ones, so the ordinary tables stay spread exactly as the modulus spread them and the
+    /// per-minute ceiling holds by CONSTRUCTION rather than by arithmetic that happens to divide: each slot
+    /// is given <see cref="CompressionPhaseMaxPerMinute"/> seats and a table is never placed in a slot with
+    /// none left.</para>
+    ///
+    /// <para><b>The overflow case degrades rather than throws</b>, for the reason the heaviest set's doc
+    /// gives. A catalog grown past <c>MaxPerMinute * BandMinutes</c> has no seat for its last tables; those
+    /// fall back to the modulus this map replaced, which is #3174's grid — a grid that shipped, not a new
+    /// one — and TimescaleSupportTests holds that overflow red in CI, where widening the band is a decision
+    /// someone makes deliberately out of the heaviest refresh's window.</para>
+    ///
+    /// <para>Declared HERE, after <see cref="CompressionPhaseMinutes"/> and
+    /// <see cref="CompressionPhaseOrder"/>, because a static field initializer runs in declaration order and
+    /// this one reads both.</para>
+    /// </summary>
+    private static readonly Dictionary<string, int> s_compressionPhaseSlots = BuildCompressionPhaseSlots();
+
+    private static Dictionary<string, int> BuildCompressionPhaseSlots()
+    {
+        var slots = CompressionPhaseMinutes.Count;
+        var assigned = new Dictionary<string, int>(CompressionPhaseOrder.Count, StringComparer.Ordinal);
+
+        if (slots <= 0)
+        {
+            return assigned;
+        }
+
+        var seats = new int[slots];
+
+        for (var slot = 0; slot < slots; slot++)
+        {
+            seats[slot] = CompressionPhaseMaxPerMinute;
+        }
+
+        /* The heaviest set first, at its evenly spaced slots, so the ordinary fill below sees their seats
+           already taken. A member that is not on the phase order — a misspelling, or a collector that left
+           the catalog — leaves its slot to the fill and is reported by test rather than thrown for. */
+        for (var index = 0; index < HeaviestCompressionTables.Count; index++)
+        {
+            var table = HeaviestCompressionTables[index];
+            var slot = index * slots / HeaviestCompressionTables.Count;
+
+            if (slot >= slots
+                || seats[slot] <= 0
+                || assigned.ContainsKey(table)
+                || !CompressionPhaseOrder.Contains(table, StringComparer.Ordinal))
+            {
+                continue;
+            }
+
+            assigned[table] = slot;
+            seats[slot]--;
+        }
+
+        var cursor = 0;
+
+        for (var index = 0; index < CompressionPhaseOrder.Count; index++)
+        {
+            var table = CompressionPhaseOrder[index];
+
+            if (assigned.ContainsKey(table))
+            {
+                continue;
+            }
+
+            var placed = false;
+
+            for (var probe = 0; probe < slots; probe++)
+            {
+                var slot = (cursor + probe) % slots;
+
+                if (seats[slot] <= 0)
+                {
+                    continue;
+                }
+
+                assigned[table] = slot;
+                seats[slot]--;
+                cursor = slot + 1;
+                placed = true;
+                break;
+            }
+
+            if (!placed)
+            {
+                assigned[table] = index % slots;
+            }
+        }
+
+        return assigned;
+    }
+
+    /// <summary>
     /// Which minute of the hour <paramref name="table"/>'s compression policy starts on; <c>false</c> when
     /// this product does not own the hypertable, in which case its schedule is none of this code's business
     /// beyond the <see cref="CompressScheduleInterval"/> tick #1778 already converges.
@@ -3613,13 +5151,12 @@ WITH NO DATA";
         var dot = table.LastIndexOf('.');
         var bare = dot >= 0 ? table[(dot + 1)..] : table;
 
-        for (var index = 0; index < CompressionPhaseOrder.Count; index++)
+        /* The slot map, not the registry position: what a table's index used to decide, a measured-weight
+           aware assignment decides now (see s_compressionPhaseSlots). Unknown name is still FOREIGN. */
+        if (s_compressionPhaseSlots.TryGetValue(bare, out var slot) && slot < CompressionPhaseMinutes.Count)
         {
-            if (string.Equals(CompressionPhaseOrder[index], bare, StringComparison.Ordinal))
-            {
-                minutes = CompressionPhaseMinutes[index % CompressionPhaseMinutes.Count];
-                return true;
-            }
+            minutes = CompressionPhaseMinutes[slot];
+            return true;
         }
 
         return false;
@@ -3669,11 +5206,14 @@ WITH NO DATA";
     /// space the something has.</para>
     ///
     /// <para><b>What the shipped grid puts where, so the residual is named rather than left to be found.</b>
-    /// <c>query_store_stats</c> — the largest hypertable this store has — sits at <b>:42</b> with
-    /// <b>1,080 s</b>, and <c>procedure_stats</c> sits at <b>:58</b> with <b>120 s</b>, the tightest placement
-    /// any of the large hypertables has. Both figures follow from the catalog's ORDER, so a collector
-    /// registered ahead of either moves them; they are pinned as derived values rather than stated as facts
-    /// about those two tables, and the prose going stale is what reddens the pin.</para>
+    /// <c>query_store_stats</c> — the largest hypertable this store has — sits at <b>:36</b> with
+    /// <b>1,440 s</b>, and <c>procedure_stats</c> sits at <b>:58</b> with <b>120 s</b>, the tightest placement
+    /// any of the large hypertables has. The first of those follows from
+    /// <see cref="HeaviestCompressionTables"/> (#3678: it is that list's first member, so it takes the band's
+    /// widest minute by MEASUREMENT rather than by where its collector sits in the catalog); the second still
+    /// follows from the catalog's ORDER, so a collector registered ahead of it moves it. Both are pinned as
+    /// derived values rather than stated as facts about those two tables, and the prose going stale is what
+    /// reddens the pin.</para>
     ///
     /// <para><b>The measurement this exists because of, scoped (#3112).</b> In the <c>2026-09-08 00:00Z</c>
     /// hour on ONE store, three compression policies were read at <b>360 s</b> (<c>query_stats</c>),
@@ -3691,8 +5231,11 @@ WITH NO DATA";
     /// <b>240 s</b>, <b>180 s</b> and <b>120 s</b> of clearance, so every one of them ran past the refresh
     /// that followed it. The one whose hypertable that refresh also READ was <c>query_store_stats</c>, and it
     /// is that refresh — not the other two — whose runtime went to 160.4 s and then 226.8 s against a
-    /// 20–58 s steady state. On the grid this file ships the same three hold <c>:40</c>, <c>:41</c> and
-    /// <c>:42</c>, where those readings are <b>30%</b>, <b>17%</b> and <b>51%</b> of their clearance.
+    /// 20–58 s steady state. On the grid this file ships the same three hold <c>:44</c>, <c>:52</c> and
+    /// <c>:36</c>, where those readings are <b>38%</b>, <b>41%</b> and <b>38%</b> of their clearance —
+    /// eight minutes apart rather than consecutive, because #3678's
+    /// <see cref="HeaviestCompressionTables"/> places these three by measured weight and the rest of the
+    /// catalog fills in around them.
     /// <b>Nothing here reduces what midnight carries</b>, and the placement that absorbs it was not chosen
     /// for that: it is a consequence of #3174's re-derivation, which claimed neutrality on CONCENTRATION and
     /// was neutral on it. Clearance is a different axis and it moved.</para>
@@ -3822,7 +5365,8 @@ WITH NO DATA";
             DailyRefreshStartOffset,
             DailyRefreshScheduleInterval,
             DailyRefreshScheduleInterval,
-            phaseMinutes: null);
+            phaseMinutes: null,
+            bucketsPerBatch: DailyRefreshBucketsPerBatch);
 
     /// <summary>The TimescaleDB policy proc behind a continuous-aggregate refresh job — what
     /// <c>timescaledb_information.jobs.proc_name</c> reports, and the leading token of the job label both
@@ -3880,19 +5424,34 @@ WITH NO DATA";
     /// TimescaleDB's handling of a past anchor. It is computed in UTC (<c>now() AT TIME ZONE 'UTC'</c>, then
     /// back to <c>timestamptz</c>) rather than with a bare <c>date_trunc('hour', now())</c>, which truncates
     /// in the SESSION time zone and would land off-grid on any of the half-hour and quarter-hour zones.</para>
+    ///
+    /// <para><b><paramref name="bucketsPerBatch"/> slices the run into one transaction per bucket</b> and is
+    /// named only when a caller passes it — see <see cref="DailyRefreshBucketsPerBatch"/> for the incident that
+    /// made a multi-bucket window's single transaction the thing to break up, and for why the hourly tier has
+    /// nothing to slice.</para>
     /// </summary>
     public static string AddContinuousAggregatePolicySql(
         string view,
         string startOffset,
         string endOffset,
         string scheduleInterval,
-        int? phaseMinutes)
+        int? phaseMinutes,
+        int? bucketsPerBatch = null)
     {
         var initialStart = phaseMinutes is int phase
             ? $", initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '{phase.ToString(CultureInfo.InvariantCulture)} minutes'"
             : string.Empty;
 
-        return $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '{startOffset}', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}', if_not_exists => true{initialStart})";
+        /* Named BEFORE if_not_exists rather than after, so the idempotence flag stays the last argument it has
+           always been and the statement a store without batching emits is byte-identical to the one it emitted
+           before #3745 — an unbatched tier's rendered SQL must not move just because a batched one gained an
+           argument. Omitted entirely when null: add_continuous_aggregate_policy's own default (10) is the
+           behaviour every hourly policy already has, and naming it would only invite a reader to tune it. */
+        var batching = bucketsPerBatch is int buckets
+            ? $", buckets_per_batch => {buckets.ToString(CultureInfo.InvariantCulture)}"
+            : string.Empty;
+
+        return $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '{startOffset}', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}'{batching}, if_not_exists => true{initialStart})";
     }
 
     /// <summary>
@@ -3927,6 +5486,13 @@ WITH NO DATA";
                has no sql_handle column. CASCADE drops query_stats_daily, which the ensure sweep recreates. */
             (View: "query_stats_hourly",
              StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_stats_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_stats_hourly' AND column_name = 'sql_handle'))"),
+            /* collection_health_hourly gained latest_run_note (#4812) → stale iff the view EXISTS but has no
+               latest_run_note column. Nothing is built on it (no daily tier), so the CASCADE drops only the view.
+               The ensure sweep recreates it WITH NO DATA and the eight-day refresh window re-materializes it from
+               raw collection_log, which keeps the notes for its own (longer) retention. Until then the fleet reads
+               answer from raw, exactly; WarmCollectionHealthHourlyAsync closes that window with one refresh. */
+            (View: CollectionHealthHourlyView,
+             StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly' AND column_name = 'latest_run_note'))"),
         };
 
         var dropped = 0;
@@ -4011,27 +5577,36 @@ WITH NO DATA";
            precede the corrected view, which is hierarchical from it. (The corrected DAILY is L1's SIBLING, not
            the hourly's child: an identity-width hierarchical CAGG is a leaf — see
            CreateQueryStoreStatsCorrectedDailySql.) */
+        /* The daily tier comes from DailyAggregates for the same reason (#3581): the aggregate-compression
+           ensure decides each materialization's compress_after by tier, and it must read the same seven
+           names this sweep creates rather than a second copy of them. The list carries its own ordering
+           requirement — L2 before the day-grain daily it feeds — on its declaration. */
+        /* Named so every branch below produces the exact same nominal type: a tuple literal cast per branch
+           left two of the four Concat calls warning CS8620 (nullability mismatch) despite each branch's
+           element being individually nullable-annotated correctly — a Roslyn tuple/LINQ inference rough edge,
+           not a real mismatch. Routing every branch through one local function's declared return type removes
+           the ambiguity instead of suppressing the warning. */
+        static (string CreateSql, string View, Func<string>? Policy) Staged(string createSql, string view, Func<string>? policy)
+            => (createSql, view, policy);
+
         var aggregates = HourlyAggregates
-            .Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true))
-            .Concat(new[]
-        {
-            (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       Hourly: false),
-            (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   Hourly: false),
-            (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  Hourly: false),
-            (CreateSql: CreateQueryStoreStatsCorrectedDailySql, View: QueryStoreStatsCorrectedDailyView, Hourly: false),
-            (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     Hourly: false),
-            /* The DAY-grain corrected daily (#1869), THREE levels deep: L1 (above) -> L2 interval_daily ->
-               daygrain_daily. Both must follow L1 and L2 must precede its own child, which this ordered sweep
-               gives — the same requirement the daily tier has, one level longer. */
-            (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, Hourly: false),
-            (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, Hourly: false),
-        })
+            .Select(a => Staged(a.CreateSql, a.View, () => AddHourlyRefreshPolicySql(a.View)))
+            .Concat(DailyAggregates.Select(a => Staged(a.CreateSql, a.View, () => AddDailyRefreshPolicySql(a.View))))
         /* The seven baseline-tier aggregates (#1757; nine until #2007) ride the HOURLY tier: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
            requirement against the daily tier. Appended from the single BaselineAggregates list so this sweep
            and the retention list cannot drift apart. HourlyRefreshPhaseOrder appends them from the same list,
            so every view here has a slot on the phase grid. */
-        .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true)))
+        .Concat(BaselineAggregates.Select(a => Staged(a.CreateSql, a.View, () => AddHourlyRefreshPolicySql(a.View))))
+        /* #3893: the off-grid aggregates, LAST - raw-sourced, so no ordering requirement - each with its own
+           policy builder rather than a tier flag, because they take neither tier's policy (no grid minute, no
+           daily window). See OffGridAggregates. */
+        .Concat(OffGridAggregates.Select(a => Staged(a.CreateSql, a.View, a.PolicySql)))
+        /* #3653 LC: the six FROZEN legacy rollups, LAST like the off-grid ones — raw- or hourly-sourced, so no
+           ordering requirement against anything above. A NULL policy rather than a builder: the loop below
+           reads that as "create it if missing and detach whatever refresh policy it has", never as "attach
+           one". See FrozenRollupAggregates. */
+        .Concat(FrozenRollupAggregates.Select(a => Staged(a.CreateSql, a.View, null)))
         .ToArray();
 
         /* A store that ran WITHOUT TimescaleDB and has now gained it is carrying the plain fallback views
@@ -4055,7 +5630,7 @@ WITH NO DATA";
         }
 
         var ready = 0;
-        foreach (var (createSql, view, hourly) in aggregates)
+        foreach (var (createSql, view, policyFor) in aggregates)
         {
             try
             {
@@ -4064,13 +5639,44 @@ WITH NO DATA";
                     await create.ExecuteNonQueryAsync(cancellationToken);
                 }
 
-                /* Built HERE, not in the array above, so RefreshPhaseMinutesFor's throw for an hourly view
-                   missing from HourlyRefreshPhaseOrder costs that one aggregate and names it in the warning
-                   below, instead of taking the whole sweep down before the first CREATE runs. */
-                var policySql = hourly ? AddHourlyRefreshPolicySql(view) : AddDailyRefreshPolicySql(view);
-
-                using (var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds })
+                /* #3893: an off-grid aggregate's materialization width is set HERE, after its CREATE and BEFORE
+                   its policy exists, because nothing later would be early enough. #3620's width ensure runs in
+                   the aggregate-compression step, a later convergence stage, and walks the compression targets
+                   only; the policy's first run is the seven-day backfill and creates the materialization's first
+                   chunks at whatever width the hypertable has at that moment. Catalog-gated, so a settled start
+                   calls nothing. See SetOffGridMaterializationChunkIntervalSql. */
+                if (IsOffGridAggregate(view))
                 {
+                    using var width = new NpgsqlCommand(SetOffGridMaterializationChunkIntervalSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await width.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                /* #4503: a fresh migrate gets the SAME kept-index shape an upgraded store reaches through
+                   V152's DO block — the CREATE INDEX statements ride right after this view's own CREATE,
+                   idempotent by a catalog read rather than IF NOT EXISTS (an unnamed CREATE INDEX has no
+                   name to guard with one), so every start after the first is a read with no write. */
+                if (QueryStoreRollupKeptIndexesSql.TryGetValue(view, out var keptIndexesSql))
+                {
+                    using var keptIndexes = new NpgsqlCommand(keptIndexesSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await keptIndexes.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                if (policyFor is null)
+                {
+                    /* #3653 LC: FrozenRollupAggregates carries no policy builder for this view. Detach
+                       whatever refresh policy an existing store still has on it from before the freeze —
+                       if_exists, so a store that never had one, or has already lost it, changes nothing — and
+                       never attach one. */
+                    using var removePolicy = new NpgsqlCommand(RemoveFrozenRollupRefreshPolicySql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await removePolicy.ExecuteNonQueryAsync(cancellationToken);
+                }
+                else
+                {
+                    /* Built HERE, not in the array above, so RefreshPhaseMinutesFor's throw for an hourly view
+                       missing from HourlyRefreshPhaseOrder costs that one aggregate and names it in the warning
+                       below, instead of taking the whole sweep down before the first CREATE runs. */
+                    var policySql = policyFor();
+                    using var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds };
                     await policy.ExecuteNonQueryAsync(cancellationToken);
                 }
 
@@ -4078,9 +5684,23 @@ WITH NO DATA";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger?.LogWarning(
-                    "Continuous aggregate {View} setup failed — composer queries fall back to raw scans: {Message}",
-                    view, ex.Message);
+                /* A frozen rollup (policyFor is null) has no raw-scan fallback to name: on an existing store its
+                   CREATE is a no-op and the throw is the policy detach, so the view keeps serving composer
+                   queries on its pre-freeze refresh schedule until a later start's retry detaches it. The same
+                   catch also sees a failed CREATE (a fresh store) or width step, so the line names both steps
+                   rather than claiming the view exists. */
+                if (IsFrozenRollupAggregate(view))
+                {
+                    logger?.LogWarning(
+                        "Could not create frozen rollup {View} or detach its refresh policy; a later start retries it, and until then it keeps any refresh policy it had: {Message}",
+                        view, ex.Message);
+                }
+                else
+                {
+                    logger?.LogWarning(
+                        "Continuous aggregate {View} setup failed — composer queries fall back to raw scans: {Message}",
+                        view, ex.Message);
+                }
             }
         }
 
@@ -4276,6 +5896,158 @@ WHERE j.job_id = $1::integer";
         return converged;
     }
 
+    /// <summary>
+    /// What every continuous-aggregate refresh policy on this store currently batches at — the read half of
+    /// <see cref="ConvergeContinuousAggregateBatchingAsync"/> (#3745).
+    ///
+    /// <para>Deliberately a SEPARATE statement from <see cref="ContinuousAggregateRefreshStateSql"/> rather
+    /// than a column added to it: that one is the #3012 window-and-phase read, it drives an
+    /// <c>alter_job</c> that MOVES a schedule, and the two converges must be able to disagree about which
+    /// policies they touch — this one reaches only the daily tier, which the other one is explicitly written to
+    /// pass over. The JOIN is the same measured pair of identities for the same reason
+    /// (<c>timescaledb_information.jobs</c> resolves a continuous-aggregate job back to its user view, and the
+    /// materialization-hypertable form reads nothing — matching either cannot double-count, because a user view
+    /// lives in <c>collect</c> and a materialization hypertable in <c>_timescaledb_internal</c>).</para>
+    ///
+    /// <para>The value is read out of the job's own <c>config</c> JSONB, which is where
+    /// <c>add_continuous_aggregate_policy</c> stores it (measured on 2.28.1: <c>"buckets_per_batch": 1</c>).
+    /// A policy created before #3745 has NO such key, so this yields NULL — and NULL is treated as needing
+    /// converge, which is correct: absent means TimescaleDB's default of ten buckets a batch, which for a
+    /// 3-bucket window is the single transaction the incident was.</para>
+    /// </summary>
+    public const string ContinuousAggregateBatchingStateSql = @"
+SELECT
+    j.job_id,
+    ca.view_name,
+    (j.config->>'buckets_per_batch')::int AS buckets_per_batch
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// Sets <c>buckets_per_batch</c> on ONE existing refresh policy and touches nothing else. <c>$1</c> the job
+    /// id (<c>::integer</c> — <c>alter_job</c> takes <c>job_id INTEGER</c> and PostgreSQL does not down-cast
+    /// bigint during function resolution, the #1586 trap), <c>$2</c> the bucket count.
+    ///
+    /// <para><b>The narrowness is the point, and it is what separates this from its #3012 sibling.</b>
+    /// <see cref="SetContinuousAggregateRefreshSql"/> also names <c>fixed_schedule</c> and
+    /// <c>initial_start</c>, because re-phasing a decayed hourly job is half of what it is for. Re-phasing is
+    /// exactly what must NOT happen here: the daily tier keeps TimescaleDB's finish-to-start scheduling on
+    /// purpose (it was never near its own cadence and never appeared in the convoy), and an <c>initial_start</c>
+    /// arriving through a batching converge would silently put seven daily jobs on a fixed schedule as a side
+    /// effect. So only <c>config</c> is named, and only the ONE key inside it is written — <c>jsonb_set</c>
+    /// against the job's own config, so <c>start_offset</c>, <c>end_offset</c> and <c>mat_hypertable_id</c>
+    /// survive verbatim, which is why this is a <c>SELECT … FROM timescaledb_information.jobs</c> rather than a
+    /// bare function call. Verified on a 2.28.1 rig: this form sets the key and leaves <c>initial_start</c>
+    /// unmoved. Every un-named <c>alter_job</c> parameter means "leave unchanged", so this also cannot arm a
+    /// paused job.</para>
+    /// </summary>
+    public const string SetContinuousAggregateBatchingSql = "SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{buckets_per_batch}', to_jsonb($2::int))) FROM timescaledb_information.jobs AS j WHERE j.job_id = $1::integer";
+
+    /// <summary>
+    /// Converges the DAILY refresh policies an already-deployed store carries onto
+    /// <see cref="DailyRefreshBucketsPerBatch"/> (#3745), without moving a single schedule.
+    ///
+    /// <para><b>Why a converge is needed at all, when the create path already passes the argument.</b>
+    /// <c>add_continuous_aggregate_policy(… if_not_exists => true)</c> returns -1 for a policy the store
+    /// ALREADY has whose window matches — it does not reconcile the rest of the config — so the batching
+    /// argument added to the create statement reaches new stores only. Every store that survived the incident
+    /// is by definition an old one: its seven daily policies would keep refreshing three buckets in one
+    /// transaction forever while the source read as if it had been fixed. That is the same gap #3012's window
+    /// converge exists to close, arriving one argument later.</para>
+    ///
+    /// <para><b>DAILY only, by membership in <see cref="DailyAggregates"/> rather than by name.</b> An hourly
+    /// policy refreshes one bucket per run already (#3012 made the window the cadence), so setting the key
+    /// there would write a config value that changes no behaviour and would have to be maintained anyway. The
+    /// membership test is against the registry list the ensure sweep and the compression registry read, so a
+    /// daily view added later is batched without an edit here — the <see cref="DailyAggregates"/> hoist is what
+    /// makes that true.</para>
+    ///
+    /// <para><b>Selects only what differs</b> (NULL — the pre-#3745 shape — counts as different), so a
+    /// converged store issues no <c>alter_job</c> at all and this step is one catalog read per pass. Returns
+    /// how many it set. Failure-isolated PER JOB, the #1775 shape: one <c>alter_job</c> that fails (most often
+    /// a least-privilege bring-your-own store whose login does not own the job) leaves that policy unsliced and
+    /// the rest still converge, and the read itself failing on a plain-PostgreSQL store is a debug line and a
+    /// zero.</para>
+    /// </summary>
+    public static async Task<int> ConvergeContinuousAggregateBatchingAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var daily = new HashSet<string>(DailyAggregates.Select(a => a.View), StringComparer.Ordinal);
+
+        var stale = new List<(int JobId, string View, int? Was)>();
+        var already = 0;
+        try
+        {
+            using var probe = new NpgsqlCommand(ContinuousAggregateBatchingStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(1);
+                if (!daily.Contains(view))
+                {
+                    continue;
+                }
+
+                var buckets = reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2);
+                if (buckets == DailyRefreshBucketsPerBatch)
+                {
+                    already++;
+                    continue;
+                }
+
+                stale.Add((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), view, buckets));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A plain-PostgreSQL store (no such catalog) or a TimescaleDB too old to accept the key. The caller
+               already gates on the extension; nothing to converge either way. */
+            logger?.LogDebug("Continuous-aggregate batching converge: could not read policy jobs: {Message}", ex.Message);
+            return 0;
+        }
+
+        var converged = 0;
+        foreach (var (jobId, view, was) in stale)
+        {
+            try
+            {
+                using var alter = new NpgsqlCommand(SetContinuousAggregateBatchingSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                alter.Parameters.AddWithValue(jobId);
+                alter.Parameters.AddWithValue(DailyRefreshBucketsPerBatch);
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+                converged++;
+
+                logger?.LogDebug(
+                    "TimescaleDB: {View}'s daily refresh policy (job {JobId}) now refreshes {Buckets} bucket(s) per batch (was {Was}) — each batch is its own transaction, so a {Window} window is that many commits instead of one (#3745).",
+                    view, jobId, DailyRefreshBucketsPerBatch, was, DailyRefreshStartOffset);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not set {View}'s daily refresh policy (job {JobId}) to {Buckets} bucket(s) per batch — it keeps re-materializing its whole {Window} window in ONE transaction, which is the WAL burst reads stall behind (often a permission issue: the store login must own the job): {Message}",
+                    view, jobId, DailyRefreshBucketsPerBatch, DailyRefreshStartOffset, ex.Message);
+            }
+        }
+
+        if (converged > 0)
+        {
+            logger?.LogInformation(
+                "Continuous-aggregate batching: {Converged} daily policies set to {Buckets} bucket(s) per batch, {Already} already converged",
+                converged, DailyRefreshBucketsPerBatch, already);
+        }
+
+        return converged;
+    }
+
     /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — comfortably past the hourly CAGG's own
     /// <see cref="HourlyRefreshStartOffset"/> refresh window, so the raw drop never outruns the aggregate that
     /// preserves it. The margin is three days since #3012 narrowed that window; it was one day before, and the
@@ -4454,6 +6226,416 @@ AND   j.hypertable_name = '{relation}'
 AND   (j.config->>'drop_after')::interval IS DISTINCT FROM $1::interval";
 
     /// <summary>
+    /// #4299: the three raw retention jobs (<see cref="RawTierCoverage"/> — <c>query_stats</c>,
+    /// <c>procedure_stats</c>, <c>query_store_stats</c>) are NEVER scheduled by TimescaleDB's own job
+    /// runner. Every evaluation of this statement forces <c>scheduled = false</c> unconditionally (not
+    /// converged, not conditional — the job simply never runs on the scheduler's own clock again) and
+    /// records the coverage gate's verdict in <c>config-&gt;&gt;'darling_armed'</c> instead, so the service
+    /// can decide when to trigger the purge itself via <c>CALL run_job(id)</c> from the hourly Periodic pass
+    /// (never Startup).
+    ///
+    /// <para><b>Why <c>config =&gt; j.config || jsonb_build_object(...)</c> and not <c>config =</c>.</b> The
+    /// job's config already carries <c>drop_after</c> (set by <see cref="AddRetentionPolicySql"/> and moved
+    /// by <see cref="ConvergeRetentionHorizonSql"/>) and may carry other keys a future feature adds. Using
+    /// <c>||</c> merges <c>darling_armed</c> in without touching anything else already there — the same
+    /// discipline <see cref="ConvergeRetentionHorizonSql"/> already follows with <c>jsonb_set</c>. A bare
+    /// <c>config =</c> assignment would replace the whole object and silently drop <c>drop_after</c>.</para>
+    ///
+    /// <para><c>$1</c> is the armed verdict as a boolean (<c>true</c> = the coverage gate says covered,
+    /// <c>false</c> = held). This statement does not itself decide the verdict — the caller measures
+    /// coverage the same way <see cref="ArmRetentionPolicySql"/>'s caller does and passes the result in.</para>
+    /// </summary>
+    public static string ConvergeRawArmedStateSql(string relation)
+        => $@"SELECT alter_job(j.job_id, scheduled => false, config => j.config || jsonb_build_object('darling_armed', $1::boolean))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'
+AND   (j.scheduled OR (j.config->>'darling_armed')::boolean IS DISTINCT FROM $1::boolean)";
+
+    /// <summary>
+    /// #4299: the shared read for a raw job's armed verdict under the never-scheduled design — a
+    /// missing <c>darling_armed</c> key (a store that has not converged yet, or a job TimescaleDB just
+    /// created with none of this project's keys) reads as HELD, never armed. <c>COALESCE</c> over a
+    /// boolean cast is fail-closed by construction: a key that is present but not parseable as boolean
+    /// would raise rather than silently reading armed, and a key that is simply absent reads
+    /// <c>false</c> — the same fail-closed posture <see cref="MeasureRetentionCoverageAsync"/> already
+    /// takes for an indeterminate coverage probe.
+    /// </summary>
+    public const string RawArmedReadExpression = "COALESCE((j.config->>'darling_armed')::boolean, false)";
+
+    /// <summary>
+    /// Reads <paramref name="relation"/>'s raw-job armed verdict through <see cref="RawArmedReadExpression"/>
+    /// — the query the service's Periodic trigger uses to decide whether a run of <c>CALL run_job(id)</c> is
+    /// due. Zero rows when the policy does not exist, same convention as
+    /// <see cref="RetentionPolicyScheduledSql"/>.
+    /// </summary>
+    public static string RawArmedStateSql(string relation)
+        => $@"SELECT {RawArmedReadExpression}
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// #4299/#4391: the trigger's own record of its last decision for <paramref name="relation"/> —
+    /// the key <c>darling_last_purge</c> under the same job <c>config</c> <see cref="ConvergeRawArmedStateSql"/>
+    /// already merges into, so <c>drop_after</c> and <c>darling_armed</c> survive untouched. The record is built
+    /// SERVER-SIDE with <c>jsonb_build_object('at', now(), 'outcome', $1, 'sql_state', $2, 'elapsed_ms', $3)</c> —
+    /// the same four keys the C#-interpolated record used before #4391 (<c>at</c>, <c>outcome</c>, <c>sql_state</c>,
+    /// <c>elapsed_ms</c>) — rather than string-interpolated in the caller
+    /// (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>), so nothing this statement writes ever passes
+    /// through a hand-built JSON string. <c>||</c> merge, same discipline as <see cref="ConvergeRawArmedStateSql"/>
+    /// and <see cref="RawRepairEpochStampSql"/> — an unconditional <c>config =</c> would drop every other key
+    /// already there.
+    /// </summary>
+    public static string SetRawLastPurgeOutcomeSql(string relation)
+        => $@"SELECT alter_job(j.job_id, config => j.config || jsonb_build_object('darling_last_purge', jsonb_build_object('at', now(), 'outcome', $1::text, 'sql_state', $2::text, 'elapsed_ms', $3::bigint)))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// #4299: reads <paramref name="relation"/>'s <c>darling_last_purge</c> record back as raw JSON
+    /// text (never parsed store-side — the caller owns the shape), parallel to <see cref="RawArmedStateSql"/>.
+    /// <c>NULL</c> when the key has never been written (a store that has not run a Periodic pass yet, or one
+    /// on a build before this record existed) — the same "absent reads as unmeasured, not innocent" posture
+    /// <see cref="RawArmedReadExpression"/> takes for the armed key, but this projection returns the raw
+    /// value rather than coalescing it, so the caller can tell "never recorded" apart from any real outcome.
+    /// </summary>
+    public static string ReadRawLastPurgeOutcomeSql(string relation)
+        => $@"SELECT j.config->>'darling_last_purge'
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// #4299: writes <paramref name="relation"/>'s <see cref="SetRawLastPurgeOutcomeSql"/> record. Never
+    /// throws outward — this is a record of what already happened, and a failure to WRITE the record must
+    /// not be confused with a failure of the purge decision itself; the caller logs its own outcome either
+    /// way. <paramref name="outcome"/> is one of <c>not_covered</c>, <c>epoch_stale</c>, <c>hole</c>,
+    /// <c>run_failed</c>, <c>no_chunks</c> or <c>ran</c> — the caller's vocabulary, not validated here.
+    /// </summary>
+    public static async Task RecordRawLastPurgeOutcomeAsync(
+        NpgsqlConnection connection, string relation, string outcome, string? sqlState, long? elapsedMs,
+        ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            await using var write = new NpgsqlCommand(SetRawLastPurgeOutcomeSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+            write.Parameters.AddWithValue(outcome);
+            write.Parameters.AddWithValue((object?)sqlState ?? DBNull.Value);
+            write.Parameters.AddWithValue((object?)elapsedMs ?? DBNull.Value);
+            await write.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Could not record the {Outcome} purge outcome for {Relation}: {Message}", outcome, relation, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #4299/#4391: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record back
+    /// as a <see cref="RawLastPurgeRecord"/>, or <c>null</c> when the key has never been written or does not
+    /// parse. Kept for the existing callers that only need the record; see
+    /// <see cref="ReadRawLastPurgeStateAsync"/> for the tri-state read that tells "never written" apart from
+    /// "could not be read".
+    /// </summary>
+    public static async Task<RawLastPurgeRecord?> ReadRawLastPurgeOutcomeAsync(
+        NpgsqlConnection connection, string relation, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        var (_, record) = await ReadRawLastPurgeStateAsync(connection, relation, logger, cancellationToken);
+        return record;
+    }
+
+    /// <summary>
+    /// #4299/#4391: which of the three states <paramref name="relation"/>'s last-purge record is in.
+    /// <see cref="NeverWritten"/> means no purge-trigger pass has recorded an outcome for it yet (the key is
+    /// missing or blank). <see cref="ReadFailed"/> means a value exists but could not be read — the read
+    /// threw, or the value failed to parse — which is a DIFFERENT state from never having been written: an
+    /// unreadable record must not be reported as "never covered".
+    /// </summary>
+    public enum RawLastPurgeReadState
+    {
+        Present,
+        NeverWritten,
+        ReadFailed,
+    }
+
+    /// <summary>
+    /// #4299/#4391: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record and
+    /// reports which of <see cref="RawLastPurgeReadState"/> applies, alongside the record when it parsed.
+    /// Tolerant of a missing job row or a read failure, same posture as <see cref="ReadJobCadenceReadingsAsync"/>
+    /// — never throws outward.
+    /// </summary>
+    public static async Task<(RawLastPurgeReadState State, RawLastPurgeRecord? Record)> ReadRawLastPurgeStateAsync(
+        NpgsqlConnection connection, string relation, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            await using var read = new NpgsqlCommand(ReadRawLastPurgeOutcomeSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            var value = await read.ExecuteScalarAsync(cancellationToken);
+            if (value is not string json || string.IsNullOrWhiteSpace(json))
+            {
+                return (RawLastPurgeReadState.NeverWritten, null);
+            }
+
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            var root = document.RootElement;
+
+            DateTime? at = root.TryGetProperty("at", out var atElement) && atElement.ValueKind == System.Text.Json.JsonValueKind.String
+                && DateTime.TryParse(atElement.GetString(), CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var parsedAt)
+                ? parsedAt
+                : null;
+
+            string outcome = root.TryGetProperty("outcome", out var outcomeElement) && outcomeElement.ValueKind == System.Text.Json.JsonValueKind.String
+                ? outcomeElement.GetString() ?? ""
+                : "";
+
+            string? sqlState = root.TryGetProperty("sql_state", out var sqlStateElement) && sqlStateElement.ValueKind == System.Text.Json.JsonValueKind.String
+                ? sqlStateElement.GetString()
+                : null;
+
+            long? elapsedMs = root.TryGetProperty("elapsed_ms", out var elapsedElement) && elapsedElement.ValueKind == System.Text.Json.JsonValueKind.Number
+                ? elapsedElement.GetInt64()
+                : null;
+
+            if (at is null || string.IsNullOrEmpty(outcome))
+            {
+                return (RawLastPurgeReadState.ReadFailed, null);
+            }
+
+            return (RawLastPurgeReadState.Present, new RawLastPurgeRecord(at.Value, outcome, sqlState, elapsedMs));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Could not read the last-purge record for {Relation}: {Message}", relation, ex.Message);
+            return (RawLastPurgeReadState.ReadFailed, null);
+        }
+    }
+
+    /// <summary>
+    /// #4299: the current PostgreSQL start time, as the value the repair epoch stamp and its comparison
+    /// both read — epoch MICROSECONDS (<c>floor(extract(epoch from pg_postmaster_start_time()) * 1e6)::bigint</c>),
+    /// not the ISO-text alternative. A bigint compares exactly with no locale or
+    /// timezone formatting step on either side of the round trip, and Postgres's own <c>timestamptz</c> already
+    /// carries microsecond resolution internally, so multiplying by 1e6 and flooring loses nothing the
+    /// to-the-microsecond comparison needs. Read BEFORE the repair starts (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>)
+    /// so the value stamped afterward is the postmaster start the repair actually ran under, not whatever it is
+    /// by the time the repair finishes.
+    /// </summary>
+    public const string PostmasterStartEpochMicrosecondsSql =
+        "SELECT floor(extract(epoch FROM pg_postmaster_start_time()) * 1e6)::bigint";
+
+    /// <summary>
+    /// #4299: stamps <paramref name="relation"/>'s raw retention job with the repair epoch that just
+    /// finished — <c>$1</c> is the <see cref="PostmasterStartEpochMicrosecondsSql"/> value read BEFORE that
+    /// repair started. Reached ONLY from a completion that did not throw and was not cancelled
+    /// (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>): a repair cut short by shutdown or a failure
+    /// isolated per aggregate has not shown the store a clean pass, so it must not make the trigger's epoch
+    /// check pass either. Guarded with <c>IS DISTINCT FROM</c> rather than an
+    /// unconditional write, for the same reason <see cref="ConvergeRawArmedStateSql"/> merges via <c>||</c>
+    /// instead of restating the whole config: a repeat stamp of the SAME value must not write a row every
+    /// pass it is already true, which is what lets a second service's own re-stamp (were one ever added) stay
+    /// a no-op rather than a race. <c>||</c> merge, same discipline as <see cref="ConvergeRawArmedStateSql"/> —
+    /// <c>drop_after</c> and <c>darling_armed</c> already live in the same config object and must survive
+    /// this write untouched.
+    /// </summary>
+    public static string RawRepairEpochStampSql(string relation)
+        => $@"SELECT alter_job(j.job_id, config => j.config || jsonb_build_object('darling_repair_epoch', $1::bigint))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'
+AND   (j.config->>'darling_repair_epoch')::bigint IS DISTINCT FROM $1::bigint";
+
+    /// <summary>
+    /// #4299: the trigger's epoch check — does <paramref name="relation"/>'s raw job carry a
+    /// <c>darling_repair_epoch</c> stamp equal, to the microsecond, to the CURRENT <c>pg_postmaster_start_time()</c>?
+    /// A missing key, a missing job row, or a stamp from an earlier postmaster start all read <c>false</c>
+    /// (fail-closed, the same posture <see cref="RawArmedReadExpression"/> takes for the armed key) —
+    /// only a repair that finished clean UNDER THE CURRENT START answers yes.
+    /// </summary>
+    public static string RawRepairEpochMatchesSql(string relation)
+        => $@"SELECT (j.config->>'darling_repair_epoch')::bigint = ({PostmasterStartEpochMicrosecondsSql})
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'
+AND   j.config->>'darling_repair_epoch' IS NOT NULL";
+
+    /// <summary>
+    /// #4299: <c>lock_timeout</c> for the service's OWN <c>CALL run_job(id)</c> against a raw retention
+    /// job — the trigger that replaces the scheduler's own run, since the three raw jobs
+    /// are never scheduled. Bounded, not generous, ON PURPOSE: <c>run_job</c> executes
+    /// <c>policy_retention</c>, whose <c>drop_chunks</c> takes <c>ACCESS EXCLUSIVE</c> on the hypertable and
+    /// every chunk it touches, so an un-bounded run queued behind a live reader would hold up every LATER
+    /// reader of the table for as long as <see cref="RunRetentionPurgeJobTimeoutSeconds"/> allows — same
+    /// hazard <see cref="PgTableTuning.DropLockTimeoutSeconds"/> (a private constant in that file, same
+    /// number) guards for its own guarded <c>DROP INDEX</c>. Proven live on the rig (#4299): a
+    /// blocked run raises <c>55P03 lock_not_available</c> at this bound, not at
+    /// <see cref="RunRetentionPurgeJobTimeoutSeconds"/> — the next hourly Periodic pass retries it, so a
+    /// timeout here costs one skipped pass, never a stuck one. <c>SET LOCAL</c> so it cannot outlive the
+    /// statement's own transaction either way.
+    /// </summary>
+    private const string RunRetentionPurgeJobLockTimeout = "5s";
+
+    /// <summary>
+    /// <c>CommandTimeout</c> for <see cref="RunRetentionPurgeJobSql"/> itself — the ceiling the CALL's own
+    /// work (not the lock wait, which <see cref="RunRetentionPurgeJobLockTimeout"/> already bounds far
+    /// tighter) is allowed to run once it has the lock. <c>drop_chunks</c> on a bounded number of expired
+    /// chunks is metadata work, not a scan of their contents, so this reuses <see cref="SetupTimeoutSeconds"/>
+    /// rather than inventing a second unmeasured number: the same 300s budget the first TimescaleDB
+    /// conversion and every other setup-shaped statement in this file already carry.
+    /// </summary>
+    private const int RunRetentionPurgeJobTimeoutSeconds = SetupTimeoutSeconds;
+
+    /// <summary>
+    /// #4299: the SET LOCAL statement alone, run as the first statement inside the explicit
+    /// transaction opened by <see cref="RunRetentionPurgeJobAsync"/>, which the following paragraph
+    /// explains applies the SAME <see cref="RunRetentionPurgeJobLockTimeout"/> bound the rig proved (#4299
+    /// #4299) works INSIDE <c>run_job</c>, not just around it: a blocked run raises
+    /// <c>55P03 lock_not_available</c> at this bound, aborting the transaction before <c>COMMIT</c> (same
+    /// shape <see cref="PgTableTuning.GuardedDrop"/> documents for its guarded DROP), so
+    /// <see cref="RunRetentionPurgeJobAsync"/> issues a best-effort <c>ROLLBACK</c> on every caught failure
+    /// — proven on the rig: the connection recovers and the next statement on it succeeds. Split out from the CALL because
+    /// Npgsql's default (extended-protocol, positional-parameter) command mode rejects more than one
+    /// statement in a single <see cref="NpgsqlCommand"/> with <c>42601 "cannot insert multiple commands
+    /// into a prepared statement"</c> — proven on the rig (#4299): the original one-command
+    /// <c>BEGIN; SET LOCAL ...; CALL run_job($1::integer); COMMIT;</c> shape never once executed the CALL;
+    /// <see cref="RunRetentionPurgeJobAsync"/> caught the 42601 every time and returned <c>false</c>, so the
+    /// service-triggered raw purge could never succeed and the existing lock-timeout pin passed on the wrong
+    /// exception. <c>SET LOCAL</c> (not session-level <c>SET</c>) so the timeout cannot outlive this
+    /// method's own <see cref="NpgsqlTransaction"/> even if the CALL throws before COMMIT.
+    /// </summary>
+    private const string RunRetentionPurgeJobSetLocalSql = "SET LOCAL lock_timeout = '" + RunRetentionPurgeJobLockTimeout + "'";
+
+    /// <summary>
+    /// #4299: the CALL alone, as its own <see cref="NpgsqlCommand"/> — see
+    /// <see cref="RunRetentionPurgeJobSetLocalSql"/> for why this had to split out of the original combined
+    /// text. <c>$1</c> is still the job's own <c>job_id</c> (<see cref="RawArmedStateSql"/>'s caller already
+    /// has it from the same catalog read).
+    /// </summary>
+    public const string RunRetentionPurgeJobSql = "CALL run_job($1::integer)";
+
+    /// <summary>
+    /// #4299: why the CALL did not fail — <see cref="RunRetentionPurgeJobAsync"/>'s success
+    /// case — carries no reason, but the FAILURE case needs one so a pin can tell a lock timeout
+    /// (<c>55P03 lock_not_available</c>, the safe, expected, retry-next-pass case this design bounds for)
+    /// apart from anything else going wrong, including a regression back to the 42601 the original shape
+    /// always raised. <paramref name="SqlState"/> is PostgreSQL's own five-character SQLSTATE
+    /// (<see cref="PostgresException.SqlState"/>) when the failure was a <see cref="PostgresException"/>,
+    /// and <c>null</c> for anything else (a cancellation is never reached here; anything else is Npgsql's
+    /// own plumbing, not the server's).
+    /// </summary>
+    public sealed record RetentionPurgeOutcome(bool Ran, string? SqlState);
+
+    /// <summary>
+    /// Runs <see cref="RunRetentionPurgeJobSql"/> for <paramref name="jobId"/> — the service triggering ITS
+    /// OWN raw purge, from the hourly Periodic pass only. A timeout or any other failure
+    /// is logged at Warning and swallowed, never thrown: the caller's contract is "try once, report the
+    /// outcome", and the NEXT hourly pass is the retry — there is no reason to crash a pass over one purge
+    /// that can wait an hour. Returns <see cref="RetentionPurgeOutcome.Ran"/> true only when the CALL
+    /// completed inside both bounds.
+    ///
+    /// <para><b>#4299: an explicit <see cref="NpgsqlTransaction"/>, not the one-command SQL
+    /// text this used to be.</b> Proven on the rig with psql, unblocked, before this change: <c>BEGIN; SET
+    /// LOCAL lock_timeout = '5s'; CALL run_job(&lt;id&gt;); COMMIT;</c> succeeds and drops the target chunk —
+    /// a procedure invoked through <c>CALL</c> whose own internal <c>COMMIT</c> is fine inside an ordinary
+    /// transaction block (a procedure that COMMITs internally only errors with "invalid transaction
+    /// termination" when called INSIDE an already-open multi-statement block started by something other
+    /// than a plain top-level <c>CALL</c> — not this shape). Npgsql's positional-parameter mode just cannot
+    /// send <c>BEGIN; SET LOCAL; CALL; COMMIT;</c> as ONE command (42601, see
+    /// <see cref="RunRetentionPurgeJobSetLocalSql"/>), so this method opens the SAME three statements as an
+    /// <see cref="NpgsqlTransaction"/> instead: <see cref="NpgsqlConnection.BeginTransactionAsync"/>, then
+    /// <see cref="RunRetentionPurgeJobSetLocalSql"/> as its own parameterless command, then
+    /// <see cref="RunRetentionPurgeJobSql"/> with <paramref name="jobId"/> bound, then
+    /// <c>CommitAsync</c>.</para>
+    ///
+    /// <para>Returns a <see cref="RetentionPurgeOutcome"/> rather than a bare bool (#4299) so
+    /// the caller can log WHY a run did not happen — in particular so a pin can assert the lock-timeout case
+    /// really is <c>55P03 lock_not_available</c> and not any other failure, including a regression back to
+    /// the 42601 the original one-command shape always raised.</para>
+    /// </summary>
+    public static async Task<RetentionPurgeOutcome> RunRetentionPurgeJobAsync(
+        NpgsqlConnection connection, long jobId, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        NpgsqlTransaction? transaction = null;
+        try
+        {
+            transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            using (var setLocal = new NpgsqlCommand(RunRetentionPurgeJobSetLocalSql, connection, transaction) { CommandTimeout = RunRetentionPurgeJobTimeoutSeconds })
+            {
+                await setLocal.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            using (var call = new NpgsqlCommand(RunRetentionPurgeJobSql, connection, transaction) { CommandTimeout = RunRetentionPurgeJobTimeoutSeconds })
+            {
+                call.Parameters.AddWithValue(jobId);
+                await call.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return new RetentionPurgeOutcome(Ran: true, SqlState: null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            var sqlState = (ex as PostgresException)?.SqlState;
+
+            logger?.LogWarning(
+                "Raw retention purge job {JobId} did not complete (lock_timeout={LockTimeout}, CommandTimeout={CommandTimeout}s, SqlState={SqlState}) — the next hourly pass retries it: {Message}",
+                jobId, RunRetentionPurgeJobLockTimeout, RunRetentionPurgeJobTimeoutSeconds, sqlState ?? "(none)", ex.Message);
+
+            try
+            {
+                if (transaction is not null)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                }
+                else
+                {
+                    using var rollback = new NpgsqlCommand("ROLLBACK", connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await rollback.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+            catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
+            {
+                /* Best-effort: PgTableTuning.ApplyAsync's ROLLBACK-after-every-failure is the same discipline,
+                   for the same reason — a connection left "in failed transaction" would take the NEXT
+                   statement run on it down too, and this connection is shared across the rest of the sweep. */
+                logger?.LogWarning("ROLLBACK after a failed raw retention purge job {JobId} also failed: {Message}", jobId, rollbackEx.Message);
+            }
+
+            return new RetentionPurgeOutcome(Ran: false, SqlState: sqlState);
+        }
+        finally
+        {
+            if (transaction is not null)
+            {
+                await transaction.DisposeAsync();
+            }
+        }
+    }
+
+    /// <summary>
     /// Re-holds a retention policy that is ALREADY ARMED (#1877). The mirror of
     /// <see cref="ArmRetentionPolicySql"/>, and the statement that closes the arm-only gap: a policy created
     /// paused stays paused by itself, but <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a
@@ -4469,7 +6651,11 @@ AND   (j.config->>'drop_after')::interval IS DISTINCT FROM $1::interval";
     /// The shared body of <see cref="ArmRetentionPolicySql"/> and <see cref="HoldRetentionPolicySql"/>: flip one
     /// relation's retention job. Filtering by proc_name AND the hypertable is what keeps it from arming — or
     /// stopping — some other policy, or every policy, by accident. Idempotent in both directions: setting a job
-    /// to the state it is already in is a no-op, which is what lets the sweep re-assert the verdict every start.
+    /// to the state it is already in is a no-op, which is what lets the sweep re-assert the verdict on every
+    /// evaluation — every start, and since #3812 every hour on the running service. Deliberately NOT made
+    /// conditional on the flag (<c>AND NOT j.scheduled</c>) when #3812 needed to count transitions: the prior
+    /// state is read separately (<see cref="RetentionPolicyScheduledSql"/>) so this stays the one plain state
+    /// set the pins hold it to be.
     /// </summary>
     private static string SetRetentionScheduleSql(string relation, bool scheduled)
         => $@"SELECT alter_job(j.job_id, scheduled => {(scheduled ? "true" : "false")})
@@ -4479,13 +6665,26 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
+    /// The <c>WHERE</c> predicate the interval-honest successor hourlies bake into their CREATE — they exclude
+    /// first-pass rows where the collector had no previous sample to delta against and stored
+    /// <c>sample_interval_seconds = 0</c>. <see cref="RetentionArmSafetySql"/> applies the same predicate to
+    /// the <c>source_oldest</c> subquery for <c>query_stats</c> and <c>procedure_stats</c>, so a 0-interval row
+    /// that pre-dates every materialized bucket cannot hold the purge gate open indefinitely (#3653 high-fix).
+    ///
+    /// <para>A pin test in <c>IntervalHonestHourlyRollupTests</c> asserts this constant appears in each
+    /// successor's CREATE text, so a CREATE change that drops the predicate is caught automatically.</para>
+    /// </summary>
+    public const string IntervalHonestSourceFilter = "sample_interval_seconds IS DISTINCT FROM 0";
+
+    /// <summary>
     /// Is it safe to arm <paramref name="relation"/>'s retention policy — i.e. does EVERY tier below it already
     /// cover everything this relation holds? Emits the source's oldest row followed by one
     /// <c>min(bucket)</c> column per coverage relation, in <paramref name="coverageRelations"/> order.
     ///
     /// <para>This is the check that makes arming provably non-destructive rather than a race the operator has to
-    /// win. It also self-heals: a store that is not yet covered stays paused and arms on the first start AFTER a
-    /// backfill, with no manual step.</para>
+    /// win. It also self-heals: a store that is not yet covered stays paused and arms on the first evaluation
+    /// AFTER a backfill, with no manual step — within the hour on the running service (#3812), not only on the
+    /// next start.</para>
     ///
     /// <para><b>Plural since #1849, and the plurality is the point.</b> <c>query_store_stats</c> now feeds TWO
     /// rollup families — the original inflated pair and the corrected one — and a purge that satisfied only one
@@ -4494,6 +6693,105 @@ AND   j.hypertable_name = '{relation}'";
     /// <c>GREATEST</c> would have expressed it in one column and is exactly wrong here, because it SKIPS NULLs.
     /// An empty new rollup would vanish from the comparison and the gate would pass on the old rollup alone —
     /// which is the whole failure this exists to prevent.</para>
+    ///
+    /// <para><b>Stitched coverage for frozen-legacy + successor pairs (#3653 high-fix, Option 4; seam-checked
+    /// since #4186).</b> When a coverage relation is an interval-honest successor (a member of
+    /// <see cref="SupersededHourlyRollups"/>), the SQL for that coverage slot stitches the legacy's floor with
+    /// the successor's so an upgrading store whose successor is still empty can fall back to the frozen
+    /// legacy's floor rather than reading Short forever.</para>
+    ///
+    /// <para><b>The stitch is NOT gap-free by construction — an earlier version of this comment claimed it
+    /// was, and that was false.</b> A store stopped longer than <see cref="HourlyRefreshStartOffset"/> before
+    /// the successor's first refresh leaves raw rows between the legacy's last bucket and the successor's
+    /// floor that NEITHER side ever materializes (the outage shape <c>MaterializationHoles.cs</c>'s class doc
+    /// works through in full). An unconditional stitch reports that seam Covered right up to the moment the
+    /// raw purge destroys it. So the SQL probes BUCKET-LEVEL, over the legacy's own interior AND the seam
+    /// together (#4301, sharing <see cref="LegacySuccessorHoleExistsSql"/> TEXT-IDENTICAL with the repair
+    /// walk — the gate and the walk must never disagree about what a hole is): from raw's own filtered floor
+    /// (below it raw admits no row, so no hole can exist there — a gap an EARLIER version's purge left below
+    /// that floor is invisible here BY CONSTRUCTION, not merely undetected) up to the successor's first
+    /// bucket strictly ABOVE the legacy's last bucket, minus one bucket width — bounded there and not by the
+    /// successor's <c>min(bucket)</c>, because an INTERIOR repair (the next lane's walk branch) materializes
+    /// successor buckets AT OR BELOW the legacy's last bucket, which moves the successor's own floor down; a
+    /// probe bounded on that floor would then miss the seam once even one such repair had run, while bounding
+    /// on the successor's first bucket above the legacy's last keeps the seam fully probed regardless. Any
+    /// detectable hole in that range — a bucket where raw admits a row and neither the legacy nor the
+    /// successor has materialized it — makes the slot NULL, which <c>MeasureRetentionCoverageAsync</c> reads
+    /// as <c>Short</c>, rather than falling back to the successor's own floor: that floor could itself read
+    /// back as Covered by the same interior-repair shape the bound above exists to catch. No hole found →
+    /// <c>LEAST(legacy.min, successor.min)</c>, the stitched floor, honest because the whole probed range
+    /// really is gap-free. Legacy never materialized (<c>l.mx IS NULL</c>) → today's plain
+    /// <c>LEAST(legacy.min, successor.min)</c>, unchanged, because the comparison it would otherwise run is
+    /// against nothing. The seam and any interior hole are what <see cref="RepairMaterializationHolesAsync"/>
+    /// repairs, by giving a stitched successor a SEAM scan window down to the legacy's last bucket, unclamped
+    /// by the horizon that bounds its ordinary scan window — so an outage longer than that horizon's own span
+    /// (#4186 follow-up: the first cut folded the seam into the same horizon clamp as the ordinary window, and
+    /// a seam older than it was silently never scanned) still gets repaired instead of clamped away —
+    /// PROVIDED the raw purge was already held when the store stopped. That proviso is real, not decoration:
+    /// PostgreSQL runs its own overdue retention jobs at start, before this service's start sweep can hold
+    /// anything, so a purge left armed across a long enough stop drops the chunk holding the seam before the
+    /// walk ever gets a turn (#4299, pre-existing — 3.8.0 loses the same chunk on the same schedule). Once the
+    /// repair does run, every detectable hole is closed and this gate's fallback releases — automatically
+    /// within the hour on a store that keeps running (#3812), and within the hour even across the upgrade
+    /// itself, with no second start needed (#4300): the FIRST start still skips a successor with nothing
+    /// materialized yet (the seam does not exist for the walk to find until the successor's own first refresh
+    /// has run), but the next hourly Periodic pass runs a seam-only repair — the same per-target body, the
+    /// same cap, restricted to legacy-paired targets and their seam window — before it re-judges coverage, so
+    /// a seam that opened across the upgrade closes on the first tick after the successor's own first refresh
+    /// rather than waiting for a restart that a store which seldom stops may not see for a long time. Release
+    /// is bounded only by the repair's own per-pass cap —
+    /// a seam wider than one pass's cap takes more than one pass to close in full, but every pass makes
+    /// progress on it. GAPS LEFT BY EARLIER VERSIONS' PURGES BELOW THE RAW FLOOR CANNOT BE DETECTED OR
+    /// REPAIRED; FROM THIS VERSION THE PURGE HOLDS UNTIL EVERY DETECTABLE HOLE IS REPAIRED.</para>
+    ///
+    /// <para><b>The probe now reaches INSIDE the frozen legacy's own materialized span too (#4301), not only
+    /// the seam above it — accepted below raw's own floor as 3.8.0 parity, not fixed by this round.</b> The
+    /// probe's <c>fromExpr</c> starts at raw's own filtered floor, which sits at or below the legacy's last
+    /// bucket, so a raw-row gap that opened INSIDE the frozen legacy's own materialized span — an outage that
+    /// predates this store's freeze — is now caught the same way a seam gap is: the slot goes NULL (Short)
+    /// rather than the unconditional <c>LEAST(legacy.min, successor.min)</c> the six frozen views used to get
+    /// with no check at all. What stays accepted as 3.8.0 parity is strictly BELOW raw's own current floor:
+    /// a gap 3.8.0's own retention already purged before this store ever took the freeze is invisible to the
+    /// probe by construction (raw admits no row there to prove the hole), and the six frozen views never
+    /// re-enter the walk to close it (<see cref="MaterializationHoleTargets"/> excludes them; see its note).
+    /// This is accepted, not a regression: 3.8.0 has no walk at all, so it loses the exact same rows on the
+    /// exact same schedule — its raw purge drops them once they age past the horizon, upgrade or not. What
+    /// this build adds beyond that parity is the A6 backfill (<c>--backfill-rollups</c>,
+    /// <see cref="RollupBackfill"/>), which — unlike the automatic walk — fills the successor down to RAW's
+    /// own oldest row, not merely the legacy's boundary, so an operator who runs it closes a pre-upgrade hole
+    /// the automatic gate can only detect from raw's current floor, not resurrect from below it.</para>
+    ///
+    /// <para><b>Source filter for 0-interval rows, now PER SLOT (#4300, #4423).</b> Each coverage slot gets its
+    /// own filtered floor, <c>source_oldest_i</c>, built from that slot's OWN CREATE — the same
+    /// <see cref="MaterializationHoleSourceFilterFor"/> lookup the hole probe already uses, over
+    /// <see cref="HourlyAggregates"/>, <see cref="DailyAggregates"/>, <see cref="FrozenRollupAggregates"/> and
+    /// <see cref="BaselineAggregates"/> — rather than one shared <c>source_oldest</c> filtered only for
+    /// <c>query_stats</c>/<c>procedure_stats</c>. A slot whose CreateSql has no <c>WHERE</c> of its own (or is
+    /// not found in any of the four lists) falls back to <see cref="IntervalHonestSourceFilter"/> exactly as
+    /// before. This matters because #4423 gave <c>query_stats</c> a SECOND consumer
+    /// (<c>query_stats_db_interval_hourly</c>) with a DIFFERENT row filter than the query-grain successor's — a
+    /// single shared <c>source_oldest</c> could only apply one filter, so a CPU-unknown row that the db-grain
+    /// rollup's own filter admits but the query-grain rollup's filter rejects (or vice versa) could pin one
+    /// slot's floor to a row the OTHER slot's rollup will never materialize, holding that slot Short forever
+    /// even once its own rollup is fully caught up. The FIRST, unfiltered <c>source_oldest</c> column stays for
+    /// the "nothing in the source" empty-store check, which must see every row regardless of any slot's
+    /// filter.</para>
+    ///
+    /// <para><b>The raw purge never runs by itself (#4299, variant d′).</b> A Covered verdict from this SQL
+    /// no longer arms TimescaleDB's own scheduler for the three raw jobs (<see cref="RawRelations"/>) —
+    /// they stay permanently unscheduled (<see cref="ConvergeRawArmedStateSql"/>) and the verdict is recorded
+    /// in <c>config-&gt;&gt;'darling_armed'</c> instead. The purge only actually runs
+    /// (<see cref="RunRetentionPurgeJobAsync"/>, <c>CALL run_job(id)</c>) when the service itself triggers
+    /// it from the hourly Periodic pass, gated on a FRESH Covered verdict from this probe AND a repair
+    /// (<see cref="RepairMaterializationHolesAsync"/>) already finished under the CURRENT
+    /// <c>pg_postmaster_start_time()</c> — never on the Startup pass, so PostgreSQL's own start-time run of
+    /// an overdue job (the #4299 pre-existing hazard this whole design exists to remove) cannot race the
+    /// repair. Two things bypass the service's own gate on purpose and are named here rather than treated as
+    /// a leak: the FIRST start after the upgrade still runs whichever raw job the OLD scheduled-based code
+    /// already armed, once (3.8.0 parity for that one run only), and a DBA's own
+    /// <c>alter_job</c>/<c>run_job</c> against a raw job's <c>job_id</c> always executes immediately, exactly
+    /// as it does for every other job in the catalog — this gate governs the SERVICE's own trigger, not the
+    /// database's ordinary admin surface.</para>
     /// </summary>
     public static string RetentionArmSafetySql(string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations)
     {
@@ -4502,8 +6800,102 @@ AND   j.hypertable_name = '{relation}'";
             throw new ArgumentNullException(nameof(coverageRelations));
         }
 
-        var columns = coverageRelations.Select((c, i) => $"    (SELECT min(bucket) FROM collect.{c}) AS coverage_oldest_{i}");
-        return $"SELECT{Environment.NewLine}    (SELECT min({sourceTimeColumn}) FROM collect.{relation}) AS source_oldest,{Environment.NewLine}"
+        /* The FIRST column stays one shared, unfiltered source_oldest — the empty-store check
+           (MeasureRetentionCoverageAsync reads column 0 only for that) must see every row regardless of
+           any slot's own filter. */
+        var sourceOldest = $"(SELECT min({sourceTimeColumn}) FROM collect.{relation}) AS source_oldest";
+
+        /* Per-slot source filter (#4300, #4423) applies ONLY to query_stats and procedure_stats — the two
+           relations whose successors bake IntervalHonestSourceFilter (or an equivalent WHERE) into their
+           CREATE. Every other coverage-gated relation (query_store_stats, and every layered CAGG whose own
+           retention is gated on ITS consumer — the query-store corrected interval layer, an hourly tier
+           gated on its daily) keeps NO filter, exactly as before #4300: those relations' consumers read
+           columns (e.g. bucket) that do not exist on the raw source this filter would be applied to, so
+           reusing MaterializationHoleSourceFilterFor's clause there is not merely unnecessary, it is wrong —
+           the coverage SQL would error, which the caller reads as Unknown and logs as a Warning, or filter
+           by a column collect.{relation} does not carry. Within query_stats/procedure_stats the slot's OWN
+           CreateSql is still looked up first (MaterializationHoleSourceFilterFor, the same extraction the
+           hole probe trusts), falling back to IntervalHonestSourceFilter only when that lookup finds nothing
+           or the CreateSql carries no WHERE of its own. This is what lets query_stats's TWO #4423 consumers
+           (the query-grain successor and query_stats_db_interval_hourly) each pin their own floor: a shared
+           filter could only honor one of them, so a CPU-unknown row one filter admits and the other rejects
+           could hold a slot Short against a row its own rollup will never materialize. Both #4423 consumers
+           are themselves sourced FROM collect.{relation} (query_stats), so this filter's columns are always
+           columns relation actually carries. */
+        string SlotSourceFilterFor(string coverageRelation)
+        {
+            if (relation is not ("query_stats" or "procedure_stats"))
+            {
+                return string.Empty;
+            }
+
+            var createSql = HourlyAggregates.Concat(DailyAggregates).Concat(FrozenRollupAggregates).Concat(BaselineAggregates)
+                .FirstOrDefault(a => string.Equals(a.View, coverageRelation, StringComparison.Ordinal)).CreateSql;
+
+            var filter = createSql is null ? string.Empty : MaterializationHoleSourceFilterFor(createSql);
+            return filter.Length == 0 ? IntervalHonestSourceFilter : filter;
+        }
+
+        /* Coverage SQL: for a coverage relation that is an interval-honest successor, stitch it with
+           its frozen legacy so an empty successor on an upgrading store falls back to the legacy's
+           floor — BUT ONLY WHEN THE SEAM (AND THE LEGACY'S OWN INTERIOR) IS GAP-FREE (#4186, #4301).
+           The legacy stopped refreshing at the freeze; if the store was down past HourlyRefreshStartOffset
+           before the successor's first refresh, the raw rows collected between the legacy's last bucket
+           and the successor's floor were never materialized by either side (see MaterializationHoles.cs's
+           class doc for the shape). A stitch that ignores that seam reports Covered over history nobody
+           holds. This is now a BUCKET-LEVEL probe over the legacy's interior AND the seam, sharing its
+           hole definition TEXT-IDENTICAL with the repair walk via LegacySuccessorHoleExistsSql (#4301) —
+           the gate and the walk must never disagree about what a hole is, or a bucket the gate calls Short
+           that the walk never repairs holds the raw purge forever with no self-release. The scanned range
+           runs from raw's own filtered floor (below it raw admits no row, so no hole can exist there — a
+           gap left by an EARLIER version's purge below that floor is invisible here BY CONSTRUCTION, not
+           merely undetected) up to the successor's first bucket strictly ABOVE the legacy's last bucket
+           (or, when the successor holds nothing that high, now() minus HourlyRefreshStartOffset — the successor's
+           own first refresh reaches every bucket newer than that, so a bare empty successor is not a hole)
+           minus one bucket width. That
+           upper bound is deliberately NOT s.mn: an interior repair materializes successor buckets AT OR
+           BELOW l.mx, which moves s.mn itself down, and a probe bounded on s.mn would then miss the seam
+           entirely once even one such repair has run. Bounding instead on the successor's first bucket
+           ABOVE l.mx holds the seam '(l.mx, that bucket)' fully probed no matter how many interior repairs
+           ran; buckets from that point up are the successor's own span, which the walk's ordinary window
+           repairs, so they are left out of this gate exactly as before. WHEN THE PROBE FINDS ANY HOLE the
+           slot is NULL — MeasureRetentionCoverageAsync reads a NULL coverage column as Short — rather than
+           falling back to s.mn: s.mn could read back as Covered by the same interior-repair shape the
+           bound above exists to catch. LEGACY.mx is NULL for a legacy that never materialized anything; the
+           WHEN branch below only applies when l.mx IS NOT NULL, and in that case the stitch behaves exactly
+           as it did before this probe existed (today's plain LEAST). LegacyOf() returns null for any
+           relation that is not in SupersededHourlyRollups (dailies, query_store_stats, baseline aggregates),
+           keeping those as simple min(bucket). PostgreSQL's LEAST ignores NULL arguments (returns NULL only
+           when EVERY argument is NULL), so LEAST(l.mn, s.mn) already is what
+           COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn) computed. */
+        var columns = coverageRelations.Select((c, i) =>
+        {
+            var legacy = LegacyOf(c);
+            var successorFilter = legacy is not null
+                ? MaterializationHoleSourceFilterFor(HourlyAggregates.Single(a => a.View == c).CreateSql)
+                : string.Empty;
+            var successorFloorWhere = successorFilter.Length == 0 ? string.Empty : $" WHERE {successorFilter}";
+            var subquery = legacy is not null
+                ? $"(SELECT CASE{Environment.NewLine}"
+                + $"                WHEN l.mx IS NULL THEN LEAST(l.mn, s.mn){Environment.NewLine}"
+                + $"                WHEN {LegacySuccessorHoleExistsSql(
+                        relation, sourceTimeColumn, successorFilter, legacy, c,
+                        fromExpr: $"time_bucket(INTERVAL '1 hour', (SELECT min(src.{sourceTimeColumn}) FROM collect.{relation} AS src{successorFloorWhere}))",
+                        toExpr: $"COALESCE((SELECT min(sa.bucket) FROM collect.{c} AS sa WHERE sa.bucket > l.mx), time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '{HourlyRefreshStartOffset}')) - INTERVAL '1 hour'",
+                        bucketWidthLiteral: "INTERVAL '1 hour'")}{Environment.NewLine}"
+                + $"                THEN NULL{Environment.NewLine}"
+                + $"                ELSE LEAST(l.mn, s.mn){Environment.NewLine}"
+                + $"           END{Environment.NewLine}"
+                + $"     FROM (SELECT min(bucket) AS mn, max(bucket) AS mx FROM collect.{legacy}) l{Environment.NewLine}"
+                + $"     CROSS JOIN (SELECT min(bucket) AS mn FROM collect.{c}) s)"
+                : $"(SELECT min(bucket) FROM collect.{c})";
+            var slotFilter = SlotSourceFilterFor(c);
+            var slotFilterWhere = slotFilter.Length == 0 ? string.Empty : $" WHERE {slotFilter}";
+            var slotSourceOldest = $"    (SELECT min({sourceTimeColumn}) FROM collect.{relation}{slotFilterWhere}) AS source_oldest_{i}";
+            return $"{slotSourceOldest},{Environment.NewLine}    {subquery} AS coverage_oldest_{i}";
+        });
+
+        return $"SELECT{Environment.NewLine}    {sourceOldest},{Environment.NewLine}"
             + string.Join("," + Environment.NewLine, columns);
     }
 
@@ -4524,10 +6916,30 @@ AND   j.hypertable_name = '{relation}'";
     public static readonly IReadOnlyList<(string Relation, string TimeColumn, IReadOnlyList<string> Coverage)> RawTierCoverage =
         new (string, string, IReadOnlyList<string>)[]
     {
-        ("query_stats", "collection_time", new[] { QueryStatsHourlyView }),
-        ("procedure_stats", "collection_time", new[] { ProcedureStatsHourlyView }),
+        /* LC (#3653): named through RequireSuccessorOf rather than the legacy hourlies directly. A gate still
+           keyed on query_stats_hourly/procedure_stats_hourly would eventually find them EMPTY — their OWN
+           retention policy (RetentionPolicies, unchanged by LC) keeps trimming their chunks at
+           HourlyRetentionInterval while the freeze stops anything from refilling them past that point — and
+           hold the raw purge forever with no self-release. See SupersededHourlyRollups for the full story.
+           query_stats has TWO consumers, same #1849 reason query_store_stats does below: the query-grain
+           successor AND query_stats_db_interval_hourly (CreateQueryStatsDbIntervalHourlySql), the db-grain
+           successor, both read raw collect.query_stats directly, so raw cannot purge over history either is
+           missing. */
+        ("query_stats", "collection_time", new[] { RequireSuccessorOf(QueryStatsHourlyView), RequireSuccessorOf(QueryStatsDbHourlyView) }),
+        ("procedure_stats", "collection_time", new[] { RequireSuccessorOf(ProcedureStatsHourlyView) }),
+        /* query_store_stats is not one of #3653's legacy six (see FrozenRollupAggregates) — both consumers
+           below go on refreshing, so their coverage is still named directly. */
         ("query_store_stats", "collection_time", new[] { QueryStoreStatsHourlyView, QueryStoreStatsIntervalHourlyView }),
     };
+
+    /// <summary>
+    /// #4299: the raw relation names, straight off <see cref="RawTierCoverage"/> — the set the sweep
+    /// checks a policy against to decide whether it is one of the three raw jobs that never run on
+    /// TimescaleDB's own scheduler (<see cref="ConvergeRawArmedStateSql"/>, <see cref="RawArmedReadExpression"/>)
+    /// rather than one of the fourteen others that keep today's <c>scheduled</c> semantics unchanged.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RawRelations =
+        RawTierCoverage.Select(t => t.Relation).ToArray();
 
     /// <summary>
     /// EVERY retention policy this store attaches, each naming the tier(s) that must already cover it before
@@ -4568,6 +6980,24 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStoreStatsDailyView }),
             (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDbDailyView }),
 
+            /* The interval-honest hourly successors (#3653, Q12) took the LEAF RULE (#1757) at Q12: nothing was
+               hierarchical from them yet, so their consumer was the routed READ, which past HourlyMaxAge went to
+               the LEGACY daily — the same relation SupersededHourlyRollups' legacy hourly fed, over the same raw
+               rows. #3653's LB gave each successor its own successor DAILY, hierarchical from it exactly the way
+               the legacy trio's own daily is hierarchical from the legacy hourly (SupersededDailyRollups); LC's
+               freeze retired the leaf shape along with the legacy trio itself. Coverage now names that successor
+               daily — derived through RequireSuccessorDailyOf rather than the legacy daily, because the legacy
+               daily is the one relation LC already froze off the refresh grid
+               (RemoveFrozenRollupRefreshPolicySql): its own coverage floor stopped advancing at the freeze, so
+               gating the successor's drop_chunks on it would never actually ask whether the RIGHT consumer — the
+               successor daily — has materialized the bucket about to be dropped, which is precisely the "never
+               drop what your consumer has not captured yet" failure this whole list exists to prevent (see the
+               summary above). What the gate protects is unchanged: the coarsened history a successor bucket
+               summarizes once it is purged at 90 days. */
+            (Relation: QueryStatsIntervalHourlyView,     DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(QueryStatsIntervalHourlyView) }),
+            (Relation: ProcedureStatsIntervalHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(ProcedureStatsIntervalHourlyView) }),
+            (Relation: QueryStatsDbIntervalHourlyView,   DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(QueryStatsDbIntervalHourlyView) }),
+
             /* The corrected Query Store tier (#1849, extended by #1869).
 
                L1 has THREE consumers. Two because the corrected daily is its SIBLING rather than the corrected
@@ -4592,6 +7022,11 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: QueryStoreStatsIntervalHourlyView,  DropAfter: IntervalRetentionInterval,      TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedHourlyView, QueryStoreStatsCorrectedDailyView, QueryStoreStatsIntervalDailyView }),
             (Relation: QueryStoreStatsCorrectedHourlyView, DropAfter: HourlyRetentionInterval,        TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedDailyView }),
             (Relation: QueryStoreStatsIntervalDailyView,   DropAfter: IntervalDailyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsDayGrainDailyView }),
+
+            /* #3893: the fleet collection-health rollup is a LEAF (#1757's rule): its consumer is the seven-day
+               fleet read, so Coverage names the aggregate itself, the baseline tier's shape. 8 days - the
+               arithmetic is on CollectionHealthRetentionInterval. */
+            (Relation: CollectionHealthHourlyView, DropAfter: CollectionHealthRetentionInterval, TimeColumn: "bucket", Coverage: new[] { CollectionHealthHourlyView }),
         })
         /* The seven baseline-tier policies (#1757; nine until #2007). Coverage is the tier ITSELF: see the leaf rule in the
            summary above -- their consumer is the baseline computation, whose capture requirement is the
@@ -4709,19 +7144,34 @@ AND   j.hypertable_name = '{relation}'";
                 return (RetentionCoverage.Covered, null);
             }
 
-            var sourceOldest = reader.GetDateTime(0);
+            /* Column 0 is the shared, unfiltered source_oldest (the empty-store check above). From column
+               1 the shape is pairs — (source_oldest_i, coverage_oldest_i) — one pair per coverage relation,
+               #4300/#4423's per-slot floor: each slot is judged against its OWN filtered source row, not
+               the one shared column every slot used to share. */
             for (var i = 0; i < coverageRelations.Count; i++)
             {
+                var sourceOldestColumn = 1 + (i * 2);
+                var coverageOldestColumn = sourceOldestColumn + 1;
+
+                /* This slot's own filter admits no source rows — nothing for its rollup to be short
+                   against, so the slot is Covered regardless of what its coverage column holds. */
+                if (await reader.IsDBNullAsync(sourceOldestColumn, cancellationToken))
+                {
+                    continue;
+                }
+
+                var slotSourceOldest = reader.GetDateTime(sourceOldestColumn);
+
                 /* Source has data but THIS coverage tier is empty - arming would drop history it never
                    materialized, whatever the other tiers hold. An empty consumer is a MEASUREMENT and not an
                    unknown: the relation exists and answered with no rows, which is precisely the state a
                    newly-added consumer is born in on an upgrading store (#1877). */
-                if (await reader.IsDBNullAsync(i + 1, cancellationToken))
+                if (await reader.IsDBNullAsync(coverageOldestColumn, cancellationToken))
                 {
                     return (RetentionCoverage.Short, coverageRelations[i]);
                 }
 
-                if (reader.GetDateTime(i + 1) > sourceOldest)
+                if (reader.GetDateTime(coverageOldestColumn) > slotSourceOldest)
                 {
                     return (RetentionCoverage.Short, coverageRelations[i]);
                 }
@@ -4752,7 +7202,10 @@ AND   j.hypertable_name = '{relation}'";
     /// 90d hourly vs the daily refresh's <see cref="DailyRefreshStartOffset"/>), so a drop never removes
     /// history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
     /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
-    /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
+    /// CAGGs the hourly policies target already exist. Returns the sweep's whole tally as a
+    /// <see cref="RetentionPolicySweepSummary"/> (until #3812 it returned one <c>int</c>: the policies IN PLACE,
+    /// which is <see cref="RetentionPolicySweepSummary.InPlace"/> now — the count that proves every policy's SQL
+    /// was valid on this TimescaleDB, and nothing about which of them the gate armed or held).
     ///
     /// COLD START ON AN EXISTING STORE (#1759): a store that already holds raw history older than its hourly
     /// CAGG has materialized does NOT lose it. <see cref="MeasureRetentionCoverageAsync"/> is fail-closed, so
@@ -4760,7 +7213,31 @@ AND   j.hypertable_name = '{relation}'";
     /// short. This used to be documented as a caveat prescribing a manual backfill "BEFORE this policy's
     /// first run" — a step no store ever received, and a defect rather than a caveat. The backfill is now a real
     /// operator verb (<c>--backfill-rollups</c>) with a disk preflight, and once it carries a rollup past the raw
-    /// horizon this gate arms the held policy by itself on the next start, with no manual step.
+    /// horizon this gate arms the held policy by itself on the next evaluation, with no manual step.
+    ///
+    /// <para><b>"The next evaluation" is hourly, not the next restart (#3812).</b> Until #3812 this method had
+    /// exactly one call site, the service start path, so "the gate releases the hold by itself" was true only
+    /// with an unstated clause: once someone restarted the service. A store on a stable build sat held
+    /// indefinitely after a backfill that had worked, with the Retention Held alert still firing — which reads
+    /// like the backfill failed. The running service now calls this on its hourly store-maintenance tick as
+    /// well (<see cref="RetentionSweepPass.Periodic"/>), and every step here was already safe to repeat:
+    /// <c>if_not_exists</c> returns -1 for an existing policy and changes nothing (a NOTICE, not a WARNING,
+    /// when the arguments match — measured on 2.28.1, so the hourly pass writes nothing to the store's server
+    /// log at its default <c>log_min_messages</c>); the horizon converge is named-config-only and a no-op once
+    /// converged; the verdict is a MEASUREMENT with <c>Unknown</c> touching nothing; and arm/hold are direct
+    /// state sets that are idempotent in both directions. Repeat invocation was a tested property before it
+    /// was a scheduled one.</para>
+    ///
+    /// <para><b>The counts are transitions where the operator needs transitions.</b> "Armed" used to count
+    /// every Covered verdict, which on a settled store is every armed policy on every pass — a number that
+    /// cannot distinguish the hour a hold released from the hour before it. It now counts policies that went
+    /// paused → scheduled THIS pass, read off the job's <c>scheduled</c> flag BEFORE the flip
+    /// (<see cref="RetentionPolicyScheduledSql"/>) rather than inferred from the verdict, and a policy already
+    /// in the state the verdict asks for is "unchanged". "Held" stays a STATE count (every policy the gate is
+    /// holding after this pass), because that is the number an operator waiting on a backfill watches go to
+    /// zero; the armed → held transition (#1877's re-hold) is carried separately as
+    /// <see cref="RetentionPolicySweepSummary.ReHeld"/> and gets its own WARNING every time, because coverage
+    /// REGRESSING under an armed policy is an event whatever the pass.</para>
     ///
     /// <para>A COVERAGE LIST THAT GROWS (#1877). Holding is not only for policies this sweep just created.
     /// <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a policy the store already has, so
@@ -4769,8 +7246,93 @@ AND   j.hypertable_name = '{relation}'";
     /// purging its source while the new consumer held nothing, capping how deep that consumer could ever be
     /// backfilled. It is now re-held, but ONLY on a positive measurement: see the three-valued
     /// <c>RetentionCoverage</c>, which is what keeps a probe failure from stopping retention fleet-wide.</para>
+    ///
+    /// <para>This overload is the START-PATH shape (<see cref="RetentionSweepPass.Startup"/>): every caller
+    /// that predates #3812 — the worker's setup block and the live tests — keeps its three arguments and its
+    /// per-start logging. The hourly tick names the pass explicitly through the four-argument overload.</para>
     /// </summary>
-    public static async Task<int> EnsureRetentionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    public static Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        => EnsureRetentionPoliciesAsync(connection, logger, RetentionSweepPass.Startup, cancellationToken);
+
+    /// <summary>
+    /// Which cadence a retention sweep is running on (#3812). The mechanism is identical on both; what differs
+    /// is what the sweep SAYS, because the same per-policy line is evidence once per start and noise once per
+    /// hour.
+    /// </summary>
+    public enum RetentionSweepPass
+    {
+        /// <summary>The service start path — the sweep's only caller until #3812. Keeps everything it logged
+        /// before: one WARNING per held policy naming the short consumer (the line the runbook and the
+        /// Retention Held alert send an operator to), the full horizon summary at Information, and now the
+        /// <c>Retention evaluation at startup:</c> tally line.</summary>
+        Startup,
+
+        /// <summary>The running service's hourly store-maintenance tick. A hold that was already a hold is a
+        /// Debug line here — the startup WARNING already named it, the Retention Held alert already judges its
+        /// cost, and 24 identical warnings a day per held policy would bury both; the full horizon summary
+        /// drops to Debug for the same reason. What stays loud is the TRANSITIONS: a policy armed this pass
+        /// (Information — the event an operator waiting on a backfill is waiting for, which before #3812 was
+        /// the one thing that never got a distinct line) and a policy re-held this pass (WARNING — coverage
+        /// regressed under an armed policy, #1877). And the one line every pass writes whatever it found:
+        /// <c>Retention re-evaluation: N policies held, M armed this pass, K unchanged</c>.</summary>
+        Periodic,
+    }
+
+    /// <summary>
+    /// What one retention sweep did — the tally behind the one unconditional line each pass writes (#3812, in
+    /// the #3756 discipline: a pass whose all-clear is indistinguishable from its non-execution has not
+    /// reported). Every policy in <see cref="RetentionPolicies"/> lands in EXACTLY ONE of
+    /// <see cref="Held"/>, <see cref="Armed"/>, <see cref="Unchanged"/> or <see cref="Failed"/>, so
+    /// <c>Held + Armed + Unchanged + Failed == RetentionPolicies.Count</c> on every pass.
+    ///
+    /// <para><see cref="InPlace"/> is what the method returned as a bare <c>int</c> before #3812: policies
+    /// whose create-or-already-exists step succeeded — <c>Count</c> on a healthy store, and the number the
+    /// live tests compare to prove every policy's SQL is valid on the TimescaleDB under test. It is NOT one of
+    /// the four buckets: a policy that got past its create and then failed in the converge or the gate counts
+    /// in both <see cref="InPlace"/> and <see cref="Failed"/>.</para>
+    ///
+    /// <para><see cref="Held"/> is a STATE: policies the gate is holding after this pass (verdict Short),
+    /// whether they were already paused or were re-held just now. <see cref="Armed"/> is a TRANSITION:
+    /// policies that went paused → scheduled on this pass; a Covered policy that was already armed is
+    /// <see cref="Unchanged"/>. <see cref="ReHeld"/> is the other transition, scheduled → paused (#1877), and
+    /// is a SUBSET of <see cref="Held"/>. <see cref="Unchanged"/> also carries every Unknown verdict — a probe
+    /// that could not conclude left the policy exactly as it was — and <see cref="Indeterminate"/> says how
+    /// many of them there were. <see cref="Converged"/> is horizons moved onto their constant (#1937),
+    /// independent of the four buckets.</para>
+    /// </summary>
+    public sealed record RetentionPolicySweepSummary(
+        int InPlace, int Held, int Armed, int Unchanged, int ReHeld, int Indeterminate, int Converged, int Failed)
+    {
+        /// <summary>The policies the gate reached a verdict on this pass — the three buckets that are not a
+        /// failure. <c>Evaluated + Failed == RetentionPolicies.Count</c>.</summary>
+        public int Evaluated => Held + Armed + Unchanged;
+    }
+
+    /// <summary>
+    /// One retention policy's <c>scheduled</c> flag, read BEFORE the sweep flips it (#3812) — the fact that
+    /// turns "armed" from a verdict count into a transition count. <c>alter_job</c> returns the job's NEW row
+    /// and nothing about its old one, and the arm/hold statements are deliberately unconditional so that they
+    /// stay the idempotent state sets <see cref="SetRetentionScheduleSql"/> describes (and the text
+    /// <c>RetentionHorizonConvergeCannotArmTests</c> pins); a prior read is the way to know whether the flip
+    /// changed anything without changing what the flip is. Same three filters as the flip, so the row it reads
+    /// is the row the flip writes; <c>hypertable_name</c> resolves to the user view for a continuous
+    /// aggregate's policy in this view, exactly as it does for the flip. Zero rows when the policy does not
+    /// exist, which the caller reads as "nothing to transition".
+    /// </summary>
+    public static string RetentionPolicyScheduledSql(string relation)
+        => $@"SELECT j.scheduled
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// The sweep proper — see the three-argument overload for the whole design. <paramref name="pass"/> decides
+    /// what is said, never what is done: both passes run the identical create / converge / measure / flip
+    /// sequence over <see cref="RetentionPolicies"/>, and both return the same tally.
+    /// </summary>
+    public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(
+        NpgsqlConnection connection, ILogger? logger, RetentionSweepPass pass, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
@@ -4780,8 +7342,11 @@ AND   j.hypertable_name = '{relation}'";
         var applied = 0;
         var armed = 0;
         var held = 0;
+        var unchanged = 0;
+        var reHeld = 0;
         var indeterminate = 0;
         var converged = 0;
+        var failed = 0;
 
         foreach (var (relation, dropAfter, timeColumn, coverage) in RetentionPolicies)
         {
@@ -4837,12 +7402,85 @@ AND   j.hypertable_name = '{relation}'";
                     }
                 }
 
+                /* #4299: the three raw relations never use the scheduled-flag verdict — they converge
+                   onto scheduled = false unconditionally, every pass, and carry the armed verdict in
+                   config->>'darling_armed' instead (ConvergeRawArmedStateSql, RawArmedReadExpression). This is
+                   the hourly converge, which runs every pass: it reverts a DBA's alter_job(scheduled => true) within
+                   the hour (and at every start), restoring the armed key to whatever this pass measures. */
+                var isRawRelation = RawRelations.Contains(relation);
+
+                /* #3812: the job's PRIOR armed verdict BEFORE the gate's flip, so the tally below can tell a
+                   transition from a re-assertion. Read here, after the horizon converge (which names only
+                   config and cannot move either flag — RetentionHorizonConvergeCannotArmTests), and BEFORE the
+                   raw/non-raw flip below — this is the freshest the verdict can be before the one statement
+                   that may change it. A raw relation reads its prior state off config->>'darling_armed'
+                   (RawArmedReadExpression); every other relation keeps reading the scheduled flag
+                   (RetentionPolicyScheduledSql). Null when no job row answers, which the flip statements below
+                   would also match nothing on. */
+                bool? wasScheduled;
+                using (var scheduledRead = new NpgsqlCommand(isRawRelation ? RawArmedStateSql(relation) : RetentionPolicyScheduledSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds })
+                {
+                    var flag = await scheduledRead.ExecuteScalarAsync(cancellationToken);
+                    wasScheduled = flag is bool b ? b : null;
+                }
+
+                /* #4299/#4391: for a raw relation wasScheduled above carries darling_armed, NOT the schedule
+                   flag, so it is the wrong signal for detecting a DBA's alter_job(scheduled => true) - that is
+                   a converge event, not a re-hold, and gets its own line here rather than reusing the
+                   armed/re-held lines below, which never fire for a raw relation's schedule flag at all. */
+                bool rawWasScheduled = false;
+                if (isRawRelation)
+                {
+                    using var rawSchedulePriorRead = new NpgsqlCommand(RetentionPolicyScheduledSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+                    var rawSchedulePriorFlag = await rawSchedulePriorRead.ExecuteScalarAsync(cancellationToken);
+                    rawWasScheduled = rawSchedulePriorFlag is true;
+                    if (rawWasScheduled)
+                    {
+                        logger?.LogInformation(
+                            "Raw retention job for {Relation} was scheduled outside the service (alter_job scheduled => true); set back to unscheduled. The service runs raw purges itself (#4299); re-arming the job does not change coverage (#3812).",
+                            relation);
+                    }
+                }
+
                 var (verdict, shortConsumer) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
                 if (verdict == RetentionCoverage.Covered)
                 {
-                    using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
-                    await arm.ExecuteNonQueryAsync(cancellationToken);
-                    armed++;
+                    if (isRawRelation)
+                    {
+                        using var armRaw = new NpgsqlCommand(ConvergeRawArmedStateSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        armRaw.Parameters.AddWithValue(true);
+                        await armRaw.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        await arm.ExecuteNonQueryAsync(cancellationToken);
+                    }
+
+                    if (wasScheduled == false)
+                    {
+                        /* THE transition an operator waiting on a backfill is waiting for, and before #3812 the
+                           one event in this sweep that never got a distinct line: the hold released. Said on both
+                           passes — on a fresh store's first start this is one line per policy, once in the
+                           store's life; on the hourly pass it is the line that proves the backfill worked without
+                           a restart. No phase-grid slot is named because there is none to name: a retention job
+                           is created with TimescaleDB's own defaults (schedule_interval 1 day, fixed_schedule
+                           false, no initial_start — measured on 2.28.1), so the grid (#3035/#3012) never phases
+                           it, and the arm statement names neither next_start nor config. A never-run policy
+                           starts on the scheduler's next pass (430 ms after the arm on the rig) and then runs a
+                           day after each finish; a policy that ran before it was re-held keeps the next_start it
+                           had. Arming moves no other job. */
+                        armed++;
+                        logger?.LogInformation(
+                            "Retention policy for {Relation} ARMED - {Coverage} now covers everything it holds, so the {DropAfter} purge the coverage gate was holding is released. The first drop runs on the scheduler's next pass and then daily; no other store job moves.",
+                            relation, string.Join(" + ", coverage), dropAfter);
+                    }
+                    else
+                    {
+                        /* Already armed (or no job row to flip): the statement above re-asserted a state the job
+                           was in, which is what "unchanged" means here. */
+                        unchanged++;
+                    }
                 }
                 else if (verdict == RetentionCoverage.Short)
                 {
@@ -4858,30 +7496,83 @@ AND   j.hypertable_name = '{relation}'";
                        a timeout, a permission blip, or a relation that is mid-rebuild. And the release is the
                        existing arming path, unchanged: the next sweep measures Covered and arms it, with no
                        manual step, exactly as a first-time hold releases. */
-                    using var hold = new NpgsqlCommand(HoldRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
-                    await hold.ExecuteNonQueryAsync(cancellationToken);
+                    if (isRawRelation)
+                    {
+                        using var holdRaw = new NpgsqlCommand(ConvergeRawArmedStateSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        holdRaw.Parameters.AddWithValue(false);
+                        await holdRaw.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        using var hold = new NpgsqlCommand(HoldRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        await hold.ExecuteNonQueryAsync(cancellationToken);
+                    }
                     held++;
-                    logger?.LogWarning(
-                        "Retention policy for {Relation} HELD PAUSED - {ShortConsumer} does not yet cover everything it holds, so arming could drop history that rollup has never materialized. Backfill past the {DropAfter} horizon and the policy arms itself on the next start.",
-                        relation, shortConsumer, dropAfter);
+
+                    if (wasScheduled == true)
+                    {
+                        /* The #1877 event itself: this policy WAS purging and its coverage is now measurably
+                           short — a consumer was added under it by a build, or lost materialization. A WARNING
+                           on every pass, because coverage regressing under an armed policy is an event whatever
+                           cadence found it; and on the hourly pass (#3812) it also undoes a hand-arm within the
+                           hour, which is what the runbook's "do not arm by hand" already asks for. */
+                        reHeld++;
+                        logger?.LogWarning(
+                            "Retention policy for {Relation} RE-HELD - it was armed, and {ShortConsumer} no longer covers everything it holds, so the {DropAfter} purge is stopped before it drops history that consumer has never materialized. Backfill that consumer past the source's oldest row and the policy arms itself on the next evaluation (hourly on the running service, and at every start).",
+                            relation, shortConsumer, dropAfter);
+                    }
+                    else
+                    {
+                        /* A hold that was already a hold. At startup this WARNING is the line the runbook and the
+                           Retention Held alert send an operator to, once per start; on the hourly pass the same
+                           line 24 times a day per held policy is noise that buries the transitions above and
+                           below, so it drops to Debug there — the tally line at the end still counts it every
+                           hour, and the Retention Held self-alert judges its cost on the same tick. */
+                        logger?.Log(
+                            pass == RetentionSweepPass.Startup ? LogLevel.Warning : LogLevel.Debug,
+                            "Retention policy for {Relation} HELD PAUSED - {ShortConsumer} does not yet cover everything it holds, so arming could drop history that rollup has never materialized. Backfill past the {DropAfter} horizon and the policy arms itself on the next evaluation - the running service re-judges every held policy hourly (#3812), and at every start.",
+                            relation, shortConsumer, dropAfter);
+                    }
                 }
                 else
                 {
                     /* Coverage could not be MEASURED, which is not the same as measuring a shortfall. Leave the
-                       policy in whatever state it is already in: a new one is paused (fail-closed, as always),
-                       and one this store already armed keeps running. Disarming here instead would let a single
-                       bad probe stop purging across every tier at once and grow disk without bound — the
-                       failure mode that kept #1877 unfixed rather than fixed badly. */
+                       ARMED VERDICT in whatever state it is already in: a new one is paused (fail-closed, as
+                       always), and one this store already armed keeps running. Disarming here instead would let
+                       a single bad probe stop purging across every tier at once and grow disk without bound —
+                       the failure mode that kept #1877 unfixed rather than fixed badly.
+
+                       For a raw relation, though, the SCHEDULED flag still converges to false on this pass
+                       (the hourly converge runs every pass, unconditionally) — it is the
+                       darling_armed key alone that an indeterminate probe must not touch, so a DBA's
+                       alter_job(scheduled => true) is reverted here too, even on a pass that could not judge
+                       coverage. */
+                    if (isRawRelation && rawWasScheduled)
+                    {
+                        /* Guarded the same way ConvergeRawArmedStateSql is: an indeterminate pass must still
+                           revert a DBA's alter_job(scheduled => true), but writing scheduled => false to a job
+                           that is ALREADY false every hour is catalog churn with nothing to show for it.
+                           rawWasScheduled (read above, before the verdict) already answered that. */
+                        using var rawScheduleOnly = new NpgsqlCommand(SetRetentionScheduleSql(relation, scheduled: false), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        await rawScheduleOnly.ExecuteNonQueryAsync(cancellationToken);
+                    }
+
+                    /* Counted as UNCHANGED in the tally (it is), and as indeterminate beside it so the summary
+                       can say how many verdicts were never reached. Stays a WARNING on both passes: a probe
+                       that cannot answer is a store fault, not a steady state an operator has already been
+                       told about. */
                     indeterminate++;
+                    unchanged++;
                     logger?.LogWarning(
-                        "Retention policy for {Relation} left as-is - its coverage ({Coverage}) could not be established this start, and an unreadable store is not evidence of anything. Re-judged on the next start.",
+                        "Retention policy for {Relation} left as-is - its coverage ({Coverage}) could not be established this pass, and an unreadable store is not evidence of anything. Re-judged on the next pass (hourly on the running service, and at every start).",
                         relation, string.Join(" + ", coverage));
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                failed++;
                 logger?.LogWarning(
-                    "Retention policy for {Relation} ({DropAfter}) failed - that tier keeps growing until the next restart retries: {Message}",
+                    "Retention policy for {Relation} ({DropAfter}) failed - that tier keeps growing until the next pass retries (hourly on the running service since #3812, and at every start): {Message}",
                     relation, dropAfter, ex.Message);
             }
         }
@@ -4895,12 +7586,1484 @@ AND   j.hypertable_name = '{relation}'";
            line promising dailies are kept forever; and the seven baseline aggregates have a horizon of their own
            that went unmentioned. A field operator cross-checking found the first one immediately and had to
            work out whether they had hit a bug (#1958). A summary line is only worth printing if it survives
-           being checked. */
+           being checked.
+
+           Since #3812 "armed" here is ARMED THIS PASS (a transition) and the line also carries the policies
+           that were already in the state the gate asked for, so the five counts still account for every
+           policy. Information at startup, where it is the store's retention posture in one line; Debug on the
+           hourly pass, where the posture has not changed since the last one and the tally line below is the
+           pass's one Information line. */
+        logger?.Log(
+            pass == RetentionSweepPass.Startup ? LogLevel.Information : LogLevel.Debug,
+            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed this pass, {Held} held paused pending backfill, {Unchanged} already in the state coverage asks for, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly history CAGGs {Hourly}, baseline CAGGs {Baseline}, internal interval-dedup tiers {Interval} hourly and {IntervalDaily} daily, collection-health rollup {CollectionHealth}; the daily history CAGGs carry no policy and are kept indefinitely)",
+            applied, RetentionPolicies.Count, armed, held, unchanged, indeterminate, converged,
+            RawRetentionInterval, HourlyRetentionInterval, BaselineRetentionInterval, IntervalRetentionInterval, IntervalDailyRetentionInterval, CollectionHealthRetentionInterval);
+
+        /* #3812, in the #3756 discipline: ONE Information line per evaluation, UNCONDITIONAL — written on the
+           all-unchanged pass exactly as on the pass that armed something, because a check whose negative outcome
+           is indistinguishable from its non-execution has not reported. Before this the only evidence a held
+           policy had been re-judged was a restart marker in the log; an operator (or the hourly monitoring
+           loop) can now verify the re-evaluation ran, and read "armed this pass" go 0 → 1 → 0, without one. Two
+           literal templates rather than one with a prefix placeholder, so each pass's line is a fixed string a
+           reader can grep for and a pin can hold. No slot detail follows the count: the coupling check on the
+           ARMED line above says why there is no phase-grid slot to name. */
+        if (pass == RetentionSweepPass.Startup)
+        {
+            logger?.LogInformation(
+                "Retention evaluation at startup: {Held} policies held, {Armed} armed this pass, {Unchanged} unchanged",
+                held, armed, unchanged);
+        }
+        else
+        {
+            logger?.LogInformation(
+                "Retention re-evaluation: {Held} policies held, {Armed} armed this pass, {Unchanged} unchanged",
+                held, armed, unchanged);
+        }
+
+        return new RetentionPolicySweepSummary(
+            InPlace: applied, Held: held, Armed: armed, Unchanged: unchanged, ReHeld: reHeld,
+            Indeterminate: indeterminate, Converged: converged, Failed: failed);
+    }
+
+    /* ─────────────── continuous-aggregate compression (#3581) ─────────────── */
+
+    /// <summary>
+    /// The margin a continuous aggregate's <c>compress_after</c> carries ABOVE its refresh policy's
+    /// <c>start_offset</c>: one raw chunk, <see cref="ChunkIntervalDays"/>.
+    ///
+    /// <para><b>Why the aggregates need a margin at all, measured.</b> A refresh that reaches into a compressed
+    /// materialization chunk does not fail on 2.28.1 — it decompresses every compressed batch that overlaps the
+    /// buckets it re-materializes (1,000 rows per <c>server_id</c> segment, measured on the rig: a six-row
+    /// backdated write into one hourly bucket staged 6,006 rows), rewrites them into the chunk's heap side, and
+    /// leaves the chunk PARTIAL (catalog status 9) until the next compression run recompresses it. Against an
+    /// uncompressed chunk the same single-bucket refresh took 8 ms; against the compressed one 29 ms plus a
+    /// 195 ms recompression on the next policy pass. A forced eight-day refresh went 1,150 ms → 1,514 ms and
+    /// left 180,000 heap rows for the policy to take back. So a refresh window that overlapped the compressed
+    /// region would not break anything; it would turn the newest chunk into a permanent decompress-and-
+    /// recompress churn, once an hour on the hourly tier, forever — which is why the two boundaries are kept
+    /// APART rather than merely non-failing when they meet.</para>
+    ///
+    /// <para><b>Why one raw chunk, derived rather than chosen.</b> The refresh window reaches back
+    /// <c>start_offset</c> and then aligns its start DOWN to a bucket boundary, so the furthest it can reach is
+    /// <c>start_offset</c> plus one bucket. A chunk becomes eligible only when its WHOLE range is older than
+    /// <c>compress_after</c>. The two regions are therefore disjoint at any chunk width whenever
+    /// <c>compress_after ≥ start_offset + bucket</c>: 1 day 1 hour for the hourly tier, 4 days for the daily.
+    /// The daily tier's bucket IS a day, so the floor is a day there already; the hourly tier's is an hour, and
+    /// an hour is the wrong unit for the gap. Every other boundary in this store moves in days — chunks close at
+    /// UTC midnight (<see cref="ChunkIntervalDays"/>), raw eligibility flips at UTC midnight
+    /// (<see cref="CompressAfterDays"/>) — and a sub-day margin would put the refresh's aligned start and the
+    /// compression boundary within one scheduling jitter of each other on every run. Taking the margin as one
+    /// raw chunk, on every tier, puts a whole day between the two on the hourly tier and lands the daily tier on
+    /// exactly its own floor. The result — 2 days hourly, 4 days daily — is the ruling #3581 was opened for,
+    /// reached as an expression rather than written down.</para>
+    ///
+    /// <para><b>What this does NOT protect, stated so it is not assumed.</b> Two refreshes reach past every
+    /// policy window by design: the coverage-gated baseline backfill
+    /// (<see cref="BackfillBaselineAggregatesAsync"/>, up to <see cref="BaselineRetentionSpan"/> back) and the
+    /// operator's <c>--backfill-rollups</c> verb. Both write below the materialized floor, where there are no
+    /// chunks to be compressed yet, except for the one chunk the floor sits inside — and that one they handle
+    /// through the partial-chunk path above, at the measured cost, once. That is a cost, not a hazard, and it
+    /// is bounded by being a one-time backfill rather than an hourly policy.</para>
+    /// </summary>
+    public static readonly TimeSpan AggregateCompressMarginSpan = TimeSpan.FromDays(ChunkIntervalDays);
+
+    /// <summary>
+    /// <c>compress_after</c> for every aggregate whose refresh policy is HOURLY —
+    /// <see cref="HourlyRefreshStartSpan"/> plus <see cref="AggregateCompressMarginSpan"/>, 2 days. That is
+    /// the six <see cref="HourlyAggregates"/> and the seven <see cref="BaselineAggregates"/>: thirteen of the
+    /// twenty, including the two interval-identity layers whose retention is the shortest in the store
+    /// (<see cref="IntervalRetentionInterval"/>, 7 days) — which at 1-day materialization chunks leaves five
+    /// of those seven days compressed, and at 10-day chunks leaves the tier mostly uncompressed; see the
+    /// chunk-width paragraph on <see cref="EnsureAggregateCompressionAsync"/>.
+    /// </summary>
+    public static readonly TimeSpan HourlyAggregateCompressAfterSpan = HourlyRefreshStartSpan + AggregateCompressMarginSpan;
+
+    /// <summary>
+    /// <c>compress_after</c> for every aggregate whose refresh policy is DAILY —
+    /// <see cref="DailyRefreshStartSpan"/> plus <see cref="AggregateCompressMarginSpan"/>, 4 days. That is
+    /// the seven <see cref="DailyAggregates"/>. Their refresh keeps TimescaleDB's finish-to-start scheduling
+    /// (<see cref="AddDailyRefreshPolicySql"/>), so the instant it runs drifts — which is one more reason the
+    /// separation between refresh and compression is carried by the WINDOW arithmetic here rather than by
+    /// where on the clock either job happens to start.
+    /// </summary>
+    public static readonly TimeSpan DailyAggregateCompressAfterSpan = DailyRefreshStartSpan + AggregateCompressMarginSpan;
+
+    /// <summary>The INTERVAL literal of <see cref="HourlyAggregateCompressAfterSpan"/> — rendered from the span
+    /// rather than kept as a second constant, so the statement and the arithmetic cannot disagree.</summary>
+    public static string HourlyAggregateCompressAfter => WholeDaysInterval(HourlyAggregateCompressAfterSpan);
+
+    /// <summary>The INTERVAL literal of <see cref="DailyAggregateCompressAfterSpan"/>.</summary>
+    public static string DailyAggregateCompressAfter => WholeDaysInterval(DailyAggregateCompressAfterSpan);
+
+    /// <summary>
+    /// Renders a whole-day span as the PostgreSQL interval literal the policy statements interpolate, and
+    /// refuses anything else: a <c>compress_after</c> that was not a whole number of days would mean one of
+    /// its two inputs stopped being one, which is a design change and not a rendering problem.
+    /// </summary>
+    internal static string WholeDaysInterval(TimeSpan span)
+    {
+        if (span <= TimeSpan.Zero || span.Ticks % TimeSpan.TicksPerDay != 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(span), span, "an aggregate compress_after must be a positive whole number of days");
+        }
+
+        return $"{((long)span.TotalDays).ToString(CultureInfo.InvariantCulture)} days";
+    }
+
+    /// <summary>
+    /// The aggregate compression policies' cadence — once a day, not <see cref="CompressScheduleInterval"/>'s
+    /// hour.
+    ///
+    /// <para>The hourly tick on the raw hypertables exists because their newest closed chunk is the least
+    /// compressed data on disk and a chunk that had already aged in was waiting up to half a day for a tick to
+    /// take it (#1778). Nothing here has that exposure: an aggregate chunk becomes eligible once, at a UTC
+    /// midnight, a whole <see cref="AggregateCompressMarginSpan"/> after its refresh policy last touched it, and
+    /// a run that finds it within the day is exactly as good as one that finds it within the hour. What an
+    /// hourly cadence WOULD do is put twenty more jobs on the hourly phase grid — the thing
+    /// <see cref="AggregateCompressionBandMinute"/> exists to avoid.</para>
+    /// </summary>
+    public const string AggregateCompressionScheduleInterval = "1 day";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="AggregateCompressionScheduleInterval"/>, pinned equal
+    /// by test; <see cref="EnsureAggregateCompressionAsync"/> compares a live job's cadence against this in
+    /// seconds, the same way the raw converge does, so <c>1 day</c> and <c>24:00:00</c> never read as a
+    /// difference.</summary>
+    public static readonly TimeSpan AggregateCompressionScheduleSpan = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// The <c>segmentby</c> column for every aggregate — the same <c>server_id</c> the raw hypertables use
+    /// (<see cref="EnableCompressionSql(string)"/>), for the same reason: every read of these relations filters
+    /// <c>server_id</c> first (the viewer's month-scale trend reads are <c>WHERE server_id = $1 AND bucket
+    /// BETWEEN</c>, and the retrieval indexes lead with it), so one segment IS one server's rows and a
+    /// compressed read touches only the segment it asked for. Measured on the rig against the trend read's own
+    /// SQL over <see cref="QueryStoreStatsCorrectedHourlyView"/>: the compressed chunks are read through a
+    /// <c>ColumnarScan</c> whose index condition is exactly <c>server_id = $1</c> with the bucket range as a
+    /// vectorized filter over the batches' min/max metadata — 15,179 shared buffers before compression and
+    /// 3,522 after for the same 30-day window, 11.2 ms → 6.6 ms.
+    ///
+    /// <para>Every registered aggregate groups by it — asserted per definition by test from the shipped
+    /// CREATE text through <see cref="RefreshGroupingTermsFor"/>, not assumed — so this is a property of the
+    /// registry rather than a constant that happens to be true today.</para>
+    /// </summary>
+    public const string AggregateCompressionSegmentBy = "server_id";
+
+    /// <summary>
+    /// Every continuous aggregate this product owns, paired with the CREATE that defines it and whether its
+    /// refresh policy is hourly — the registry the compression ensure walks, in the order that ALSO decides each
+    /// one's hour on the daily band (<see cref="AggregateCompressionBandHourFor"/>).
+    ///
+    /// <para>Derived from <see cref="HourlyAggregates"/>, <see cref="DailyAggregates"/> and
+    /// <see cref="BaselineAggregates"/> — the same three lists the ensure sweep creates from, in the same order
+    /// — rather than hand-listed, so an aggregate registered for creation is compression-registered the same
+    /// moment, with its tier decided by which list it came from. There is no fourth list to forget.</para>
+    ///
+    /// <para><b>Twenty, not twenty-three (#3653, LC).</b> A set once named <c>CompressionDeferredUntilFreeze</c>
+    /// held the three interval-honest successor dailies (<see cref="QueryStatsIntervalDailyView"/>,
+    /// <see cref="ProcedureStatsIntervalDailyView"/>, <see cref="QueryStatsDbIntervalDailyView"/>) out of this
+    /// list from A6 until LC's freeze — the daily band was full at 23 members with the legacy trio still on it,
+    /// so the successors joining unconditionally would have overflowed it. LC moved the legacy trio itself out
+    /// of <see cref="HourlyAggregates"/> and <see cref="DailyAggregates"/> (into
+    /// <see cref="FrozenRollupAggregates"/>), which is what frees the three slots the successors take here — so
+    /// this list is declared straight from the three source lists, with no deferral to subtract.</para>
+    ///
+    /// <para><b>MUST stay declared after those three lists</b>: static field initializers run in declaration
+    /// order, and this one reads all three.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<(string CreateSql, string View, bool Hourly)> AggregateCompressionTargets =
+        HourlyAggregates.Select(a => (a.CreateSql, a.View, Hourly: true))
+            .Concat(DailyAggregates.Select(a => (a.CreateSql, a.View, Hourly: false)))
+            .Concat(BaselineAggregates.Select(a => (a.CreateSql, a.View, Hourly: true)))
+            .ToArray();
+
+    /// <summary>
+    /// Is <paramref name="view"/> one of the continuous aggregates whose compression this product owns? Accepts
+    /// a bare or <c>collect.</c>-qualified name, the way <see cref="TryCompressionPhaseMinutesFor"/> does.
+    ///
+    /// <para>This is the predicate <see cref="ConvergeCompressionScheduleAsync(NpgsqlConnection, ILogger, CancellationToken)"/>
+    /// excludes on, and that exclusion is load-bearing rather than tidy. An aggregate's compression job reports
+    /// the aggregate's USER VIEW as its hypertable (<c>collect</c> / <c>&lt;view&gt;</c> — measured on 2.28.1,
+    /// the same resolution <see cref="ContinuousAggregateRefreshStateSql"/> documents for refresh jobs), so it
+    /// lands in the raw converge's unscoped <c>proc_name LIKE '%compression%'</c> read, where a cadence other
+    /// than <see cref="CompressScheduleInterval"/> IS the staleness test (#1778). Without this, the first start
+    /// after this family exists would retune every one of its once-a-day jobs to an hourly tick — and put all
+    /// twenty on the hourly phase grid, which is precisely the placement #3581 ruled out.</para>
+    /// </summary>
+    public static bool IsAggregateCompressionTarget(string? view)
+    {
+        if (string.IsNullOrEmpty(view))
+        {
+            return false;
+        }
+
+        var dot = view.LastIndexOf('.');
+        var bare = dot >= 0 ? view[(dot + 1)..] : view;
+
+        foreach (var target in AggregateCompressionTargets)
+        {
+            if (string.Equals(target.View, bare, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Looks up a registered aggregate by view name. Throws for an unregistered one, for the same reason
+    /// <see cref="RefreshPhaseMinutesFor(string)"/> does: a defaulted tier here would give an aggregate a
+    /// <c>compress_after</c> nobody derived for it.
+    /// </summary>
+    private static (string CreateSql, string View, bool Hourly) AggregateCompressionTargetFor(string view)
+    {
+        foreach (var target in AggregateCompressionTargets)
+        {
+            if (string.Equals(target.View, view, StringComparison.Ordinal))
+            {
+                return target;
+            }
+        }
+
+        throw new ArgumentOutOfRangeException(
+            nameof(view),
+            view,
+            "not a registered continuous aggregate — it is in none of HourlyAggregates, DailyAggregates or BaselineAggregates, so it has no compression tier");
+    }
+
+    /// <summary>Which <c>compress_after</c> <paramref name="view"/> takes, decided by its refresh tier — the
+    /// hourly one for every hourly-refreshed aggregate (including the baselines), the daily one for the
+    /// daily tier.</summary>
+    public static TimeSpan AggregateCompressAfterSpanFor(string view)
+        => AggregateCompressionTargetFor(view).Hourly ? HourlyAggregateCompressAfterSpan : DailyAggregateCompressAfterSpan;
+
+    /// <summary>The INTERVAL literal of <see cref="AggregateCompressAfterSpanFor"/>.</summary>
+    public static string AggregateCompressAfterFor(string view)
+        => WholeDaysInterval(AggregateCompressAfterSpanFor(view));
+
+    /// <summary>
+    /// The bucket column of one aggregate — the alias its CREATE gives <c>time_bucket(...)</c> — recovered from
+    /// the shipped text, because that column is the materialization hypertable's time dimension and therefore
+    /// the <c>orderby</c> the compression settings need.
+    ///
+    /// <para>Parsed at parenthesis depth rather than by a regex over <c>AS bucket</c>, so a CREATE that aliased
+    /// its bucket differently would compress in that column's order instead of in a column that does not exist.
+    /// Every shipped definition aliases it <c>bucket</c> and a test asserts that per definition; this recovers
+    /// it anyway so the assertion is about the registry and not about this method agreeing with itself.</para>
+    /// </summary>
+    internal static string AggregateBucketColumnFor(string createSql)
+    {
+        if (createSql is null)
+        {
+            throw new ArgumentNullException(nameof(createSql));
+        }
+
+        const string TimeBucket = "time_bucket(";
+        var start = createSql.IndexOf(TimeBucket, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            throw new ArgumentException("the CREATE has no time_bucket(...) projection, so its bucket column cannot be recovered", nameof(createSql));
+        }
+
+        var depth = 0;
+        var index = start + TimeBucket.Length - 1;
+        for (; index < createSql.Length; index++)
+        {
+            if (createSql[index] == '(')
+            {
+                depth++;
+            }
+            else if (createSql[index] == ')' && --depth == 0)
+            {
+                break;
+            }
+        }
+
+        var rest = createSql[(index + 1)..].TrimStart();
+        if (!rest.StartsWith("AS ", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("the CREATE's time_bucket(...) projection carries no alias, so its bucket column cannot be recovered", nameof(createSql));
+        }
+
+        var alias = rest[3..].TrimStart();
+        var end = 0;
+        while (end < alias.Length && (char.IsLetterOrDigit(alias[end]) || alias[end] == '_'))
+        {
+            end++;
+        }
+
+        if (end == 0)
+        {
+            throw new ArgumentException("the CREATE's time_bucket(...) alias is empty", nameof(createSql));
+        }
+
+        return alias[..end];
+    }
+
+    /// <summary>
+    /// THE DAILY BAND'S MINUTE (#3581) — the last minute of the heaviest refresh's window, stated as a method
+    /// because a table of minutes cannot be re-derived by the next reader and a method can.
+    ///
+    /// <para><b>What the hour has left, read off the grid.</b> <see cref="RefreshPhaseMinutesFor(string)"/>
+    /// tiles the hour with three bands: the light refreshes start on <c>:00</c> through <c>:11</c>, the heaviest
+    /// refresh at <see cref="HeaviestRefreshStartMinute"/>, and the raw compression band takes
+    /// <see cref="CompressionPhaseMinutes"/> to the end of the hour. No minute is unassigned — the tiling
+    /// identity TimescaleContinuousAggregateTests holds says so — but two stretches carry no START: the guard
+    /// after the light band, where the light refreshes are still finishing, and the heaviest refresh's window
+    /// past its own start. The compression grid deliberately leaves the tail of that window unused
+    /// (<see cref="CompressionPhaseMinutes"/>: "the other 6 minutes of the window are past the refresh and are
+    /// left on the table"), because recovering them for HOURLY policies would size a band for one window
+    /// against a still-moving ceiling. A once-a-day job is a different trade, and this is the minute it
+    /// takes.</para>
+    ///
+    /// <para><b>The last minute, not the first clear one, and the difference is 296 seconds.</b> The first
+    /// minute past the recorded ceiling is <see cref="HeaviestRefreshStartMinute"/> plus
+    /// <c>ceil(<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> / 60)</c> = :30, which is 900 s after
+    /// the heaviest refresh starts against an 896 s ceiling — a four-second margin. The window's last minute is
+    /// 1,200 s after it. Both are pinned: this minute is asserted past the ceiling by test in the same way the
+    /// grid asserts the ceiling inside the window, so a ceiling that grew to meet it goes red rather than
+    /// quietly putting a daily rewrite into the heaviest refresh's tail. And it is derived from GEOMETRY —
+    /// start plus width — rather than from the ceiling constant, so re-taking the ceiling (#3182, #3188) moves
+    /// no job here.</para>
+    ///
+    /// <para><b>What sits on either side, and why neither is a lock hazard.</b> The minute after this one is
+    /// <see cref="CompressionPhaseMinutes"/>' first, where the raw compression policies start; they lock raw
+    /// chunks and this family locks materialization chunks, so the two cannot queue on each other, and on most
+    /// hours of the day those policies find nothing eligible and finish in tens of milliseconds — twenty-three
+    /// of twenty-four for a table still at the 1-day chunk ceiling, fewer for a table the reconcile has
+    /// narrowed to 12h or 6h chunks (#4211). The next refresh START is the next hour's <c>:00</c>, 25 minutes
+    /// away — and a compression run cannot
+    /// block an aggregate's own refresh in any case: <c>compress_chunk</c> on 2.28.1 holds
+    /// <c>AccessShareLock</c> on the materialization hypertable and escalates only on the CHUNK it is rewriting
+    /// (<c>ShareLock</c>, <c>ExclusiveLock</c>, then <c>AccessExclusiveLock</c> at the swap — all three observed
+    /// on the rig inside one run), while the refresh writes the newest chunk, which
+    /// <see cref="AggregateCompressMarginSpan"/> keeps out of the eligible set. What a run CAN hold up is a
+    /// reader of exactly the chunk being swapped, for the swap; that is the ordinary cost of compressing and
+    /// the same one the raw tier pays today.</para>
+    ///
+    /// <para><b>Why not #3174's compression band.</b> That band's width is derived from
+    /// <see cref="HypertableCount"/> over <see cref="CompressionPhaseMaxPerMinute"/>, and every minute it
+    /// takes comes out of <see cref="HeaviestRefreshWindowMinutes"/>. Twenty more members would widen it from
+    /// 24 minutes to 31 and shrink the window from 21 minutes to 14 — 840 s against the 896 s ceiling, which
+    /// is the envelope TimescaleSupportTests holds red. #3185 measured what stepping a band by member count
+    /// does to per-group cost; this is the same lesson from the other side. So this family does not join that
+    /// band, and its own minute is one the hourly grid already has and does not use.</para>
+    ///
+    /// <para><b>:35 is also the minute READERS read, and that overlap was measured and then decided
+    /// (#3781).</b> The monitoring tick read every store at <c>:35</c> until 2026-09-21, so a 7-day scan
+    /// issued at <c>:35:00</c> races one aggregate's daily compression start — one aggregate, one hour of
+    /// one day, and only the chunk being swapped. It is counted rather than moved: at steady state these
+    /// runs are about 68 s, the staged first lifts that reached 1,246 s end around 2026-10-12, and the alert
+    /// pass retries once (#3851), so the losing read is a retried read rather than a missed one. Moving the
+    /// minute would spend the one minute of the heaviest refresh's window this family has and put a daily
+    /// rewrite back into that window's tail, which is the trade the paragraph above declines. The bar to
+    /// REOPEN it is stated so it is checkable rather than remembered: more than two losing hours in a day
+    /// after the staged lifts end, or any alert-read kill attributed to an aggregate-compression run.</para>
+    /// </summary>
+    public static int AggregateCompressionBandMinute =>
+        HeaviestRefreshStartMinute + HeaviestRefreshWindowMinutes - 1;
+
+    /// <summary>
+    /// The hour of the day (UTC) the first registered aggregate compresses at; each later one takes the next
+    /// hour (<see cref="AggregateCompressionBandHourFor"/>).
+    ///
+    /// <para><b>One, and it is the hour AFTER the one that carries the raw tier's shared daily rewrite.</b>
+    /// <see cref="CompressAfterDays"/> is 1 day on every table (#4211 ruling decision 1) and TimescaleDB
+    /// epoch-aligns every rung of the chunk ladder, so every raw hypertable's newest closed chunk becomes
+    /// eligible at the same UTC midnight regardless of its own chunk width — a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed to 12h or 6h (#4211) shares that boundary too, plus
+    /// others through the day this hour does not try to clear — and the <c>00:</c> hour's compression band is
+    /// the one every raw table shares (#3112's midnight band — its largest run, <c>query_store_stats</c>,
+    /// measured at 552 s from <c>:42</c>). The aggregates' chunks become eligible at the same midnight, for the
+    /// same epoch-alignment reason, so the earliest hour that both sees the new eligibility and is clear of
+    /// that shared rewrite is the next one. Later hours would only add latency to the newest eligible chunk;
+    /// earlier there is none.</para>
+    /// </summary>
+    public const int AggregateCompressionBandFirstHour = 1;
+
+    /// <summary>The hours in a day, named so the band's fit is an identity against the cadence it tiles rather
+    /// than a literal 24.</summary>
+    public static int HoursInDailyCadence => (int)AggregateCompressionScheduleSpan.TotalHours;
+
+    /// <summary>
+    /// Which hour of the day (UTC) <paramref name="view"/>'s compression policy runs at: one aggregate per
+    /// hour, in <see cref="AggregateCompressionTargets"/> order from <see cref="AggregateCompressionBandFirstHour"/>.
+    ///
+    /// <para><b>An hour apart rather than a few minutes apart, because distinct STARTS are not the
+    /// guarantee that was asked for (#3185).</b> Staggering twenty jobs a few minutes apart inside one hour
+    /// gives twenty distinct starts and nothing about overlap: a run longer than the step overlaps its successor
+    /// for the rest of its run, and the runs here are minutes — a day's chunk of the largest aggregate is
+    /// roughly the raw table's, which #3112 measured at 552 s. The hour also has only six minutes that are past
+    /// every recorded refresh ceiling and on no hourly-grid start (<see cref="AggregateCompressionBandMinute"/>),
+    /// so the stagger had nowhere to go in any case. Placing one aggregate per hour makes the property "no two
+    /// aggregates decompress and recompress at once" hold by construction: a run would have to exceed an hour
+    /// to meet the next, and a run that long is the stuck-job check's business
+    /// (<see cref="StuckRunningBound"/>, 48 hours at this cadence). It also keeps this family inside the
+    /// background-worker headroom the managed store already sizes — at most one of these jobs runs at a time,
+    /// so the <c>+ 2</c> over <see cref="HypertableCount"/> is not re-derived.</para>
+    ///
+    /// <para><b>Keyed on the VIEW's registry position, never on a job id or on a store measurement</b>, for
+    /// the reason <see cref="HourlyRefreshPhaseOrder"/> gives: the same configuration has to be reproducible on
+    /// a store that has never seen this one's ids or sizes. The staging of FIRST runs is by measured size
+    /// (<see cref="StageAggregateCompressionNights"/>); the hour is by identity. An operator reading
+    /// <c>timescaledb_information.jobs</c> therefore sees the same aggregate at the same hour on every
+    /// store.</para>
+    ///
+    /// <para>Throws for an unregistered view (<see cref="RefreshPhaseMinutesFor(string)"/>'s reasoning), and for
+    /// a registry too long for the day — twenty-three hours are available, and a twenty-fourth member would land
+    /// on the midnight hour <see cref="AggregateCompressionBandFirstHour"/> exists to avoid. The ensure builds
+    /// each statement inside its per-aggregate try, so either throw costs one aggregate and names it.</para>
+    /// </summary>
+    public static int AggregateCompressionBandHourFor(string view)
+    {
+        for (var index = 0; index < AggregateCompressionTargets.Count; index++)
+        {
+            if (!string.Equals(AggregateCompressionTargets[index].View, view, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var hour = AggregateCompressionBandFirstHour + index;
+            if (hour >= HoursInDailyCadence)
+            {
+                throw new InvalidOperationException(
+                    $"the aggregate compression band has {AggregateCompressionTargets.Count} members from hour {AggregateCompressionBandFirstHour}, which runs past the day — {view} would land on hour {hour}. Re-derive the band (two per hour, or a second minute) rather than wrapping onto the midnight hour");
+            }
+
+            return hour;
+        }
+
+        throw new ArgumentOutOfRangeException(
+            nameof(view),
+            view,
+            "not a registered continuous aggregate — register it in HourlyAggregates, DailyAggregates or BaselineAggregates before giving it a compression policy");
+    }
+
+    /// <summary>
+    /// One aggregate's compression enablement: the same <c>server_id</c> segmentation the raw tier uses, ordered
+    /// by the aggregate's own bucket column descending — the read order of every trend query.
+    ///
+    /// <para><c>ALTER MATERIALIZED VIEW</c> rather than <c>ALTER TABLE</c> on the materialization: TimescaleDB
+    /// resolves the settings onto the materialization hypertable itself, and the statement is idempotent — on a
+    /// view already compressed it re-states the settings with a NOTICE that existing compressed chunks keep
+    /// theirs, measured on 2.28.1. The ensure still gates it on the catalog
+    /// (<c>continuous_aggregates.compression_enabled</c>) so a settled store runs no ALTER at all. Same pre-2.18
+    /// vocabulary as <see cref="EnableCompressionSql(string)"/>, for the same cross-2.x reason.</para>
+    /// </summary>
+    public static string EnableAggregateCompressionSql(string view)
+    {
+        var target = AggregateCompressionTargetFor(view);
+        return $"ALTER MATERIALIZED VIEW collect.{view} SET (timescaledb.compress, timescaledb.compress_segmentby = '{AggregateCompressionSegmentBy}', timescaledb.compress_orderby = '{AggregateBucketColumnFor(target.CreateSql)} DESC')";
+    }
+
+    /// <summary>
+    /// The <c>initial_start</c> expression for an aggregate compression job: <paramref name="nightOffset"/>
+    /// UTC midnights after the NEXT one, at <paramref name="hour"/>:<paramref name="minute"/>.
+    ///
+    /// <para>Anchored to the next UTC midnight rather than to "the next occurrence of this hour" so that night
+    /// <c>k</c> is the same calendar day for every aggregate — which is what makes "one aggregate per night,
+    /// largest first" (<see cref="StageAggregateCompressionNights"/>) mean consecutive calendar nights rather
+    /// than a sequence that folds when one aggregate's hour has already passed today and another's has not.
+    /// Always in the future, so the statement never depends on TimescaleDB's handling of a past anchor; computed
+    /// in UTC and cast back, for the reason <see cref="AddContinuousAggregatePolicySql"/> gives — a bare
+    /// <c>date_trunc('day', now())</c> truncates in the SESSION time zone.</para>
+    /// </summary>
+    public static string AggregateCompressionInitialStartSql(int hour, int minute, int nightOffset)
+    {
+        if (hour < 0 || hour >= 24 || minute < 0 || minute >= 60 || nightOffset < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(nightOffset), "the band instant must be a valid hour and minute of the day and a non-negative night");
+        }
+
+        return "(date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day'"
+            + $" + INTERVAL '{nightOffset.ToString(CultureInfo.InvariantCulture)} days'"
+            + $" + INTERVAL '{hour.ToString(CultureInfo.InvariantCulture)} hours {minute.ToString(CultureInfo.InvariantCulture)} minutes') AT TIME ZONE 'UTC'";
+    }
+
+    /// <summary>
+    /// One aggregate's compression policy: its tier's <c>compress_after</c>, the once-a-day cadence, and a
+    /// FIXED schedule pinned to its hour on the daily band, first running <paramref name="nightOffset"/> nights
+    /// after the next UTC midnight. <c>if_not_exists</c> so a restart re-converges; the -1 it returns for a
+    /// policy the store already has is the quiet skip <c>add_compression_policy</c> is documented to give
+    /// (<see cref="AddCompressionPolicySql(string)"/>), which is why parameter drift on an EXISTING policy is
+    /// the converge's business (<see cref="SetAggregateCompressionPolicySql"/>) and not this statement's.
+    /// </summary>
+    public static string AddAggregateCompressionPolicySql(string view, int nightOffset)
+        => $"SELECT add_compression_policy('collect.{view}', compress_after => INTERVAL '{AggregateCompressAfterFor(view)}', schedule_interval => INTERVAL '{AggregateCompressionScheduleInterval}', if_not_exists => true, initial_start => {AggregateCompressionInitialStartSql(AggregateCompressionBandHourFor(view), AggregateCompressionBandMinute, nightOffset)})";
+
+    /// <summary>
+    /// Every registered aggregate's compression state in one read: whether compression is enabled on the
+    /// materialization, its compression job if any (with the four things a converged policy is made of —
+    /// <c>compress_after</c>, cadence, fixed schedule, and the UTC hour and minute it is pinned to), how large the
+    /// materialization is, and how many of its chunks would compress on the policy's first run under EACH
+    /// tier's <c>compress_after</c> — both counted, the caller picks its tier's, because the tier is a C#
+    /// registry fact and the read should not restate it.
+    ///
+    /// <para>Joins the job on EITHER identity, the view or its materialization, for the reason
+    /// <see cref="ContinuousAggregateRefreshStateSql"/> documents: the job catalog resolves an aggregate's
+    /// jobs back to the user view (measured for compression jobs too — <c>collect</c> / <c>&lt;view&gt;</c>),
+    /// but the underlying row carries the materialization, and the two schemas are disjoint so no job can
+    /// match twice. Chunks are keyed by the MATERIALIZATION, which is the only identity
+    /// <c>timescaledb_information.chunks</c> knows an aggregate by — a count keyed by the view name reads zero
+    /// forever, silently, which is the shape #3582 recorded for the store-metrics tool.</para>
+    ///
+    /// <para>Sizes come from <c>hypertable_size</c> over the materialization — the whole relation, indexes
+    /// included, because indexes are what compression removes on a chunk — and the hour and minute are
+    /// extracted in UTC so a session time zone cannot make a correctly pinned job read as stale.</para>
+    /// </summary>
+    public static string AggregateCompressionStateSql =>
+        $@"
+SELECT
+    ca.view_name,
+    ca.compression_enabled,
+    j.job_id,
+    EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint AS compress_after_seconds,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds,
+    j.fixed_schedule,
+    CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_hour,
+    CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_minute,
+    hypertable_size(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass) AS materialization_bytes,
+    (
+        SELECT count(*)
+        FROM timescaledb_information.chunks AS c
+        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
+        AND   c.hypertable_name = ca.materialization_hypertable_name
+        AND   NOT c.is_compressed
+        AND   c.range_end < now() - INTERVAL '{HourlyAggregateCompressAfter}'
+    ) AS eligible_under_hourly_rule,
+    (
+        SELECT count(*)
+        FROM timescaledb_information.chunks AS c
+        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
+        AND   c.hypertable_name = ca.materialization_hypertable_name
+        AND   NOT c.is_compressed
+        AND   c.range_end < now() - INTERVAL '{DailyAggregateCompressAfter}'
+    ) AS eligible_under_daily_rule
+FROM timescaledb_information.continuous_aggregates AS ca
+LEFT JOIN timescaledb_information.jobs AS j
+  ON  (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
+  AND (
+        (j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
+     OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)
+      )
+WHERE ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// Moves one EXISTING aggregate compression policy onto the shipped <c>compress_after</c>, cadence and band
+    /// instant. <c>$1</c> the job id (<c>::integer</c>, the #1586 trap), <c>$2</c> the <c>compress_after</c>
+    /// text, <c>$3</c> the hour, <c>$4</c> the minute.
+    ///
+    /// <para>Exists because <c>add_compression_policy(if_not_exists =&gt; true)</c> returns -1 and changes
+    /// nothing against a policy the store already has (<see cref="AddCompressionPolicySql(string)"/> measured
+    /// it), so a later change to either tier's <c>compress_after</c>, or to the band, would reach fresh stores
+    /// only — the #1937/#1778 drift this project treats as a defect, pre-empted here rather than filed later.
+    /// <c>config</c> is updated with <c>jsonb_set</c> against the job's OWN config so its other keys survive;
+    /// <c>scheduled</c> is not named, so this can neither arm nor pause. The anchor is re-taken at night zero:
+    /// a policy this converges is one whose hour, minute, cadence or window DIFFERS from the shipped values, and
+    /// a policy created by this build cannot differ before its first run — so re-anchoring never disturbs a
+    /// staged first night, and never re-anchors a policy that merely has not run yet.</para>
+    /// </summary>
+    public static string SetAggregateCompressionPolicySql =>
+        $@"SELECT alter_job(
+    j.job_id,
+    config => jsonb_set(j.config, '{{compress_after}}', to_jsonb($2::text)),
+    schedule_interval => INTERVAL '{AggregateCompressionScheduleInterval}',
+    fixed_schedule => true,
+    initial_start => (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day' + ($3::int * INTERVAL '1 hour') + ($4::int * INTERVAL '1 minute')) AT TIME ZONE 'UTC')
+FROM timescaledb_information.jobs AS j
+WHERE j.job_id = $1::integer";
+
+    /// <summary>
+    /// One aggregate as the ensure read it: what the store holds for it right now.
+    /// </summary>
+    public sealed record AggregateCompressionState(
+        string View,
+        bool CompressionEnabled,
+        int? JobId,
+        long? CompressAfterSeconds,
+        long? ScheduleIntervalSeconds,
+        bool FixedSchedule,
+        int? PhaseHour,
+        int? PhaseMinute,
+        long MaterializationBytes,
+        long EligibleChunksNow);
+
+    /// <summary>
+    /// THE STAGING (#3581): which night each aggregate that still needs a compression policy gets its FIRST run
+    /// — one aggregate per night, largest first, and every aggregate with nothing to compress on night zero.
+    /// Returns <c>(view, nightOffset)</c> in the order the policies should be created.
+    ///
+    /// <para><b>Why a first run is the heavy event and a steady-state run is not.</b> A compression policy's
+    /// first run compresses EVERY chunk older than <c>compress_after</c>, one chunk per transaction, in one
+    /// pass. On a store that has been materializing for weeks that is the whole aggregate minus its newest
+    /// <see cref="AggregateCompressMarginSpan"/> — on the largest production store, four Query Store aggregates
+    /// of 71.5, 55.6, 54.7 and 33.5 GiB, ~235 GiB across all twenty. Every run after the first finds at most the
+    /// chunks that aged in since yesterday. So the question the staging answers is only ever about the first
+    /// run, and it answers it the way #3581 ruled: one aggregate's backlog per night, so each night's rewrite
+    /// is one bounded relation and the phase grid's runtime watch (#3044/#3166) sees the effect of one before
+    /// the next begins.</para>
+    ///
+    /// <para><b>Largest first, by measured materialization size.</b> The largest aggregate is the one whose
+    /// backlog pass costs the most and saves the most disk; taking it first front-loads the saving onto the
+    /// store that needs it and puts the biggest single night where the operator is watching most closely —
+    /// the first one. Size is read from the store (<see cref="AggregateCompressionStateSql"/>) rather than
+    /// assumed from the registry, because which aggregate is largest is a property of the workload: on a store
+    /// with no writable Query Store primary the Query Store family is empty and the query_stats rollups
+    /// lead.</para>
+    ///
+    /// <para><b>Nothing to compress means night zero, not a place in the queue.</b> An aggregate with no chunk
+    /// past its <c>compress_after</c> — every aggregate on a fresh store, and the empty ones on any store — has
+    /// no backlog pass to stage, so its policy simply starts tomorrow and finds nothing. A fresh store therefore
+    /// gets all twenty policies at once, exactly as the ruling asks, with no special case: the queue is empty
+    /// and everything is on night zero.</para>
+    ///
+    /// <para><b>Carried by the schedule, not by state.</b> The nights are written into each policy's
+    /// <c>initial_start</c> when it is created, so the plan is visible in <c>timescaledb_information.jobs</c>
+    /// (<c>next_start</c> reads as consecutive calendar days) and survives a restart with nothing to remember —
+    /// the alternative, adding one policy per daily tick, needs a tick the startup path does not have and a
+    /// cursor that a restart mid-sequence would have to recover. The one thing this shape does not do is
+    /// re-plan around a partial failure: a start that created ten of twenty policies and lost its connection
+    /// stages the remaining ten from night zero on the next start, so up to two aggregates can share a night
+    /// on that path, each still at its own hour. That is the bounded, visible consequence and it is accepted
+    /// over a stateful cursor.</para>
+    ///
+    /// <para>Pure — no clock, no catalog — so the order pins directly, and ties on size break on registry
+    /// order so the result is deterministic on a store where two empty aggregates read the same bytes.</para>
+    /// </summary>
+    public static IReadOnlyList<(string View, int NightOffset)> StageAggregateCompressionNights(
+        IReadOnlyList<AggregateCompressionState> needingPolicy)
+    {
+        if (needingPolicy is null)
+        {
+            throw new ArgumentNullException(nameof(needingPolicy));
+        }
+
+        var registryIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var index = 0; index < AggregateCompressionTargets.Count; index++)
+        {
+            registryIndex[AggregateCompressionTargets[index].View] = index;
+        }
+
+        var staged = new List<(string View, int NightOffset)>();
+
+        var night = 0;
+        foreach (var state in needingPolicy
+            .Where(s => s.EligibleChunksNow > 0)
+            .OrderByDescending(s => s.MaterializationBytes)
+            .ThenBy(s => registryIndex.TryGetValue(s.View, out var at) ? at : int.MaxValue))
+        {
+            staged.Add((state.View, night++));
+        }
+
+        foreach (var state in needingPolicy
+            .Where(s => s.EligibleChunksNow <= 0)
+            .OrderBy(s => registryIndex.TryGetValue(s.View, out var at) ? at : int.MaxValue))
+        {
+            staged.Add((state.View, 0));
+        }
+
+        return staged;
+    }
+
+    /* ─────────────── materialization chunk width (#3620) ─────────────── */
+
+    /// <summary>
+    /// The chunk interval every continuous aggregate's materialization hypertable is held at: ONE raw chunk,
+    /// <see cref="ChunkIntervalDays"/>, as a span. Derived from the constant rather than written as a day so the
+    /// raw tables and their rollups cannot disagree — a store whose raw tier moved to a different width would
+    /// move its materializations with it on the next start.
+    /// </summary>
+    public static TimeSpan MaterializationChunkIntervalSpan => TimeSpan.FromDays(ChunkIntervalDays);
+
+    /// <summary>The interval literal <see cref="SetMaterializationChunkIntervalSql(string)"/> interpolates, rendered
+    /// through the same whole-days renderer the compression windows use.</summary>
+    public static string MaterializationChunkInterval => WholeDaysInterval(MaterializationChunkIntervalSpan);
+
+    /// <summary>
+    /// Every registered aggregate's CURRENT materialization chunk interval, in seconds, keyed by view name.
+    /// <c>timescaledb_information.dimensions</c> carries one <c>time_interval</c> per hypertable dimension; a
+    /// materialization has exactly one, its time dimension, and the join is on the materialization identity
+    /// because that is the only name the dimensions view knows an aggregate by (the same rule as the chunk
+    /// counts in <see cref="AggregateCompressionStateSql"/>). Seconds rather than the interval itself so the
+    /// comparison is an integer equality in C# against <see cref="MaterializationChunkIntervalSpan"/>, and a
+    /// session setting cannot change how the interval renders.
+    /// </summary>
+    public static string MaterializationChunkIntervalStateSql =>
+        @"
+SELECT
+    ca.view_name,
+    EXTRACT(EPOCH FROM d.time_interval)::bigint AS chunk_interval_seconds
+FROM timescaledb_information.continuous_aggregates AS ca
+JOIN timescaledb_information.dimensions AS d
+  ON  d.hypertable_schema = ca.materialization_hypertable_schema
+  AND d.hypertable_name = ca.materialization_hypertable_name
+  AND d.dimension_type = 'Time'
+WHERE ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// Moves ONE aggregate's materialization hypertable onto <see cref="MaterializationChunkInterval"/>. The
+    /// materialization is resolved from the catalog inside the statement — its schema and name are TimescaleDB's
+    /// (<c>_timescaledb_internal._materialized_hypertable_N</c>), never stable across stores, so the view name
+    /// from the registry is the only identity this file should carry. <c>set_chunk_time_interval</c> affects
+    /// chunks created AFTER the call and nothing else — measured on 2.28.1: existing chunks keep their range,
+    /// the aggregate's refresh, compression and retention jobs read back byte-identical, and re-running with the
+    /// interval the hypertable already has is a no-op — but the ensure still gates it on the catalog so a
+    /// settled store issues no statement at all.
+    /// </summary>
+    public static string SetMaterializationChunkIntervalSql(string view)
+    {
+        _ = AggregateCompressionTargetFor(view);
+        return $@"SELECT set_chunk_time_interval(
+    format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass,
+    INTERVAL '{MaterializationChunkInterval}')
+FROM timescaledb_information.continuous_aggregates AS ca
+WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'";
+    }
+
+    /// <summary>
+    /// Holds every registered aggregate's materialization at one raw chunk of width (#3620). Idempotent under
+    /// the catalog — a settled store reads <c>timescaledb_information.dimensions</c> once and issues nothing —
+    /// and failure-isolated per aggregate. Returns the number of materializations whose interval this call
+    /// changed. Called first thing by <see cref="EnsureAggregateCompressionAsync"/>, so the order the worker
+    /// sees is: aggregates exist → chunk width set → compression enabled and scheduled.
+    ///
+    /// <para><b>The default this overrides, measured on 2.28.1.</b> TimescaleDB sizes a first-level continuous
+    /// aggregate's materialization chunks at TEN TIMES the raw hypertable's chunk interval as it stands at
+    /// creation (1-day raw → 10-day, 2-day → 20-day, 3-day → 30-day), and a hierarchical aggregate's at exactly
+    /// its PARENT materialization's interval as it stands at creation (a parent set to 5 days yields a 5-day
+    /// daily; a parent at 1 day yields a 1-day daily). On an untouched store the two rules agree — the parent is
+    /// already root × 10 — which is why the #3581 rig read the dailies as inheriting from the root. Nothing in
+    /// this file ever set the materializations' interval, so every one of the twenty aggregates on every store
+    /// carries 10-day chunks: on the largest production store all twenty read <c>10 days</c>, the interval-dedup
+    /// tiers in two chunks spanning twenty days and the rest in four spanning forty.</para>
+    ///
+    /// <para><b>The two consequences, with that store's numbers.</b> First, retention over-holds:
+    /// <c>drop_chunks</c> removes a chunk only once its WHOLE range is past the horizon, so a 7-day tier on
+    /// 10-day chunks holds between 7 and 17 days of rows at any moment (the 7-day
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/> was holding Sep 4 → Sep 24 in two chunks, ~14 days) and
+    /// the 10-day tier between 10 and 20 — tiers that are "internal plumbing sized only to outlive what gates on
+    /// them" (#1958) holding roughly double their design, and a per-day ingest figure derived from their size at
+    /// the assumed width reading ~2× high. Second, compression reaches less than #3581 projected: a policy
+    /// compresses a chunk only once its whole range is past <c>compress_after</c>, so with a 10-day head chunk
+    /// the newest ~10 days of every aggregate stay uncompressed regardless of a 2-day window — ~11% of a 90-day
+    /// tier, but most of a 7-day one, whose only compressible chunk is the one already past the horizon's edge.
+    /// Both were reasoned about as if the chunks were a day wide.</para>
+    ///
+    /// <para><b>Why one raw chunk.</b> It is the granularity every raw table already has
+    /// (<see cref="ChunkIntervalDays"/>), the granularity retention and compression both act at (chunks close at
+    /// UTC midnight; eligibility flips at UTC midnight), and the unit the whole compression derivation on
+    /// <see cref="AggregateCompressMarginSpan"/> is stated in. It does not touch the disjointness argument #3581
+    /// pinned: a chunk compresses only when its whole range is past <c>compress_after</c>, which holds at any
+    /// width, and the daily tier's 3-day refresh <c>start_offset</c> reads hourly rows by bucket, not by chunk.
+    /// The cost is ten times as many materialization chunks — a few hundred rather than a few dozen, inside
+    /// what the raw tier already carries across ~70 hypertables — and one more job-free catalog read per start.</para>
+    ///
+    /// <para><b>The honest side-effect: convergence is gradual, not immediate.</b> Existing 10-day chunks keep
+    /// their range and age out on their own schedule; only chunks created after this runs are a day wide. So the
+    /// interval tiers' VISIBLE hold tightens toward its designed 7 / 10 days over roughly two weeks as the old
+    /// chunks drop — a one-time ~5–10 GiB reclaim on the largest store, spread over that fortnight — and
+    /// #3581's compression reaches everything older than <c>compress_after</c> + 1 day instead of + 10 on the
+    /// same timetable. Modest movement on the first nights after this ships is the expected shape, not evidence
+    /// against either change.</para>
+    ///
+    /// <para><b>All twenty, every start, under the catalog check</b> — not only the first-level aggregates.
+    /// The creation sweep (<see cref="EnsureContinuousAggregatesAsync"/>) builds every aggregate BEFORE this
+    /// runs, so on a fresh store the hierarchical dailies inherit 10 days from hourlies that have not been
+    /// narrowed yet; on an existing store they already carry it. Setting each one directly is correct under
+    /// either inheritance rule and costs nothing on a settled store.</para>
+    /// </summary>
+    public static async Task<int> EnsureMaterializationChunkIntervalAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var currentSeconds = new Dictionary<string, long>(StringComparer.Ordinal);
+        try
+        {
+            using var probe = new NpgsqlCommand(MaterializationChunkIntervalStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(0);
+                if (!IsAggregateCompressionTarget(view) || reader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                currentSeconds[view] = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "TimescaleDB: could not read the continuous aggregates' materialization chunk intervals, so none was changed this start — new materialization chunks keep whatever width the store gives them (ten raw chunks, by default) until the next start reads it: {Message}",
+                ex.Message);
+            return 0;
+        }
+
+        var wantedSeconds = (long)MaterializationChunkIntervalSpan.TotalSeconds;
+        var atTarget = 0;
+        var changed = 0;
+        var absent = new List<string>();
+
+        foreach (var (_, view, _) in AggregateCompressionTargets)
+        {
+            if (!currentSeconds.TryGetValue(view, out var seconds))
+            {
+                /* The creation sweep is failure-isolated per aggregate and has already warned about this one. */
+                absent.Add(view);
+                continue;
+            }
+
+            if (seconds == wantedSeconds)
+            {
+                atTarget++;
+                continue;
+            }
+
+            try
+            {
+                using var set = new NpgsqlCommand(SetMaterializationChunkIntervalSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                await set.ExecuteNonQueryAsync(cancellationToken);
+                atTarget++;
+                changed++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: continuous aggregate {View}'s materialization now chunks at {Interval} (was {WasDays:0.#} days) — existing chunks keep their range and age out on their own schedule; only chunks created from now on are one raw chunk wide, so its retention tier converges to its designed hold and its compression policy reaches its newest days over the next couple of weeks, not tonight (#3620).",
+                    view, MaterializationChunkInterval, seconds / 86400d);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not set continuous aggregate {View}'s materialization chunk interval to {Interval} — its new chunks keep the store's default width ({WasDays:0.#} days), so its retention tier keeps over-holding and its compression policy keeps missing its newest chunk, until the next restart retries (often a permission issue: the store login must own the materialization): {Message}",
+                    view, MaterializationChunkInterval, seconds / 86400d, ex.Message);
+            }
+        }
+
+        /* The #1958 shape: the count that matters (how many are at the designed width), what this start did about
+           it, and the interval interpolated rather than restated. */
         logger?.LogInformation(
-            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly history CAGGs {Hourly}, baseline CAGGs {Baseline}, internal interval-dedup tiers {Interval} hourly and {IntervalDaily} daily; the daily history CAGGs carry no policy and are kept indefinitely)",
-            applied, RetentionPolicies.Count, armed, held, indeterminate, converged,
-            RawRetentionInterval, HourlyRetentionInterval, BaselineRetentionInterval, IntervalRetentionInterval, IntervalDailyRetentionInterval);
-        return applied;
+            "TimescaleDB: {AtTarget}/{Total} materializations chunked at {Interval} (one raw chunk, ChunkIntervalDays), {Changed} changed this start, {Absent} aggregate(s) absent: {AbsentViews}",
+            atTarget, AggregateCompressionTargets.Count, MaterializationChunkInterval, changed, absent.Count, absent.Count == 0 ? "none" : string.Join(", ", absent));
+
+        return changed;
+    }
+
+    /* ─────────────── interval-dedup materialization indexes (#3597) ─────────────── */
+
+    /// <summary>
+    /// The per-GROUP-BY-column indexes TimescaleDB's default <c>create_group_indexes</c> built on
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/>'s materialization hypertable, resolved from the catalog
+    /// by SHAPE rather than by name: a btree on the materialization whose key is exactly one column followed by
+    /// <c>bucket DESC</c>. The bucket index (<c>(bucket DESC)</c> alone) does not match and stays — the refresh's
+    /// DELETE, the coverage probe's <c>min(bucket)</c> and the children's bucket-range reads all use it. The
+    /// materialization's schema and name are TimescaleDB's (<c>_timescaledb_internal._materialized_hypertable_N</c>),
+    /// never stable across stores, so the statement resolves them from the view name, the same rule as
+    /// <see cref="SetMaterializationChunkIntervalSql"/>. Hypertable-level indexes only (<c>pg_indexes</c> on the
+    /// parent): dropping the parent drops every chunk's copy, so the per-chunk names never need to be known —
+    /// they are read here only to SIZE what a drop releases, and for that the naming convention is the only
+    /// map 2.28.1 offers (no catalog row and no <c>pg_inherits</c>/<c>pg_depend</c> edge ties a chunk's copy to
+    /// its parent index): a copy is named <c>&lt;chunk&gt;_&lt;parent index&gt;</c> truncated to 63 characters.
+    /// A copy TimescaleDB had to suffix to keep unique after truncation is missed by that join, which
+    /// understates the logged figure and changes nothing else.
+    /// </summary>
+    public static string IntervalDedupMaterializationGroupIndexesSql =>
+        $@"
+SELECT
+    i.schemaname,
+    i.indexname,
+    i.indexdef,
+    pg_relation_size(format('%I.%I', i.schemaname, i.indexname)::regclass)
+      + COALESCE((SELECT sum(pg_relation_size(format('%I.%I', ci.schemaname, ci.indexname)::regclass))
+                  FROM timescaledb_information.chunks AS ch
+                  JOIN pg_indexes AS ci
+                    ON  ci.schemaname = ch.chunk_schema
+                    AND ci.tablename = ch.chunk_name
+                    AND ci.indexname = left(ch.chunk_name || '_' || i.indexname, 63)
+                  WHERE ch.hypertable_schema = ca.materialization_hypertable_schema
+                  AND   ch.hypertable_name = ca.materialization_hypertable_name), 0) AS bytes
+FROM timescaledb_information.continuous_aggregates AS ca
+JOIN pg_indexes AS i
+  ON  i.schemaname = ca.materialization_hypertable_schema
+  AND i.tablename = ca.materialization_hypertable_name
+WHERE ca.view_schema = 'collect'
+AND   ca.view_name = '{QueryStoreStatsIntervalHourlyView}'
+AND   i.indexdef ~ 'USING btree \([a-z_]+, bucket DESC\)$'
+ORDER BY i.indexname";
+
+    /// <summary>
+    /// The lock wait the index drops below will tolerate before giving the start back, as a PostgreSQL
+    /// <c>lock_timeout</c> literal. <c>DROP INDEX</c> takes <c>AccessExclusiveLock</c> on the materialization and
+    /// its chunks, and the hourly refresh that this exists to lighten holds <c>RowExclusiveLock</c> on the same
+    /// relation for its whole run — up to fifteen minutes on the largest store. A drop that queued behind it
+    /// would not merely wait: a QUEUED exclusive request blocks every later shared request too (the convoy
+    /// <see cref="HourlyRefreshStartOffset"/> documents), so the three child aggregates' refreshes and the
+    /// coverage probe would pile up behind a lock that was only requested. Ten seconds is long enough for the
+    /// lock to be free whenever no refresh is running and short enough that a running refresh costs this start
+    /// nothing but a warning; the next start retries. Set with <c>SET LOCAL</c> inside each drop's own
+    /// transaction, so it never outlives the statement it guards.
+    /// </summary>
+    public const string IntervalDedupIndexDropLockTimeout = "10s";
+
+    /// <summary>
+    /// Drops the per-column group indexes an earlier build's <c>CREATE MATERIALIZED VIEW</c> left on
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/>'s materialization (#3597), so an existing store reaches
+    /// the shape <see cref="CreateQueryStoreStatsIntervalHourlySql"/>'s <c>create_group_indexes = false</c> gives
+    /// a fresh one. Idempotent under the catalog — a settled store reads <c>pg_indexes</c> once and issues
+    /// nothing — and failure-isolated per index. Returns the number of indexes dropped this start.
+    ///
+    /// <para><b>What was measured and what was not, stated apart because the lever is licensed by the first
+    /// and not the second.</b> The refresh's cost per re-materialized bucket was measured with and without
+    /// these indexes on a rig at one tenth of the largest store's scale (the figures are on
+    /// <see cref="CreateQueryStoreStatsIntervalHourlySql"/>): 4.3x the WAL, 1.19 M extra buffer touches and
+    /// 108x the dirtied buffers per bucket with them, from twelve index inserts per row where one suffices.
+    /// That is the write amplification, and it is a property of the statement, not of the rig. What the rig
+    /// could NOT reproduce is the production I/O regime — its indexes fit in shared buffers, so its wall clock
+    /// barely moved — and so this file does not claim a refresh-duration figure for the largest store. The
+    /// issue's own <c>job_history</c> series after this lands is that measurement; the trough value
+    /// (276–286 s at the quietest hours, when only the newly-closed bucket is dirty) is the per-bucket floor
+    /// this should lower.</para>
+    ///
+    /// <para><b>Why a drop at startup rather than a recreate.</b> The option that keeps a fresh store from
+    /// building these speaks only at CREATE, and recreating the aggregate would discard seven days of
+    /// materialization the corrected tiers are gated on. <c>DROP INDEX</c> on the parent hypertable is
+    /// transactional, propagates to every chunk, and is measured harmless to what remains: the hourly refresh,
+    /// the three child aggregates' refreshes, <c>compress_chunk</c> on a materialization chunk and
+    /// <c>decompress_chunk</c> all ran unchanged on the rig with the bucket index alone.</para>
+    ///
+    /// <para><b>Ordering.</b> After <see cref="EnsureContinuousAggregatesAsync"/> (the aggregate must exist)
+    /// and before <see cref="EnsureAggregateCompressionAsync"/> (so the nightly compression pass compresses a
+    /// relation that is already smaller). Under a <see cref="IntervalDedupIndexDropLockTimeout"/> so a refresh
+    /// in flight at startup is yielded to rather than convoyed — that arm logs at Warning and the next start
+    /// retries, which on an hourly grid is at most one refresh away from succeeding.</para>
+    /// </summary>
+    public static async Task<int> EnsureIntervalDedupMaterializationIndexesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var indexes = new List<(string Schema, string Name, string Definition, long Bytes)>();
+        try
+        {
+            using var probe = new NpgsqlCommand(IntervalDedupMaterializationGroupIndexesSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                indexes.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "TimescaleDB: could not read {View}'s materialization indexes, so none was dropped this start — its hourly refresh keeps paying twelve index inserts per re-materialized row until the next start reads it (#3597): {Message}",
+                QueryStoreStatsIntervalHourlyView, ex.Message);
+            return 0;
+        }
+
+        if (indexes.Count == 0)
+        {
+            logger?.LogInformation(
+                "TimescaleDB: {View}'s materialization carries no per-column group index — the bucket index alone, the shape its refresh is cheapest in (#3597)",
+                QueryStoreStatsIntervalHourlyView);
+            return 0;
+        }
+
+        var dropped = 0;
+        long freed = 0;
+        foreach (var (schema, name, definition, bytes) in indexes)
+        {
+            /* One transaction per index, each with its own lock timeout: a drop that cannot get its lock leaves
+               the others untried THIS start rather than half-done, because the convoy argument on the timeout
+               constant applies to every one of them equally — if the first is blocked by a refresh, so are the
+               rest, and eleven ten-second waits is a startup stalled for two minutes behind a lock it decided
+               not to wait for. */
+            try
+            {
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{IntervalDedupIndexDropLockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await timeout.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                using (var drop = new NpgsqlCommand($"DROP INDEX IF EXISTS {QuoteIdentifier(schema)}.{QuoteIdentifier(name)}", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await drop.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
+                dropped++;
+                freed += bytes;
+                logger?.LogInformation(
+                    "TimescaleDB: dropped {Index} ({SizeMiB:0.#} MiB across the materialization and its chunks) from {View}'s materialization — a per-column group index nothing read, whose maintenance every hourly refresh paid on every re-materialized row (#3597). Definition was: {Definition}",
+                    name, bytes / 1048576d, QueryStoreStatsIntervalHourlyView, definition);
+            }
+            catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.LockNotAvailable, StringComparison.Ordinal))
+            {
+                logger?.LogWarning(
+                    "TimescaleDB: {Index} on {View}'s materialization could not be dropped within {Timeout} — its hourly refresh is holding the relation, and waiting would queue every reader behind this drop; the remaining {Remaining} group index(es) are left for the next start rather than each waiting its own turn (#3597).",
+                    name, QueryStoreStatsIntervalHourlyView, IntervalDedupIndexDropLockTimeout, indexes.Count - dropped);
+                break;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "TimescaleDB: could not drop {Index} from {View}'s materialization — its refresh keeps maintaining it until the next restart retries (often a permission issue: the store login must own the materialization) (#3597): {Message}",
+                    name, QueryStoreStatsIntervalHourlyView, ex.Message);
+            }
+        }
+
+        logger?.LogInformation(
+            "TimescaleDB: {Dropped}/{Found} per-column group index(es) dropped from {View}'s materialization this start, {FreedMiB:0.#} MiB released; {Remaining} remain (#3597)",
+            dropped, indexes.Count, QueryStoreStatsIntervalHourlyView, freed / 1048576d, indexes.Count - dropped);
+
+        return dropped;
+    }
+
+    /// <summary>Double-quotes one SQL identifier, doubling any embedded quote — the catalog names the
+    /// drops above interpolate are TimescaleDB's own, but a name is a name and gets quoted.</summary>
+    private static string QuoteIdentifier(string identifier)
+        => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+
+    /// <summary>
+    /// Puts every continuous aggregate this product owns on the compression ladder (#3581): enables columnar
+    /// compression on each materialization, attaches a once-a-day compression policy on the daily band, stages
+    /// the first runs one aggregate per night largest first, and converges any policy an earlier build left on
+    /// different values. Idempotent under the catalog — a settled store runs no ALTER, adds no policy and
+    /// alters no job — and failure-isolated per aggregate, the <see cref="EnsureRetentionPoliciesAsync"/>
+    /// shape. Returns the number of aggregates with a compression policy in place afterwards.
+    ///
+    /// <para><b>The omission this closes, with the production numbers that set its stakes.</b> Every raw
+    /// hypertable has compressed since the archival tier existed (<see cref="CompressAfterDays"/>); no
+    /// continuous aggregate ever did, and nothing in this file said so — an omission, not a decision. On the
+    /// largest production store the twenty materializations were 235 GiB of a 415 GiB database with every one
+    /// reading <c>compression_enabled = false</c>: the four Query Store aggregates alone 71.5 / 55.6 / 54.7 /
+    /// 33.5 GiB against a raw <c>query_store_stats</c> of 25 GiB compressing at ~9x, because the hourly grain is
+    /// only a ~4x row reduction and an uncompressed rollup of a 9x-compressed source is LARGER than the source.
+    /// The 90-day hourly tier was a month into its first fill, so uncompressed the store was on course for a
+    /// 600–650 GB plateau in mid-November; at the raw tier's measured ratio the same plateau is ~200 GB. The
+    /// rig reproduces the shape in miniature — 1,056 MB of raw compressing to 32 MB while its five Query Store
+    /// aggregates held 110 / 110 / 179 / 148 / 5 MB uncompressed — and the aggregates compressed at 10.1x to
+    /// 18.6x once enabled.</para>
+    ///
+    /// <para><b>A startup ensure, not a schema rung</b>, for the reason the retention and raw-compression
+    /// policies are: <c>ALTER MATERIALIZED VIEW ... SET (timescaledb.compress ...)</c> is idempotent under a
+    /// catalog check and <c>add_compression_policy</c> has <c>if_not_exists</c>, so this re-converges on every
+    /// start and contends for nothing on the migration ladder.</para>
+    ///
+    /// <para><b>Ordering.</b> MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> — the aggregates have
+    /// to exist; it then sets their materializations' chunk width (<see cref="EnsureMaterializationChunkIntervalAsync"/>)
+    /// before anything else, and compression has to be enabled on a materialization BEFORE a policy is attached to it (the
+    /// ALTER precedes the <c>add_compression_policy</c> inside each aggregate's own try, so a failed ALTER costs
+    /// that aggregate its policy too rather than attaching a policy to an uncompressible relation). It runs
+    /// BEFORE <see cref="EnsureRetentionPoliciesAsync"/> only because that is where the raw tier's compression
+    /// sits relative to its retention; nothing here depends on the retention sweep either way.</para>
+    ///
+    /// <para><b>The materialization chunk width, which this design is correct at either value of and which
+    /// <see cref="EnsureMaterializationChunkIntervalAsync"/> now holds at one raw chunk (#3620).</b> Left to
+    /// TimescaleDB, a materialization's chunks are ten times the raw hypertable's interval — measured on 2.28.1:
+    /// a 1-day raw table yields 10-day materialization chunks, hierarchical aggregates take their parent's width
+    /// (see that method for the exact rule). #3581's staging note describes the production backlog as "~60 1-day
+    /// chunks" per aggregate; a store whose raw tables were created with <see cref="ChunkIntervalDays"/> = 1 had
+    /// 10-day materialization chunks instead. The separation argument on
+    /// <see cref="AggregateCompressMarginSpan"/> holds at any width, because a chunk compresses only when its
+    /// whole range is past <c>compress_after</c>. What changes with the width is the SHAPE of the work: at 1-day
+    /// chunks each aggregate compresses one day's chunk every night and the 7-day interval tier spends five of
+    /// its seven days compressed; at 10-day chunks each aggregate compresses one 10-day chunk every tenth
+    /// night, a 10-day chunk of the 7-day tier lives seventeen days and is compressed for the last five of
+    /// them, and the 90-day tiers hold up to 100 days. This ensure therefore narrows the width FIRST, so every
+    /// chunk the policies it attaches will ever see created is a day wide; the 10-day chunks a store already
+    /// holds keep their range and compress on the tenth-night shape until they age out.</para>
+    ///
+    /// <para><b>Concurrency with the rest of the store.</b> A compression run holds <c>AccessShareLock</c> on
+    /// the materialization and escalates only on the chunk it rewrites
+    /// (<see cref="AggregateCompressionBandMinute"/>), so it cannot block the aggregate's own refresh; a
+    /// hierarchical daily's refresh READS the compressed hourly region (measured at 578 ms for three days on
+    /// the rig, working) and a reader of the chunk being swapped waits for the swap. The daily refreshes and the
+    /// nightly purge (<c>DarlingWorker</c>'s <c>_nextPurgeUtc</c>, anchored to service start) run at drifting
+    /// or per-process instants that no fixed band can avoid by construction; the purge is chunk drops on a
+    /// TimescaleDB store and the refreshes are read-only against these chunks, so neither is a lock hazard, and
+    /// that is stated rather than papered over with a schedule that claims to dodge them.</para>
+    ///
+    /// <para><b>What the raw converge must not do to these jobs</b> is handled on its side:
+    /// <see cref="ConvergeCompressionScheduleAsync(NpgsqlConnection, ILogger, CancellationToken)"/> skips every
+    /// <see cref="IsAggregateCompressionTarget"/> job, because its cadence test would otherwise retune this
+    /// family to the hourly tick on the first start after it exists. The stuck-job check (#1581/#3575) covers
+    /// these jobs as it covers every compression job, with a <see cref="StuckRunningBound"/> of 48 hours at this
+    /// cadence, and its samples at <c>:30</c> of the minute stay off these jobs' <c>:00</c> starts exactly as
+    /// they stay off the raw band's.</para>
+    ///
+    /// <para><b>The summary line names every aggregate and its window</b>, the #1958 way: an operator
+    /// cross-checking it against <c>timescaledb_information.jobs</c> should meet every job it promises and no
+    /// job it does not.</para>
+    /// </summary>
+    public static async Task<int> EnsureAggregateCompressionAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        /* Width before policies (#3620): the chunk interval governs only chunks created from now on, so the
+           earlier it is set the fewer 10-day chunks the compression policies below ever have to wait out. Its own
+           read, its own per-aggregate isolation, its own summary line; a failure there costs no aggregate its
+           compression. */
+        await EnsureMaterializationChunkIntervalAsync(connection, logger, cancellationToken);
+
+        var states = new Dictionary<string, AggregateCompressionState>(StringComparer.Ordinal);
+        try
+        {
+            using var probe = new NpgsqlCommand(AggregateCompressionStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(0);
+                if (!IsAggregateCompressionTarget(view))
+                {
+                    continue;
+                }
+
+                var hourly = AggregateCompressionTargetFor(view).Hourly;
+                states[view] = new AggregateCompressionState(
+                    View: view,
+                    CompressionEnabled: !reader.IsDBNull(1) && reader.GetBoolean(1),
+                    JobId: reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture),
+                    CompressAfterSeconds: reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                    ScheduleIntervalSeconds: reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                    FixedSchedule: !reader.IsDBNull(5) && reader.GetBoolean(5),
+                    PhaseHour: reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                    PhaseMinute: reader.IsDBNull(7) ? null : reader.GetInt32(7),
+                    MaterializationBytes: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8), CultureInfo.InvariantCulture),
+                    EligibleChunksNow: Convert.ToInt64(reader.GetValue(hourly ? 9 : 10), CultureInfo.InvariantCulture));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A plain-PostgreSQL store, or a catalog too old for one of these columns. The caller already gates
+               on the extension; with no state there is nothing safe to add, and a warning names the cost. */
+            logger?.LogWarning(
+                "TimescaleDB: could not read the continuous aggregates' compression state, so none was enabled or converged this start — the aggregates keep whatever they have (uncompressed, on a store that never had this build) until the next start reads it: {Message}",
+                ex.Message);
+            return 0;
+        }
+
+        var enabled = 0;
+        var needingPolicy = new List<AggregateCompressionState>();
+        var absent = new List<string>();
+
+        foreach (var (_, view, _) in AggregateCompressionTargets)
+        {
+            if (!states.TryGetValue(view, out var state))
+            {
+                /* The creation sweep is failure-isolated per aggregate and has already warned about this one;
+                   there is no materialization to compress. Named in the summary rather than re-warned. */
+                absent.Add(view);
+                continue;
+            }
+
+            try
+            {
+                if (!state.CompressionEnabled)
+                {
+                    using var enable = new NpgsqlCommand(EnableAggregateCompressionSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await enable.ExecuteNonQueryAsync(cancellationToken);
+                    state = state with { CompressionEnabled = true };
+                    states[view] = state;
+                }
+
+                enabled++;
+
+                if (state.JobId is null)
+                {
+                    needingPolicy.Add(state);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Compression could not be enabled on continuous aggregate {View} — it stays uncompressed, at its full materialized size, until the next restart retries: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        var added = 0;
+        var stagedLines = new List<string>();
+        foreach (var (view, nightOffset) in StageAggregateCompressionNights(needingPolicy))
+        {
+            try
+            {
+                using var policy = new NpgsqlCommand(AddAggregateCompressionPolicySql(view, nightOffset), connection) { CommandTimeout = SetupTimeoutSeconds };
+                var jobId = Convert.ToInt32(await policy.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+                added++;
+
+                var state = states[view];
+                var hour = AggregateCompressionBandHourFor(view);
+                stagedLines.Add($"{view} night {nightOffset} at {hour:00}:{AggregateCompressionBandMinute:00}Z ({FormatGiB(state.MaterializationBytes)}, {state.EligibleChunksNow} chunk(s) eligible now)");
+
+                logger?.LogInformation(
+                    "TimescaleDB: continuous aggregate {View} ({Size}) gets a once-a-day compression policy (job {JobId}, compress_after {CompressAfter}) at {Hour:00}:{Minute:00}Z, first running {Nights} night(s) after the next UTC midnight — {Eligible} chunk(s) are past the window now and that first run compresses all of them, chunk by chunk, in one pass (#3581).",
+                    view, FormatGiB(state.MaterializationBytes), jobId, AggregateCompressAfterFor(view), hour, AggregateCompressionBandMinute, nightOffset, state.EligibleChunksNow);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Compression policy for continuous aggregate {View} failed — compression is enabled on it but nothing compresses its chunks until the next restart retries: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        var converged = 0;
+        foreach (var state in states.Values)
+        {
+            if (state.JobId is not int jobId)
+            {
+                continue;
+            }
+
+            var wantedSeconds = (long)AggregateCompressAfterSpanFor(state.View).TotalSeconds;
+            var wantedCadence = (long)AggregateCompressionScheduleSpan.TotalSeconds;
+            int wantedHour;
+            try
+            {
+                wantedHour = AggregateCompressionBandHourFor(state.View);
+            }
+            catch (InvalidOperationException ex)
+            {
+                logger?.LogWarning("Continuous aggregate {View}'s compression policy cannot be placed on the daily band: {Message}", state.View, ex.Message);
+                continue;
+            }
+
+            if (state.CompressAfterSeconds == wantedSeconds
+                && state.ScheduleIntervalSeconds == wantedCadence
+                && state.FixedSchedule
+                && state.PhaseHour == wantedHour
+                && state.PhaseMinute == AggregateCompressionBandMinute)
+            {
+                continue;
+            }
+
+            try
+            {
+                using var alter = new NpgsqlCommand(SetAggregateCompressionPolicySql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                alter.Parameters.AddWithValue(jobId);
+                alter.Parameters.AddWithValue(AggregateCompressAfterFor(state.View));
+                alter.Parameters.AddWithValue(wantedHour);
+                alter.Parameters.AddWithValue(AggregateCompressionBandMinute);
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+                converged++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: moved {View}'s compression policy (job {JobId}) onto compress_after {CompressAfter}, a {Cadence} cadence and a fixed {Hour:00}:{Minute:00}Z schedule (was {WasSeconds}s of compress_after, {WasCadence}s of cadence, fixed_schedule={WasFixed}, {WasHour}:{WasMinute}) — add_compression_policy does not update a policy that already exists (#3581).",
+                    state.View, jobId, AggregateCompressAfterFor(state.View), AggregateCompressionScheduleInterval, wantedHour, AggregateCompressionBandMinute,
+                    state.CompressAfterSeconds, state.ScheduleIntervalSeconds, state.FixedSchedule, state.PhaseHour, state.PhaseMinute);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not converge {View}'s compression policy (job {JobId}) onto the shipped window and band — it keeps its old values (often a permission issue: the store login must own the job): {Message}",
+                    state.View, jobId, ex.Message);
+            }
+        }
+
+        var inPlace = states.Values.Count(s => s.JobId is not null) + added;
+        var hourlyTier = AggregateCompressionTargets.Where(t => t.Hourly).Select(t => t.View).ToArray();
+        var dailyTier = AggregateCompressionTargets.Where(t => !t.Hourly).Select(t => t.View).ToArray();
+
+        /* EVERY aggregate is named with its window, and the windows are interpolated rather than restated
+           (#1958's rule for the retention line): an operator cross-checking timescaledb_information.jobs meets
+           thirteen policies at one compress_after and seven at another, and a line that said "the aggregates
+           compress after 2 days" would be a universal claim with seven counterexamples in the catalog. */
+        logger?.LogInformation(
+            "TimescaleDB: continuous-aggregate compression on {Enabled}/{Total} aggregates, {InPlace} once-a-day policies in place ({Added} added this start, {Converged} converged, {Absent} aggregate(s) absent: {AbsentViews}) — compress_after {HourlyAfter} for the hourly-refreshed tier ({HourlyViews}) and {DailyAfter} for the daily tier ({DailyViews}); one aggregate per hour, minute :{Minute:00}Z, from hour {FirstHour:00}Z; staged first runs, largest first: {Staged}",
+            enabled, AggregateCompressionTargets.Count, inPlace, added, converged, absent.Count, absent.Count == 0 ? "none" : string.Join(", ", absent),
+            HourlyAggregateCompressAfter, string.Join(", ", hourlyTier), DailyAggregateCompressAfter, string.Join(", ", dailyTier),
+            AggregateCompressionBandMinute, AggregateCompressionBandFirstHour,
+            stagedLines.Count == 0 ? "none this start" : string.Join("; ", stagedLines));
+
+        /* #3653 LC point 7, the drain: a separate concern from everything above — these three are never
+           AggregateCompressionTargets, so the states/needingPolicy/converge loops above never see them and
+           this call never sees what they did. Runs last so it costs no target its own progress if it fails. */
+        await DrainFrozenDailyCompressionPoliciesAsync(connection, logger, cancellationToken);
+
+        return inPlace;
+    }
+
+    /// <summary>A byte count as GiB with one decimal, for the log lines above — the unit the issue's own figures
+    /// are stated in.</summary>
+    private static string FormatGiB(long bytes)
+        => (bytes / 1073741824d).ToString("0.0", CultureInfo.InvariantCulture) + " GiB";
+
+    /* ─────────────── the frozen dailies' compression drain (#3653, LC point 7) ─────────────── */
+
+    /// <summary>
+    /// One of the six frozen rollups' (<see cref="FrozenRollupAggregates"/> members) own compression drain
+    /// state, as <see cref="FrozenDailyCompressionDrainStateSql"/> reads it — its compression job if any,
+    /// and how many of its materialization's chunks are uncompressed.
+    /// </summary>
+    public sealed record FrozenDailyCompressionDrainState(string View, int? JobId, long UncompressedChunks);
+
+    /// <summary>
+    /// All six frozen rollups' (<see cref="FrozenRollupAggregates"/>) own compression drain state in one
+    /// read: whether each still carries a compression job, and how many of its materialization's chunks are
+    /// uncompressed — EVERY uncompressed chunk, of any age, not the age-gated
+    /// <c>eligible_under_hourly_rule</c> / <c>eligible_under_daily_rule</c> columns
+    /// <see cref="AggregateCompressionStateSql"/> reads for the registered targets.
+    ///
+    /// <para><b>Why not those columns.</b> They answer "how many chunks would this policy's NEXT run compress",
+    /// which is gated on a tier's <c>compress_after</c> — a chunk younger than that window is not eligible YET
+    /// but is still uncompressed. <see cref="ShouldDrainFrozenDailyCompression"/> asks a different question:
+    /// has this aggregate finished compressing everything it will ever hold. A young uncompressed chunk must
+    /// still count toward that, or the drain would remove the policy while a chunk was still waiting its turn
+    /// to compress, and nothing would ever compress it afterward.</para>
+    ///
+    /// <para>Scoped BY NAME to exactly <see cref="FrozenRollupAggregates"/>'s six members — all six this
+    /// rule ever drains (three legacy hourlies and three legacy dailies; existing stores had compression
+    /// policies on all six before the LC freeze) — rather than reading every non-target aggregate under
+    /// <c>collect</c>, so an unrelated off-grid or newly-registered-but-not-yet-enabled aggregate can never be
+    /// swept in by a broadened <c>WHERE</c> later. Same join shape as <see cref="AggregateCompressionStateSql"/>
+    /// (job resolved on either the view or the materialization identity) for the same measured reason.</para>
+    /// </summary>
+    public static string FrozenDailyCompressionDrainStateSql
+    {
+        get
+        {
+            var views = string.Join(", ", FrozenRollupAggregates.Select(a => $"'{a.View}'"));
+            return $@"
+SELECT
+    ca.view_name,
+    j.job_id,
+    (
+        SELECT count(*)
+        FROM timescaledb_information.chunks AS c
+        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
+        AND   c.hypertable_name = ca.materialization_hypertable_name
+        AND   NOT c.is_compressed
+    ) AS uncompressed_chunks
+FROM timescaledb_information.continuous_aggregates AS ca
+LEFT JOIN timescaledb_information.jobs AS j
+  ON  (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
+  AND (
+        (j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
+     OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)
+      )
+WHERE ca.view_schema = 'collect'
+AND   ca.view_name IN ({views})";
+        }
+    }
+
+    /// <summary>
+    /// THE DRAIN RULE (#3653, LC point 7), pure so the truth table pins directly: does
+    /// <paramref name="state"/>'s frozen daily lose its compression policy now? Only once there is a policy to
+    /// lose — <c>JobId</c> not null; a store that never enabled compression on it, or has already been
+    /// drained, changes nothing — AND every one of its materialization's chunks is already compressed
+    /// (<c>UncompressedChunks == 0</c>). Any uncompressed chunk, however old or young, holds the policy in
+    /// place, because compression still has a chunk left to do; once that count reaches zero it can only ever
+    /// STAY zero, since nothing refreshes a frozen daily past the freeze to create another one
+    /// (<see cref="FrozenRollupAggregates"/>).
+    /// </summary>
+    public static bool ShouldDrainFrozenDailyCompression(FrozenDailyCompressionDrainState state)
+    {
+        if (state is null)
+        {
+            throw new ArgumentNullException(nameof(state));
+        }
+
+        return state.JobId is not null && state.UncompressedChunks == 0;
+    }
+
+    /// <summary>Removes a DRAINED frozen daily's compression policy (<see cref="ShouldDrainFrozenDailyCompression"/>)
+    /// — <c>if_exists</c>, so a policy already removed on a prior start, or never created, changes nothing. The
+    /// chunks it already compressed keep their compression (this removes the JOB, not the columnstore data);
+    /// it only stops a future run from firing on an aggregate that will never materialize another chunk.</summary>
+    public static string RemoveFrozenDailyCompressionPolicySql(string view)
+        => $"SELECT remove_compression_policy('collect.{view}', if_exists => true)";
+
+    /// <summary>
+    /// THE DRAIN (#3653, LC point 7, Medium finding fix): walks all six frozen rollups
+    /// (<see cref="FrozenRollupAggregates"/>) and removes a compression policy that has nothing left to
+    /// compress (<see cref="ShouldDrainFrozenDailyCompression"/>), via
+    /// <see cref="RemoveFrozenDailyCompressionPolicySql"/>. Called once, at the end of
+    /// <see cref="EnsureAggregateCompressionAsync"/> — a separate concern from that function's own
+    /// enable/stage/converge loops, which never see these six (<see cref="IsAggregateCompressionTarget"/>
+    /// excludes the active twenty; <see cref="IsFrozenRollupAggregate"/> identifies these six) the way this
+    /// method's own scoped probe never sees a registered target.
+    ///
+    /// <para><b>Why these six ever HAD a policy to drain.</b> Every store that took a build before LC's
+    /// freeze enabled compression and attached a policy on all six the same as any other registered aggregate;
+    /// the freeze stopped their REFRESH (<see cref="RemoveFrozenRollupRefreshPolicySql"/>) but left the
+    /// existing compression policy running, because a policy already converged onto the shipped window is not
+    /// itself wrong — it is aimed at an aggregate that will, from the freeze on, only ever gain MORE compressed
+    /// chunks and never another uncompressed one. This is what eventually turns that policy off, once there is
+    /// truly nothing left for it to do — never on a fresh store past the freeze, which creates these six with
+    /// no compression policy at all (<see cref="FrozenRollupAggregates"/> carries no policy builder), so
+    /// there is nothing here to drain and <see cref="ShouldDrainFrozenDailyCompression"/> reads a null
+    /// <c>JobId</c> forever.</para>
+    ///
+    /// <para>Failure-isolated per aggregate and per statement, the same as every other step in
+    /// <see cref="EnsureAggregateCompressionAsync"/>: a read or removal that fails costs a warning and the
+    /// others still run.</para>
+    /// </summary>
+    public static async Task<int> DrainFrozenDailyCompressionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var states = new List<FrozenDailyCompressionDrainState>();
+        try
+        {
+            using var probe = new NpgsqlCommand(FrozenDailyCompressionDrainStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                states.Add(new FrozenDailyCompressionDrainState(
+                    View: reader.GetString(0),
+                    JobId: reader.IsDBNull(1) ? null : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
+                    UncompressedChunks: Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(
+                "TimescaleDB: could not read the frozen dailies' compression drain state, so none was drained this start: {Message}",
+                ex.Message);
+            return 0;
+        }
+
+        var drained = 0;
+        foreach (var state in states)
+        {
+            if (!ShouldDrainFrozenDailyCompression(state))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var remove = new NpgsqlCommand(RemoveFrozenDailyCompressionPolicySql(state.View), connection) { CommandTimeout = SetupTimeoutSeconds };
+                await remove.ExecuteNonQueryAsync(cancellationToken);
+                drained++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: removed frozen daily {View}'s compression policy (job {JobId}) — every chunk it will ever hold is already compressed, and nothing refreshes it past the freeze to make another (#3653).",
+                    state.View, state.JobId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not remove frozen daily {View}'s drained compression policy (job {JobId}) — it stays, harmlessly, since it has nothing left to compress: {Message}",
+                    state.View, state.JobId, ex.Message);
+            }
+        }
+
+        return drained;
     }
 
     /* ─────────────── rollup availability (the plain-PostgreSQL guard, #1664) ─────────────── */
@@ -4931,7 +9094,19 @@ AND   j.hypertable_name = '{relation}'";
         /* The day-grain daily and its dedup layer (#1869) — the same existence-is-the-probe degrade, so a
            store on a #1849-era service keeps reading the corrected daily and needs no version gate either. */
         $"to_regclass('collect.{QueryStoreStatsIntervalDailyView}') IS NOT NULL, " +
-        $"to_regclass('collect.{QueryStoreStatsDayGrainDailyView}') IS NOT NULL";
+        $"to_regclass('collect.{QueryStoreStatsDayGrainDailyView}') IS NOT NULL, " +
+        /* The interval-honest hourly successors (#3653, Q12) — existence-is-the-probe once more: a store on an
+           older service has none of them, and RollupCoverage.HourlyRelationFor keeps every hourly-tier read on
+           the legacy relation for exactly that store, with no version gate. */
+        $"to_regclass('collect.{QueryStatsIntervalHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{ProcedureStatsIntervalHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDbIntervalHourlyView}') IS NOT NULL, " +
+        /* The interval-honest successor DAILIES (#3653, A6) — existence-is-the-probe once more: a store whose
+           service predates this build has none of them, and reads route to the legacy daily for exactly that
+           store, with no version gate. */
+        $"to_regclass('collect.{QueryStatsIntervalDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{ProcedureStatsIntervalDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDbIntervalDailyView}') IS NOT NULL";
 
     /// <summary>
     /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
@@ -4957,7 +9132,9 @@ AND   j.hypertable_name = '{relation}'";
             reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3),
             reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7),
             reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10),
-            reader.GetBoolean(11), reader.GetBoolean(12));
+            reader.GetBoolean(11), reader.GetBoolean(12),
+            reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15),
+            reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18));
     }
 
     /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
@@ -5026,6 +9203,23 @@ AND   j.hypertable_name = '{relation}'";
            BucketWidth above is what keeps the backfill honest here as well. */
         (QueryStoreStatsIntervalDailyView, "query_store_stats", QueryStoreStatsIntervalHourlyView, "bucket", DailyBucket),
         (QueryStoreStatsDayGrainDailyView, "query_store_stats", QueryStoreStatsIntervalDailyView, "bucket", DailyBucket),
+
+        /* The interval-honest hourly successors (#3653, Q12): raw-sourced, so depth 0 in the backfill order and
+           probed for coverage like any other hourly. Registering them HERE is what puts them on the
+           --backfill-rollups plan (RollupBackfill.Targets derives from this list), in the coverage probe every
+           hourly-tier reader routes on, and under RollupCoverage.HourlyRelationFor's supply choice. */
+        (QueryStatsIntervalHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
+        (ProcedureStatsIntervalHourlyView, "procedure_stats", "procedure_stats", "collection_time", HourlyBucket),
+        (QueryStatsDbIntervalHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
+
+        /* The interval-honest successor DAILIES (#3653, A6): hierarchical from the interval-honest hourly
+           successors just above, so RawTable is still the raw table two hops down and Source is the successor
+           HOURLY (not the legacy). Registering them here puts them on the --backfill-rollups plan
+           (RollupBackfill.Targets derives from this list, ordered after their hourly source by SourceDepth),
+           in the coverage probe, and under the eventual daily-tier routing. */
+        (QueryStatsIntervalDailyView, "query_stats", QueryStatsIntervalHourlyView, "bucket", DailyBucket),
+        (ProcedureStatsIntervalDailyView, "procedure_stats", ProcedureStatsIntervalHourlyView, "bucket", DailyBucket),
+        (QueryStatsDbIntervalDailyView, "query_stats", QueryStatsDbIntervalHourlyView, "bucket", DailyBucket),
     };
 
     /// <summary>The three raw tables the rollups roll up, in coverage-probe order (deduplicated
@@ -5057,9 +9251,21 @@ AND   j.hypertable_name = '{relation}'";
     /// serve a window the arming gate considers uncovered (or worse, the reverse).</para>
     /// </summary>
     public static string RollupCoverageProbeSql(RollupAvailability availability)
+        => RollupCoverageProbeSql(availability, measure: null);
+
+    /// <summary>
+    /// #4539: the same probe as the one-argument overload, except a present view NOT in
+    /// <paramref name="measure"/> contributes a literal <c>NULL::timestamp</c> and is never named — the same
+    /// "never mention an absent relation" trick <see cref="RollupCoverageProbeSql(RollupAvailability)"/> already
+    /// uses for a rollup that does not exist, reused here for a rollup that exists but whose cached floor is
+    /// still trusted. <paramref name="measure"/> null means "measure every present view", which keeps this
+    /// overload byte-identical to the one-argument form — <see cref="RetentionArmSafetySql"/> and every
+    /// existing caller of the one-argument overload must keep seeing today's SQL verbatim.
+    /// </summary>
+    public static string RollupCoverageProbeSql(RollupAvailability availability, IReadOnlySet<string>? measure)
     {
         var columns = RollupViews
-            .Select(r => availability.Has(r.View)
+            .Select(r => availability.Has(r.View) && (measure is null || measure.Contains(r.View))
                 ? $"(SELECT min(bucket) FROM collect.{r.View})"
                 : "NULL::timestamp")
             /* The raw tables are migration-created and always exist, so they need no availability gate. */
@@ -5069,38 +9275,314 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
+    /// #4539: for each rollup PRESENT in <paramref name="availability"/>, its materialization's OLDEST chunk —
+    /// the identity the floor cache keys on. A rollup's floor only moves when its oldest chunk changes
+    /// (retention drops it, or an older backfill creates an earlier one), so this catalog read is the cheap
+    /// half of the check that lets <see cref="DetectRollupCoverageAsync"/> skip re-sorting a chunk that has
+    /// not moved. Single-digit milliseconds measured against two hypertables' chunk catalogs — nothing here
+    /// touches a compressed batch. A rollup with no chunks at all (freshly created, no data yet) reads a NULL
+    /// chunk name; the caller treats that as "always measure", because an empty read is itself cheap.
+    ///
+    /// <para>Also reads the aggregate's <b>materialization hypertable identity</b> (its schema-qualified
+    /// name from the continuous-aggregate catalog, which is stable metadata rather than a scan). A DROP and
+    /// re-CREATE of the continuous aggregate mints a brand-new materialization hypertable, and by coincidence
+    /// its first chunk can land with the SAME generated chunk name a previous incarnation once had (Timescale
+    /// names chunks from a sequence that is not scoped per-hypertable in every version) — the oldest-chunk name
+    /// alone is not a reliable identity across a drop/re-create. The hypertable identity is, so the planner
+    /// must treat EITHER one changing as a reason to re-measure.</para>
+    /// </summary>
+    public static string? RollupOldestChunkSql(RollupAvailability availability)
+    {
+        var present = RollupViews.Select(r => r.View).Where(availability.Has).ToArray();
+        if (present.Length == 0)
+        {
+            return null;
+        }
+
+        var viewList = string.Join(", ", present.Select(v => $"'{v}'"));
+        return $@"
+SELECT
+    ca.view_name,
+    oldest.chunk_name,
+    oldest.range_start,
+    ca.materialization_hypertable_schema || '.' || ca.materialization_hypertable_name AS materialization_hypertable
+FROM timescaledb_information.continuous_aggregates AS ca
+LEFT JOIN LATERAL (
+    SELECT c.chunk_name, c.range_start
+    FROM timescaledb_information.chunks AS c
+    WHERE c.hypertable_schema = ca.materialization_hypertable_schema
+      AND c.hypertable_name = ca.materialization_hypertable_name
+    ORDER BY c.range_start ASC
+    LIMIT 1
+) AS oldest ON true
+WHERE ca.view_schema = 'collect'
+  AND ca.view_name IN ({viewList})";
+    }
+
+    /// <summary>
+    /// #4539/#4553: the per-<see cref="NpgsqlDataSource"/> rollup floor cache — keyed on the data source rather
+    /// than held statically, so two stores' caches (two <see cref="NpgsqlDataSource"/> instances, one per store)
+    /// never cross-pollute, and a disposed data source's entry is collected with it rather than leaking
+    /// forever. <see cref="ConditionalWeakTable{TKey,TValue}"/> for exactly that lifetime, and its own
+    /// dictionary value is a plain (thread-unsynchronized) <see cref="Dictionary{TKey,TValue}"/> guarded by a
+    /// lock — <see cref="DetectRollupCoverageAsync"/> is called on a timer AND on demand from the viewer, so
+    /// two calls can race on the same data source.</summary>
+    private static readonly ConditionalWeakTable<NpgsqlDataSource, RollupFloorCache> RollupFloorCaches = new();
+
+    /// <summary>
+    /// #4553: bounds how long a cached rollup floor may be reused even when its oldest chunk's identity has
+    /// not changed. A retention DELETE that runs against the oldest materialization chunk (raw data aging out
+    /// past its retention while the chunk itself is left in place) can move the true floor LATER without
+    /// changing the chunk's identity at all — the cache has no catalog signal for that. Re-measuring on a
+    /// timer, independent of the chunk-identity check, bounds the staleness to at most this long. An hour
+    /// still cuts the expensive re-sort from every five-minute probe cycle to at most once an hour.
+    /// </summary>
+    internal static readonly TimeSpan RollupFloorMaxReuse = TimeSpan.FromHours(1);
+
+    /// <summary>One data source's cached rollup floors, keyed by view name.</summary>
+    private sealed class RollupFloorCache
+    {
+        public readonly object Lock = new();
+        public readonly Dictionary<string, RollupFloorCacheEntry> ByView = new(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// #4553: one view's cached floor and the identity it was measured against — the oldest chunk's name AND
+    /// the materialization hypertable's own identity (schema-qualified name), because a DROP and re-CREATE of
+    /// the continuous aggregate mints a new materialization hypertable whose first chunk can, by coincidence,
+    /// land with the same generated chunk name a previous incarnation once had. Either identity changing means
+    /// the cached floor no longer describes the relation actually being read. <see cref="MeasuredAtUtc"/> backs
+    /// <see cref="RollupFloorMaxReuse"/>.
+    /// </summary>
+    /// <para><see cref="Ceiling"/> (#4605) is the materialization ceiling measured in the SAME
+    /// cycle as <see cref="Floor"/> — re-read whenever the floor is (the ceiling moves every refresh, so
+    /// piggybacking on the floor's re-measure cadence, rather than a separate TTL, is the cheap answer: a
+    /// view whose floor is trusted from cache almost never has a stale-enough ceiling to matter, and a
+    /// dedicated per-request re-read would be the expensive scan #4539 already exists to avoid).</para>
+    internal readonly record struct RollupFloorCacheEntry(string? ChunkName, string? MaterializationHypertable, DateTime Floor, DateTime MeasuredAtUtc, DateTime? Ceiling = null);
+
+    /// <summary>The oldest-chunk catalog read's per-view identity, before any floor has been attached to it.</summary>
+    internal readonly record struct RollupChunkIdentity(string? ChunkName, string? MaterializationHypertable);
+
+    /// <summary>
+    /// #4539/#4553 pure planner: which of <paramref name="availability"/>'s present views must have
+    /// <c>min(bucket)</c> re-run, given <paramref name="cached"/>'s last-measured identities and
+    /// <paramref name="oldestNow"/>'s freshly-read ones. A view is measured when it has no cache entry yet, OR
+    /// either half of its identity (oldest-chunk name, materialization hypertable) differs from what is
+    /// cached, OR it currently has no chunk at all (an empty read costs nothing, so there is no reason to
+    /// trust a stale cache entry over it), OR the cached entry is older than <paramref name="now"/> minus
+    /// <see cref="RollupFloorMaxReuse"/> (the TTL safety net — see <see cref="RollupFloorMaxReuse"/> for why
+    /// identity alone is not always enough). Otherwise its cached floor is reused. An absent view (not in
+    /// <paramref name="availability"/>) is never in the returned set — it was never a candidate to measure in
+    /// the first place, since <see cref="RollupCoverageProbeSql(RollupAvailability,IReadOnlySet{string}?)"/>
+    /// already contributes <c>NULL::timestamp</c> for it regardless.
+    /// </summary>
+    internal static IReadOnlySet<string> RollupFloorsToMeasure(
+        IReadOnlyDictionary<string, RollupFloorCacheEntry> cached,
+        IReadOnlyDictionary<string, RollupChunkIdentity> oldestNow,
+        RollupAvailability availability,
+        DateTime now)
+    {
+        var measure = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (view, identity) in oldestNow)
+        {
+            if (!availability.Has(view))
+            {
+                continue;
+            }
+
+            if (identity.ChunkName is null)
+            {
+                measure.Add(view);
+                continue;
+            }
+
+            if (!cached.TryGetValue(view, out var entry)
+                || !string.Equals(entry.ChunkName, identity.ChunkName, StringComparison.Ordinal)
+                || !string.Equals(entry.MaterializationHypertable, identity.MaterializationHypertable, StringComparison.Ordinal)
+                || now - entry.MeasuredAtUtc >= RollupFloorMaxReuse)
+            {
+                measure.Add(view);
+            }
+        }
+
+        return measure;
+    }
+
+    /// <summary>
+    /// #4553 pure: the floor-merge half of <see cref="DetectRollupCoverageAsync"/>, split out so the
+    /// NULL-reuse bug (a view measured this cycle that came back empty must NOT fall back to its stale cached
+    /// floor) has a unit test with no database involved. <paramref name="measuredThisCycle"/> holds ONE entry
+    /// per view that was actually named in this cycle's probe SQL — its value is the fresh <c>min(bucket)</c>,
+    /// or <c>null</c> when that view is present but currently empty. A view absent from
+    /// <paramref name="measuredThisCycle"/> was not measured this cycle at all (its cached identity matched),
+    /// and its cached floor is carried forward unchanged — UNLESS the rollup itself is no longer present, in
+    /// which case its stale entry is dropped rather than carried forward.
+    ///
+    /// <para>The returned <c>NewCacheEntries</c> is the COMPLETE replacement for the cache's <c>ByView</c> —
+    /// the caller must overwrite, not merge, or an evicted view's stale entry would survive under whatever key
+    /// this function chose not to re-emit.</para>
+    /// </summary>
+    internal static (IReadOnlyDictionary<string, DateTime> Floors, IReadOnlyDictionary<string, RollupFloorCacheEntry> NewCacheEntries) MergeRollupFloors(
+        IReadOnlyDictionary<string, DateTime?> measuredThisCycle,
+        IReadOnlyDictionary<string, RollupFloorCacheEntry> cached,
+        IReadOnlyDictionary<string, RollupChunkIdentity> oldestNow,
+        RollupAvailability availability,
+        DateTime now)
+        => MergeRollupFloors(measuredThisCycle, cached, oldestNow, availability, now, ceilingsMeasuredThisCycle: null);
+
+    /// <summary>
+    /// #4605: the same merge, with <paramref name="ceilingsMeasuredThisCycle"/> carrying the
+    /// freshly-read <see cref="RollupMaterializationWatermark"/> for every view re-measured THIS cycle —
+    /// <c>null</c> for the two-argument overload (every pre-#4605 caller and test), which leaves every new
+    /// entry's ceiling unset (the safe "unknown" default) rather than guessing one.
+    /// </summary>
+    internal static (IReadOnlyDictionary<string, DateTime> Floors, IReadOnlyDictionary<string, RollupFloorCacheEntry> NewCacheEntries) MergeRollupFloors(
+        IReadOnlyDictionary<string, DateTime?> measuredThisCycle,
+        IReadOnlyDictionary<string, RollupFloorCacheEntry> cached,
+        IReadOnlyDictionary<string, RollupChunkIdentity> oldestNow,
+        RollupAvailability availability,
+        DateTime now,
+        IReadOnlyDictionary<string, DateTime?>? ceilingsMeasuredThisCycle)
+    {
+        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var newEntries = new Dictionary<string, RollupFloorCacheEntry>(StringComparer.Ordinal);
+
+        foreach (var (view, measuredFloor) in measuredThisCycle)
+        {
+            if (measuredFloor is DateTime floor)
+            {
+                floors[view] = floor;
+                if (oldestNow.TryGetValue(view, out var identity))
+                {
+                    DateTime? ceiling = ceilingsMeasuredThisCycle is not null && ceilingsMeasuredThisCycle.TryGetValue(view, out var freshCeiling)
+                        ? freshCeiling
+                        : null;
+                    newEntries[view] = new RollupFloorCacheEntry(identity.ChunkName, identity.MaterializationHypertable, floor, now, ceiling);
+                }
+            }
+
+            /* Measured this cycle and came back NULL (empty, or no chunks): no floor, and — because this view
+               is skipped here — no entry in newEntries either. That is the eviction: the caller replaces the
+               whole cache with newEntries, so a view left out of it is gone. */
+        }
+
+        foreach (var (view, entry) in cached)
+        {
+            if (measuredThisCycle.ContainsKey(view))
+            {
+                /* Already resolved above, whether it kept or lost its floor this cycle. */
+                continue;
+            }
+
+            if (!availability.Has(view))
+            {
+                /* The rollup itself is gone — drop the stale entry rather than carry it forward forever. */
+                continue;
+            }
+
+            floors[view] = entry.Floor;
+            newEntries[view] = entry;
+        }
+
+        return (floors, newEntries);
+    }
+
+    /// <summary>
     /// Reads every rollup's materialized floor and every rolled raw table's oldest row
-    /// (<see cref="RollupCoverageProbeSql"/>). <paramref name="availability"/> comes from
+    /// (<see cref="RollupCoverageProbeSql(RollupAvailability)"/>). <paramref name="availability"/> comes from
     /// <see cref="DetectRollupsAsync"/> in the same probe cycle and decides which relations are named at
     /// all.
     ///
     /// <para>NOTE that a DAILY rollup's floor is the day-FLOOR of its oldest hourly bucket, so it can read
     /// up to a day earlier than the hourly it is sourced from. That over-claims coverage by at most one
     /// bucket, and it is exactly the semantics the arming gate already runs on — matching it is the point.</para>
+    ///
+    /// <para><b>#4539: a floor is re-measured only for a rollup whose oldest materialization chunk changed.</b>
+    /// <c>min(bucket)</c> on a compressed materialization chunk sorts every one of that chunk's compressed
+    /// batches by their batch metadata before it can decompress the first one — measured on a production store
+    /// at ~170 MB of temp every five minutes, because the oldest Query Store rollup chunks hold tens of
+    /// thousands of batches. The floor only MOVES when the oldest chunk changes (retention drops it, or an
+    /// older backfill creates an earlier one), so a cheap catalog read of each rollup's oldest chunk
+    /// (<see cref="RollupOldestChunkSql"/>) decides which rollups actually need that sort re-run; the rest
+    /// reuse their last-measured floor. A reused floor can only be LATER than the true one (an older backfill
+    /// landing in the same chunk moves the true floor earlier, never later), which is the conservative
+    /// direction for routing — it can never claim coverage a rollup does not actually have. A failed catalog
+    /// read (a plain-PostgreSQL store, or any other failure) falls back to measuring every present rollup, the
+    /// same as before this cache existed.</para>
     /// </summary>
-    public static async Task<RollupCoverage> DetectRollupCoverageAsync(
+    public static Task<RollupCoverage> DetectRollupCoverageAsync(
         NpgsqlDataSource dataSource, RollupAvailability availability, CancellationToken cancellationToken = default)
+        => DetectRollupCoverageAsync(dataSource, availability, DateTime.UtcNow, cancellationToken);
+
+    /// <summary>
+    /// #4553: the same probe as the three-argument overload, with the wall clock <paramref name="now"/> is
+    /// measured against injectable for the TTL check (<see cref="RollupFloorMaxReuse"/>) rather than always
+    /// reading <see cref="DateTime.UtcNow"/> — so a live test can force a TTL expiry without sleeping an hour.
+    /// </summary>
+    internal static async Task<RollupCoverage> DetectRollupCoverageAsync(
+        NpgsqlDataSource dataSource, RollupAvailability availability, DateTime now, CancellationToken cancellationToken = default)
     {
         if (dataSource is null)
         {
             throw new ArgumentNullException(nameof(dataSource));
         }
 
-        await using var command = dataSource.CreateCommand(RollupCoverageProbeSql(availability));
+        var cache = RollupFloorCaches.GetOrCreateValue(dataSource);
+        HashSet<string>? measure = null;
+        Dictionary<string, RollupChunkIdentity>? oldestNow = null;
+        Dictionary<string, RollupFloorCacheEntry> cachedSnapshot;
+        lock (cache.Lock)
+        {
+            cachedSnapshot = new Dictionary<string, RollupFloorCacheEntry>(cache.ByView, StringComparer.Ordinal);
+        }
+
+        var oldestChunkSql = RollupOldestChunkSql(availability);
+        if (oldestChunkSql is not null)
+        {
+            try
+            {
+                var chunksNow = new Dictionary<string, RollupChunkIdentity>(StringComparer.Ordinal);
+                await using var chunkCommand = dataSource.CreateCommand(oldestChunkSql);
+                chunkCommand.CommandTimeout = JobCatalogReadTimeoutSeconds;
+                await using var chunkReader = await chunkCommand.ExecuteReaderAsync(cancellationToken);
+                while (await chunkReader.ReadAsync(cancellationToken))
+                {
+                    var view = chunkReader.GetString(0);
+                    var chunkName = await chunkReader.IsDBNullAsync(1, cancellationToken) ? null : chunkReader.GetString(1);
+                    var materializationHypertable = await chunkReader.IsDBNullAsync(3, cancellationToken) ? null : chunkReader.GetString(3);
+                    chunksNow[view] = new RollupChunkIdentity(chunkName, materializationHypertable);
+                }
+
+                var toMeasure = new HashSet<string>(RollupFloorsToMeasure(cachedSnapshot, chunksNow, availability, now), StringComparer.Ordinal);
+
+                /* Every present view this catalog read never saw (should not happen, but a partial read from a
+                   mid-build store is exactly what #1664 exists to tolerate) is measured too — the safe default
+                   when this cache has no evidence either way. */
+                foreach (var (view, _, _, _, _) in RollupViews)
+                {
+                    if (availability.Has(view) && !chunksNow.ContainsKey(view))
+                    {
+                        toMeasure.Add(view);
+                    }
+                }
+
+                measure = toMeasure;
+                oldestNow = chunksNow;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                measure = null;
+                oldestNow = null;
+            }
+        }
+
+        await using var command = dataSource.CreateCommand(RollupCoverageProbeSql(availability, measure));
         command.CommandTimeout = JobCatalogReadTimeoutSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
             return RollupCoverage.Unknown;
-        }
-
-        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
-        for (var i = 0; i < RollupViews.Length; i++)
-        {
-            if (!await reader.IsDBNullAsync(i, cancellationToken))
-            {
-                floors[RollupViews[i].View] = reader.GetDateTime(i);
-            }
         }
 
         var rawOldest = new Dictionary<string, DateTime>(StringComparer.Ordinal);
@@ -5113,7 +9595,101 @@ AND   j.hypertable_name = '{relation}'";
             }
         }
 
-        return new RollupCoverage(floors, rawOldest);
+        if (measure is null || oldestNow is null)
+        {
+            /* The catalog read failed or found no rollups at all — every present view was measured this cycle
+               (RollupCoverageProbeSql(availability, measure: null) names all of them), so there is nothing to
+               reuse from the cache and nothing new to remember either. */
+            var floorsWithoutCache = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            for (var i = 0; i < RollupViews.Length; i++)
+            {
+                if (!await reader.IsDBNullAsync(i, cancellationToken))
+                {
+                    floorsWithoutCache[RollupViews[i].View] = reader.GetDateTime(i);
+                }
+            }
+
+            var ceilingsWithoutCache = await MeasureRollupCeilingsAsync(dataSource, floorsWithoutCache.Keys, availability, cancellationToken);
+            return new RollupCoverage(floorsWithoutCache, rawOldest, availability, ceilingsWithoutCache);
+        }
+
+        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+        for (var i = 0; i < RollupViews.Length; i++)
+        {
+            var view = RollupViews[i].View;
+            if (!measure.Contains(view))
+            {
+                continue;
+            }
+
+            measuredThisCycle[view] = await reader.IsDBNullAsync(i, cancellationToken) ? (DateTime?)null : reader.GetDateTime(i);
+        }
+
+        /* #4605: the ceiling is re-read for exactly the views re-measured this cycle (a view
+           whose floor came from cache keeps its cached ceiling below, on the same reuse cadence #4539/#4553
+           already give the floor — no per-request max(bucket)/cagg_watermark scan). */
+        var ceilingsMeasuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+        foreach (var view in measuredThisCycle.Keys)
+        {
+            if (measuredThisCycle[view] is null)
+            {
+                continue;
+            }
+
+            var bucketWidth = RollupViews.First(r => r.View == view).BucketWidth;
+            ceilingsMeasuredThisCycle[view] = await RollupMaterializationWatermark.GetAsync(dataSource, view, bucketWidth, JobCatalogReadTimeoutSeconds, cancellationToken);
+        }
+
+        var (floors, newEntries) = MergeRollupFloors(measuredThisCycle, cachedSnapshot, oldestNow, availability, now, ceilingsMeasuredThisCycle);
+
+        lock (cache.Lock)
+        {
+            cache.ByView.Clear();
+            foreach (var (view, entry) in newEntries)
+            {
+                cache.ByView[view] = entry;
+            }
+        }
+
+        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        foreach (var (view, entry) in newEntries)
+        {
+            if (entry.Ceiling is DateTime ceiling)
+            {
+                ceilings[view] = ceiling;
+            }
+        }
+
+        return new RollupCoverage(floors, rawOldest, availability, ceilings);
+    }
+
+    /// <summary>
+    /// #4605: the ceiling read for the catalog-read-failed / no-rollups-present fallback path,
+    /// where every present view was just measured for its floor and has no cache entry to carry a ceiling
+    /// forward from. One <see cref="RollupMaterializationWatermark.GetAsync"/> per view named in
+    /// <paramref name="views"/> — bounded by the same small view list the floor probe itself named, so this
+    /// is no more expensive than the floor read it accompanies.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<string, DateTime>> MeasureRollupCeilingsAsync(
+        NpgsqlDataSource dataSource, IEnumerable<string> views, RollupAvailability availability, CancellationToken cancellationToken)
+    {
+        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        foreach (var view in views)
+        {
+            var match = RollupViews.FirstOrDefault(r => r.View == view);
+            if (match.View is null || !availability.Has(view))
+            {
+                continue;
+            }
+
+            var ceiling = await RollupMaterializationWatermark.GetAsync(dataSource, view, match.BucketWidth, JobCatalogReadTimeoutSeconds, cancellationToken);
+            if (ceiling is DateTime c)
+            {
+                ceilings[view] = c;
+            }
+        }
+
+        return ceilings;
     }
 
     /// <summary>
@@ -5165,13 +9741,29 @@ AND   j.hypertable_name = '{relation}'";
             throw new ArgumentNullException(nameof(connection));
         }
 
+        /* #3817: ONE catalog read for the whole sweep, so the enable ALTER is issued only for tables that
+           do not already carry it. The ALTER takes an AccessExclusiveLock even as a no-op (measured — see
+           CompressionEnabledStateSql), which was free on the start path and is a lock convoy on the hourly
+           tick at :30, in the same minute the collectors are COPYing into these tables. A null answer means
+           the read failed and every ALTER is issued, exactly as before the guard. */
+        var converged = await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);
+        var enabledAlready = 0;
+
         var applied = 0;
         foreach (var schema in HypertableTables)
         {
             try
             {
-                using (var enable = new NpgsqlCommand(EnableCompressionSql(schema), connection) { CommandTimeout = SetupTimeoutSeconds })
+                /* The POLICY half still runs unconditionally: add_compression_policy's if_not_exists returns
+                   -1 against an existing policy and takes no exclusive lock on the hypertable, so it is
+                   idempotent in cost as well as in effect. Only the ALTER needed guarding. */
+                if (converged is not null && converged.Contains(schema.TargetTable))
                 {
+                    enabledAlready++;
+                }
+                else
+                {
+                    using var enable = new NpgsqlCommand(EnableCompressionSql(schema), connection) { CommandTimeout = SetupTimeoutSeconds };
                     await enable.ExecuteNonQueryAsync(cancellationToken);
                 }
 
@@ -5189,9 +9781,105 @@ AND   j.hypertable_name = '{relation}'";
             }
         }
 
-        logger?.LogInformation("TimescaleDB: compression policy ({Days}d) in place on {Applied}/{Total} collector table(s)",
-            CompressAfterDays, applied, HypertableTables.Count);
+        logger?.LogInformation(
+            "TimescaleDB: compression policy ({Days}d) in place on {Applied}/{Total} collector table(s); {AlreadyEnabled} already had compression enabled with the shipped segmentby, so no ALTER was issued for them (#3817 — that statement takes an AccessExclusiveLock even when it changes nothing)",
+            CompressAfterDays, applied, HypertableTables.Count, enabledAlready);
         return applied;
+    }
+
+    /// <summary>
+    /// Which hypertables in <c>collect</c> already have compression enabled, and with which
+    /// <c>segmentby</c> — ONE read for the whole sweep, so the enable ALTER below can be skipped on the
+    /// tables that already carry it (#3817).
+    ///
+    /// <para><b>Why this read exists, measured rather than reasoned.</b>
+    /// <c>ALTER TABLE ... SET (timescaledb.compress ...)</c> is idempotent in EFFECT but not in COST: it is
+    /// processed by TimescaleDB's utility hook and takes an <c>AccessExclusiveLock</c> on the hypertable for
+    /// the statement even when every setting already matches. Measured on TimescaleDB 2.28.1 / PostgreSQL
+    /// 17.10: with one session holding a plain <c>SELECT</c> (AccessShareLock) on the hypertable, the
+    /// re-issued no-op ALTER appears in <c>pg_locks</c> as <c>AccessExclusiveLock</c> with
+    /// <c>granted = false</c>, and an <c>INSERT</c> arriving behind it queues its <c>RowExclusiveLock</c>
+    /// behind the ALTER — a lock convoy in which one long reader plus one no-op DDL blocks every writer to
+    /// that table. That was harmless while these statements ran once per service start, before any collector
+    /// was writing; #3817 put them on the hourly store-maintenance tick at :30 past the minute, which is
+    /// inside the window the collectors are COPYing into these tables and the heaviest hourly refresh is
+    /// still open. So the ALTER has to become conditional, and this is the condition.</para>
+    ///
+    /// <para><b><c>timescaledb_information.compression_settings</c> rather than the 2.18+
+    /// <c>hypertable_compression_settings</c></b>, which reports the same facts more conveniently but is
+    /// younger than the 2.x floor this file targets; this view carries <c>hypertable_schema</c> +
+    /// <c>hypertable_name</c> + per-column <c>segmentby_column_index</c> and has been present throughout.
+    /// Joined LEFT from <c>hypertables</c> so a table with compression enabled and NO segmentby is
+    /// distinguishable from one that is not enabled at all — the first needs the ALTER (its settings differ
+    /// from what this product wants), the second needs it too, and only "enabled AND segmentby is exactly
+    /// ours" is skippable.</para>
+    ///
+    /// <para>Scoped to the <c>collect</c> schema for the reason <see cref="CompressionPolicyStateSql"/>
+    /// gives: a bring-your-own store may carry its own <c>wait_stats</c> hypertable elsewhere, and this
+    /// product has no business reading, let alone altering, that one.</para>
+    /// </summary>
+    public const string CompressionEnabledStateSql = @"
+SELECT
+    h.hypertable_name,
+    h.compression_enabled,
+    (
+        SELECT string_agg(cs.attname, ',' ORDER BY cs.segmentby_column_index)
+        FROM timescaledb_information.compression_settings AS cs
+        WHERE cs.hypertable_schema = h.hypertable_schema
+        AND   cs.hypertable_name = h.hypertable_name
+        AND   cs.segmentby_column_index IS NOT NULL
+    ) AS segmentby
+FROM timescaledb_information.hypertables AS h
+WHERE h.hypertable_schema = 'collect'";
+
+    /// <summary>
+    /// Every <c>collect</c> hypertable that does NOT already have compression enabled with exactly
+    /// <see cref="CompressionSegmentByColumn"/> as its segmentby — the set the enable ALTER must be issued
+    /// for, and nothing else (#3817). A table absent from the read (not a hypertable yet, or a catalog too
+    /// old for the view) is treated as NEEDING the ALTER: the conservative direction, because the cost of a
+    /// needless ALTER is one lock and the cost of a skipped one is a table that never compresses.
+    ///
+    /// <para>Failure-isolated to the same conservative answer: if the read throws, this returns <c>null</c>
+    /// and the caller issues every ALTER exactly as it did before this guard existed. A store that cannot
+    /// answer one catalog query must not silently stop converging its compression settings.</para>
+    /// </summary>
+    public static async Task<IReadOnlySet<string>?> ReadTablesNeedingCompressionEnableAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            var converged = new HashSet<string>(StringComparer.Ordinal);
+            using var probe = new NpgsqlCommand(CompressionEnabledStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var table = reader.GetString(0);
+                var enabled = !reader.IsDBNull(1) && reader.GetBoolean(1);
+                var segmentBy = reader.IsDBNull(2) ? null : reader.GetString(2);
+
+                /* Both halves, or the ALTER still has to run: a store whose segmentby was changed out from
+                   under this product (or created by an older build with a different one) must converge, which
+                   is the whole reason this is a settings comparison and not a boolean. */
+                if (enabled && string.Equals(segmentBy, CompressionSegmentByColumn, StringComparison.Ordinal))
+                {
+                    converged.Add(table);
+                }
+            }
+
+            return converged;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(
+                "TimescaleDB: could not read the hypertables' compression settings, so this pass issues the compression-enable statement for every table as it did before the #3817 guard: {Message}",
+                ex.Message);
+            return null;
+        }
     }
 
     /// <summary>
@@ -5208,7 +9896,7 @@ AND   j.hypertable_name = '{relation}'";
     /// every start — and the text form stays because the line an operator reads names the cadence the policy
     /// LEFT.</para>
     ///
-    /// <para>Scoped to compression jobs the SAME tolerant way <see cref="ReadStuckCompressionJobsAsync"/> is
+    /// <para>Scoped to compression jobs the SAME tolerant way <see cref="ReadStuckPolicyJobsAsync"/> is
     /// (<c>policy_compression</c> plus the 2.18+ <c>columnstore</c> rebrand). Retention, continuous-aggregate
     /// refresh, reorder and every other job type are deliberately untouched: their cadences are separate
     /// decisions, and the retention jobs in particular carry an armed/paused state (#1680) this must never
@@ -5244,7 +9932,8 @@ SELECT
         WHEN j.initial_start IS NULL THEN NULL
         ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
     END AS phase_minutes,
-    j.hypertable_schema
+    j.hypertable_schema,
+    EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint AS compress_after_seconds
 FROM timescaledb_information.jobs AS j
 WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
 
@@ -5331,6 +10020,28 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + ($2::int * INTERVAL '1 minute'))";
 
     /// <summary>
+    /// #4510: retunes one EXISTING raw hypertable's compression policy onto its own
+    /// <see cref="HeavyCompressAfterOffsetHours"/> stagger — the converge's ONLY path to a deployed store,
+    /// the same reason <see cref="SetAggregateCompressionPolicySql"/> exists for the aggregate side
+    /// (<see cref="AddCompressionPolicySql(string)"/>'s <c>if_not_exists =&gt; true</c> is a documented
+    /// no-op against a policy the store already has). <c>$1</c> the job id (<c>::integer</c>, the #1586
+    /// trap), <c>$2</c> the <c>compress_after</c> text this table's <see cref="CompressAfterFor"/> renders.
+    ///
+    /// <para><c>config =&gt; jsonb_set(j.config, ...)</c> against the job's OWN config, not a replacement
+    /// object, so the job's other config keys (and its job id, cadence and phase, none of which this
+    /// statement names) survive untouched — <see cref="SetAggregateCompressionPolicySql"/>'s own template.
+    /// Never <c>remove_compression_policy</c> + <c>add_compression_policy</c>: that loses the job's stats
+    /// history and hands the hypertable a NEW job id, which is the mistake the design this fixes explicitly
+    /// rejects.</para>
+    /// </summary>
+    public static string SetCompressAfterSql =>
+        @"SELECT alter_job(
+    j.job_id,
+    config => jsonb_set(j.config, '{compress_after}', to_jsonb($2::text)))
+FROM timescaledb_information.jobs AS j
+WHERE j.job_id = $1::integer";
+
+    /// <summary>
     /// Converges EXISTING compression policies onto <see cref="CompressScheduleInterval"/> (#1778) and onto
     /// the <see cref="CompressionPhaseMinutes"/> grid on a fixed schedule (#3035) — one function owning both
     /// properties, because they are set by the same <c>alter_job</c> and a second sweep would fight this one
@@ -5370,6 +10081,59 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         => ConvergeCompressionScheduleAsync(connection, logger, CompressionPolicyStateSql, cancellationToken);
 
     /// <summary>
+    /// #4510: warns once per converge run when a heavy table (a <see cref="HeavyCompressAfterOffsetHours"/>
+    /// key) is found on 6-hour chunks. <see cref="HeavyCompressAfterOffsetHours"/>' offsets were chosen so
+    /// the {N, N+12} eligibility hours a 24-hour or 12-hour chunked table produces never collide across the
+    /// heavy set — but a table narrowed that far also becomes eligible at N+6 and N+18
+    /// (<see cref="RawChunkIntervalPlanner"/>), and N+6 can land on another heavy table's own hour. Fixing
+    /// that needs the field's actual chunk widths, which this compile-time map cannot see, so this logs
+    /// rather than silently tolerating the possible collision. Failure-isolated the way every other
+    /// converge probe in this class is: a read that fails costs the warning and nothing else.
+    /// </summary>
+    internal static async Task WarnIfHeavyTableOnNarrowChunksAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (HeavyCompressAfterOffsetHours.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            using var probe = new NpgsqlCommand(
+                @"
+SELECT d.hypertable_name, (EXTRACT(EPOCH FROM d.time_interval) / 3600.0)::integer AS interval_hours
+FROM timescaledb_information.dimensions AS d
+WHERE d.hypertable_schema = 'collect' AND d.dimension_type = 'Time'",
+                connection)
+            { CommandTimeout = SetupTimeoutSeconds };
+
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (reader.IsDBNull(0) || reader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                var table = reader.GetString(0);
+                var hours = reader.GetInt32(1);
+
+                if (hours == 6 && HeavyCompressAfterOffsetHours.TryGetValue(table, out var offset))
+                {
+                    logger?.LogWarning(
+                        "TimescaleDB: {Hypertable} is a heavy table (compress_after stagger +{Offset}h, #4510) narrowed to 6-hour chunks — its N+6 eligibility hour can collide with another heavy table's own hour; the compile-time stagger map cannot see this, so review the field's chunk widths.",
+                        table, offset);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Compression-schedule converge: could not read chunk intervals for the #4510 narrow-chunk warning: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
     /// The seam that lets the FALLBACK DIRECTION be tested: <paramref name="phasedStateSql"/> is the wide read
     /// the public entry point supplies, and a test supplies a deliberately-failing one instead.
     ///
@@ -5394,12 +10158,17 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
             throw new ArgumentNullException(nameof(connection));
         }
 
+        await WarnIfHeavyTableOnNarrowChunksAsync(connection, logger, cancellationToken);
+
         var desiredSeconds = (long)CompressScheduleSpan.TotalSeconds;
 
-        var stale = new List<(int JobId, string? Hypertable, string? Interval, bool WasFixed, int? WasPhase, int? Phase)>();
+        var stale = new List<(int JobId, string? Hypertable, string? Interval, bool WasFixed, int? WasPhase, int? Phase, string? DesiredCompressAfter)>();
 
         /* One reader for both statements: the narrow one is the wide one's first four columns in the same
-           order, so withPhase decides which ordinals are READ rather than selecting a different shape. */
+           order, so withPhase decides which ordinals are READ rather than selecting a different shape. The
+           #4510 compress_after column is on the WIDE read only — the stagger is scoped to owned hypertables
+           the same way the phase is, and the narrow fallback exists for a store that lacks even the older
+           phase columns, so it has no business gaining a newer one. */
         async Task ReadStateAsync(string sql, bool withPhase)
         {
             stale.Clear();
@@ -5421,16 +10190,56 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     && !reader.IsDBNull(6)
                     && string.Equals(reader.GetString(6), PgSchemaGenerator.CollectSchema, StringComparison.Ordinal);
 
+                /* #4510: present only on the wide read (ordinal 7), NULL for a policy with no compress_after
+                   key at all (compress_created_before policies, which this product never creates). */
+                var compressAfterSeconds = withPhase && !reader.IsDBNull(7) ? reader.GetInt64(7) : (long?)null;
+
+                /* #3653 LC (Medium security finding): frozen rollups are removed from
+                   AggregateCompressionTargets, so without this guard they fall through and get their
+                   compression schedule reset to the 1-hour raw cadence on every start. Skip them
+                   unconditionally — their schedule is never ours to tune. */
+                if (IsFrozenRollupAggregate(hypertable))
+                {
+                    continue;
+                }
+
+                /* The continuous aggregates' compression policies are NOT this converge's to retune (#3581).
+                   Their job reports the aggregate's user view as its hypertable (collect / <view>), so it
+                   lands in this unscoped read, and its once-a-day cadence would read as stale against the
+                   hourly tick — the first start after that family exists would put all twenty on the hourly
+                   grid, which is the placement #3581 ruled out. They have their own converge
+                   (EnsureAggregateCompressionAsync). Excluded by name on the narrow read, which carries no
+                   schema, and by name-in-collect on the wide one, so a foreign hypertable in another schema
+                   that happens to share an aggregate's name keeps #1778's cadence converge exactly as before. */
+                if (IsAggregateCompressionTarget(hypertable) && (!withPhase || ours))
+                {
+                    continue;
+                }
+
                 int? phase = ours && hypertable is not null && TryCompressionPhaseMinutesFor(hypertable, out var slot)
                     ? slot
+                    : null;
+
+                /* #4510: the desired compress_after, for OWNED hypertables only — CompressAfterFor's
+                   contract is scoped to the collector catalog, the same reach the phase already has, so a
+                   foreign hypertable with a same-named table elsewhere keeps whatever compress_after its
+                   own owner set. NULL means "nothing to converge on this axis", matching phase's own null
+                   contract just above. Computed straight from the offset map rather than parsed back out of
+                   CompressAfterFor's rendered literal — the literal is for the SQL statement, this is for
+                   the C# comparison, and going through text twice would be one more place the two could
+                   disagree. */
+                string? desiredCompressAfter = ours && hypertable is not null ? CompressAfterFor(hypertable) : null;
+                var desiredCompressAfterSeconds = ours && hypertable is not null
+                    ? (long?)(TimeSpan.FromDays(CompressAfterDays) + TimeSpan.FromHours(HeavyOffsetHoursFor(hypertable))).TotalSeconds
                     : null;
 
                 /* A NULL cadence is the widest wakeup there is, so it counts as stale rather than as
                    "nothing to compare". */
                 var cadenceStale = seconds != desiredSeconds;
                 var phaseStale = phase is int wanted && (!fixedSchedule || wasPhase != wanted);
+                var compressAfterStale = desiredCompressAfterSeconds is long wantedSeconds && compressAfterSeconds != wantedSeconds;
 
-                if (!cadenceStale && !phaseStale)
+                if (!cadenceStale && !phaseStale && !compressAfterStale)
                 {
                     continue;
                 }
@@ -5441,7 +10250,8 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     intervalText,
                     fixedSchedule,
                     wasPhase,
-                    phase));
+                    phase,
+                    compressAfterStale ? desiredCompressAfter : null));
             }
         }
 
@@ -5477,7 +10287,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         }
 
         var converged = 0;
-        foreach (var (jobId, hypertable, interval, wasFixed, wasPhase, phase) in stale)
+        foreach (var (jobId, hypertable, interval, wasFixed, wasPhase, phase, desiredCompressAfter) in stale)
         {
             try
             {
@@ -5504,6 +10314,23 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                         "TimescaleDB: retuned {Hypertable}'s compression policy from a {Was} tick to {Now} — that is the longest an already-eligible chunk can now sit uncompressed.",
                         hypertable, interval, CompressScheduleInterval);
                 }
+
+                /* #4510: SEPARATE from the cadence/phase alter above — alter_job accepts only one config
+                   argument per call and this is its own key, so a mismatch here is retuned with its own
+                   statement (SetCompressAfterSql) rather than folded into either branch above. Applied
+                   whichever branch ran, since a store can be stale on compress_after alone (its cadence and
+                   phase already converged) as easily as it can be stale on all three. */
+                if (desiredCompressAfter is not null)
+                {
+                    using var stagger = new NpgsqlCommand(SetCompressAfterSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    stagger.Parameters.AddWithValue(jobId);
+                    stagger.Parameters.AddWithValue(desiredCompressAfter);
+                    await stagger.ExecuteNonQueryAsync(cancellationToken);
+
+                    logger?.LogInformation(
+                        "TimescaleDB: retuned {Hypertable}'s compression policy onto its own {CompressAfter} eligibility delay (#4510) — spreading which hour each heavy table's chunks become eligible keeps the nightly compression burst from landing on all of them at once.",
+                        hypertable, desiredCompressAfter);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -5521,6 +10348,432 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         }
 
         return converged;
+    }
+
+    /* ─────────────── the fleet collection-health rollup (#3893 arm 2) ─────────────── */
+
+    /// <summary>The fleet collection-health rollup's continuous aggregate (#3893): one row per
+    /// (server, collector, hour) of <c>collection_log</c>.</summary>
+    public const string CollectionHealthHourlyView = "collection_health_hourly";
+
+    /// <summary>
+    /// The fleet collection-health rollup's inputs, materialized per hour so the seven-day read stops
+    /// decompressing six of its seven days on every call (#3893 arm 2). The first ELEVEN aggregates are
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, expression for expression, and each one
+    /// re-aggregates losslessly over hours — COUNT by SUM, SUM by SUM, MAX by MAX — which is why the read can
+    /// be served from buckets EXACTLY (the reader composes the partial head hour from raw). The TWELFTH,
+    /// <c>latest_run_note</c> (#4812), is deliberately not one of those eleven and not pinned with them.
+    ///
+    /// <para><b>Why the twelfth is <c>last()</c>, re-aggregated by newest time rather than SUM or MAX
+    /// (#4812).</b> A collector that lost half its databases still records SUCCESS, so the note of its newest
+    /// run is the only record of the loss, and the per-server reads band on it. The rollup used to drop the
+    /// note, which banded the same collector Healthy on the fleet overview and the Overview cards while its own
+    /// tab said Warning. A note is not a count or an instant, so it has no SUM or MAX: the bucket keeps the note of its
+    /// newest run (<c>last(x, collection_time)</c>, the ordered aggregate TimescaleDB accepts inside a
+    /// continuous aggregate, as <c>query_store_stats_hourly</c> does), and the composer re-aggregates the
+    /// buckets by keeping the note of the bucket with the greatest <c>last_run_time</c>
+    /// (<c>CollectionHealthRollupSupport.LatestRunNoteComposedSql</c>). The value is NULL unless the hour's
+    /// newest run IS a SUCCESS run carrying the partial-failure sentence
+    /// (<c>CollectionHealthRollupSupport.PartialFailureRunPredicateSql</c>), so the rollup stores only that
+    /// sentence, never arbitrary error text. It joins the frozen predicates below: the sentence
+    /// (<c>PartialDatabaseFailureNote.Marker</c>) is baked at materialization time.</para>
+    ///
+    /// <para><b>THE FROZEN-PREDICATE PRICE (#3698's known cost; the #1757 comment above states the rule:
+    /// baking a row filter is safe only when nothing can freeze a configurable behavior).</b> This CREATE
+    /// bakes, at materialization time, <c>EnumeratedCollectorDriver.AbandonedByNotePredicateSql</c> (and
+    /// through it <c>WholeCycleBudgetNoteSqlPattern</c>), <c>EnumeratedCollectorDriver.AbandonedRunPredicateSql</c>
+    /// (and through it <c>AbandonedStatus</c>), <c>CollectorRuntimePrecondition.NamedSkipStatusSqlList</c>
+    /// (and its three statuses), and the literals <c>'SUCCESS'</c>, <c>'ERROR'</c>, <c>'SKIPPED'</c>,
+    /// <c>'PERMISSIONS'</c>, <c>'EXTENSION_MISSING'</c>. Changing ANY of them changes what already-materialized
+    /// buckets MEAN: the aggregate must be dropped and rebuilt (CREATE ... IF NOT EXISTS will not re-define
+    /// it), or the fleet card bands a week of history under the old predicate.</para>
+    ///
+    /// <para>FROM the hypertable, not <c>v_collection_log</c> (every precedent aggregate selects from its
+    /// hypertable); <c>server_id &lt;&gt; 0</c> is a literal and is baked for the reason the read excludes the
+    /// fleet-maintenance sentinel.</para>
+    /// </summary>
+    public const string CreateCollectionHealthHourlySql = $@"
+CREATE MATERIALIZED VIEW IF NOT EXISTS collect.{CollectionHealthHourlyView}
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    collector_name,
+    time_bucket(INTERVAL '1 hour', collection_time) AS bucket,
+    COUNT(*) AS total_runs,
+    SUM(CASE WHEN status = 'SUCCESS'
+              AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+             THEN 1 ELSE 0 END) AS success_count,
+    SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
+    MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
+    SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
+    MAX(collection_time) AS last_run_time,
+    SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+             THEN 1 ELSE 0 END) AS abandoned_count,
+    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+    MAX(CASE WHEN status IS NULL
+              OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+             THEN collection_time END) AS last_non_skip_time,
+    MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+    MAX(CASE WHEN NOT (status = 'SUCCESS'
+                       AND COALESCE(rows_collected, 0) = 0
+                       AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+             THEN collection_time END) AS last_zero_row_streak_break_time,
+    last(CASE WHEN {CollectionHealthRollupSupport.PartialFailureRunPredicateSql} THEN error_message END, collection_time) AS latest_run_note
+FROM collect.collection_log
+WHERE server_id <> 0
+GROUP BY server_id, collector_name, bucket
+WITH NO DATA";
+
+    /// <summary>
+    /// How far back each refresh of <see cref="CollectionHealthHourlyView"/> re-materializes: EIGHT DAYS — the
+    /// seven-day consumer window + one bucket (the head hour straddling the window's start) + margin, rounded up
+    /// to the whole day, equal to <see cref="CollectionHealthRetentionInterval"/>.
+    ///
+    /// <para><b>THE WINDOW MUST COVER THE CONSUMER WINDOW, OR HOLES ARE PERMANENT (#3893's watermark hole, found
+    /// before merge).</b> <c>materialized_only = false</c> serves raw rows only ABOVE the watermark; below it only
+    /// materialized buckets exist. A refresh moves the watermark to the end of its window, so a run whose window
+    /// starts AFTER the current watermark jumps it past every unrefreshed hour in between, and those hours are
+    /// never materialized. The first design (start_offset 3 h) did exactly that twice over: the FIRST run after
+    /// the ensure pass (which creates the aggregate WITH NO DATA — exact until then, because nothing is
+    /// materialized and the whole window is served real-time from raw) stranded all history older than 3 h, and
+    /// any outage longer than two hours stranded its gap. A run whose window starts at or before the watermark
+    /// can never jump a gap; with the window starting eight days back, far below the watermark, a hole cannot
+    /// form inside the consumer window BY CONSTRUCTION (an outage longer than eight days leaves its gap older
+    /// than the consumer window). The first run after install therefore IS the one-time backfill.</para>
+    ///
+    /// <para><b>Cost.</b> A refresh re-materializes only the INVALIDATED ranges inside its window, not the whole
+    /// window, so a steady-state run touches only the new hour (measured in the #3893 PR: 1–3 ms with nothing or
+    /// one still-filling hour new, 0.12 s for a whole fleet hour). A late row landing in a compressed chunk
+    /// invalidates its bucket, which the next run heals once, by decompressing that range once. This window sizes
+    /// the REFRESH, not the READ tail — the tail stays bounded by <see cref="CollectionHealthTailWorstCaseAge"/>
+    /// whatever this is. A pin fails if it ever drops below the consumer window plus a bucket.</para>
+    /// </summary>
+    public const string CollectionHealthRefreshStartOffset = "8 days";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="CollectionHealthRefreshStartOffset"/>, pinned equal
+    /// by test.</summary>
+    public static readonly TimeSpan CollectionHealthRefreshStartSpan = TimeSpan.FromDays(8);
+
+    /// <summary>The one consumer's window (<c>DarlingFleetReader</c>'s seven-day fleet collection-health read).
+    /// <see cref="CollectionHealthRefreshStartSpan"/> must be at least this plus a bucket (pinned).</summary>
+    public static readonly TimeSpan CollectionHealthConsumerWindow = TimeSpan.FromDays(7);
+
+    /// <summary>The refresh cadence of <see cref="CollectionHealthHourlyView"/>, and ALSO its end offset — the
+    /// same argument twice, like every refresh policy here (<see cref="ScheduleIntervalDoublesAsEndOffset"/>).
+    /// One hour: the bucket width.</summary>
+    public const string CollectionHealthRefreshScheduleInterval = "1 hour";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="CollectionHealthRefreshScheduleInterval"/>, pinned
+    /// equal by test.</summary>
+    public static readonly TimeSpan CollectionHealthRefreshScheduleSpan = TimeSpan.FromHours(1);
+
+    /// <summary>What one refresh run is allowed to take in the tail-age bound below — one hour, far above
+    /// what a steady-state run takes (0.12 s for a whole fleet hour, measured in the #3893 PR).</summary>
+    public static readonly TimeSpan CollectionHealthRefreshRunAllowance = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// The WORST-CASE AGE of the real-time tail a <see cref="CollectionHealthHourlyView"/> read serves from raw
+    /// (watermark to now): the end offset, plus the still-filling bucket the watermark rounds down past, plus
+    /// a whole schedule interval between runs, plus a run's own duration — 1 h + 1 h + 1 h + 1 h = 4 h.
+    ///
+    /// <para><b>It must stay well under <see cref="CompressAfterDays"/> (one day), and a pin fails if it does
+    /// not.</b> <c>materialized_only = false</c> serves the tail from raw <c>collection_log</c>; if the tail
+    /// ever reached a compressed chunk, every read would decompress again and the problem #3893 removes would
+    /// be rebuilt inside the fix.</para>
+    /// </summary>
+    public static TimeSpan CollectionHealthTailWorstCaseAge =>
+        CollectionHealthRefreshScheduleSpan + HourlyBucket + CollectionHealthRefreshScheduleSpan + CollectionHealthRefreshRunAllowance;
+
+    /// <summary>Retention horizon of <see cref="CollectionHealthHourlyView"/>. Its one consumer reads seven days;
+    /// 7 d + one bucket (the head hour straddling the cut) + margin, rounded UP to whole days = 8 days — the
+    /// same span as <see cref="CollectionHealthRefreshStartOffset"/>. A chunk-level drop, so the slack costs one
+    /// small chunk.
+    ///
+    /// <para><b>So this aggregate is NEVER compressed, deliberately (#4619).</b> Retention equal to the refresh
+    /// window means every chunk it keeps overlaps the window every refresh re-materializes. This store keeps
+    /// compression out of that window (<see cref="AggregateCompressMarginSpan"/>: <c>compress_after</c> is the
+    /// refresh start offset plus one raw chunk, because a refresh that reaches a compressed chunk decompresses what
+    /// it re-materializes, turning compression into hourly churn), and that point — nine days here — is past the eight-day
+    /// retention, so no chunk would ever become eligible before it is dropped. Hence no compression settings,
+    /// no compression policy and no <see cref="AggregateCompressionTargets"/> entry, and
+    /// <c>get_store_metrics</c> states this instead of counting the aggregate among those with compression
+    /// DISABLED. A pin fails if the refresh window plus that margin ever falls inside retention, which is the
+    /// point where leaving it uncompressed would become a choice to revisit.</para></summary>
+    public const string CollectionHealthRetentionInterval = "8 days";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="CollectionHealthRetentionInterval"/>, pinned equal by
+    /// test.</summary>
+    public static readonly TimeSpan CollectionHealthRetentionSpan = TimeSpan.FromDays(8);
+
+    /// <summary>
+    /// <see cref="CollectionHealthHourlyView"/>'s refresh policy — OFF the minute grid, deliberately.
+    ///
+    /// <para><b>Why not the grid.</b> The hourly phase grid has no free light slot: a
+    /// <see cref="HourlyAggregates"/> or <see cref="BaselineAggregates"/> member grows the light band by a
+    /// minute and drops <see cref="RefreshSlotWarningSeconds"/> about 50 s, below the 896 s
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> (the #3698 arithmetic), and any registry
+    /// membership would be a 24th <see cref="AggregateCompressionTargets"/> entry in a band full at
+    /// twenty-three. So it is on none of those lists (<see cref="OffGridAggregates"/>): no grid minute, no
+    /// compression target.</para>
+    ///
+    /// <para><b>Finish-to-start, no <c>initial_start</c> — the daily tier's precedent
+    /// (<see cref="AddDailyRefreshPolicySql"/>).</b> Its start minute therefore DRIFTS forward run by run and
+    /// will eventually visit the heaviest refresh window. That is acceptable ONLY because the refresh is
+    /// measured cheap even with its eight-day window (the fleet-sized steady-state measurement is in the #3893
+    /// PR: milliseconds, 0.12 s for a whole fleet hour). If that stops holding, this belongs on the grid
+    /// (#3892), not here.</para>
+    ///
+    /// <para>Every converge that walks refresh jobs skips it by MEMBERSHIP: the #3012 window/phase converge
+    /// reads <see cref="HourlyRefreshPhaseOrder"/>, the #3745 batching converge reads
+    /// <see cref="DailyAggregates"/>, and the compression / chunk-interval ensures read
+    /// <see cref="AggregateCompressionTargets"/> — none of which contains it. Its materialization WIDTH is
+    /// nonetheless #3620's one raw chunk, set by the creation sweep itself before this policy exists
+    /// (<see cref="SetOffGridMaterializationChunkIntervalSql"/> says why it cannot wait for #3620's ensure).</para>
+    /// </summary>
+    public static string AddCollectionHealthRefreshPolicySql()
+        => AddContinuousAggregatePolicySql(
+            CollectionHealthHourlyView,
+            CollectionHealthRefreshStartOffset,
+            CollectionHealthRefreshScheduleInterval,
+            CollectionHealthRefreshScheduleInterval,
+            phaseMinutes: null);
+
+    /// <summary>
+    /// The ONE refresh of <see cref="CollectionHealthHourlyView"/>'s whole window that follows a rebuild
+    /// (#4812): <c>[now - <see cref="CollectionHealthRefreshStartSpan"/>, now - <see cref="CollectionHealthRefreshScheduleSpan"/>]</c>,
+    /// the policy's own window, so the watermark lands where the policy would put it and the still-filling hour
+    /// stays real-time.
+    ///
+    /// <para><b>Why it exists.</b> The reshape sweep drops the old view and the ensure sweep recreates it WITH NO
+    /// DATA. Until a refresh runs, every fleet read answers from raw over seven days - the cost the rollup
+    /// removed (#3893). The policy is finish-to-start with no <c>initial_start</c>, so its first run is launched
+    /// AT ONCE, when the ensure sweep commits it, not up to an hour later (see
+    /// <see cref="RollupBackfill.ConcurrentRefreshSqlState"/>), and it refreshes this same window. This refresh
+    /// can therefore land on the policy's own run: TimescaleDB serializes refreshes of one aggregate and raises
+    /// <c>55P03</c> rather than waiting. When it does, the policy is doing the same refresh, so that is logged at
+    /// Information and this returns false; every other failure is a Warning. Measured at about 11 s and about
+    /// 1 GB read on a 44-server store (8.9M <c>collection_log</c> rows over eight days). The service launches it
+    /// OFF the start path (never awaited by startup), on its own connection.</para>
+    ///
+    /// <para><b>Gated on the state, not on having just dropped the view:</b> it refreshes only when the view
+    /// exists in the shape the composer reads (<see cref="CollectionHealthRollupSupport.RollupProbeSql"/>) and
+    /// holds nothing yet (no watermark, <see cref="CollectionHealthRollupSupport.WatermarkSql"/>). That is the
+    /// state the rebuild leaves, so it also covers a restart inside the first hour, and it is a two-statement
+    /// no-op on every start after the view has been materialized. It reuses
+    /// <see cref="RollupBackfill.RefreshSliceSql"/> (the same statement the operator backfill issues, without
+    /// the newest-first option a one-window refresh does not need) rather than a second refresh statement.
+    /// A failure is logged and left to the policy: the reads stay exact from raw.</para>
+    /// </summary>
+    /// <returns>True when it ran the refresh; false when the view was absent, already materialized, the
+    /// policy's own refresh held the aggregate's lock, or the refresh failed.</returns>
+    public static async Task<bool> WarmCollectionHealthHourlyAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            using (var probe = new NpgsqlCommand(CollectionHealthRollupSupport.RollupProbeSql, connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+                {
+                    return false;
+                }
+            }
+
+            using (var watermark = new NpgsqlCommand(CollectionHealthRollupSupport.WatermarkSql, connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                if (await watermark.ExecuteScalarAsync(cancellationToken) is DateTime)
+                {
+                    return false;
+                }
+            }
+
+            var clock = Stopwatch.StartNew();
+            using (var refresh = new NpgsqlCommand(
+                RollupBackfill.RefreshSliceSql(CollectionHealthHourlyView, force: false, withOptions: false), connection)
+            {
+                CommandTimeout = BackfillTimeoutSeconds,
+            })
+            {
+                refresh.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - CollectionHealthRefreshStartSpan, DateTimeKind.Unspecified));
+                refresh.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - CollectionHealthRefreshScheduleSpan, DateTimeKind.Unspecified));
+                await refresh.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            logger?.LogInformation(
+                "TimescaleDB: {View} was empty after its rebuild (#4812); refreshed its {Window} window once, in {Seconds:F1} s, so the fleet overview and Overview cards read hourly buckets instead of a week of raw until the refresh policy's first run.",
+                CollectionHealthHourlyView, CollectionHealthRefreshStartOffset, clock.Elapsed.TotalSeconds);
+            return true;
+        }
+        catch (PostgresException ex) when (ex.SqlState == RollupBackfill.ConcurrentRefreshSqlState)
+        {
+            /* The policy's own first run (launched at once, with no initial_start) holds the aggregate's refresh
+               lock, and TimescaleDB raises lock_not_available rather than waiting. It is the same refresh, so this
+               is not a failure: step aside and let it fill the view. */
+            logger?.LogInformation(
+                "TimescaleDB: {View} is being refreshed by its own policy (#4812); skipped the one-time refresh of its {Window} window, the policy fills the view.",
+                CollectionHealthHourlyView, CollectionHealthRefreshStartOffset);
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not refresh {View} after its rebuild (#4812) - the fleet reads answer from raw, exactly but slower, until its refresh policy runs: {Message}",
+                CollectionHealthHourlyView, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Continuous aggregates <see cref="EnsureContinuousAggregatesAsync"/> creates that are on NONE of the
+    /// three registry lists — no grid minute, no compression target — each paired with its own policy builder
+    /// (#3893). The sweep appends them LAST (raw-sourced, no ordering requirement). Grants: none of their own,
+    /// exactly like every other aggregate in <c>collect</c> — the roles reach them through
+    /// <c>DarlingManagedRoles</c>' <c>GRANT SELECT ON ALL TABLES IN SCHEMA collect TO mcp</c> (re-run every
+    /// start) and its <c>ALTER DEFAULT PRIVILEGES ... IN SCHEMA collect</c> grant to admin/viewer.
+    /// </summary>
+    public static readonly (string CreateSql, string View, Func<string> PolicySql)[] OffGridAggregates =
+    {
+        (CreateCollectionHealthHourlySql, CollectionHealthHourlyView, AddCollectionHealthRefreshPolicySql),
+    };
+
+    /// <summary>
+    /// Builds the <c>DO</c> block that gives a FRESH migrate the EXACT index a store upgrading through
+    /// V152's own <c>DO</c> block reaches by keeping (rather than dropping) its surviving auto-created group
+    /// index, for one kept <paramref name="column"/> on <paramref name="view"/> — called once per kept
+    /// column, so a view keeping two (the hourly pair's <c>server_id</c> and <c>server_name</c>) gets two
+    /// separate statements concatenated by <see cref="KeptIndexesSql(string, string[])"/>.
+    ///
+    /// <para><b>Why an unnamed <c>CREATE INDEX</c> resolved onto the materialization from the catalog, not
+    /// a hand-typed name.</b> The <c>DO</c> block below issues its <c>CREATE INDEX</c> directly against the
+    /// materialization OID it just resolved (<c>v_mat_oid</c>), not against the view — TimescaleDB's own
+    /// <c>create_group_indexes</c> is what issues an unnamed index against the continuous aggregate's VIEW
+    /// and lets PostgreSQL route it to the materialization, which names it by ITS OWN default-naming rule
+    /// (<c>&lt;table&gt;_&lt;column&gt;_bucket_idx</c>, truncated to 63 bytes with PostgreSQL's own
+    /// de-duplicating suffix if that truncation collides) — the same result this code reaches, never a string this
+    /// code builds. A hand-built name matching that pattern for five of the six views would still be WRONG
+    /// for the sixth: <c>query_store_stats_interval_daily</c>'s materialization name is itself a generated
+    /// <c>_materialized_hypertable_N</c>, wider than the fixed views' own table names, so a name built from
+    /// the VIEW's name would drift from what PostgreSQL actually assigns the materialization's copy — the
+    /// exact bug #4503's PR body traces on the upgrade side (<see cref="PgMigrations"/>'s V152 remarks) and
+    /// the reason this resolves the materialization from the catalog and lets PostgreSQL name the index,
+    /// the same as an upgraded store's survivor. <c>bucket DESC</c>, never ASC, for the same reason: an
+    /// upgraded store's survivor was built DESC, and an index with a different sort order is a DIFFERENT
+    /// index to <see cref="PgSchemaGeneratorTests"/>'s fresh-vs-upgraded comparison.</para>
+    ///
+    /// <para><b>Idempotent by a catalog read, not by <c>IF NOT EXISTS</c></b> (an unnamed <c>CREATE INDEX</c>
+    /// has no name to guard with one — a second unnamed <c>CREATE INDEX</c> on the same columns would create
+    /// a SECOND index under PostgreSQL's own collision-suffixed name). The <c>DO</c> block instead reads
+    /// <c>pg_index</c>/<c>pg_attribute</c> for a two-key btree already carrying <paramref name="column"/>
+    /// then <c>bucket</c> — the same shape-matching rule <see cref="PgMigrations"/>'s V152 drop uses on the
+    /// upgrade side — and issues the <c>CREATE INDEX</c> only when that read finds nothing, so every start
+    /// after the first is a read with no write. A missing view (<c>v_mat_oid IS NULL</c>, a plain-PostgreSQL
+    /// store or one where this aggregate never enabled) is skipped rather than erroring.</para>
+    /// </summary>
+    private static string KeptIndexesSql(string view, string column) => $@"
+DO $$
+DECLARE
+    v_mat_oid regclass;
+BEGIN
+    SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name)::regclass
+    INTO v_mat_oid
+    FROM timescaledb_information.continuous_aggregates
+    WHERE view_schema = 'collect' AND view_name = '{view}';
+
+    IF v_mat_oid IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
+        JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
+        WHERE i.indrelid = v_mat_oid
+        AND   i.indnatts = 2
+        AND   a1.attname = '{column}'
+        AND   a2.attname = 'bucket'
+    ) THEN
+        EXECUTE format('CREATE INDEX ON %s ({column}, bucket DESC)', v_mat_oid);
+    END IF;
+END $$;";
+
+    /// <summary>Concatenates one <see cref="KeptIndexesSql(string, string)"/> block per kept column on <paramref name="view"/>.</summary>
+    private static string KeptIndexesSql(string view, params string[] columns) =>
+        string.Join("\n", columns.Select(column => KeptIndexesSql(view, column)));
+
+    /// <summary>
+    /// #4503: the six Query Store rollups whose <c>Create...Sql</c> now carries <c>create_group_indexes =
+    /// false</c>, mapped to the follow-on <c>KeptIndexesSql</c> <c>DO</c> block(s) that give a FRESH
+    /// store the same kept-index shape a store that upgrades through V152 reaches by resolving and keeping
+    /// (rather than dropping) its own two-key group indexes. Read by <see cref="EnsureContinuousAggregatesAsync"/>
+    /// right after each view's CREATE, so a fresh migrate and an upgraded store land the identical index —
+    /// same key order, <c>bucket DESC</c>, and the same PostgreSQL-assigned name
+    /// (<see cref="PgSchemaGeneratorTests"/>'s fresh-vs-upgraded comparison checks both).
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, string> QueryStoreRollupKeptIndexesSql = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [QueryStoreStatsHourlyView] = CreateQueryStoreStatsHourlyKeptIndexesSql,
+        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql,
+        [QueryStoreStatsDailyView] = CreateQueryStoreStatsDailyKeptIndexesSql,
+        [QueryStoreStatsCorrectedDailyView] = CreateQueryStoreStatsCorrectedDailyKeptIndexesSql,
+        [QueryStoreStatsIntervalDailyView] = CreateQueryStoreStatsIntervalDailyKeptIndexesSql,
+        [QueryStoreStatsDayGrainDailyView] = CreateQueryStoreStatsDayGrainDailyKeptIndexesSql,
+    };
+
+    /// <summary>Is <paramref name="view"/> (bare or <c>collect.</c>-qualified) one of <see cref="OffGridAggregates"/>?</summary>
+    public static bool IsOffGridAggregate(string? view)
+    {
+        if (string.IsNullOrEmpty(view))
+        {
+            return false;
+        }
+
+        var dot = view.LastIndexOf('.');
+        var bare = dot >= 0 ? view[(dot + 1)..] : view;
+        return OffGridAggregates.Any(a => string.Equals(a.View, bare, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Holds an off-grid aggregate's materialization at #3620's width, one raw chunk
+    /// (<see cref="MaterializationChunkInterval"/>), issuing <c>set_chunk_time_interval</c> ONLY when the catalog
+    /// reads another width, so a settled start calls nothing. Run by <see cref="EnsureContinuousAggregatesAsync"/>
+    /// between the aggregate's CREATE and its policy (#3893).
+    ///
+    /// <para><b>Why here, not in #3620's ensure.</b> Left alone, TimescaleDB gives a first-level aggregate's
+    /// materialization TEN raw chunks (10 days here), and <c>drop_chunks</c> removes a chunk only once its whole
+    /// range is past the horizon. The 8-day <see cref="CollectionHealthRetentionInterval"/> would then hold 8 to
+    /// 18 days, the over-hold #3620 removed from every other aggregate. #3620's ensure cannot catch this one in
+    /// time. It runs in the aggregate-compression step, a LATER convergence stage than this sweep, and
+    /// <c>set_chunk_time_interval</c> governs only chunks created after the call. This aggregate's policy carries
+    /// no <c>initial_start</c>, and its first run is the seven-day backfill, which creates the first chunks. The
+    /// aggregate is created <c>WITH NO DATA</c>, so a width set before the policy exists covers every chunk it
+    /// will ever have.</para>
+    /// </summary>
+    public static string SetOffGridMaterializationChunkIntervalSql(string view)
+    {
+        if (!IsOffGridAggregate(view))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(view),
+                view,
+                "not an off-grid continuous aggregate — it is not in OffGridAggregates; the registry aggregates take their width from #3620's EnsureMaterializationChunkIntervalAsync");
+        }
+
+        return $@"SELECT set_chunk_time_interval(
+    format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass,
+    INTERVAL '{MaterializationChunkInterval}')
+FROM timescaledb_information.continuous_aggregates AS ca
+JOIN timescaledb_information.dimensions AS d
+  ON  d.hypertable_schema = ca.materialization_hypertable_schema
+  AND d.hypertable_name = ca.materialization_hypertable_name
+  AND d.dimension_type = 'Time'
+WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'
+AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunkIntervalSpan.TotalSeconds}";
     }
 
     /// <summary>The V23 non-catalog hypertable: the per-run observability log. Bare name — the connection's
@@ -5559,8 +10812,16 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                 await convert.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            using (var enable = new NpgsqlCommand(EnableCompressionSql(CollectionLogTable), connection) { CommandTimeout = SetupTimeoutSeconds })
+            /* #3817: same guard as the collector sweep's, same reason — the enable ALTER takes an
+               AccessExclusiveLock even when it changes nothing (measured; CompressionEnabledStateSql carries
+               the measurement), and this method is now on the hourly tick rather than only the start path.
+               collection_log is written by every collector cycle, so the convoy applies to it as much as to
+               the collector tables. Its own read because this method takes no set from its caller; one row
+               back, and a null answer issues the ALTER exactly as before. */
+            var converged = await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);
+            if (converged is null || !converged.Contains(CollectionLogTable))
             {
+                using var enable = new NpgsqlCommand(EnableCompressionSql(CollectionLogTable), connection) { CommandTimeout = SetupTimeoutSeconds };
                 await enable.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -5584,12 +10845,121 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /* ---------------- compression-job self-heal (#1581) ---------------- */
 
     /// <summary>
+    /// The TimescaleDB release from which a persisted <c>next_start = -infinity</c> stopped being a PERMANENT
+    /// state (#3591): upstream #9360, "Sanitize <c>DT_NOBEGIN</c> next_start to recover jobs stuck after
+    /// primary failover", shipped in the 2.26.4 patch release (2026-04-28 — the CHANGELOG lists it under
+    /// 2.26.4, not 2.27.0 as the issue first said) and is therefore in every 2.27+ release as well.
+    /// <see cref="SchedulerRecoversNegativeInfinity"/> is the predicate over it.
+    ///
+    /// <para><b>What the fix changed, from the 2.28.1 source (<c>src/bgw/job_stat.c</c>,
+    /// <c>ts_bgw_job_stat_next_start</c>).</b> The scheduler computes each job's in-memory next start from
+    /// its stat row in three arms, in this order: a row with <c>consecutive_crashes &gt; 0</c> gets the CRASH
+    /// BACKOFF (below); otherwise, since #9360, a row whose persisted <c>next_start</c> is <c>-infinity</c> is
+    /// sanitized to "now" and runs at once; otherwise the persisted value stands. Before the fix the second arm
+    /// did not exist: the sentinel was returned as-is, the scheduler's due-time subtraction on <c>INT64_MIN</c>
+    /// wrapped, and the job was never due again — the permanent dead state #1581's arm was built against and
+    /// the field incident that filled a disk. A row reaches that state with <c>consecutive_crashes = 0</c> through
+    /// <c>on_failure_to_start_job</c>'s <c>next_start != DT_NOBEGIN</c> restore guard, or by inheriting a
+    /// mid-run row across a primary failover; both are named in the upstream fix's own comment.</para>
+    ///
+    /// <para><b>What a PERSISTENT <c>-infinity</c> is on a fixed store.</b> Only the first arm's row: a worker
+    /// killed between <c>mark_start</c> and <c>mark_end</c> (a SIGKILL, a crash-restart, a failover — a SIGTERM
+    /// is caught and marked as a FAILURE with a finite next start) leaves <c>next_start = -infinity</c>,
+    /// <c>last_finish = -infinity</c> (the view's <c>last_run_status IS NULL</c>) and <c>consecutive_crashes = 1</c>,
+    /// and the scheduler holds it there, un-persisted, for
+    /// <c>max(MIN_WAIT_AFTER_CRASH_MS, retry_period × crashes)</c> capped at five schedule intervals and
+    /// jittered ±13 %: at least FIVE MINUTES, and for a compression policy — whose <c>retry_period</c> defaults
+    /// to one hour, measured on 2.28.1 — about an hour. Then it re-runs the job itself. (#3575's rig read
+    /// exactly five minutes because its 10-second probe policy capped the retry term at 50 s; the five-minute
+    /// floor is the whole backoff only when the retry term is smaller than it.) So on 2.26.4+ the row this
+    /// product's dead-job arm fires on is a self-recovering condition, not a permanent one, and the alert's
+    /// sentence has to say which — <see cref="ClassifyPolicyJob(bool, string?, DateTime?, TimeSpan?, DateTime, Version?, out string)"/>
+    /// does, by version.</para>
+    ///
+    /// <para>The version is read from <c>pg_extension.extversion</c> by <see cref="ReadTimescaleVersionAsync"/>
+    /// — the first place in this file to read it. Nothing else here declares a TimescaleDB floor (the stated
+    /// target is "2.x"), and this does not either: a version that cannot be read or parsed is treated as OLD,
+    /// because "the scheduler will never run it again" is the sentence that costs nothing when wrong on a new
+    /// store and everything when wrong on an old one.</para>
+    /// </summary>
+    public static readonly Version TimescaleNextStartSanitizedFrom = new(2, 26, 4);
+
+    /// <summary>
+    /// Whether <paramref name="timescaleVersion"/> has upstream #9360 (#3591): <c>true</c> from
+    /// <see cref="TimescaleNextStartSanitizedFrom"/> up, <c>false</c> below it AND for <c>null</c> — an unknown
+    /// version is the old behaviour, deliberately (see the constant). Pure, so the version arms pin.
+    /// </summary>
+    public static bool SchedulerRecoversNegativeInfinity(Version? timescaleVersion)
+        => timescaleVersion is not null && timescaleVersion >= TimescaleNextStartSanitizedFrom;
+
+    /// <summary>
+    /// <c>pg_extension.extversion</c> for timescaledb as a <see cref="Version"/>, or <c>null</c> when it cannot
+    /// be read (#3591). Failure-isolated for the same reason the job-stat read is: this decides a SENTENCE,
+    /// not whether to page, and a store hiccup on it must fall back to the conservative text rather than
+    /// fail the check. Debug on failure; the caller already gates on the extension being present.
+    /// </summary>
+    public static async Task<Version?> ReadTimescaleVersionAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            using var command = new NpgsqlCommand(
+                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            var raw = await command.ExecuteScalarAsync(cancellationToken) as string;
+            var parsed = ParseTimescaleVersion(raw);
+            if (parsed is null)
+            {
+                logger?.LogDebug("TimescaleDB extversion '{Raw}' did not parse as a version — treating the store as pre-2.26.4 for the compression dead-job text (#3591)", raw ?? "(absent)");
+            }
+
+            return parsed;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Could not read the TimescaleDB extension version — treating the store as pre-2.26.4 for the compression dead-job text (#3591): {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The numeric prefix of an <c>extversion</c> string as a <see cref="Version"/> (#3591): <c>2.28.1</c>
+    /// parses whole; a development suffix (<c>2.29.0-dev</c>) is dropped and the number kept, because the
+    /// scheduler code in a dev build past 2.26.4 has the fix; anything with fewer than two dotted numbers
+    /// (<c>null</c>, empty, a bare <c>2</c>) is <c>null</c>, which the caller reads as OLD. Pure so it pins.
+    /// </summary>
+    public static Version? ParseTimescaleVersion(string? extversion)
+    {
+        if (string.IsNullOrWhiteSpace(extversion))
+        {
+            return null;
+        }
+
+        var span = extversion.AsSpan().Trim();
+        int end = 0;
+        while (end < span.Length && (char.IsAsciiDigit(span[end]) || span[end] == '.'))
+        {
+            end++;
+        }
+
+        var numeric = span[..end].TrimEnd('.');
+        return numeric.Contains('.') && Version.TryParse(numeric, out var version) ? version : null;
+    }
+
+    /// <summary>
     /// The parameterized re-arm statement (#1581): reschedule a background job to run immediately, which
     /// un-sticks a job whose <c>next_start</c> has become <c>-infinity</c> (the scheduler will never re-fire
-    /// it otherwise — the field-incident root cause). The job_id is ALWAYS bound as <c>$1</c>, never
+    /// it otherwise — the field-incident root cause, on TimescaleDB below 2.26.4; see
+    /// <see cref="TimescaleNextStartSanitizedFrom"/> for what the same row is above it, and
+    /// <see cref="StuckPolicyJob.SchedulerRetries"/> for why this statement must NOT be run against it
+    /// there — measured, it resets the scheduler's crash backoff rather than shortening it, #3591). The job_id is ALWAYS bound as <c>$1</c>, never
     /// interpolated (the discipline is uniform with DarlingRetention's parameterized paths); <c>now()</c> is
     /// SQL, not a value. It is cast <c>$1::integer</c> because TimescaleDB's <c>alter_job</c> takes
-    /// <c>job_id integer</c>, but <see cref="StuckCompressionJob.JobId"/> is a <c>long</c> that Npgsql sends as
+    /// <c>job_id integer</c>, but <see cref="StuckPolicyJob.JobId"/> is a <c>long</c> that Npgsql sends as
     /// <c>bigint</c>; Postgres does NOT down-cast bigint→integer during function resolution, so an un-cast bind
     /// fails with <c>42883: function alter_job(bigint, ...) does not exist</c> (a real defect the gated-live
     /// test caught — a TimescaleDB job_id never exceeds int4, so the cast is always safe).
@@ -5630,16 +11000,255 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     }
 
     /// <summary>
+    /// How long <see cref="ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+    /// waits before it RE-READS a job whose <c>-infinity</c> arm tripped, and requires the trip to persist
+    /// (#3575). Only taken when that arm trips; a pass with nothing to confirm costs nothing.
+    ///
+    /// <para><b>Why a confirm-read exists at all.</b> The <c>-infinity</c> arm already carried a running
+    /// guard (<c>nextStartIsNegativeInfinity &amp;&amp; !isRunning</c>) and a false page came through it
+    /// anyway, on a production store, with the alert's stamp 53 ms inside a 63 ms scheduled run that
+    /// succeeded. The guard's two inputs are read from INDEPENDENT sources inside TimescaleDB's own view,
+    /// and the 2.28.1 definition (<c>pg_get_viewdef('timescaledb_information.job_stats')</c>, read live)
+    /// says so exactly: <c>job_status</c> is <c>CASE WHEN pgs.state = 'active' THEN 'Running' WHEN
+    /// j.scheduled = false THEN 'Paused' ELSE 'Scheduled' END</c> over a <c>LEFT JOIN pg_stat_activity pgs
+    /// ON pgs.application_name = j.application_name</c>, while <c>next_start</c> is
+    /// <c>_timescaledb_internal.bgw_job_stat.next_start</c>. The scheduler's <c>mark_start</c> writes
+    /// <c>next_start = -infinity</c> (and <c>last_finish = -infinity</c>) in its OWN transaction and commits
+    /// it BEFORE the worker process is even registered; the worker then has to start, initialise its
+    /// connection, run one catalog transaction, report its <c>application_name</c> and finally call
+    /// <c>pgstat_report_activity(STATE_RUNNING)</c> before the join can say <c>Running</c>. Every read that
+    /// lands in that START EDGE sees <c>-infinity</c> AND <c>Scheduled</c>, which is this predicate's
+    /// dead-job arm. There is an END EDGE too, with a different cause: the catalog row is read under the
+    /// statement's MVCC snapshot while <c>pg_stat_activity</c> is read live from shared memory, so one SELECT
+    /// can pair a pre-<c>mark_end</c> row (<c>-infinity</c>) with a post-exit activity view (no backend, so
+    /// <c>Scheduled</c>). Both edges were captured on a PG18 + TimescaleDB 2.28.1 rig by polling
+    /// <see cref="StuckPolicyJobsSql"/> in a tight loop across a 10-second-cadence policy: every run
+    /// showed ~3 ms of <c>-infinity + Scheduled</c> before the first <c>Running</c> sample and one more such
+    /// sample after the last, in a run ~7.5 ms long end to end. On a Windows store — where the production
+    /// page came from — backend process creation is far slower than a Linux fork, so the start edge is a
+    /// larger share of a run that is itself only tens of milliseconds when there is nothing to compress.</para>
+    ///
+    /// <para><b>Why a confirm-read and not a same-source running signal.</b> The stat row DOES carry its own
+    /// mid-run marker — <c>mark_start</c> sets <c>last_finish = -infinity</c>, which the view surfaces as
+    /// <c>last_run_status IS NULL</c> and <c>last_run_duration IS NULL</c> (the duration is
+    /// <c>CASE WHEN js.last_finish &gt; js.last_start</c> in every <c>sql/views.sql</c> from 2.14 through
+    /// 2.28.1, so it reads NULL mid-run and never negative; the belief that it "goes negative" is not borne
+    /// out by any version checked) — and deriving "running" from it would make both inputs one row. It was
+    /// rejected because that marker is IDENTICAL for a run whose worker died
+    /// before <c>mark_end</c> ever ran, which is precisely the state this arm exists to catch: reproduced on
+    /// the rig by SIGKILLing a job's worker, after which the row read <c>-infinity + Scheduled +
+    /// last_run_status NULL</c> for the whole five-minute crash backoff. A same-source guard would have read
+    /// that as "running" and stayed silent on the one state it is for. Re-reading after a delay makes no such
+    /// assumption: an edge is over in milliseconds, a dead row is still dead seconds later.</para>
+    ///
+    /// <para><b>Why five seconds.</b> The transient it has to outlast is bounded by the run's own edges: the
+    /// start edge is one process start plus one catalog transaction (~3 ms measured on Linux; tens of
+    /// milliseconds is the realistic Windows figure, and a pathological second is still covered five times
+    /// over), and a short run bounds the whole exposure at its own duration (40–100 ms is what a production
+    /// store's hourly no-op compressions measure). Against what it costs, five seconds is 1/720 of the hourly
+    /// cadence and 1/4,320 of the six-hour <see cref="StuckRunningBound"/> floor, so a genuinely dead job is
+    /// detected on the same hourly pass it always was, five seconds later. And it is far below the shortest
+    /// PERSISTENT <c>-infinity</c> state there is: TimescaleDB's crash backoff holds the row at
+    /// <c>-infinity</c> for at least <c>MIN_WAIT_AFTER_CRASH_MS</c> (five minutes) before the scheduler
+    /// re-runs a crashed job, so a real crash cannot slip between the two reads. The check is AWAITED on the
+    /// worker's serial sweep loop (#2327's concern), so the delay is bounded, cancellable, and paid only on
+    /// the rare pass where the arm tripped at all.</para>
+    /// </summary>
+    public static readonly TimeSpan StuckPolicyJobConfirmDelay = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The compression-job health check's wall-clock phase (#3575): how many seconds past a minute boundary
+    /// the hourly check is pinned to. <see cref="NextCompressionCheckUtc"/> applies it.
+    ///
+    /// <para><b>Why the check needs a phase at all, stated against how the two schedules are really
+    /// anchored — which is not how the postmortem first described them.</b> Every compression policy this
+    /// product owns runs on a FIXED schedule whose <c>initial_start</c> is <c>date_trunc('hour', now()) +
+    /// 1 hour + &lt;phase minutes&gt;</c> (<see cref="AddCompressionPolicySql(string)"/>, #3035), so its runs
+    /// begin at <c>:MM:00.000</c> of the wall clock for the 24 minutes of <see cref="CompressionPhaseMinutes"/>
+    /// — three jobs to a minute, every hour, on every store. The continuous aggregates' compression policies
+    /// (#3581) are anchored the same way at <c>:MM:00.000</c> of their own minute
+    /// (<see cref="AggregateCompressionBandMinute"/>), one job an hour once a day, so the half-step below is
+    /// as far from their starts as it is from the raw band's. The health check, by contrast, was anchored to
+    /// nothing in the wall clock: its first sample was the first sweep pass after service start and each
+    /// later one was scheduled as <c>UtcNow + 1 hour</c> at the moment of the previous fire, which lands on
+    /// the first 15-second sweep pass at or after that instant. So its second-of-the-hour SLIPPED forward by
+    /// the loop's latency every hour — a few seconds to fifteen — and swept across every minute boundary in
+    /// the band in turn, roughly one boundary every twelve hours. The service behind the production page
+    /// started at <c>:46:13</c>; seven hourly slips later its sample sat 53 ms past <c>:47:00</c>, the minute
+    /// <c>file_io_stats</c> compresses on. The schedules were therefore NOT aligned by construction — a
+    /// service-start anchor drifts, a wall-clock anchor does not — and the collision was the ~1-in-a-hundred
+    /// draw a drifting sample takes each time it crosses a boundary: the crossing is certain, the landing
+    /// inside a ~60 ms window is chance. That is still a false page every month or two per store, forever,
+    /// which is what "structural" correctly meant.</para>
+    ///
+    /// <para><b>Why thirty seconds and not an offset from the service start.</b> Any offset from a DRIFTING
+    /// anchor drifts with it, so "+N minutes from start" would cross the same boundaries N minutes later.
+    /// The only offset that holds is one measured from the jobs' own grid, and the grid step is one minute
+    /// with every job at <c>:00</c> of its minute — so half a step, <c>:30</c>, is the point furthest from
+    /// every job's start instant in both directions: 30 s from the previous boundary and 30 s from the next,
+    /// against edges measured in milliseconds and runs measured in tens of milliseconds when there is nothing
+    /// to compress. (A run that IS compressing a chunk lasts minutes and straddles <c>:30</c>, but a job that
+    /// long reports <c>Running</c>, which the <c>-infinity</c> arm already yields to.) Pinning to the wall
+    /// clock rather than the previous fire is what stops the drift: <see cref="NextCompressionCheckUtc"/>
+    /// floors the hourly due time to its minute and adds this phase, so a fire at <c>:47:3x</c> schedules
+    /// the next at exactly <c>:47:30</c>. A fire that lands LATE in its minute (a slow sweep pass) snaps the
+    /// next due back to <c>:30</c> of that same minute, a few seconds short of a full hour; one that lands in
+    /// the NEXT minute moves the check one whole minute later. Either way the sample is at <c>:30</c>, and
+    /// nothing the loop does can walk it toward <c>:00</c>.</para>
+    ///
+    /// <para>The first check after a restart is deliberately NOT phased — it runs on the first sweep pass,
+    /// because a restart is when an operator is reading the log and wants the store's job health now — so
+    /// that single sample keeps the pre-#3575 odds (24 minutes × ~0.1 s of edge in 3,600 s, under 0.1 %),
+    /// and <see cref="StuckPolicyJobConfirmDelay"/> covers it the same way it covers every other sample.
+    /// The phase is the hardening; the confirm-read is the fix.</para>
+    /// </summary>
+    public const int CompressionCheckPhaseSeconds = 30;
+
+    /// <summary>
+    /// When the compression-job health check should next run (#3575): one <paramref name="interval"/> after
+    /// <paramref name="nowUtc"/>, snapped to <see cref="CompressionCheckPhaseSeconds"/> past that minute so no
+    /// steady-state sample is ever taken on the <c>:MM:00</c> instant the compression policies fire on.
+    /// Pure, so it pins. The snap moves the due time by at most 30 s either way, so the cadence stays
+    /// hourly to within the loop's own latency; what it never does is land on <c>:00</c>.
+    /// </summary>
+    public static DateTime NextCompressionCheckUtc(DateTime nowUtc, TimeSpan interval)
+    {
+        var due = nowUtc + interval;
+        var minute = new DateTime(due.Ticks - (due.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Utc);
+        return minute.AddSeconds(CompressionCheckPhaseSeconds);
+    }
+
+    /// <summary>
+    /// Which family of TimescaleDB policy job a row of <see cref="StuckPolicyJobsSql"/> belongs to (#3816) —
+    /// the grain the self-heal bands on, because the three have different consequences, different remedies
+    /// and therefore different alert text and severity.
+    ///
+    /// <para>This is a vocabulary over <c>proc_name</c> and nothing else. It does NOT decide scope: which
+    /// jobs are read at all is the statement's WHERE, and the two must agree — <see cref="ClassifyPolicyJobFamily"/>
+    /// answers <see cref="Other"/> for a proc name the statement could not have returned, which is a state a
+    /// future widening reaches before anyone writes its sentence.</para>
+    /// </summary>
+    public enum StorePolicyJobFamily
+    {
+        /// <summary><c>policy_compression</c> and the 2.18+ columnstore rebrand, on a raw hypertable or on a
+        /// continuous aggregate (#3581). #1581's original and only family: the store's archival tier.</summary>
+        Compression,
+
+        /// <summary><c>policy_refresh_continuous_aggregate</c> on a <c>collect</c> aggregate — the job that
+        /// materializes a rollup. Dead, the rollup silently stops advancing, every reader of the view gets
+        /// stale answers, and #1680/#1877's coverage gate holds that tier's retention because the consumer no
+        /// longer covers what raw holds (#3812's measured holds, #3816's cause).</summary>
+        Refresh,
+
+        /// <summary><c>policy_retention</c> on a <c>collect</c> hypertable or aggregate — the job that drops
+        /// aged chunks. Dead, the tier keeps everything it was told to drop.</summary>
+        Retention,
+
+        /// <summary>A proc name this vocabulary does not know. Unreachable from
+        /// <see cref="StuckPolicyJobsSql"/> as written; it exists so a widened WHERE, or an upstream proc
+        /// rename, lands on a band with neutral text instead of silently wearing another family's
+        /// sentence.</summary>
+        Other,
+    }
+
+    /// <summary>The TimescaleDB policy proc behind a retention job — what
+    /// <c>timescaledb_information.jobs.proc_name</c> reports, and the exact spelling
+    /// <see cref="StuckPolicyJobsSql"/>, <see cref="RetentionHoldReadSql"/> and the converge statements all
+    /// match on. Named (like <see cref="RefreshPolicyProcName"/>) because <c>LIKE '%retention%'</c> also
+    /// catches TimescaleDB's own <c>policy_job_stat_history_retention</c>, whose subject is the extension's
+    /// bookkeeping rather than this store's archival tier.</summary>
+    public const string RetentionPolicyProcName = "policy_retention";
+
+    /// <summary>
+    /// Which family a <c>proc_name</c> names (#3816). Exact match for the two families
+    /// <see cref="StuckPolicyJobsSql"/> lists by name; the same tolerant substring test as that statement's
+    /// compression arm for compression, so the classification cannot disagree with the scope; and
+    /// <see cref="StorePolicyJobFamily.Other"/> for everything else, including <c>null</c>.
+    ///
+    /// <para>Pure and total, so it pins directly — and the pin that matters is the AGREEMENT one: every
+    /// proc name the statement admits must classify to something other than <see cref="StorePolicyJobFamily.Other"/>,
+    /// and the extension's own jobs must not classify as a family whose text would then be spoken about
+    /// them.</para>
+    /// </summary>
+    public static StorePolicyJobFamily ClassifyPolicyJobFamily(string? procName)
+    {
+        if (string.IsNullOrEmpty(procName))
+        {
+            return StorePolicyJobFamily.Other;
+        }
+
+        if (procName.Equals(RefreshPolicyProcName, StringComparison.Ordinal))
+        {
+            return StorePolicyJobFamily.Refresh;
+        }
+
+        if (procName.Equals(RetentionPolicyProcName, StringComparison.Ordinal))
+        {
+            return StorePolicyJobFamily.Retention;
+        }
+
+        /* The compression arm's own predicate, in C#: the statement matches LIKE '%compression%' OR
+           '%columnstore%' and nothing about that is case-sensitive in PostgreSQL's collation for these
+           ASCII names, so OrdinalIgnoreCase is the faithful mirror. Written as the same two tests rather
+           than as a list of proc names because the second one deliberately matches nothing today (measured
+           on 2.28.1: add_columnstore_policy records proc_name = 'policy_compression'). */
+        if (procName.Contains("compression", StringComparison.OrdinalIgnoreCase)
+            || procName.Contains("columnstore", StringComparison.OrdinalIgnoreCase))
+        {
+            return StorePolicyJobFamily.Compression;
+        }
+
+        return StorePolicyJobFamily.Other;
+    }
+
+    /// <summary>
+    /// Whether a policy job is HELD — deliberately not scheduled — rather than dead or hung (#3816, guarding
+    /// #1680/#1877). THE discrimination this widening turns on, and the one whose failure mode is destructive
+    /// rather than noisy.
+    ///
+    /// <para><b>Why a held policy is not a dead one, and what conflating them would destroy.</b>
+    /// <see cref="EnsureRetentionPoliciesAsync"/> creates every retention policy PAUSED
+    /// (<see cref="PauseJobSql"/>) and the rollup-coverage gate keeps it paused until that tier's consumer
+    /// covers everything raw holds; #3812's hourly re-evaluation is what arms it. So <c>scheduled = false</c>
+    /// on a retention policy is the product working correctly, and the history it is holding exists nowhere
+    /// else. A self-heal that "revives dead jobs" and treated a hold as one would call
+    /// <c>alter_job(next_start => now())</c> on it — dropping, in one run, exactly the chunks the gate exists
+    /// to protect. The issue names this as the caveat that must be honored; this is where it is honored.</para>
+    ///
+    /// <para><b>The view already makes it structurally impossible, and this guard still exists.</b> Measured
+    /// on 2.28.1 (<c>pg_get_viewdef('timescaledb_information.job_stats')</c>, read live):
+    /// <c>next_start</c> is <c>CASE WHEN j.scheduled THEN js.next_start ELSE NULL END</c> and
+    /// <c>job_status</c> is <c>CASE … WHEN j.scheduled = false THEN 'Paused' …</c>. So a held policy reads
+    /// <c>next_start IS NULL</c> — which makes <c>(js.next_start = '-infinity')</c> NULL, not true, and the
+    /// reader maps a NULL to <c>false</c> — and reads <c>Paused</c>, never <c>Running</c>. Both arms are
+    /// therefore already unreachable for it through that view. The guard is here anyway because that
+    /// immunity is TimescaleDB's view definition rather than this product's decision: it is one upstream
+    /// refactor away from changing, the raw <c>_timescaledb_internal.bgw_job_stat</c> row DOES keep a real
+    /// <c>next_start</c> for a paused job, and the cost of being wrong is deleted history. Two independent
+    /// gates for one destructive action, neither of them load-bearing alone.</para>
+    ///
+    /// <para>Both inputs are tested, not just the flag: <c>scheduled = false</c> is the catalog's statement of
+    /// intent and <c>'Paused'</c> is the view's rendering of the same fact, and a row that says either is not
+    /// a job the scheduler has abandoned.</para>
+    /// </summary>
+    public static bool IsPolicyJobHeld(bool scheduled, string? jobStatus)
+        => !scheduled || string.Equals(jobStatus, "Paused", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// The pure stuck-compression-job decision (#1581). A compression policy job is STUCK when either:
     /// <list type="bullet">
-    /// <item>its <c>next_start</c> is <c>-infinity</c> while the job is NOT currently running — the scheduler
-    /// abandoned it and will NEVER re-fire it (the dead-job bug that let uncompressed data grow without bound
-    /// until the disk filled), or</item>
+    /// <item>its <c>next_start</c> is <c>-infinity</c> while the job is NOT currently running — on TimescaleDB
+    /// below 2.26.4 the scheduler abandoned it and will NEVER re-fire it (the dead-job bug that let uncompressed
+    /// data grow without bound until the disk filled); from 2.26.4 on (upstream #9360,
+    /// <see cref="TimescaleNextStartSanitizedFrom"/>) it is a crashed run in the scheduler's crash backoff,
+    /// which the scheduler clears by itself (#3591) — the same arm, a different sentence, and no re-arm; or</item>
     /// <item>it has been in the <c>Running</c> state since a <c>last_run_started_at</c> older than
     /// <see cref="StuckRunningBound"/> — a run that began long ago and never finished (a hung run).</item>
     /// </list>
     /// A job with neither condition is healthy and is NOT flagged. No I/O, so it pins directly with a
     /// controllable clock. Scoping to compression jobs happens in the query — this decides only "stuck".
+    /// <see cref="ClassifyPolicyJob"/> is the same decision naming WHICH arm fired, for the caller that
+    /// has to treat the two arms differently.
     ///
     /// <para><b><c>-infinity</c> is ALSO the engine's mid-run marker</b>, measured live on TimescaleDB
     /// 2.x (pg17): from the moment the scheduler picks up a due job until its run completes,
@@ -5651,26 +11260,119 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// left to the second arm, whose elapsed bound is what actually distinguishes a hung run from a
     /// healthy one.</para>
     ///
+    /// <para><b>And the running guard is itself a non-atomic read (#3575).</b> <c>job_status</c> comes from
+    /// <c>pg_stat_activity</c> and <c>next_start</c> from <c>bgw_job_stat</c>; the scheduler commits
+    /// <c>-infinity</c> before the worker exists, and the worker is gone before its <c>mark_end</c> is
+    /// visible to a snapshot taken a moment earlier, so at both edges of every run the view reads
+    /// <c>-infinity</c> AND <c>Scheduled</c> — this arm, on a healthy job, for a few milliseconds an hour.
+    /// A production store paged on exactly that: the alert stamp sat 53 ms inside a 63 ms run that
+    /// succeeded. This predicate stays pure and single-shot on purpose; the caller closes the race by
+    /// re-reading after <see cref="StuckPolicyJobConfirmDelay"/> and requiring the <c>-infinity</c> arm
+    /// to persist (<see cref="ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>),
+    /// and the worker keeps its samples off the jobs' run instant (<see cref="NextCompressionCheckUtc"/>).</para>
+    ///
     /// <para>A <paramref name="lastRunStartedAtUtc"/> of <see cref="DateTime.MinValue"/> counts as NEVER RAN,
-    /// not as "started in year 1" (#1760). <see cref="StuckCompressionJobsSql"/> already NULLIFs TimescaleDB's
+    /// not as "started in year 1" (#1760). <see cref="StuckPolicyJobsSql"/> already NULLIFs TimescaleDB's
     /// <c>-infinity</c> never-ran sentinel, so this is the second line of defence: the sentinel maps to
     /// MinValue through Npgsql, and any future caller reading the column un-guarded would otherwise compute a
     /// ~739,000-day elapsed that clears every bound and flag a healthy job on its very first run.</para>
+    ///
+    /// <para><b>"Will never run it again" is true of TimescaleDB below 2.26.4 and false above it (#3591).</b>
+    /// Upstream #9360 (<see cref="TimescaleNextStartSanitizedFrom"/>) made the scheduler sanitize a persisted
+    /// <c>-infinity</c>, so on a fixed store the only PERSISTENT <c>-infinity</c> is a crashed run sitting out
+    /// its crash backoff, which the scheduler clears by itself. The VERDICT is the same on every version — the
+    /// row is still reported, still re-armed once, still paged, because the arm is also the backstop for the
+    /// older 2.x stores the compatibility target admits and for whatever the next upstream regression is — but
+    /// the SENTENCE differs, and this overload without a version says the old one. Production goes through
+    /// <see cref="ClassifyPolicyJob(bool, string?, DateTime?, TimeSpan?, DateTime, Version?, out string)"/>
+    /// with the version <see cref="ReadTimescaleVersionAsync"/> read; the version-less form is the pre-#3591
+    /// pins' entry point and the "unknown version" case, which are the same text.</para>
     /// </summary>
-    public static bool IsCompressionJobStuck(
+    public static bool IsPolicyJobStuck(
         bool nextStartIsNegativeInfinity,
         string? jobStatus,
         DateTime? lastRunStartedAtUtc,
         TimeSpan? scheduleInterval,
         DateTime nowUtc,
         out string reason)
+        => ClassifyPolicyJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion: null, out reason)
+            != StuckPolicyJobArm.None;
+
+    /// <summary>
+    /// <see cref="IsPolicyJobStuck"/> with the store's TimescaleDB version, so the <c>-infinity</c> arm's
+    /// reason tells the truth for that version (#3591). <c>null</c> is "unknown, assume old".
+    /// </summary>
+    public static bool IsPolicyJobStuck(
+        bool nextStartIsNegativeInfinity,
+        string? jobStatus,
+        DateTime? lastRunStartedAtUtc,
+        TimeSpan? scheduleInterval,
+        DateTime nowUtc,
+        Version? timescaleVersion,
+        out string reason)
+        => ClassifyPolicyJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion, out reason)
+            != StuckPolicyJobArm.None;
+
+    /// <summary>
+    /// <see cref="IsPolicyJobStuck"/> with the arm named (#3575): the confirm-read applies ONLY to
+    /// <see cref="StuckPolicyJobArm.NextStartNegativeInfinity"/>, because that is the arm whose inputs
+    /// race; <see cref="StuckPolicyJobArm.RunningPastBound"/> is judged on six hours of elapsed time and
+    /// a second read five seconds later could not change it. Same decision, same reason text — this is the
+    /// implementation and the boolean is its projection, so the two cannot drift. Version-less: the
+    /// <c>-infinity</c> reason is the pre-2.26.4 text (#3591); see the overload below.
+    /// </summary>
+    public static StuckPolicyJobArm ClassifyPolicyJob(
+        bool nextStartIsNegativeInfinity,
+        string? jobStatus,
+        DateTime? lastRunStartedAtUtc,
+        TimeSpan? scheduleInterval,
+        DateTime nowUtc,
+        out string reason)
+        => ClassifyPolicyJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion: null, out reason);
+
+    /// <summary>
+    /// The <c>-infinity</c> arm's reason on a TimescaleDB below <see cref="TimescaleNextStartSanitizedFrom"/>,
+    /// or of unknown version: the #1581 sentence, byte for byte, because on those stores it is true — the
+    /// scheduler returns the sentinel as the due time and the job is never due again.
+    /// </summary>
+    public const string NextStartNegativeInfinityPermanentReason =
+        "next_start is -infinity — the scheduler will never run it again";
+
+    /// <summary>
+    /// The <c>-infinity</c> arm's reason on a TimescaleDB with upstream #9360 (#3591): the row is a crashed
+    /// run in the scheduler's crash backoff, and the scheduler clears it without help. Names the fix and the
+    /// floor so an operator reading the page knows which condition they are looking at and where the claim
+    /// comes from; how long the backoff is, and what the re-arm does to it, is the evaluator's detail text.
+    /// </summary>
+    public const string NextStartNegativeInfinityCrashBackoffReason =
+        "next_start is -infinity — a crashed run left the job in the scheduler's crash backoff, which the scheduler clears on its own (TimescaleDB 2.26.4+, upstream #9360)";
+
+    /// <summary>
+    /// <see cref="ClassifyPolicyJob(bool, string?, DateTime?, TimeSpan?, DateTime, out string)"/> with the
+    /// store's TimescaleDB version (#3591). The <c>-infinity</c> arm fires on exactly the same inputs whatever
+    /// the version — the confirm-read, the re-arm, the alert key and the severity all see one arm — and only
+    /// its <paramref name="reason"/> changes: <see cref="NextStartNegativeInfinityCrashBackoffReason"/> when
+    /// <see cref="SchedulerRecoversNegativeInfinity"/> says the scheduler has the fix,
+    /// <see cref="NextStartNegativeInfinityPermanentReason"/> below it and for <c>null</c>. The stuck-Running
+    /// arm does not read the version; nothing about a hung run changed upstream.
+    /// </summary>
+    public static StuckPolicyJobArm ClassifyPolicyJob(
+        bool nextStartIsNegativeInfinity,
+        string? jobStatus,
+        DateTime? lastRunStartedAtUtc,
+        TimeSpan? scheduleInterval,
+        DateTime nowUtc,
+        Version? timescaleVersion,
+        out string reason)
     {
         var isRunning = string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase);
 
         if (nextStartIsNegativeInfinity && !isRunning)
         {
-            reason = "next_start is -infinity — the scheduler will never run it again";
-            return true;
+            reason = SchedulerRecoversNegativeInfinity(timescaleVersion)
+                ? NextStartNegativeInfinityCrashBackoffReason
+                : NextStartNegativeInfinityPermanentReason;
+            return StuckPolicyJobArm.NextStartNegativeInfinity;
         }
 
         if (isRunning
@@ -5685,12 +11387,12 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     CultureInfo.InvariantCulture,
                     "stuck in the Running state for {0:F0} minutes (over the {1:F0}-minute bound) — the run hung and never finished",
                     elapsed.TotalMinutes, bound.TotalMinutes);
-                return true;
+                return StuckPolicyJobArm.RunningPastBound;
             }
         }
 
         reason = "";
-        return false;
+        return StuckPolicyJobArm.None;
     }
 
     /// <summary>
@@ -5711,31 +11413,146 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// while <c>last_run_started_at</c> is <c>bgw_job_stat.last_start</c>. A job's FIRST run therefore reads
     /// <c>Running</c> while its start time is still the sentinel, and that window flagged a perfectly healthy
     /// job as stuck — which the self-heal then "fixed" by re-arming a job that was running fine.</para>
+    ///
+    /// <para><b>The same two sources are why one execution of this statement cannot be trusted alone on the
+    /// <c>-infinity</c> arm (#3575).</b> <c>next_start_neg_infinity</c> is the stat row under the statement's
+    /// snapshot; <c>job_status</c> is <c>pg_stat_activity</c> read live. At the start of every run the row
+    /// already says <c>-infinity</c> while no backend yet says <c>Running</c>, and at the end the backend can
+    /// be gone while the snapshot still holds the pre-<c>mark_end</c> row. No rewrite of this SELECT closes
+    /// that — the skew is between a catalog snapshot and live shared memory inside TimescaleDB's own view —
+    /// which is why <see cref="ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+    /// executes it TWICE, <see cref="StuckPolicyJobConfirmDelay"/> apart, when that arm trips. The text is
+    /// unchanged from #1760; what changed is how many times it is asked.</para>
+    ///
+    /// <para><b>What a confirmed <c>next_start_neg_infinity</c> row IS depends on the store's TimescaleDB
+    /// (#3591), and this statement does not carry that.</b> Below 2.26.4 it is the permanent dead state #1581
+    /// was built against. From 2.26.4 (upstream #9360, <see cref="TimescaleNextStartSanitizedFrom"/>) the
+    /// scheduler sanitizes a persisted <c>-infinity</c> to "now", so the only row that stays <c>-infinity</c>
+    /// across the confirm delay is a crashed run in the scheduler's crash backoff, which the view shows as
+    /// <c>-infinity + Scheduled + last_run_status IS NULL</c> — and that <c>last_run_status IS NULL</c> is NOT a
+    /// discriminator between the two, because both are a <c>mark_start</c> whose <c>mark_end</c> never came.
+    /// The discriminator is <c>pg_extension.extversion</c>, read separately by
+    /// <see cref="ReadTimescaleVersionAsync"/> on the pass where the arm trips, and applied to the verdict's
+    /// text and re-arm by <see cref="ClassifyStuckPolicyJobs"/>.</para>
+    ///
+    /// <para><b>Renamed from <c>StuckCompressionJobsSql</c> and widened past compression (#3816), which is
+    /// the whole content of that issue.</b> The failure mode is not compression-specific:
+    /// <c>next_start = -infinity</c> is how the scheduler retires ANY job it has given up on, and a dead
+    /// <c>policy_refresh_continuous_aggregate</c> is the upstream cause of #3812's retention holds — a rollup
+    /// stops materializing, the coverage gate refuses to arm that tier's retention, and the operator is told to
+    /// run <c>--backfill-rollups</c>, which fixes the symptom and leaves the dead job in place to cause it
+    /// again. The <c>-infinity</c> NULLIF handling, the stuck-<c>Running</c> bound and the confirm-read apply
+    /// unchanged; what changed is WHICH jobs reach them, and that the row now carries <c>proc_name</c> (so the
+    /// evaluator bands per family), <c>j.scheduled</c> (so a HELD policy can never be read as a DEAD one) and
+    /// the two failure counters #3816's fourth arm judges.
+    ///
+    /// <para><b>The WHERE has two arms with deliberately different scopes, and the asymmetry is
+    /// load-bearing.</b> The compression arm is the pre-#3816 predicate byte for byte — UNSCOPED, so a
+    /// compression policy on a hypertable this product did not create stays watched exactly as it has been
+    /// since #1581; scoping it would silently switch off coverage a deployed store has today. The new arm is
+    /// scoped to <c>j.hypertable_schema = 'collect'</c> because its alert TEXT asserts what only this
+    /// product's own policies make true — the refresh sentence names the coverage gate and the raw tier
+    /// behind it, the retention sentence names <c>--backfill-rollups</c> — and both are wrong advice about a
+    /// policy this product never created, the same judgement <see cref="RetentionHoldReadSql"/> makes with the
+    /// same two predicates.</para>
+    ///
+    /// <para><b>Scoping on <c>j.hypertable_schema</c> and NOT <c>js.hypertable_schema</c> is the difference
+    /// between reading every aggregate policy and reading none of them</b> (measured on 2.28.1;
+    /// <c>pg_get_viewdef</c> read live). <c>jobs</c> reports a policy on a continuous aggregate under the
+    /// aggregate's USER VIEW identity (<c>COALESCE(ca.user_view_schema, ht.schema_name)</c>), while
+    /// <c>job_stats</c> joins the raw catalog and reports the MATERIALIZATION's
+    /// (<c>_timescaledb_internal</c> / <c>_materialized_hypertable_3</c>). On the rig, every one of the five
+    /// policies on a CAGG — refresh, aggregate compression (#3581) and aggregate retention — read
+    /// <c>collect</c> through <c>j.</c> and <c>_timescaledb_internal</c> through <c>js.</c>. The projected
+    /// <c>hypertable_name</c> is <c>j.</c>'s for the same reason: it is the name the alert must say and the
+    /// one the operator can find.</para>
+    ///
+    /// <para><b>The new arm matches proc names EXACTLY while the compression arm keeps its tolerant LIKE, and
+    /// that is not inconsistency.</b> <c>LIKE '%retention%'</c> would also match
+    /// <c>policy_job_stat_history_retention</c> — TimescaleDB's own job-history trimmer, whose proc name
+    /// contains the word and whose subject is the extension's bookkeeping, not this store's archival tier.
+    /// The compression arm's LIKE is tolerant on purpose (#1581: <c>policy_compression</c> is the long-stable
+    /// name and <c>columnstore</c> the 2.18+ rebrand; measured on 2.28.1,
+    /// <c>CALL add_columnstore_policy(...)</c> still records <c>proc_name = 'policy_compression'</c>, so the
+    /// second pattern is future-proofing that matches nothing today).</para>
+    ///
+    /// <para><b>What the scope excludes is the reason it exists, measured rather than reasoned about.</b> On a
+    /// VIRGIN 2.28.1 container with no network, the extension's own <c>policy_telemetry</c> job (job_id 1,
+    /// no hypertable) sat at a PERSISTENT <c>next_start = -infinity</c> with
+    /// <c>bgw_job_stat.consecutive_crashes = 1</c> — the exact confirmed dead-job shape, stable across
+    /// minutes, on a store where nothing is wrong with anything this product owns. An unscoped widening
+    /// therefore pages about TimescaleDB's phone-home on every air-gapped store, forever. Both extension jobs
+    /// are excluded twice over: they name no hypertable, so <c>j.hypertable_schema</c> is NULL, and neither
+    /// proc name is in the list.</para>
+    ///
+    /// <para><b><c>policy_reorder</c> and user-defined actions are read by neither arm</b>, deliberately:
+    /// this product creates none (the rig grew one by hand to confirm it is enumerated and then excluded), so
+    /// there is no tier of ours for a dead one to stall and no sentence this evaluator could honestly say
+    /// about it. A family this product starts creating joins the list, the band and the text together.</para>
     /// </summary>
-    public const string StuckCompressionJobsSql = @"
+    public const string StuckPolicyJobsSql = @"
 SELECT
     js.job_id,
     (js.next_start = '-infinity'::timestamptz)  AS next_start_neg_infinity,
     js.job_status,
     NULLIF(js.last_run_started_at, '-infinity'::timestamptz) AS last_run_started_at,
     EXTRACT(EPOCH FROM j.schedule_interval)     AS schedule_interval_seconds,
-    j.hypertable_name
+    j.hypertable_name,
+    j.proc_name,
+    j.scheduled,
+    js.last_run_status,
+    js.total_failures
 FROM timescaledb_information.job_stats AS js
 JOIN timescaledb_information.jobs      AS j USING (job_id)
 WHERE j.proc_name LIKE '%compression%'
-   OR j.proc_name LIKE '%columnstore%'";
+   OR j.proc_name LIKE '%columnstore%'
+   OR (j.hypertable_schema = 'collect'
+       AND j.proc_name IN ('policy_refresh_continuous_aggregate', 'policy_retention'))";
 
     /// <summary>
-    /// Reads every COMPRESSION-policy background job (<c>proc_name</c> is <c>policy_compression</c>, or the
-    /// 2.18+ columnstore rebrand's name — the same tolerant LIKE the compression test uses) and returns the
-    /// ones the pure <see cref="IsCompressionJobStuck"/> predicate flags as stuck. The <c>-infinity</c> tests
-    /// run IN SQL (see <see cref="StuckCompressionJobsSql"/>); the stuck-Running bound is computed in C# from
-    /// the raw fields. Scoped to compression jobs ONLY — retention, continuous-aggregate refresh, reorder, and
-    /// every other job type are untouched. Failure-isolated: a store hiccup, or the views being absent (a
-    /// plain-PostgreSQL store — the caller also gates on the extension), yields an empty list and a Debug line,
-    /// never a throw.
+    /// Reads every POLICY background job this product owns — compression (raw and aggregate), and, scoped to
+    /// the <c>collect</c> schema, continuous-aggregate refresh and retention (#3816; see
+    /// <see cref="StuckPolicyJobsSql"/> for which arm scopes and why) — and returns both the ones the pure
+    /// <see cref="IsPolicyJobStuck"/> predicate flags as stuck AND the census of everything it looked at.
+    /// The <c>-infinity</c> tests run IN SQL; the stuck-Running bound is computed in C# from the raw fields.
+    /// Failure-isolated: a store hiccup, or the views being absent (a plain-PostgreSQL store — the caller also
+    /// gates on the extension), yields <see cref="StorePolicyJobHealth.Empty"/> and a Debug line, never a
+    /// throw.
+    ///
+    /// <para><b>A HELD policy is not a stuck one and never reaches the returned list</b> —
+    /// <see cref="ClassifyStuckPolicyJobs"/> drops it, <see cref="IsPolicyJobHeld"/> says why, and the census
+    /// counts it so the summary line can report a hold without anything acting on it. That is the one
+    /// discrimination in this widening whose failure mode is destructive rather than noisy: #1680/#1877
+    /// deliberately leave a retention policy <c>scheduled = false</c> until its tier's rollups cover raw, and
+    /// re-arming one drops the only copy of the history the gate exists to protect.</para>
+    ///
+    /// <para><b>The <c>-infinity</c> arm is CONFIRMED before it is reported (#3575).</b> When, and only when,
+    /// the first read flags a job on that arm, this waits <see cref="StuckPolicyJobConfirmDelay"/>, runs
+    /// <see cref="StuckPolicyJobsSql"/> once more, and reports the job only if the same arm trips
+    /// again. A run-instant edge — the view pairing the scheduler's already-committed <c>-infinity</c> with a
+    /// worker that is not yet, or no longer, visible as <c>Running</c> — is over in milliseconds and clears;
+    /// a row the scheduler has genuinely abandoned (TimescaleDB below 2.26.4), or a crashed run sitting out its
+    /// crash backoff (the only persistent <c>-infinity</c> from 2.26.4 on, #3591 — reported with
+    /// <see cref="StuckPolicyJob.SchedulerRetries"/> set so the evaluator neither re-arms nor pages it on
+    /// first sight), reads the same on both passes and is reported with the latency it always had plus five seconds. One
+    /// confirm per pass, not per job: the delay is taken once however many jobs tripped. The
+    /// <see cref="StuckPolicyJobArm.RunningPastBound"/> arm is reported from the first read as before —
+    /// a six-hour elapsed bound has nothing to gain from a second look five seconds later.</para>
+    ///
+    /// <para><b>A confirm read that FAILS confirms nothing.</b> Its <c>-infinity</c> trips are dropped for
+    /// this pass, with a Warning naming the jobs and the consequence, rather than reported on the strength of
+    /// the one read this issue proved insufficient: compression is a slow archival tier where a dead job
+    /// takes hours to matter, so deferring a real detection to the next hourly pass costs little, while a
+    /// false page on the family that reports the store's own health is the very thing being fixed. The
+    /// stuck-Running results from the first read are still returned. Like the first read's own catch, this
+    /// swallow is logged but not counted by the #3013 read-failure surface — that census covers the worker's
+    /// catch blocks, and both reads sit one level below it.</para>
+    ///
+    /// <para>The gated live test polls this method until a job it just re-armed reads healthy, and the
+    /// confirm only makes that settle sooner: the mid-run marker it used to have to wait out is now judged
+    /// twice and cleared inside one call instead of surfacing as a flagged poll.</para>
     /// </summary>
-    public static async Task<IReadOnlyList<StuckCompressionJob>> ReadStuckCompressionJobsAsync(
+    public static Task<StorePolicyJobHealth> ReadStuckPolicyJobsAsync(
         NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -5743,39 +11560,273 @@ WHERE j.proc_name LIKE '%compression%'
             throw new ArgumentNullException(nameof(connection));
         }
 
-        var stuck = new List<StuckCompressionJob>();
+        return ReadStuckPolicyJobsAsync(
+            ct => ReadPolicyJobStatRowsAsync(connection, ct),
+            Task.Delay,
+            nowUtc,
+            logger,
+            cancellationToken,
+            ct => ReadTimescaleVersionAsync(connection, logger, ct));
+    }
+
+    /// <summary>
+    /// The seam <see cref="ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+    /// is built on, with the two things a test needs to control injected: the read (so a transient edge and
+    /// a persistent dead row can each be scripted as a pair of result sets, and a failing confirm as a throw)
+    /// and the delay (so the pin can assert it is taken exactly when the <c>-infinity</c> arm tripped and
+    /// never otherwise, without sleeping). Internal rather than private for that reason alone; production
+    /// reaches it only through the connection overload.
+    ///
+    /// <para><paramref name="readVersion"/> (#3591) is the store's TimescaleDB version, read ONLY on a pass
+    /// where the <c>-infinity</c> arm tripped — it decides that arm's sentence and nothing else, so the common
+    /// hourly pass still costs one read. Omitted (the pre-#3591 pins) or failing, the version is unknown and
+    /// the sentence is the conservative pre-2.26.4 one. Read before the confirm delay, on the same connection
+    /// the first read used, so the two reads that decide the page are not pushed further apart.</para>
+    /// </summary>
+    internal static async Task<StorePolicyJobHealth> ReadStuckPolicyJobsAsync(
+        Func<CancellationToken, Task<IReadOnlyList<PolicyJobStatRow>>> readRows,
+        Func<TimeSpan, CancellationToken, Task> delay,
+        DateTime nowUtc,
+        ILogger? logger,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<Version?>>? readVersion = null)
+    {
+        if (readRows is null)
+        {
+            throw new ArgumentNullException(nameof(readRows));
+        }
+
+        if (delay is null)
+        {
+            throw new ArgumentNullException(nameof(delay));
+        }
+
         try
         {
-            using var command = new NpgsqlCommand(StuckCompressionJobsSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            var rows = await readRows(cancellationToken);
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            /* #3816: the census is the FIRST read's rows, whatever the confirm does with the -infinity arm.
+               It is taken here, before any classification, because it is a statement about what the store
+               was asked and answered — not about what was wrong. */
+            var census = rows.Select(r => r.ToReading()).ToList();
+
+            var first = ClassifyStuckPolicyJobs(rows, nowUtc);
+            if (!first.Any(f => f.Arm == StuckPolicyJobArm.NextStartNegativeInfinity))
             {
-                long jobId = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
-                bool negInfinity = !reader.IsDBNull(1) && reader.GetBoolean(1);
-                string? jobStatus = reader.IsDBNull(2) ? null : reader.GetString(2);
-                DateTime? lastRunStartedAt = reader.IsDBNull(3)
-                    ? null
-                    : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc);
-                TimeSpan? scheduleInterval = reader.IsDBNull(4)
-                    ? null
-                    : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(4), CultureInfo.InvariantCulture));
-                string? hypertable = reader.IsDBNull(5) ? null : reader.GetString(5);
+                /* Nothing on the racing arm: no delay, no second read, no version read. The common hourly
+                   pass costs exactly what it did before #3575. */
+                return new StorePolicyJobHealth(first.Select(f => f.ToJob()).ToList(), census);
+            }
 
-                if (IsCompressionJobStuck(negInfinity, jobStatus, lastRunStartedAt, scheduleInterval, nowUtc, out var reason))
+            /* #3591: the sentence the confirmed row will carry depends on whether this store's scheduler
+               recovers a -infinity row by itself. ReadTimescaleVersionAsync is failure-isolated to null, and
+               a scripted reader that throws is treated the same way here — the version decides words, never
+               the verdict, so it must not be able to fail the pass. */
+            Version? timescaleVersion = null;
+            if (readVersion is not null)
+            {
+                try
                 {
-                    stuck.Add(new StuckCompressionJob(jobId, hypertable, reason));
+                    timescaleVersion = await readVersion(cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger?.LogDebug("Could not read the TimescaleDB extension version — treating the store as pre-2.26.4 for the compression dead-job text (#3591): {Message}", ex.Message);
                 }
             }
+
+            await delay(StuckPolicyJobConfirmDelay, cancellationToken);
+
+            IReadOnlyList<PolicyJobStatRow>? confirm;
+            try
+            {
+                confirm = await readRows(cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The views were readable seconds ago, so this is a store hiccup on the one read that decides
+                   whether to page — say so at Warning, name what is deferred, and judge it next hour. */
+                confirm = null;
+                logger?.LogWarning(
+                    "Compression-job health check: {Count} job(s) read next_start = -infinity while not Running, but the confirm read {Delay:F0} s later failed — not judged this pass, re-checked next hour (#3575): {Message}",
+                    first.Count(f => f.Arm == StuckPolicyJobArm.NextStartNegativeInfinity),
+                    StuckPolicyJobConfirmDelay.TotalSeconds,
+                    ex.Message);
+            }
+
+            return new StorePolicyJobHealth(
+                ConfirmStuckPolicyJobs(first, confirm, nowUtc, logger, timescaleVersion), census);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* The views are absent (a plain-PG store or the extension was removed) or the store hiccuped —
-               no signal this check. The caller already gates on the extension; this is belt-and-suspenders. */
-            logger?.LogDebug("Compression-job health check: could not read job stats: {Message}", ex.Message);
+               no signal this check. The caller already gates on the extension; this is belt-and-suspenders.
+               #3816: Empty rather than an empty stuck list, so the summary line says "could not read" by
+               having no census rather than claiming a store with no jobs. */
+            logger?.LogDebug("Store policy-job health check: could not read job stats: {Message}", ex.Message);
+            return StorePolicyJobHealth.Empty;
+        }
+    }
+
+    /// <summary>
+    /// The pure merge of a first pass with its confirm pass (#3575), separated so the decision table pins
+    /// without a clock or a store:
+    /// <list type="bullet">
+    /// <item><see cref="StuckPolicyJobArm.RunningPastBound"/> from the first pass — reported, untouched by
+    /// the confirm.</item>
+    /// <item><see cref="StuckPolicyJobArm.NextStartNegativeInfinity"/> from the first pass, and the SAME arm
+    /// on the confirm pass — reported, carrying the confirm pass's reason (the two are identical today; the
+    /// later read is the one that stood).</item>
+    /// <item>That arm on the first pass but not on the confirm — the run-instant edge; cleared, and logged at
+    /// Information because a person reading the log after this alert family fires deserves to find the near
+    /// miss, and it is rare enough (a few a year per store) never to be noise.</item>
+    /// <item><paramref name="confirm"/> null (the confirm read failed) — every <c>-infinity</c> trip is
+    /// dropped; the caller has already logged why.</item>
+    /// </list>
+    /// A job that appears on the confirm pass but not the first is not reported either: the confirm exists to
+    /// ratify the first pass, not to widen it, and a job that only just went <c>-infinity</c> gets its own
+    /// two reads next hour.
+    ///
+    /// <para><paramref name="timescaleVersion"/> (#3591) phrases the confirmed rows' reason for the store's
+    /// TimescaleDB; it is applied to the CONFIRM pass's classification because that is the row carried. The
+    /// first pass is classified without it on purpose — the arm is version-independent, and the first pass
+    /// only decides whether there is anything to confirm.</para>
+    /// </summary>
+    internal static IReadOnlyList<StuckPolicyJob> ConfirmStuckPolicyJobs(
+        IReadOnlyList<ClassifiedPolicyJob> first,
+        IReadOnlyList<PolicyJobStatRow>? confirm,
+        DateTime nowUtc,
+        ILogger? logger,
+        Version? timescaleVersion = null)
+    {
+        if (first is null)
+        {
+            throw new ArgumentNullException(nameof(first));
         }
 
-        return stuck;
+        var result = new List<StuckPolicyJob>(first.Count);
+        var confirmed = confirm is null
+            ? null
+            : ClassifyStuckPolicyJobs(confirm, nowUtc, timescaleVersion)
+                .Where(c => c.Arm == StuckPolicyJobArm.NextStartNegativeInfinity)
+                .ToDictionary(c => c.Row.JobId);
+
+        foreach (var flagged in first)
+        {
+            switch (flagged.Arm)
+            {
+                case StuckPolicyJobArm.RunningPastBound:
+                    result.Add(flagged.ToJob());
+                    break;
+
+                case StuckPolicyJobArm.NextStartNegativeInfinity:
+                    if (confirmed is null)
+                    {
+                        break;
+                    }
+
+                    if (confirmed.TryGetValue(flagged.Row.JobId, out var still))
+                    {
+                        result.Add(still.ToJob());
+                    }
+                    else
+                    {
+                        logger?.LogInformation(
+                            "Compression-job health check: job {JobId}{Hypertable} read next_start = -infinity while not Running, and {Delay:F0} s later it was scheduled normally — the run-instant edge of TimescaleDB's job_stats view, not a stuck job; nothing re-armed, nothing alerted (#3575)",
+                            flagged.Row.JobId,
+                            string.IsNullOrEmpty(flagged.Row.HypertableName) ? "" : " on " + flagged.Row.HypertableName,
+                            StuckPolicyJobConfirmDelay.TotalSeconds);
+                    }
+
+                    break;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// One pass of the pure predicate over a result set: every row it flags, with the arm that fired. Rows
+    /// the predicate clears are not returned. <paramref name="timescaleVersion"/> (#3591) phrases the
+    /// <c>-infinity</c> arm's reason; <c>null</c> is the pre-2.26.4 text.
+    ///
+    /// <para><b>A HELD row is skipped before the predicate ever sees it (#3816).</b> This is the first of the
+    /// two gates that keep the self-heal off a deliberately paused retention policy — see
+    /// <see cref="IsPolicyJobHeld"/> for the measurement that says the view already makes it unreachable and
+    /// why one gate is nevertheless not enough when being wrong deletes history. It is a <c>continue</c>
+    /// rather than a classification because a hold is not a degree of stuck: it is the product working, and
+    /// the only thing that should happen to it is being counted (which the census does, from the same rows).</para>
+    /// </summary>
+    internal static List<ClassifiedPolicyJob> ClassifyStuckPolicyJobs(
+        IReadOnlyList<PolicyJobStatRow> rows, DateTime nowUtc, Version? timescaleVersion = null)
+    {
+        if (rows is null)
+        {
+            throw new ArgumentNullException(nameof(rows));
+        }
+
+        var flagged = new List<ClassifiedPolicyJob>();
+        foreach (var row in rows)
+        {
+            if (row.Held)
+            {
+                continue;
+            }
+
+            var arm = ClassifyPolicyJob(
+                row.NextStartIsNegativeInfinity, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, nowUtc, timescaleVersion, out var reason);
+            if (arm != StuckPolicyJobArm.None)
+            {
+                flagged.Add(new ClassifiedPolicyJob(
+                    row, arm, reason,
+                    SchedulerRetries: arm == StuckPolicyJobArm.NextStartNegativeInfinity && SchedulerRecoversNegativeInfinity(timescaleVersion)));
+            }
+        }
+
+        return flagged;
+    }
+
+    /// <summary>
+    /// One execution of <see cref="StuckPolicyJobsSql"/>, mapped row for row and NOT failure-isolated:
+    /// the isolation belongs to the caller, which has to tell a failed FIRST read (no signal, Debug) from a
+    /// failed CONFIRM read (a deferred judgement, Warning). Both <c>-infinity</c> tests already ran in SQL;
+    /// the #1760 sentinel arrives here as a NULL.
+    /// </summary>
+    private static async Task<IReadOnlyList<PolicyJobStatRow>> ReadPolicyJobStatRowsAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var rows = new List<PolicyJobStatRow>();
+        using var command = new NpgsqlCommand(StuckPolicyJobsSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            long jobId = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
+            bool negInfinity = !reader.IsDBNull(1) && reader.GetBoolean(1);
+            string? jobStatus = reader.IsDBNull(2) ? null : reader.GetString(2);
+            DateTime? lastRunStartedAt = reader.IsDBNull(3)
+                ? null
+                : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc);
+            TimeSpan? scheduleInterval = reader.IsDBNull(4)
+                ? null
+                : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(4), CultureInfo.InvariantCulture));
+            string? hypertable = reader.IsDBNull(5) ? null : reader.GetString(5);
+
+            /* #3816. proc_name bands the row; j.scheduled is the held-vs-dead discriminator's own input
+               rather than an inference from job_status; last_run_status and total_failures feed the failure
+               arm. scheduled is NOT NULL in the catalog, so an IsDBNull there would be a view change, and
+               the conservative read of "no answer" is the one that cannot cause a re-arm: false = held. */
+            string? procName = reader.IsDBNull(6) ? null : reader.GetString(6);
+            bool scheduled = !reader.IsDBNull(7) && reader.GetBoolean(7);
+            string? lastRunStatus = reader.IsDBNull(8) ? null : reader.GetString(8);
+            long totalFailures = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9), CultureInfo.InvariantCulture);
+
+            rows.Add(new PolicyJobStatRow(
+                jobId, negInfinity, jobStatus, lastRunStartedAt, scheduleInterval, hypertable,
+                procName, scheduled, lastRunStatus, totalFailures));
+        }
+
+        return rows;
     }
 
     /// <summary>
@@ -5791,7 +11842,7 @@ WHERE j.proc_name LIKE '%compression%'
     /// a SUCCESSFUL last run judges: a failed run's duration is not a cadence signal, and job failures are
     /// their own condition (<c>total_failures</c> rides the V56 telemetry).</para>
     /// </summary>
-    public const string JobCadenceReadSql = @"
+    public static readonly string JobCadenceReadSql = $@"
 SELECT
     j.job_id,
     j.proc_name || coalesce(' ' || j.hypertable_name, ''),
@@ -5799,12 +11850,17 @@ SELECT
     (EXTRACT(EPOCH FROM j.schedule_interval) * 1000)::bigint
 FROM timescaledb_information.job_stats AS js
 JOIN timescaledb_information.jobs AS j USING (job_id)
-WHERE js.last_run_status = 'Success'";
+WHERE js.last_run_status = 'Success'
+  AND NOT (
+      j.hypertable_schema = 'collect'
+      AND j.proc_name = 'policy_retention'
+      AND j.hypertable_name = ANY(ARRAY[{string.Join(", ", RawRelations.Select(r => $"'{r}'"))}])
+  )";
 
     /// <summary>
     /// Every background job's last-run duration against its own schedule interval (#2136) — the readings the
     /// Store Job Over Cadence self-alert judges. Tolerant like
-    /// <see cref="ReadStuckCompressionJobsAsync"/> — a plain-PG store or a hiccup yields no readings, never
+    /// <see cref="ReadStuckPolicyJobsAsync"/> — a plain-PG store or a hiccup yields no readings, never
     /// an exception. See <see cref="JobCadenceReadSql"/> for the statement and its decisions.
     /// </summary>
     public static async Task<IReadOnlyList<StoreJobCadenceReading>> ReadJobCadenceReadingsAsync(
@@ -6084,7 +12140,7 @@ AND   js.last_run_status = 'Success'";
 
             case RefreshSlotHeadroom.ApproachingSlot:
                 logger.LogWarning(
-                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default, and a store provisioned before that GUC gained its own conf marker reports nothing there until it heals, so an empty result is that gap and not a quiet hour (#3175/#3177). The hourly collect.store_metrics series (object_kind = 'background_job') samples one reading an hour and serves a daily point that is the day's LAST, so neither answers a maximum question on its own (#3044, #3119).",
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default, and with it off only FAILED runs are written (a failure is logged regardless of the GUC; a success needs it) — so a store provisioned before that GUC gained its own conf marker shows this job's successes there only once it heals, and a result holding no successful runs is that gap and not a quiet hour (#3175/#3177). The hourly collect.store_metrics series (object_kind = 'background_job') samples one reading an hour and serves a daily point that is the day's LAST, so neither answers a maximum question on its own (#3044, #3119).",
                     reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot,
                     reading.ClearOfSlotSeconds, RefreshSlotWarningSeconds);
                 break;
@@ -6196,7 +12252,8 @@ SELECT
     CASE
         WHEN (j.config->>'drop_after') IS NULL THEN NULL
         ELSE EXTRACT(EPOCH FROM (j.config->>'drop_after')::interval)::bigint
-    END
+    END,
+    COALESCE((j.config->>'darling_armed')::boolean, false)
 FROM timescaledb_information.jobs AS j
 LEFT JOIN LATERAL (
     SELECT
@@ -6254,10 +12311,20 @@ WHERE j.proc_name = 'policy_retention'
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                var hypertableName = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                var scheduled = !reader.IsDBNull(2) && reader.GetBoolean(2);
+                var darlingArmed = !reader.IsDBNull(7) && reader.GetBoolean(7);
+
+                /* #4299: a raw relation's permanent scheduled=false is not a hold — its verdict is
+                   darling_armed, read through the same expression RawArmedStateSql projects (see the
+                   isRawRelation split in EnsureRetentionPoliciesAsync). Every other relation keeps reading
+                   j.scheduled unchanged. */
+                var armed = RawRelations.Contains(hypertableName) ? darlingArmed : scheduled;
+
                 readings.Add(new RetentionHoldReading(
                     Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
-                    reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    !reader.IsDBNull(2) && reader.GetBoolean(2),
+                    hypertableName,
+                    armed,
                     reader.IsDBNull(3) ? "" : reader.GetString(3),
                     reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
                     reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5), CultureInfo.InvariantCulture),
@@ -6267,6 +12334,38 @@ WHERE j.proc_name = 'policy_retention'
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogDebug("Retention-hold check: could not read retention policy state: {Message}", ex.Message);
+        }
+
+        return readings;
+    }
+
+    /// <summary>
+    /// #4299: the combined reading <see cref="DarlingSelfAlertEvaluator.ApplyRawPurgeOverHorizonAsync"/>
+    /// judges — each of the three raw relations' <see cref="RetentionHoldReading.OverHorizonRatio"/> (already
+    /// present in <paramref name="holdReadings"/>, the SAME list <see cref="EvaluateRetentionHoldsAsync"/>
+    /// reads this pass) paired with that relation's <see cref="ReadRawLastPurgeOutcomeAsync"/> record. Filters
+    /// <paramref name="holdReadings"/> down to raw relations only — a second read of the same catalog would
+    /// duplicate <see cref="RetentionHoldReadSql"/>'s work; this reuses the pass's own reading instead.
+    /// </summary>
+    public static async Task<IReadOnlyList<RawPurgeOverHorizonReading>> ReadRawPurgeOverHorizonReadingsAsync(
+        NpgsqlConnection connection, IReadOnlyList<RetentionHoldReading> holdReadings, ILogger? logger,
+        CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var readings = new List<RawPurgeOverHorizonReading>();
+        foreach (var hold in holdReadings)
+        {
+            if (!RawRelations.Contains(hold.HypertableName))
+            {
+                continue;
+            }
+
+            var (state, lastPurge) = await ReadRawLastPurgeStateAsync(connection, hold.HypertableName, logger, cancellationToken);
+            readings.Add(new RawPurgeOverHorizonReading(hold.JobId, hold.HypertableName, hold.DropAfter, hold.OverHorizonRatio, lastPurge, state == RawLastPurgeReadState.ReadFailed));
         }
 
         return readings;
@@ -6291,12 +12390,27 @@ WHERE j.proc_name = 'policy_retention'
     /// was half a day.</para>
     ///
     /// <para><c>last_run_started_at</c> is <c>NULLIF</c>'d against <c>-infinity</c> for the SAME reason
-    /// <see cref="StuckCompressionJobsSql"/> does it (#1760): TimescaleDB stores <b>-infinity</b>, not NULL, as
+    /// <see cref="StuckPolicyJobsSql"/> does it (#1760): TimescaleDB stores <b>-infinity</b>, not NULL, as
     /// the never-ran sentinel, Npgsql maps that to <see cref="DateTime.MinValue"/>, and <c>job_status</c> comes
     /// from an INDEPENDENT source (<c>pg_stat_activity</c>) than the start time — so a policy's very FIRST run
     /// reads <c>Running</c> while its start is still the sentinel. Un-guarded, this observability path would
     /// report that healthy first run as having been going for ~739,000 days. The two queries were written in
     /// parallel branches and each was green on its own; this is the seam between them, not either side.</para>
+    ///
+    /// <para><b>The backlog is counted on the relation the chunks actually belong to, at the job's OWN delay
+    /// (#3581).</b> A continuous aggregate's compression job reports the aggregate's user view as its
+    /// hypertable, while <c>timescaledb_information.chunks</c> knows the aggregate only by its materialization
+    /// hypertable — so a count keyed on the job's own name read ZERO for every aggregate job, forever, with
+    /// nothing to say it was looking at the wrong relation. The <c>LEFT JOIN</c> to
+    /// <c>continuous_aggregates</c> resolves the materialization when the job is an aggregate's and falls
+    /// through to the job's own identity for a raw hypertable. The eligibility delay comes from the job's
+    /// <c>config</c> for the same reason: the raw tier compresses after <see cref="CompressAfterDays"/>, the
+    /// aggregates after their tier's <see cref="AggregateCompressAfterSpanFor"/>, and a count taken at the
+    /// wrong delay reports a chunk as waiting that the policy is not yet allowed to take. The constant
+    /// remains as the fallback for a policy whose config carries no <c>compress_after</c> at all
+    /// (<c>compress_created_before</c> policies), which this product never creates. The delay is also emitted
+    /// as a column so the log line can name the delay it counted against rather than restating the raw
+    /// constant for every job.</para>
     /// </summary>
     public static string CompressionActivitySql =>
         $@"
@@ -6311,19 +12425,23 @@ SELECT
     (
         SELECT count(*)
         FROM timescaledb_information.chunks AS c
-        WHERE c.hypertable_schema = j.hypertable_schema
-        AND   c.hypertable_name = j.hypertable_name
+        WHERE c.hypertable_schema = COALESCE(ca.materialization_hypertable_schema, j.hypertable_schema)
+        AND   c.hypertable_name = COALESCE(ca.materialization_hypertable_name, j.hypertable_name)
         AND   NOT c.is_compressed
-        AND   c.range_end < now() - INTERVAL '{CompressAfterDays} days'
-    ) AS eligible_uncompressed
+        AND   c.range_end < now() - COALESCE((j.config->>'compress_after')::interval, INTERVAL '{CompressAfterDays} days')
+    ) AS eligible_uncompressed,
+    EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint AS compress_after_seconds
 FROM timescaledb_information.jobs      AS j
 JOIN timescaledb_information.job_stats AS js USING (job_id)
+LEFT JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  ca.view_schema = j.hypertable_schema
+  AND ca.view_name = j.hypertable_name
 WHERE j.proc_name LIKE '%compression%'
    OR j.proc_name LIKE '%columnstore%'";
 
     /// <summary>
     /// Reads <see cref="CompressionActivitySql"/>. Failure-isolated to an empty list the same way
-    /// <see cref="ReadStuckCompressionJobsAsync"/> is — observability must never be able to break the sweep
+    /// <see cref="ReadStuckPolicyJobsAsync"/> is — observability must never be able to break the sweep
     /// that carries it.
     /// </summary>
     public static async Task<IReadOnlyList<CompressionActivity>> ReadCompressionActivityAsync(
@@ -6348,7 +12466,10 @@ WHERE j.proc_name LIKE '%compression%'
                     reader.IsDBNull(3)
                         ? null
                         : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(3), CultureInfo.InvariantCulture)),
-                    Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture)));
+                    Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(5)
+                        ? null
+                        : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(5), CultureInfo.InvariantCulture))));
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -6427,9 +12548,15 @@ WHERE j.proc_name LIKE '%compression%'
             }
             else if (item.EligibleUncompressedChunks > 0)
             {
+                /* The delay and the cadence are the JOB's, not the raw constants: a continuous aggregate's policy
+                   (#3581) waits two or four days and wakes once a day, and a line that said "1d" and "1 hour"
+                   about it would be the #1958 drift in a new place. The raw constants are what a raw job's
+                   config reads back as, so a raw hypertable's line is byte-identical to what it was. */
                 logger.LogInformation(
                     "TimescaleDB: {Hypertable} has {Waiting} chunk(s) past the {Days}d compression delay and still uncompressed; its policy wakes every {Interval} (last completed run took {Seconds:F0}s).",
-                    item.HypertableName, item.EligibleUncompressedChunks, CompressAfterDays, CompressScheduleInterval,
+                    item.HypertableName, item.EligibleUncompressedChunks,
+                    item.CompressAfter?.TotalDays ?? CompressAfterDays,
+                    IsAggregateCompressionTarget(item.HypertableName) ? AggregateCompressionScheduleInterval : CompressScheduleInterval,
                     item.LastRunDuration?.TotalSeconds ?? 0d);
             }
 
@@ -6438,9 +12565,13 @@ WHERE j.proc_name LIKE '%compression%'
 
         if (running == 0 && backlog == 0)
         {
+            var aggregatePolicies = activity.Count(item => IsAggregateCompressionTarget(item.HypertableName));
+            /* #3653 LC: frozen views are not in AggregateCompressionTargets, so subtract them from the
+               raw count too — they drain asynchronously and are not at the raw 1-hour cadence. */
+            var frozenPolicies = activity.Count(item => IsFrozenRollupAggregate(item.HypertableName));
             logger.LogDebug(
-                "TimescaleDB: {Count} compression policies on a {Interval} tick, nothing running, no eligible chunk uncompressed.",
-                activity.Count, CompressScheduleInterval);
+                "TimescaleDB: {Count} compression policies on a {Interval} tick and {AggregateCount} continuous-aggregate policies on a {AggregateInterval} cadence, nothing running, no eligible chunk uncompressed.",
+                activity.Count - aggregatePolicies - frozenPolicies, CompressScheduleInterval, aggregatePolicies, AggregateCompressionScheduleInterval);
         }
 
         LogCompressionClearance(activity, logger);
@@ -6491,7 +12622,7 @@ WHERE j.proc_name LIKE '%compression%'
             {
                 case CompressionClearanceBand.RefreshOverrun when item.PercentOfClearance is not null:
                     logger.LogWarning(
-                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, at or past the {Clearance}s it had before the next hourly refresh started ({Over:F0}s past it) — so it was still holding AccessExclusiveLock when a refresh wanted the table. This is the daily chunk close: every hypertable's newest {Days}d chunk becomes eligible at the same UTC midnight, so one tick a day carries a full day's rewrite while the other twenty-three find nothing (#3112). The grid's guard is one-sided by decision, so the tail of the compression band has one refresh step of clearance and this is that residual being spent. Widening it costs minutes the heaviest refresh's window is holding (#3174).",
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, at or past the {Clearance}s it had before the next hourly refresh started ({Over:F0}s past it) — so it was still holding AccessExclusiveLock when a refresh wanted the table. This is a chunk close: a chunk becomes eligible {Days}d after it closes, and a hypertable still at the 1-day chunk ceiling closes only one a day, at UTC midnight, so one tick a day carries a full day's rewrite while the other twenty-three find nothing; a table the reconcile has narrowed to 12h or 6h chunks (#4211) closes more of them and carries that rewrite at each of its own chunk boundaries instead (#3112). The grid's guard is one-sided by decision, so the tail of the compression band has one refresh step of clearance and this is that residual being spent. Widening it costs minutes the heaviest refresh's window is holding (#3174).",
                         item.HypertableName, duration.TotalSeconds, minute, clearance, -clear, CompressAfterDays);
                     break;
 
@@ -6628,7 +12759,7 @@ WHERE j.proc_name LIKE '%compression%'
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Could not re-arm compression job {JobId} via alter_job (often a permission issue — the store login must own the job): {Message}",
+                "Could not re-arm policy job {JobId} via alter_job (often a permission issue — the store login must own the job): {Message}",
                 jobId, ex.Message);
             return false;
         }
@@ -6636,11 +12767,173 @@ WHERE j.proc_name LIKE '%compression%'
 }
 
 /// <summary>
-/// A COMPRESSION-policy background job that <see cref="TimescaleSupport.ReadStuckCompressionJobsAsync"/> flagged
+/// A COMPRESSION-policy background job that <see cref="TimescaleSupport.ReadStuckPolicyJobsAsync"/> flagged
 /// as stuck (#1581): its immutable <c>job_id</c>, the hypertable it compresses (for a friendlier alert label —
 /// may be null on an odd catalog), and the human-readable reason the pure predicate produced.
+///
+/// <para><see cref="SchedulerRetries"/> (#3591) is <c>true</c> for a <c>-infinity</c> row on a TimescaleDB at or
+/// past <see cref="TimescaleSupport.TimescaleNextStartSanitizedFrom"/>: the row is a crashed run in the
+/// scheduler's crash backoff, and the scheduler will re-run it by itself. The evaluator MUST NOT re-arm such a
+/// row, measured on a 2.28.1 rig: <c>alter_job(next_start =&gt; now())</c> against a job in crash backoff does
+/// not shorten the wait — the scheduler's crash arm ignores the persisted <c>next_start</c> while
+/// <c>consecutive_crashes &gt; 0</c> — it RESETS it. The re-arm refreshes the scheduler's job list, every crash
+/// row's backoff is recomputed from that instant, and the retry moved from crash + 5:00 to re-arm + 5:04, for
+/// the re-armed job AND for an un-re-armed sibling crash row in the same database. It also overwrites the
+/// <c>-infinity</c> with a finite value, so the next hourly read would report the job healthy and post
+/// "Recovered" before it had run. On the fleet's hourly policies (default <c>retry_period</c> one hour) that is a
+/// retry pushed out by up to an hour and two untrue messages. <c>false</c> — the pre-2.26.4 row, an unknown
+/// version, or the stuck-Running arm — keeps #1581's re-arm-once semantics exactly.</para>
+///
+/// <para><b><see cref="Family"/> and <see cref="Scheduled"/> arrive with #3816</b>, both defaulted so every
+/// pre-#3816 construction — the pins, and the compression family itself — keeps its exact previous meaning.
+/// <see cref="Family"/> is what the evaluator bands on: one dead job needs three different sentences, three
+/// different severities and three different metric names depending on which tier it stalls.
+/// <see cref="Scheduled"/> is <c>true</c> by construction, because
+/// <see cref="TimescaleSupport.ClassifyStuckPolicyJobs"/> drops a held row before it can become one of these
+/// — it is carried anyway as the SECOND of the two gates that keep <c>alter_job</c> off a held retention
+/// policy (see <see cref="TimescaleSupport.IsPolicyJobHeld"/> for why one gate is not enough for a
+/// destructive action).</para>
+///
+/// <para><see cref="Arm"/> (also #3816) is which arm the classifier fired, carried so the evaluator's
+/// per-pass summary can say "1 dead, 0 stuck" without re-deriving it from the reason PROSE — matching on a
+/// paraphrase is the drift this file keeps warning about. It defaults to
+/// <see cref="StuckPolicyJobArm.None"/>, which is the honest answer for a hand-built row that states no arm:
+/// the census counts such a row as neither dead nor hung rather than guessing.</para>
 /// </summary>
-public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason);
+public sealed record StuckPolicyJob(
+    long JobId,
+    string? HypertableName,
+    string Reason,
+    bool SchedulerRetries = false,
+    TimescaleSupport.StorePolicyJobFamily Family = TimescaleSupport.StorePolicyJobFamily.Compression,
+    bool Scheduled = true,
+    StuckPolicyJobArm Arm = StuckPolicyJobArm.None);
+
+/// <summary>
+/// One row of <see cref="TimescaleSupport.StuckPolicyJobsSql"/> as the CENSUS and the failure arm consume it
+/// (#3816) — every job the statement returned, flagged or not, which is the population the two things the
+/// stuck list cannot answer are about:
+/// <list type="bullet">
+/// <item>the unconditional per-pass summary (#3756's discipline): how many jobs were read, per family, and
+/// how many were held — a tick that says "12 jobs read, 0 dead" is a tick that can be verified to have
+/// happened, which "no alert" never was;</item>
+/// <item>the <c>total_failures</c> arm: a job that FAILS repeatedly without ever going <c>-infinity</c> is
+/// invisible to both stuck arms, to #2136's cadence read (which filters to
+/// <c>last_run_status = 'Success'</c>) and to #2813's hold check (which judges a PAUSED policy). Its
+/// counters are recorded hourly by <see cref="StoreSelfMetrics.BackgroundJobInsertSql"/> and nothing has
+/// ever alerted on them.</item>
+/// </list>
+/// <see cref="RelationName"/> is <c>j.hypertable_name</c> — for a continuous aggregate's policy that is the
+/// USER VIEW's name, not the materialization's (see <see cref="TimescaleSupport.StuckPolicyJobsSql"/>).
+/// </summary>
+public sealed record PolicyJobRunReading(
+    long JobId,
+    TimescaleSupport.StorePolicyJobFamily Family,
+    string? RelationName,
+    bool Held,
+    string? LastRunStatus,
+    long TotalFailures);
+
+/// <summary>
+/// One pass of <see cref="TimescaleSupport.ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+/// (#3816): the jobs the predicate FLAGGED, and every job it looked at.
+///
+/// <para><b>Why one record rather than two reads.</b> The census and the failure arm need the rows the stuck
+/// list is a subset of, and the rows are already in hand — asking the store a second question for them would
+/// double an hourly catalog read to re-derive what the first read had. <see cref="Jobs"/> is the FIRST read's
+/// result set even when a confirm read was taken: the confirm exists to ratify the <c>-infinity</c> arm, not
+/// to re-census the store, and the two reads are five seconds apart.</para>
+///
+/// <para>A pass that could not read at all yields <see cref="Empty"/> — no stuck jobs AND no census, which is
+/// the honest shape: "nothing was flagged" and "nothing was read" must not look alike to the summary line.</para>
+/// </summary>
+public sealed record StorePolicyJobHealth(
+    IReadOnlyList<StuckPolicyJob> Stuck,
+    IReadOnlyList<PolicyJobRunReading> Jobs)
+{
+    /// <summary>The unreadable pass: nothing flagged, nothing censused.</summary>
+    public static StorePolicyJobHealth Empty { get; } =
+        new(Array.Empty<StuckPolicyJob>(), Array.Empty<PolicyJobRunReading>());
+}
+
+/// <summary>
+/// WHICH arm of <see cref="TimescaleSupport.IsPolicyJobStuck"/> fired (#3575), from
+/// <see cref="TimescaleSupport.ClassifyPolicyJob"/>. Exists because the two arms need different
+/// treatment downstream: <see cref="NextStartNegativeInfinity"/> is judged on two inputs that TimescaleDB's
+/// view reads from independent sources and is therefore CONFIRMED by a second read before it is reported;
+/// <see cref="RunningPastBound"/> is judged on hours of elapsed time and is reported from the first read.
+/// </summary>
+public enum StuckPolicyJobArm
+{
+    /// <summary>Healthy — neither arm fired.</summary>
+    None,
+
+    /// <summary><c>next_start = -infinity</c> while the job is not reporting <c>Running</c>: the dead-job arm,
+    /// and the one that races the run instant.</summary>
+    NextStartNegativeInfinity,
+
+    /// <summary><c>Running</c> since before <see cref="TimescaleSupport.StuckRunningBound"/>: the hung-run
+    /// arm.</summary>
+    RunningPastBound,
+}
+
+/// <summary>
+/// One row of <see cref="TimescaleSupport.StuckPolicyJobsSql"/> as the predicate consumes it (#3575):
+/// the two <c>-infinity</c> tests already applied in SQL, the #1760 sentinel already NULLIFed. Internal because
+/// it is the seam the confirm-read pins through, not a product surface; the product's result type is
+/// <see cref="StuckPolicyJob"/>.
+///
+/// <para>The last four members arrive with #3816 and are all DEFAULTED, so the row shapes the confirm-read
+/// pins construct by name keep compiling and keep meaning what they meant: an armed compression job with no
+/// failure history. <see cref="ProcName"/> bands the row, <see cref="Scheduled"/> is the held-vs-dead
+/// discriminator's input, and the last two feed the failure arm.</para>
+/// </summary>
+internal sealed record PolicyJobStatRow(
+    long JobId,
+    bool NextStartIsNegativeInfinity,
+    string? JobStatus,
+    DateTime? LastRunStartedAtUtc,
+    TimeSpan? ScheduleInterval,
+    string? HypertableName,
+    string? ProcName = null,
+    bool Scheduled = true,
+    string? LastRunStatus = null,
+    long TotalFailures = 0)
+{
+    /// <summary>This row's family (#3816), from <see cref="TimescaleSupport.ClassifyPolicyJobFamily"/>. A row
+    /// built by a pre-#3816 pin carries no <c>proc_name</c> and therefore reads
+    /// <see cref="TimescaleSupport.StorePolicyJobFamily.Other"/> — which is why the DEFAULT on
+    /// <see cref="StuckPolicyJob.Family"/> is Compression and this property is applied only where a real read
+    /// supplied the name.</summary>
+    public TimescaleSupport.StorePolicyJobFamily Family =>
+        ProcName is null
+            ? TimescaleSupport.StorePolicyJobFamily.Compression
+            : TimescaleSupport.ClassifyPolicyJobFamily(ProcName);
+
+    /// <summary>Whether this row is a deliberately paused policy rather than an abandoned job —
+    /// <see cref="TimescaleSupport.IsPolicyJobHeld"/> over this row's two inputs.</summary>
+    public bool Held => TimescaleSupport.IsPolicyJobHeld(Scheduled, JobStatus);
+
+    /// <summary>This row as the census and the failure arm consume it.</summary>
+    public PolicyJobRunReading ToReading() =>
+        new(JobId, Family, HypertableName, Held, LastRunStatus, TotalFailures);
+}
+
+/// <summary>
+/// A <see cref="PolicyJobStatRow"/> the predicate flagged, with the arm that fired and its reason —
+/// the unit <see cref="TimescaleSupport.ConfirmStuckPolicyJobs"/> merges two passes of (#3575).
+/// <see cref="SchedulerRetries"/> is <see cref="StuckPolicyJob.SchedulerRetries"/>, decided where the arm
+/// was (#3591): the <c>-infinity</c> arm on a store whose scheduler has upstream #9360.
+/// </summary>
+internal sealed record ClassifiedPolicyJob(PolicyJobStatRow Row, StuckPolicyJobArm Arm, string Reason, bool SchedulerRetries = false)
+{
+    /// <summary>The product-facing shape of this flag, carrying the row's family and its armed state
+    /// (#3816). <c>Scheduled</c> is always <c>true</c> here — a held row never becomes a
+    /// <see cref="ClassifiedPolicyJob"/> — and is projected rather than hard-coded so the evaluator's
+    /// second gate is reading the catalog's answer and not this method's assumption.</summary>
+    public StuckPolicyJob ToJob() =>
+        new(Row.JobId, Row.HypertableName, Reason, SchedulerRetries, Row.Family, Row.Scheduled, Arm);
+}
 
 /// <summary>
 /// One background job's cadence reading (#2136): the last SUCCESSFUL run's duration against the job's own
@@ -6789,8 +13082,13 @@ public sealed class RefreshCeilingStalenessWatch
 /// One retention policy's armed state and the consequence of it being held (#2813), from
 /// <see cref="TimescaleSupport.ReadRetentionHoldReadingsAsync"/>.
 ///
-/// <para><see cref="Armed"/> is <c>timescaledb_information.jobs.scheduled</c> — false means the #1680/#1877
-/// coverage gate is holding this policy so it cannot drop history a consumer has never materialized.
+/// <para><see cref="Armed"/> is <c>timescaledb_information.jobs.scheduled</c> for every non-raw policy —
+/// false means the #1680/#1877 coverage gate is holding this policy so it cannot drop history a consumer
+/// has never materialized. For one of the three raw relations (#4299, <see
+/// cref="TimescaleSupport.RawRelations"/>) <c>scheduled</c> is permanently false by design, so
+/// <see cref="Armed"/> instead reads <c>config-&gt;&gt;'darling_armed'</c> — the same verdict
+/// <see cref="TimescaleSupport.RawArmedReadExpression"/> computes — through
+/// <see cref="TimescaleSupport.ReadRetentionHoldReadingsAsync"/>'s per-row branch.</para>
 /// <see cref="SpanSeconds"/> is now minus the OLDEST chunk's start (null when the hypertable has no chunks
 /// yet) and <see cref="HorizonSeconds"/> is the policy's own <c>drop_after</c>, so
 /// <see cref="OverHorizonRatio"/> is how many times its intended depth the tier is actually holding. That
@@ -6820,15 +13118,44 @@ public sealed record RetentionHoldReading(
 }
 
 /// <summary>
+/// #4299: one raw relation's last recorded purge-trigger outcome, from
+/// <see cref="TimescaleSupport.ReadRawLastPurgeOutcomeAsync"/> — the record
+/// <see cref="TimescaleSupport.RecordRawLastPurgeOutcomeAsync"/> writes at every decision point inside
+/// <see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>. <see cref="Outcome"/> is one of <c>not_covered</c>,
+/// <c>epoch_stale</c>, <c>hole</c>, <c>run_failed</c>, <c>no_chunks</c> or <c>ran</c> — named verbatim in the
+/// over-horizon alert's text (the whole point of persisting it: a page that says WHY the purge did not run
+/// instead of the generic Retention Held text, which cannot distinguish these).
+/// </summary>
+public sealed record RawLastPurgeRecord(DateTime At, string Outcome, string? SqlState, long? ElapsedMs);
+
+/// <summary>
+/// #4299: one raw relation's over-horizon measure PLUS its last recorded purge-trigger outcome —
+/// the combined reading <see cref="DarlingSelfAlertEvaluator.ApplyRawPurgeOverHorizonAsync"/> judges. Built
+/// from a <see cref="RetentionHoldReading"/> for a raw relation (<see cref="TimescaleSupport.RawRelations"/>)
+/// plus that same relation's <see cref="TimescaleSupport.ReadRawLastPurgeOutcomeAsync"/> result, by
+/// <see cref="TimescaleSupport.ReadRawPurgeOverHorizonReadingsAsync"/>.
+/// </summary>
+public sealed record RawPurgeOverHorizonReading(
+    long JobId, string HypertableName, string DropAfter, double? OverHorizonRatio, RawLastPurgeRecord? LastPurge,
+    bool LastPurgeReadFailed = false);
+
+/// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how
 /// long the last COMPLETED run took, and how many chunks are past the eligibility delay but still uncompressed.
+///
+/// <para><see cref="CompressAfter"/> is the delay the count was taken against — the job's own, read from its
+/// config (#3581): one day for a raw hypertable, two or four for a continuous aggregate by tier. Null only for
+/// a policy whose config carries no <c>compress_after</c>, which this product never creates; the log line then
+/// falls back to <see cref="TimescaleSupport.CompressAfterDays"/>. Optional and last so the five-argument
+/// shape every existing caller and test constructs is unchanged.</para>
 /// </summary>
 public sealed record CompressionActivity(
     string? HypertableName,
     string? JobStatus,
     DateTime? LastRunStartedAtUtc,
     TimeSpan? LastRunDuration,
-    long EligibleUncompressedChunks)
+    long EligibleUncompressedChunks,
+    TimeSpan? CompressAfter = null)
 {
     /// <summary>Is a compression run in progress right now?</summary>
     public bool IsRunning => string.Equals(JobStatus, "Running", StringComparison.OrdinalIgnoreCase);
@@ -6862,6 +13189,16 @@ public sealed record CompressionActivity(
     /// hypertable — a bring-your-own store's own table, or a fixture table. Null is what keeps every
     /// clearance figure below silent for a FOREIGN hypertable: this code chose no minute for it, so it has no
     /// standing to say whether its run overran anything.
+    ///
+    /// <para><b>Null for the continuous aggregates' compression jobs too, deliberately (#3581).</b> Those jobs
+    /// are on <see cref="TimescaleSupport.AggregateCompressionBandMinute"/> once a day rather than on this
+    /// hourly grid, and the clearance findings below reason from the raw tier's geometry — the #3112 overrun
+    /// text explains a run by a raw chunk's own close, daily for a table still at the 1-day ceiling and more
+    /// often for a table the reconcile has narrowed (#4211), which is not what an aggregate's run is. Reporting
+    /// an aggregate job through that text would name the wrong mechanism; a watch over the
+    /// daily band's own clearance (25 minutes to the next hour's first refresh) is a separate instrument, and
+    /// until it exists these jobs are silent here the way a foreign hypertable is, rather than misdescribed.
+    /// The #1778 backlog count above DOES cover them, at their own delay.</para>
     /// </summary>
     public int? AssignedPhaseMinute =>
         HypertableName is not null
@@ -6941,7 +13278,9 @@ public readonly record struct RollupAvailability(
     bool QueryGrainHourly, bool QueryGrainDaily, bool DbGrainHourly, bool DbGrainDaily,
     bool ProcedureGrainHourly, bool ProcedureGrainDaily, bool QueryStoreGrainHourly, bool QueryStoreGrainDaily,
     bool QueryStoreIntervalHourly = false, bool QueryStoreCorrectedHourly = false, bool QueryStoreCorrectedDaily = false,
-    bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false)
+    bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false,
+    bool QueryGrainIntervalHourly = false, bool ProcedureGrainIntervalHourly = false, bool DbGrainIntervalHourly = false,
+    bool QueryGrainIntervalDaily = false, bool ProcedureGrainIntervalDaily = false, bool DbGrainIntervalDaily = false)
 {
     /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
     /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
@@ -6949,13 +13288,26 @@ public readonly record struct RollupAvailability(
         QueryGrainHourly && QueryGrainDaily && DbGrainHourly && DbGrainDaily
         && ProcedureGrainHourly && ProcedureGrainDaily && QueryStoreGrainHourly && QueryStoreGrainDaily
         && QueryStoreIntervalHourly && QueryStoreCorrectedHourly && QueryStoreCorrectedDaily
-        && QueryStoreIntervalDaily && QueryStoreDayGrainDaily;
+        && QueryStoreIntervalDaily && QueryStoreDayGrainDaily
+        && QueryGrainIntervalHourly && ProcedureGrainIntervalHourly && DbGrainIntervalHourly
+        && QueryGrainIntervalDaily && ProcedureGrainIntervalDaily && DbGrainIntervalDaily;
 
     /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
     public static RollupAvailability None => default;
 
     /// <summary>Every flag true — the fully-built TimescaleDB shape (and the test shorthand for it).</summary>
-    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true);
+    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
+
+    /// <summary>The pre-#3653 shape: every rollup a #1869-era service created, none of the interval-honest hourly
+    /// successors (Q12) — a store whose service predates this build. Its hourly-tier reads must keep routing to
+    /// the legacy trio, which is the degrade that lets the successors ship with no migration and no version
+    /// gate; <see cref="RollupCoverage.HourlyRelationFor"/> answers the legacy name for exactly this shape.</summary>
+    public static RollupAvailability WithoutIntervalHourlies => new(true, true, true, true, true, true, true, true, true, true, true, true, true);
+
+    /// <summary>The pre-#3653-A6 shape: every rollup up to and including the interval-honest hourly successors
+    /// (Q12), none of the interval-honest successor DAILIES (A6) — a store whose service predates this build.
+    /// The test shorthand for exactly this degrade.</summary>
+    public static RollupAvailability WithoutIntervalDailies => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>The pre-#1849 shape: every ORIGINAL rollup present, none of the corrected Query Store ones —
     /// i.e. a store whose service has not yet created them. The routing fallback's test shorthand.</summary>
@@ -6987,6 +13339,12 @@ public readonly record struct RollupAvailability(
         TimescaleSupport.QueryStoreStatsCorrectedDailyView => QueryStoreCorrectedDaily,
         TimescaleSupport.QueryStoreStatsIntervalDailyView => QueryStoreIntervalDaily,
         TimescaleSupport.QueryStoreStatsDayGrainDailyView => QueryStoreDayGrainDaily,
+        TimescaleSupport.QueryStatsIntervalHourlyView => QueryGrainIntervalHourly,
+        TimescaleSupport.ProcedureStatsIntervalHourlyView => ProcedureGrainIntervalHourly,
+        TimescaleSupport.QueryStatsDbIntervalHourlyView => DbGrainIntervalHourly,
+        TimescaleSupport.QueryStatsIntervalDailyView => QueryGrainIntervalDaily,
+        TimescaleSupport.ProcedureStatsIntervalDailyView => ProcedureGrainIntervalDaily,
+        TimescaleSupport.QueryStatsDbIntervalDailyView => DbGrainIntervalDaily,
         _ => false,
     };
 }
@@ -7048,19 +13406,135 @@ public sealed class RollupCoverage
 {
     private readonly IReadOnlyDictionary<string, DateTime> _floorsByView;
     private readonly IReadOnlyDictionary<string, DateTime> _oldestByRawTable;
+    private readonly RollupAvailability _availability;
+    private readonly IReadOnlyDictionary<string, DateTime> _ceilingsByView;
 
     public RollupCoverage(
         IReadOnlyDictionary<string, DateTime> floorsByView,
         IReadOnlyDictionary<string, DateTime> oldestByRawTable)
+        : this(floorsByView, oldestByRawTable, RollupAvailability.None)
+    {
+    }
+
+    /// <summary>
+    /// The probe's own shape, carrying the <see cref="RollupAvailability"/> it was built from (#3653). Coverage
+    /// alone cannot tell "this rollup holds nothing" from "this rollup does not exist" — both are a null floor,
+    /// deliberately (see <see cref="TierCoverage"/>) — and <see cref="HourlyRelationFor"/> has to know the
+    /// difference, because naming an absent relation in a reader's SQL is a 42P01 at the user. The two-argument
+    /// constructor keeps every pre-#3653 caller and test where it was; it answers the legacy relation for every
+    /// pair, which is the safe reading when nothing has been proved present.
+    /// </summary>
+    public RollupCoverage(
+        IReadOnlyDictionary<string, DateTime> floorsByView,
+        IReadOnlyDictionary<string, DateTime> oldestByRawTable,
+        RollupAvailability availability)
+        : this(floorsByView, oldestByRawTable, availability, new Dictionary<string, DateTime>(StringComparer.Ordinal))
+    {
+    }
+
+    /// <summary>
+    /// #4605: the per-view MATERIALIZATION CEILING — how far forward each rollup has actually
+    /// materialized, read from <see cref="RollupMaterializationWatermark"/> in the same probe cycle that
+    /// measures the floor (<see cref="TimescaleSupport.DetectRollupCoverageAsync"/>) and cached the same way.
+    /// A view absent from <paramref name="ceilingsByView"/> answers null from <see cref="CeilingOf"/> — the
+    /// safe "unknown" reading a hybrid raw/rollup route must treat as "do not use the rollup here".
+    /// </summary>
+    public RollupCoverage(
+        IReadOnlyDictionary<string, DateTime> floorsByView,
+        IReadOnlyDictionary<string, DateTime> oldestByRawTable,
+        RollupAvailability availability,
+        IReadOnlyDictionary<string, DateTime> ceilingsByView)
     {
         _floorsByView = floorsByView ?? throw new ArgumentNullException(nameof(floorsByView));
         _oldestByRawTable = oldestByRawTable ?? throw new ArgumentNullException(nameof(oldestByRawTable));
+        _availability = availability;
+        _ceilingsByView = ceilingsByView ?? throw new ArgumentNullException(nameof(ceilingsByView));
     }
+
+    /// <summary>
+    /// #4605: <paramref name="caggView"/>'s MEASURED materialization ceiling — the instant AT
+    /// OR ABOVE which the rollup holds nothing (<see cref="RollupMaterializationWatermark.GetAsync"/>'s
+    /// engine watermark, or its <c>max(bucket) + bucketWidth</c> fallback) — or <c>null</c> when unknown (no
+    /// rollup by this name was probed, or the probe found nothing to measure). A hybrid raw/rollup route
+    /// (#4605 part 2 §2) reads the rollup ONLY for whole buckets strictly below this instant; everything at
+    /// or above it must come from raw, because nothing has materialized there yet.
+    ///
+    /// <para><b>Contiguity below the ceiling is NOT guaranteed by this alone.</b> A ceiling says how far
+    /// materialization has REACHED, not that every bucket beneath it is filled — an outage longer than
+    /// <c>HourlyRefreshStartOffset</c> before a refresh, or a seam below a successor's floor, can leave a hole
+    /// strictly BELOW the ceiling and above the floor
+    /// (<see cref="TimescaleSupport.MaterializationHoleTargets"/>, <c>MaterializationHoles.cs</c> lines 27–40,
+    /// 505–531; the #4301 seam decision at line 74 states the property a caller needs: contiguity from the
+    /// FLOOR upward is what the repair pass (<see cref="TimescaleSupport.RepairMaterializationHolesAsync"/>,
+    /// <see cref="TimescaleSupport.RepairMaterializationSeamsAsync"/>) works to hold, not something this probe
+    /// measures on every read). A caller that needs a hole-free span checked, rather than assumed, calls
+    /// <see cref="TimescaleSupport.HoleFreeThroughAsync"/> for that exact range — this coverage snapshot does
+    /// not attempt to answer it, because doing so per read would be the same expensive scan
+    /// <see cref="TimescaleSupport.DetectRollupCoverageAsync"/> already exists to avoid for the floor.</para>
+    /// </summary>
+    public DateTime? CeilingOf(string caggView) =>
+        _ceilingsByView.TryGetValue(caggView, out var ceiling) ? ceiling : null;
+
+    /// <summary>
+    /// THE HOURLY-TIER RELATION for a read whose window starts at <paramref name="windowStartUtc"/> (#3653, Q12):
+    /// <paramref name="legacyHourly"/>'s interval-honest successor when it exists on this store and reaches at
+    /// least as far back into the window as the legacy does, otherwise the legacy —
+    /// <see cref="TimescaleSupport.PrefersSuccessor"/> over the two materialized floors this probe measured.
+    /// For an hourly rollup that was never superseded (the Query Store family) the answer is the name it was
+    /// handed.
+    ///
+    /// <para><b>Called AFTER the tier is resolved, never instead of it.</b> The router decides whether the hourly
+    /// tier can answer a window from <see cref="For"/> over the LEGACY pair — <see cref="For"/> stitches the
+    /// legacy and successor floors (#3653 LC), taking the deeper of the two, so "can the hourly tier serve this
+    /// window" is answered correctly on both a pre-freeze store (legacy is deeper) and a fresh or post-trim store
+    /// (successor is deeper or the only non-null floor).  Only once the tier is Hourly does THIS choose which
+    /// hourly relation, and the successor is chosen only when the window loses nothing by it. A reader that
+    /// asked this first and routed on the successor's floor alone would fall to raw on stores where the legacy
+    /// still holds the answer.</para>
+    ///
+    /// <para><b>Absence beats coverage.</b> A store on a service that predates the successors
+    /// (<see cref="RollupAvailability.WithoutIntervalHourlies"/>) has a null successor floor AND no successor
+    /// relation; the supply rule alone would answer "successor" whenever the legacy is also empty, and the read
+    /// would name a relation that is not there. The availability this coverage was probed with is consulted
+    /// first, so an absent successor is never named — including from <see cref="Unknown"/>, which carries
+    /// <see cref="RollupAvailability.None"/> and therefore always answers the legacy.</para>
+    /// </summary>
+    public string HourlyRelationFor(string legacyHourly, DateTime windowStartUtc)
+    {
+        if (legacyHourly is null)
+        {
+            throw new ArgumentNullException(nameof(legacyHourly));
+        }
+
+        var successor = TimescaleSupport.SuccessorOf(legacyHourly);
+        if (successor is null || !_availability.Has(successor))
+        {
+            return legacyHourly;
+        }
+
+        return TimescaleSupport.PrefersSuccessor(
+                legacyExists: _availability.Has(legacyHourly),
+                legacyOldest: FloorOf(legacyHourly),
+                successorOldest: FloorOf(successor),
+                windowStart: windowStartUtc)
+            ? successor
+            : legacyHourly;
+    }
+
+    /// <summary>The routed relation's NAME, for probes, logs and registry lookups ONLY; never splice it into
+    /// SQL (use <see cref="StitchedRelationSql"/>). Same routing as <see cref="HourlyRelationFor"/> — this is
+    /// the by-name half of decision 1 (#3653 A6): a reader that only needs to say which relation applies
+    /// (a probe, a log line, a registry lookup) calls this; a reader building a FROM clause calls
+    /// <see cref="StitchedRelationSql"/> instead.</summary>
+    public string HourlyRelationNameFor(string legacyHourly, DateTime windowStartUtc) =>
+        HourlyRelationFor(legacyHourly, windowStartUtc);
 
     /// <summary>Nothing measured — every lookup answers null, so the router keeps its pre-#1759 behaviour.
     /// The safe answer for a store with no rollups AND for a probe that failed.</summary>
     public static RollupCoverage Unknown { get; } = new(
         new Dictionary<string, DateTime>(StringComparer.Ordinal),
+        new Dictionary<string, DateTime>(StringComparer.Ordinal),
+        RollupAvailability.None,
         new Dictionary<string, DateTime>(StringComparer.Ordinal));
 
     /// <summary>The oldest bucket <paramref name="caggView"/> has materialized, or null when it holds nothing
@@ -7078,14 +13552,320 @@ public sealed class RollupCoverage
     /// <see cref="RetentionTierRouter.Resolve(DateTime, DateTime, bool, bool, TierCoverage)"/>. A pair with no
     /// daily view (or an unrecognized hourly view) still answers — with nulls, which the router treats as
     /// "no evidence".
+    ///
+    /// <para><b>Stitched floor for frozen-legacy pairs (#3653 LC).</b> After the LC freeze, a FRESH store
+    /// (just upgraded, legacy starts <c>WITH NO DATA</c>) has a null legacy floor while its successor holds real
+    /// data.  A store 90+ days post-freeze has had its legacy trimmed to empty for the same reason.  Both shapes
+    /// produce a null legacy floor, so routing on the legacy floor alone falls every window older than 4 days to
+    /// raw.  This method therefore stitches the legacy AND the successor: the effective floor for each tier is
+    /// the deeper (earlier) of the two non-null floors.  A null from both is still null (no evidence from
+    /// either).  Callers that determine which hourly <em>relation</em> to name in SQL still go through
+    /// <see cref="HourlyRelationFor"/>, which makes the legacy-vs-successor choice independently and only after
+    /// the tier has been resolved.</para>
     /// </summary>
     public TierCoverage For(string hourlyView, string? dailyView)
     {
         var rawTable = RawTableFor(hourlyView);
-        return new TierCoverage(
+
+        // #3653 LC: stitch legacy and successor floors so that fresh stores (empty legacy, successor has
+        // data) and post-trim stores (legacy drained by retention) still route correctly to the hourly tier.
+        var successorHourly = TimescaleSupport.SuccessorOf(hourlyView);
+        var hourlyFloor = DeepestFloor(
             FloorOf(hourlyView),
-            dailyView is null ? null : FloorOf(dailyView),
-            rawTable is null ? null : RawOldestOf(rawTable));
+            successorHourly is null ? null : FloorOf(successorHourly));
+
+        DateTime? dailyFloor = null;
+        if (dailyView is not null)
+        {
+            var successorDaily = SuccessorDailyFromLegacy(dailyView);
+            dailyFloor = DeepestFloor(
+                FloorOf(dailyView),
+                successorDaily is null ? null : FloorOf(successorDaily));
+        }
+
+        return new TierCoverage(hourlyFloor, dailyFloor, rawTable is null ? null : RawOldestOf(rawTable));
+    }
+
+    /// <summary>The deeper (earlier) of two nullable UTC floors — the effective floor when a frozen legacy
+    /// and its interval-honest successor both cover part of the span (#3653 LC). A null on either side is
+    /// skipped; null on both yields null (no evidence from either tier).</summary>
+    private static DateTime? DeepestFloor(DateTime? a, DateTime? b) =>
+        (a, b) is ({ } da, { } db) ? (da < db ? da : db) : a ?? b;
+
+    /// <summary>The interval-honest SUCCESSOR DAILY that replaces <paramref name="legacyDaily"/> for the
+    /// daily-tier floor lookup (#3653 LC), or <c>null</c> for a daily view that was never superseded.</summary>
+    private static string? SuccessorDailyFromLegacy(string legacyDaily)
+    {
+        foreach (var (legacyDailyV, successorDaily, _) in TimescaleSupport.SupersededDailyRollups)
+        {
+            if (string.Equals(legacyDailyV, legacyDaily, StringComparison.Ordinal))
+            {
+                return successorDaily;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Which tier <see cref="StitchedRelationSql"/> is stitching (#3653 A6): the boundary is the
+    /// hourly grid's own bucket for <see cref="Hourly"/>, and the ceiling-of-day boundary described on
+    /// <see cref="StitchedRelationSql"/> for <see cref="Daily"/>.</summary>
+    public enum StitchTier { Hourly, Daily }
+
+    /// <summary>Each stitched pair's explicit column list (#3653 A6 design v2 §2): the LEGACY's own columns,
+    /// with no <c>sample_interval_seconds_sum</c> — no reader selects that column, and the legacy side of the
+    /// UNION does not carry it. Pinned as a subset of both sides' CREATE text by
+    /// <c>StitchedRelationSqlTests</c>. Keyed by the LEGACY view name for both tiers (the daily pair's legacy is
+    /// also the lookup key).</summary>
+    private static readonly Dictionary<string, string[]> s_stitchColumnsByLegacy = new(StringComparer.Ordinal)
+    {
+        [TimescaleSupport.QueryStatsHourlyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "query_hash", "sql_handle", "bucket",
+            "worker_time_sum", "worker_time_min", "worker_time_max",
+            "elapsed_time_sum", "elapsed_time_min", "elapsed_time_max",
+            "execution_count_sum", "execution_count_min", "execution_count_max", "sample_count",
+        },
+        [TimescaleSupport.ProcedureStatsHourlyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "schema_name", "object_name", "bucket",
+            "worker_time_sum", "worker_time_min", "worker_time_max",
+            "elapsed_time_sum", "elapsed_time_min", "elapsed_time_max",
+            "execution_count_sum", "execution_count_min", "execution_count_max", "sample_count",
+        },
+        [TimescaleSupport.QueryStatsDbHourlyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "bucket",
+            "worker_time_sum", "logical_reads_sum", "physical_reads_sum", "logical_writes_sum",
+            "execution_count_sum", "last_execution_time_max", "sample_count",
+        },
+        [TimescaleSupport.QueryStatsDailyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "query_hash", "sql_handle", "bucket",
+            "worker_time_sum", "worker_time_min", "worker_time_max",
+            "elapsed_time_sum", "elapsed_time_min", "elapsed_time_max",
+            "execution_count_sum", "execution_count_min", "execution_count_max", "sample_count",
+        },
+        [TimescaleSupport.ProcedureStatsDailyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "schema_name", "object_name", "bucket",
+            "worker_time_sum", "worker_time_min", "worker_time_max",
+            "elapsed_time_sum", "elapsed_time_min", "elapsed_time_max",
+            "execution_count_sum", "execution_count_min", "execution_count_max", "sample_count",
+        },
+        [TimescaleSupport.QueryStatsDbDailyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "bucket",
+            "worker_time_sum", "logical_reads_sum", "physical_reads_sum", "logical_writes_sum",
+            "execution_count_sum", "last_execution_time_max", "sample_count",
+        },
+    };
+
+    /// <summary>
+    /// THE STITCH (#3653 A6 design v2 §2): a FROM-clause item that reads a frozen legacy rollup and its
+    /// interval-honest successor as ONE relation, split at the successor's first bucket, so a caller never has
+    /// to choose between "the frozen legacy, forever" and "the successor, missing everything before it" —
+    /// which is exactly what lets the freeze (#3653 A6 lane LC) ship without waiting for raw to age out of the
+    /// legacy's reach.
+    ///
+    /// <para><b>Three shapes.</b> <c>collect.&lt;legacy&gt; AS alias</c> when there is no successor (an
+    /// unsuperseded pair, or a store predating LB); <c>collect.&lt;successor&gt; AS alias</c> when there is no
+    /// legacy, the legacy is empty, the successor is itself empty (nothing to stitch to yet — the same "empty
+    /// never wins" guard <see cref="PrefersSuccessor"/> applies), or the successor's floor already reaches at
+    /// or before <paramref name="windowStartUtc"/> (the legacy side would contribute nothing this read could
+    /// use); otherwise a <c>UNION ALL</c> split at the boundary, aliased once at the end (PostgreSQL 14/15
+    /// require the FROM-subquery alias).</para>
+    ///
+    /// <para><b>The hourly boundary</b> is the successor's own materialized floor: both sides share the same
+    /// <c>time_bucket</c> grid, so <c>bucket &lt; F</c> / <c>bucket &gt;= F</c> partitions every row exactly
+    /// once, for any F between the successor's true floor and the legacy's frozen ceiling — a cached probe
+    /// that is slightly stale is still safe.</para>
+    ///
+    /// <para><b>The daily boundary</b> is <c>F_d = max(FloorOf(successorDaily), ceilDay(FloorOf(successorHourly)))</c>:
+    /// the later of the successor daily's own floor and the first WHOLE day after the successor hourly's first
+    /// bucket. Ceiling rather than floor keeps the successor hourly's partial first day on the LEGACY side of
+    /// the split, so the daily stitch never reports a partial day as if it were whole. If the successor daily
+    /// is absent or empty, or the successor hourly it hangs off has not materialized, the read is legacy-only —
+    /// inert until both exist, which is exactly LB's job.</para>
+    ///
+    /// <para><b>Column lists.</b> Each pair's explicit list omits <c>sample_interval_seconds_sum</c>: no reader
+    /// selects it, and it exists only on the successor side.</para>
+    ///
+    /// <para><b>Why a literal, not a view or a scalar subquery.</b> A view breaks the by-name lookups
+    /// <see cref="DailySummarySql"/> and the backfill/repair targets depend on, and a <c>min(bucket)</c> probed
+    /// on a view would answer the LEGACY floor, hiding the successor's own. A scalar-subquery boundary only
+    /// allows run-time chunk exclusion; the literal lets the planner prune chunks on each side before the query
+    /// runs.</para>
+    /// </summary>
+    public string StitchedRelationSql(string legacy, string alias, DateTime windowStartUtc, StitchTier tier)
+    {
+        if (legacy is null)
+        {
+            throw new ArgumentNullException(nameof(legacy));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(alias);
+
+        var legacyOnly = $"collect.{legacy} AS {alias}";
+
+        string? successor;
+        string? successorHourly = null;
+        if (tier == StitchTier.Hourly)
+        {
+            successor = TimescaleSupport.SuccessorOf(legacy);
+
+            /* Hourly names are wired into RollupAvailability (#3653, Q12), so "does this store even HAVE the
+               relation" is answered by the probe's own availability shape, the same guard HourlyRelationFor
+               applies — an absent successor must never be named in a reader's SQL (a 42P01 at the user). */
+            if (successor is null || !_availability.Has(successor))
+            {
+                return legacyOnly;
+            }
+        }
+        else
+        {
+            /* Daily names are LB's registry (SupersededDailyRollups, #4181), and RollupAvailability now maps
+               them (Has), so the daily branch gates on availability exactly like the hourly branch above — an
+               absent successor daily must NEVER be named in SQL, even when a stale floor happens to be cached
+               for it (a store whose probe ran before the successor daily was created, then the successor
+               daily's name got reused — belt and suspenders, since Has() is the authoritative "does this store
+               have the relation" answer, not the floor dictionary). */
+            var pair = TimescaleSupport.SupersededDailyRollups.FirstOrDefault(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal));
+            successor = pair.SuccessorDaily;
+            successorHourly = pair.SuccessorHourly;
+
+            if (successor is null || !_availability.Has(successor))
+            {
+                return legacyOnly;
+            }
+        }
+
+        var successorOnly = $"collect.{successor} AS {alias}";
+
+        var legacyExists = _availability.Has(legacy);
+        var legacyFloor = legacyExists ? FloorOf(legacy) : null;
+        if (!legacyExists || legacyFloor is null)
+        {
+            return successorOnly;
+        }
+
+        var successorFloor = FloorOf(successor);
+        if (successorFloor is null)
+        {
+            /* Empty successor never wins while the legacy holds rows — the same guard PrefersSuccessor applies,
+               and "absent or empty" reads legacy-only per this method's own remarks. */
+            return legacyOnly;
+        }
+
+        DateTime boundary;
+        if (tier == StitchTier.Hourly)
+        {
+            boundary = successorFloor.Value;
+        }
+        else
+        {
+            var successorHourlyFloor = successorHourly is null ? null : FloorOf(successorHourly);
+            if (successorHourlyFloor is null)
+            {
+                return legacyOnly;
+            }
+
+            var hourlyFloor = successorHourlyFloor.Value;
+            var ceilDay = hourlyFloor == hourlyFloor.Date ? hourlyFloor : hourlyFloor.Date.AddDays(1);
+            boundary = successorFloor.Value > ceilDay ? successorFloor.Value : ceilDay;
+        }
+
+        if (boundary <= windowStartUtc)
+        {
+            return successorOnly;
+        }
+
+        if (!s_stitchColumnsByLegacy.TryGetValue(legacy, out var columns))
+        {
+            throw new ArgumentException(
+                $"'{legacy}' has no stitch column list registered (RollupCoverage.s_stitchColumnsByLegacy) — add one before stitching it (#3653 A6).",
+                nameof(legacy));
+        }
+
+        var columnList = string.Join(", ", columns);
+        var literal = $"TIMESTAMP '{boundary:yyyy-MM-dd HH:mm:ss.ffffff}'";
+
+        return "(SELECT " + columnList + " FROM collect." + legacy + " WHERE bucket < " + literal
+            + " UNION ALL SELECT " + columnList + " FROM collect." + successor + " WHERE bucket >= " + literal
+            + ") AS " + alias;
+    }
+
+    /// <summary>
+    /// THE STITCH'S OWN BOUNDARY (#3653 A6, lane LA-3b2): the same F <see cref="StitchedRelationSql"/> would
+    /// split <paramref name="legacy"/>/<paramref name="tier"/> at for a read starting at
+    /// <paramref name="windowStartUtc"/>, or null when that call would answer legacy-only or successor-only —
+    /// nothing to split for THIS window. <see cref="DailySummarySql"/>'s not-carried probe uses this to decide
+    /// between one probe and two (UNION ALL, one per relation name, split at F), so it MUST agree with
+    /// <see cref="StitchedRelationSql"/>'s own decision exactly rather than re-derive it — the guard chain
+    /// below is deliberately the same chain, kept side by side with it rather than factored through it, so a
+    /// future edit to one is a visible diff next to the other instead of a shared private path either could
+    /// drift under without a test noticing.
+    /// </summary>
+    public DateTime? StitchFloor(string legacy, StitchTier tier, DateTime windowStartUtc)
+    {
+        if (legacy is null)
+        {
+            throw new ArgumentNullException(nameof(legacy));
+        }
+
+        string? successor;
+        string? successorHourly = null;
+        if (tier == StitchTier.Hourly)
+        {
+            successor = TimescaleSupport.SuccessorOf(legacy);
+            if (successor is null || !_availability.Has(successor))
+            {
+                return null;
+            }
+        }
+        else
+        {
+            var pair = TimescaleSupport.SupersededDailyRollups.FirstOrDefault(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal));
+            successor = pair.SuccessorDaily;
+            successorHourly = pair.SuccessorHourly;
+            if (successor is null || !_availability.Has(successor))
+            {
+                return null;
+            }
+        }
+
+        var legacyExists = _availability.Has(legacy);
+        var legacyFloor = legacyExists ? FloorOf(legacy) : null;
+        if (!legacyExists || legacyFloor is null)
+        {
+            return null;
+        }
+
+        var successorFloor = FloorOf(successor);
+        if (successorFloor is null)
+        {
+            return null;
+        }
+
+        DateTime boundary;
+        if (tier == StitchTier.Hourly)
+        {
+            boundary = successorFloor.Value;
+        }
+        else
+        {
+            var successorHourlyFloor = successorHourly is null ? null : FloorOf(successorHourly);
+            if (successorHourlyFloor is null)
+            {
+                return null;
+            }
+
+            var hourlyFloor = successorHourlyFloor.Value;
+            var ceilDay = hourlyFloor == hourlyFloor.Date ? hourlyFloor : hourlyFloor.Date.AddDays(1);
+            boundary = successorFloor.Value > ceilDay ? successorFloor.Value : ceilDay;
+        }
+
+        return boundary <= windowStartUtc ? null : boundary;
     }
 
     /// <summary>The raw table a rollup view's tier ladder falls back TO, or null for a name outside
@@ -7103,6 +13883,88 @@ public sealed class RollupCoverage
             {
                 return rawTable;
             }
+        }
+
+        return null;
+    }
+}
+
+/// <summary>
+/// THE MATERIALIZATION WATERMARK (#4227): how far a <c>materialized_only</c> continuous aggregate has actually
+/// materialized, for a caller that must supplement it with raw for the UNMATERIALIZED TAIL — the one question
+/// <see cref="RollupCoverage"/> itself does not answer, since a floor (the OLDEST bucket) says nothing about the
+/// newest. Kept beside <see cref="RollupCoverage"/> rather than folded into it: the floor dictionary is probed
+/// once per <see cref="TimescaleSupport.DetectRollupCoverageAsync"/> cycle and cached for several minutes; the
+/// watermark moves every refresh, so a caller that needs it re-reads it fresh rather than trusting a coverage
+/// snapshot that may already be stale by the time the tail matters.
+///
+/// <para><b>Two reads, cheapest and most precise first.</b> <c>_timescaledb_functions.cagg_watermark</c> is the
+/// engine's own answer and needs no extra grant beyond the <c>viewer</c> role's existing <c>SELECT ON ALL TABLES
+/// IN SCHEMA collect</c> — measured directly on the rig AS the <c>viewer</c> role (#4227): EXECUTE on the
+/// function and SELECT on <c>_timescaledb_catalog.continuous_agg</c> are both PUBLIC by default, the same grant
+/// every real-time CAGG read already depends on to rewrite its own view. A read that throws anyway (an older
+/// TimescaleDB whose catalog shape differs) falls back to <c>max(bucket)</c> off the view itself — ordinary
+/// SELECT, already granted — plus one bucket width. That fallback is never LATER than the true watermark (a
+/// refresh only ever writes BELOW the threshold it then advances to), so a caller that reads raw from there
+/// onward never treats unmaterialized data as covered; it may occasionally re-read a bucket the aggregate
+/// already has, which is free for a boolean "any executions" check.</para>
+/// </summary>
+public static class RollupMaterializationWatermark
+{
+    /// <summary>The engine's own answer: the instant below which <paramref name="view"/> serves only
+    /// materialized buckets. NULL before the first refresh (#3973's finite-sentinel handling — the same guard
+    /// <c>DarlingFleetReader.CollectionHealthWatermarkSql</c> applies for the collection-health aggregate).</summary>
+    public static string WatermarkSql(string view) => @"
+SELECT CASE WHEN isfinite(w) AND w >= '2000-01-01'::timestamp THEN w END
+FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(mat_hypertable_id)) AS w
+      FROM _timescaledb_catalog.continuous_agg
+      WHERE user_view_schema = 'collect'
+      AND   user_view_name = '" + view + @"') x";
+
+    /// <summary>The fallback: the newest bucket <paramref name="view"/> actually holds a row for. Ordinary
+    /// SELECT against the view itself, no catalog access. The caller adds one bucket width (this is the last
+    /// WRITTEN bucket, not the boundary above it).</summary>
+    public static string FallbackMaxBucketSql(string view) => $"SELECT max(bucket) FROM collect.{view}";
+
+    /// <summary>
+    /// Reads <paramref name="view"/>'s materialization watermark: the engine's own answer preferred, the
+    /// <c>max(bucket) + bucketWidth</c> fallback on any Postgres or cast failure. NULL means nothing has
+    /// materialized at all (or the relation is not a continuous aggregate here) — the caller's cue to skip the
+    /// rollup route entirely for this read and answer from raw alone, the same "no evidence, raw answers
+    /// everything" rule <see cref="RollupCoverage"/> already follows.
+    /// </summary>
+    public static async Task<DateTime?> GetAsync(
+        NpgsqlDataSource dataSource, string view, TimeSpan bucketWidth, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentException.ThrowIfNullOrWhiteSpace(view);
+
+        try
+        {
+            await using var probe = dataSource.CreateCommand(WatermarkSql(view));
+            probe.CommandTimeout = commandTimeoutSeconds;
+            if (await probe.ExecuteScalarAsync(cancellationToken) is DateTime w)
+            {
+                return w;
+            }
+        }
+        catch (Exception ex) when (ex is PostgresException or InvalidCastException)
+        {
+            _ = ex;
+        }
+
+        try
+        {
+            await using var fallback = dataSource.CreateCommand(FallbackMaxBucketSql(view));
+            fallback.CommandTimeout = commandTimeoutSeconds;
+            if (await fallback.ExecuteScalarAsync(cancellationToken) is DateTime max)
+            {
+                return max + bucketWidth;
+            }
+        }
+        catch (Exception ex) when (ex is PostgresException or InvalidCastException)
+        {
+            _ = ex;
         }
 
         return null;

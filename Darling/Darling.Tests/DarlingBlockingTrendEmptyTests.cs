@@ -91,8 +91,9 @@ public sealed class DarlingBlockingTrendEmptyTests
             Assert.DoesNotContain("EVER", gapText, StringComparison.Ordinal);
 
             /* ── the collector ran inside the window and stored nothing: a genuine all-clear ── */
-            await SeedRunAsync(connection, ct, "blocked_process_report", MinutesAgo(10));
-            await SeedRunAsync(connection, ct, "dmv_blocking_snapshot", MinutesAgo(10));
+            var t10 = MinutesAgo(10);
+            await SeedRunAsync(connection, ct, "blocked_process_report", t10);
+            await SeedRunAsync(connection, ct, "dmv_blocking_snapshot", t10);
 
             var clear = await DarlingMcpBlockingTools.GetBlockingTrend(dataSource, ServerName, 4);
             var clearRoot = JsonDocument.Parse(clear).RootElement;

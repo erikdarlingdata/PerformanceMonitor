@@ -29,7 +29,9 @@ import {
   readErrorStrip,
   emptyStrip,
   noticeStrip,
+  keptWindowStrip,
   readTool,
+  readWithinKeptHistory,
   apiGet,
   buildQuery,
   getPath,
@@ -40,31 +42,73 @@ import {
 } from "./util.js";
 import { renderLineChart, SERIES_COLORS } from "./charts.js";
 
+/* The AbortSignal for the render currently building panels (#4191). A page sets it (setPanelSignal)
+   synchronously, immediately before calling a tab's build()/a page's descriptor array, and renderPanel below
+   captures the CURRENT VALUE into a local const at the moment each panel is built — a later render's signal
+   swap can only affect panels renderPanel has not been called for yet, never one already in flight. This is
+   what lets every page fall in line without threading a signal through table()/stat()/line() and every
+   build(server, ctx) signature: the one seam every panel read already shares picks it up implicitly. A page
+   that never calls setPanelSignal (most of them, today) leaves this undefined, and fetch(path, {signal:
+   undefined}) is exactly the unabortable request every panel already made. */
+let panelSignal;
+
+/** Set (or clear, with no argument) the AbortSignal the NEXT renderPanel() calls will capture — see above. */
+export function setPanelSignal(signal) {
+  panelSignal = signal;
+}
+
 /**
  * Build a panel node. It returns immediately with a loading strip and fills itself once the fetch resolves,
- * mapping the three API response kinds (data / empty envelope / error) to the right UI.
+ * mapping the API response kinds (data / empty envelope / error / aborted / auth) to the right UI.
  */
-export function renderPanel(desc) {
+export function renderPanel(desc, onSettled) {
+  const signal = panelSignal;
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : "") }, [
     el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null]),
     body,
   ]);
-  loadPanel(desc, body);
+  loadPanel(desc, body, signal, onSettled);
   return panel;
 }
 
-async function loadPanel(desc, body) {
-  const res = desc.read ? await readTool(desc.read, desc.params) : await apiGet(desc.path + buildQuery(desc.params));
+/* `onSettled` (#4222) is an optional completion callback fired exactly once when this panel's load reaches a
+   terminal state (data, empty, error, aborted, or auth) — every renderPanel caller today omits it (a no-op), but
+   it is what lets a caller with its OWN concurrency budget (the alert-notebook doc's max-3 in-flight cell loader,
+   views.js) know when a slot frees, since renderPanel itself returns synchronously with the fetch still in flight. */
+async function loadPanel(desc, body, signal, onSettled) {
+  try {
+    await loadPanelBody(desc, body, signal);
+  } finally {
+    if (onSettled) onSettled();
+  }
+}
+
+async function loadPanelBody(desc, body, signal) {
+  /* A read that keeps less history than the page's Range is asked again for what it keeps, and the panel says
+     so through keptWindowStrip (readWithinKeptHistory in util.js, shared with the server-tab composites). */
+  const res = await readWithinKeptHistory(
+    (params) => (desc.read ? readTool(desc.read, params, signal) : apiGet(desc.path + buildQuery(params), signal)),
+    desc.params
+  );
+
+  /* A superseded render's own reads (#4191) or a session that just expired (#4187, its own shell-wide
+     takeover — see util.js) — either way this panel's slot is no longer this code's to fill; the render that
+     owns the screen now already replaced it or is about to. */
+  if (res.kind === "aborted" || res.kind === "auth") {
+    return;
+  }
 
   if (res.kind === "error") {
     /* readErrorStrip degrades the "window too wide" validation error to a notice; every other error stays red
-       (#2780). Shared with the server-tab composites so the whole page degrades the same way. */
+       (#2780). Shared with the server-tab composites so the whole page degrades the same way. A window refusal
+       only reaches it now when the one retry above could not settle it. */
     mount(body, readErrorStrip(res.message));
     return;
   }
+  const kept = keptWindowStrip(res);
   if (res.kind === "empty") {
-    mount(body, emptyStrip(res.message));
+    mount(body, [kept, emptyStrip(res.message)]);
     return;
   }
 
@@ -87,9 +131,19 @@ async function loadPanel(desc, body) {
        Read through getPath and rendered as TEXT by noticeStrip, so a note is inert markup like every other
        server value on this page (R4). */
     const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
+    /* #4925: a panel may carry further server notes (`moreNoteKeys`), each rendered as its own line when non-null. */
+    const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
+    /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
+       A copy, so the caller's descriptor keeps the window it asked for. */
+    if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
     const rendered = render(res.data, desc);
 
-    mount(body, typeof note === "string" && note.trim() ? [noticeStrip(note), rendered] : rendered);
+    mount(body, [
+      kept,
+      typeof note === "string" && note.trim() ? noticeStrip(note) : null,
+      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noticeStrip(n) : null)),
+      rendered,
+    ]);
   } catch (e) {
     mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
   }
@@ -119,10 +173,12 @@ const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-dete
 
 /* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,sevKey,statusSev}] } */
 function vizTable(data, desc) {
-  const cols = Array.isArray(desc.columns) ? desc.columns : [];
-  if (!cols.length) return emptyStrip(NO_FIELDS_MSG);
-  const rows = getPath(data, desc.rowsKey) || [];
+  const allCols = Array.isArray(desc.columns) ? desc.columns : [];
+  if (!allCols.length) return emptyStrip(NO_FIELDS_MSG);
+  /* rowsKey "." is a read whose payload is one object, drawn as one row. */
+  const rows = desc.rowsKey === "." ? (data ? [data] : []) : getPath(data, desc.rowsKey) || [];
   if (!rows.length) return emptyStrip(desc.emptyText || "No rows in this window.");
+  const cols = visibleColumns(allCols, rows);
 
   const head = el(
     "tr",
@@ -136,8 +192,24 @@ function vizTable(data, desc) {
   ]);
 }
 
+/* A table column may depend on the rows: `hideWhenEmpty: true` drops it when no row has a value at its key (null,
+   undefined or "" is empty; 0 and false are values). Database Sizes uses it for its Note column, which only the row
+   for another database on an Azure SQL Database server fills, so every other server shows no column of dashes. A
+   column without the option is always kept. When the option would drop every column the list is kept as it is, so
+   the table never renders with no columns. */
+export function visibleColumns(cols, rows) {
+  const kept = cols.filter((c) => {
+    if (!c.hideWhenEmpty) return true;
+    return rows.some((row) => {
+      const v = getPath(row, c.key);
+      return v != null && v !== "";
+    });
+  });
+  return kept.length ? kept : cols;
+}
+
 function isNumericCol(c) {
-  return c.align === "right" || ["int", "num1", "num2", "ms", "mb", "pct"].includes(c.format);
+  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "pct"].includes(c.format);
 }
 
 function cell(row, c) {
@@ -156,15 +228,41 @@ function cell(row, c) {
   if (c.mono) cls.push("mono");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
   if (c.statusSev) cls.push(sevClass(statusToSev(raw)));
-  const text = c.format ? applyFormat(c.format, raw) : raw == null || raw === "" ? "—" : String(raw);
+  /* nullKey names another field of the SAME row that says why this one is empty (get_file_io_stats' size_note:
+     "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
+     shows it in place of the bare em dash. */
+  const why = raw == null && c.nullKey ? getPath(row, c.nullKey) : null;
+  const text =
+    why != null && why !== ""
+      ? String(why)
+      : c.format
+        ? applyFormat(c.format, raw)
+        : raw == null || raw === ""
+          ? "—"
+          : String(raw);
   return el("td", { class: cls.join(" ") || null, text });
 }
 
-/* stat: desc = { stats:[{key,label,format,small?,sev?}], emptyText? } over the tool's top-level object. A stat
+/* A stat tile may depend on another value in the same payload: `hideWhen: { key, equals }` drops it when that value
+   equals `equals`, `showWhen: { key, equals }` keeps it only then. The Server Properties list uses the pair on
+   `engine_edition`: an Azure SQL Database (5) reports the HOST's sockets, cores per socket, hyperthread ratio and
+   physical memory, which are not the database's, so those tiles are not drawn and its vCores tile is (a tile with
+   neither field is always drawn, so its own logical CPU count still is). */
+export function visibleStats(stats, data) {
+  return stats.filter((s) => {
+    if (s.hideWhen && getPath(data, s.hideWhen.key) === s.hideWhen.equals) return false;
+    if (s.showWhen && getPath(data, s.showWhen.key) !== s.showWhen.equals) return false;
+    return true;
+  });
+}
+
+/* stat: desc = { stats:[{key,label,format,small?,sev?,nullKey?}], emptyText? } over the tool's top-level object. A stat
    descriptor may carry a PRE-COMPUTED severity (`sev`/`severity`, e.g. "Critical") — colored here from that hint
-   only (R1: the browser never re-derives a band); absent the hint the value keeps the default color. */
+   only (R1: the browser never re-derives a band); absent the hint the value keeps the default color. `nullKey` is
+   the table cell's rule (cell() above) for a tile: another field of the payload that says why this one is empty
+   (get_memory_stats' system_memory_state_note, "n/a (...)" on an Azure SQL Database), shown in place of the dash. */
 function vizStat(data, desc) {
-  const stats = Array.isArray(desc.stats) ? desc.stats : [];
+  const stats = visibleStats(Array.isArray(desc.stats) ? desc.stats : [], data);
   if (!stats.length) return emptyStrip(NO_FIELDS_MSG);
   /* The stat twin of vizLine's zero-points guard, and it exists for the same failure (#2530). Several reads
      answer their HEALTHY case with a data body carrying a prose `finding` and none of the summary keys —
@@ -181,15 +279,18 @@ function vizStat(data, desc) {
     stats.map((s) => {
       const sev = s.sev || s.severity;
       const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
+      const raw = getPath(data, s.key);
+      const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
       return el("div", { class: "stat" }, [
-        el("div", { class: valueClass, text: applyFormat(s.format, getPath(data, s.key)) }),
+        el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : applyFormat(s.format, raw) }),
         el("div", { class: "label", text: s.label }),
       ]);
     })
   );
 }
 
-/* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? } */
+/* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? }. `format: "int"` declares the
+   series are COUNTS, so the chart also puts its gridlines on whole numbers (see integerTicks in charts.js). */
 function vizLine(data, desc) {
   const seriesCfg = Array.isArray(desc.series) ? desc.series : [];
   if (!seriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
@@ -215,7 +316,8 @@ function vizLine(data, desc) {
   /* #2802: span the x-axis over the REQUESTED window ("last N hours" ending now), not the data's own extent, so a
      sparse trend (blocking/deadlocks) plots at its true position instead of the axis zooming to its burst. The
      width is the panel's own `hours` param — `windowHours` when a fanout injects it (a fanout spec carries no
-     params), else desc.params.hours. Absent ⇒ null ⇒ the chart keeps its data-extent domain, unchanged. */
+     params) or when loadPanelBody narrowed the read to the history it keeps, else desc.params.hours. Absent ⇒
+     null ⇒ the chart keeps its data-extent domain, unchanged. */
   const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours);
   return renderLineChart({
     points,
@@ -223,6 +325,9 @@ function vizLine(data, desc) {
     series,
     formatValue,
     clampMax,
+    /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the
+       whole-number formatter as the same label several times over ("1 1 1 0 0 0" on a blocking-events axis). */
+    integerTicks: desc.format === "int",
     unit: desc.unit ?? null,
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,

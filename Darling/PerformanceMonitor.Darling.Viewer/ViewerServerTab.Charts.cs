@@ -20,9 +20,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (<c>UpdateCpuChart</c> and the three <c>UpdateTempDb*Chart</c> bodies) with the data layer rewired
 /// to <see cref="ViewerDataService"/> Postgres reads. The only render-body change is the time axis:
 /// where Lite shifts by its per-server <c>UtcOffsetMinutes</c> (CPU plots the raw server-local
-/// sample_time directly), the viewer has no server-offset concept, so every point runs through
-/// <see cref="ViewerTimeHelper.ForDisplay"/> — the naive-UTC-to-viewer-local convention the shell's
-/// Overview charts already use. The hover tooltips are kept, and Lite's per-chart "Show Active Queries at
+/// sample_time directly), the viewer plots each naive-UTC instant itself as X (#4766) and draws the tick,
+/// hover and crosshair labels in <see cref="ViewerTimeHelper.CurrentDisplayZone"/>, the frame the shell's
+/// Overview charts use too; <see cref="ViewerTimeHelper.ForDisplay"/> is for text (grids, captions,
+/// tooltips), never for a chart's X. The hover tooltips are kept, and Lite's per-chart "Show Active Queries at
 /// This Time" drill-down IS now ported (the right-click menu is wired in <c>ViewerServerTab.DrillDown.cs</c>;
 /// Lite's ContextMenuHelper save/export chrome remains Lite-only). Chart chrome/legend/line polish flow
 /// through the shared <see cref="ChartStyle"/>
@@ -57,10 +58,10 @@ public partial class ViewerServerTab : IDisposable
         TempDbFileIoChart.Refresh();
 
         /* Hover tooltips with Lite's per-chart units ("%", "MB", "MB", "ms"). */
-        _cpuHover = new ChartHoverHelper(CpuChart, "%");
-        _tempDbHover = new ChartHoverHelper(TempDbChart, "MB");
-        _tempDbSizeHover = new ChartHoverHelper(TempDbSizeChart, "MB");
-        _tempDbFileIoHover = new ChartHoverHelper(TempDbFileIoChart, "ms");
+        _cpuHover = new ChartHoverHelper(CpuChart, "%", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _tempDbHover = new ChartHoverHelper(TempDbChart, "MB", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _tempDbSizeHover = new ChartHoverHelper(TempDbSizeChart, "MB", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _tempDbFileIoHover = new ChartHoverHelper(TempDbFileIoChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>Tears down the hover helpers (unhooks their chart event handlers). Called from
@@ -99,7 +100,7 @@ public partial class ViewerServerTab : IDisposable
     private async Task LoadCpuAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var samples = await _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc);
+        var samples = await _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc, endUtc);
         /* The read is start-only server-side; bound the end for a custom range so a window that ends in
            the past doesn't trail to the newest sample. sample_time is de-skewed to naive UTC (matching endUtc). */
         if (IsCustomRange)
@@ -120,18 +121,13 @@ public partial class ViewerServerTab : IDisposable
 
         /* Both reads run concurrently — NpgsqlDataSource pools a connection for each. */
         using var readFanOut = ViewerReadFanOut.Of(2);
-        var trendTask = _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc);
-        var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc);
+        var trendTask = _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc, endUtc);
+        var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc, endUtc);
         var trend = await trendTask;
         var fileIo = await fileIoTask;
 
-        /* Start-only reads; bound the end for a custom range (collection_time is naive UTC). */
-        if (IsCustomRange)
-        {
-            trend = trend.Where(t => t.CollectionTime <= endUtc).ToList();
-            fileIo = fileIo.Where(f => f.CollectionTime <= endUtc).ToList();
-        }
-
+        /* Both reads are bucketed (#4234/#4349) and already windowed server-side on endUtc; no client-side
+           post-filter is needed for a custom range. */
         RenderTempDbUsageChart(trend, startUtc, endUtc);
         RenderTempDbSizeChart(trend, startUtc, endUtc);
         RenderTempDbFileIoChart(fileIo, startUtc, endUtc);
@@ -143,12 +139,12 @@ public partial class ViewerServerTab : IDisposable
         _cpuHover?.Clear();
         ApplyTheme(CpuChart);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
-            CpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             CpuChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
             ReapplyAxisColors(CpuChart);
             CpuChart.Refresh();
@@ -156,11 +152,12 @@ public partial class ViewerServerTab : IDisposable
         }
 
         /* sample_time is the monitored server's LOCAL wall clock in the store, so GetCpuUtilizationAsync
-           de-skews it to naive UTC in SQL (#1262); it then runs through ViewerTimeHelper.ForDisplay like
-           every other Darling chart. (The SQL de-skew — recovering the offset from the collection batch —
-           is a data correction independent of the Server/Local/UTC display mode ForDisplay then applies;
-           Lite instead shifts the raw server-local sample_time by its per-server ServerTimeHelper offset.) */
-        var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.SampleTime).ToOADate()).ToArray();
+           de-skews it to naive UTC in SQL (#1262); the chart then plots that instant as X, like every other
+           Darling chart, and draws it in ViewerTimeHelper.CurrentDisplayZone. (The SQL de-skew — recovering
+           the offset from the collection batch — is a data correction independent of the Server/Local/UTC
+           display mode, which only decides how the instant is labelled; Lite instead shifts the raw
+           server-local sample_time by its per-server ServerTimeHelper offset.) */
+        var times = data.Select(d => d.SampleTime.ToOADate()).ToArray();
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
         var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();
 
@@ -176,7 +173,7 @@ public partial class ViewerServerTab : IDisposable
         ChartStyle.StyleScatter(otherPlot);
         _cpuHover?.Add(otherPlot, "Other");
 
-        CpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         CpuChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(CpuChart);
         CpuChart.Plot.YLabel("CPU %");
@@ -192,19 +189,19 @@ public partial class ViewerServerTab : IDisposable
         _tempDbHover?.Clear();
         ApplyTheme(TempDbChart);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
-            TempDbChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             TempDbChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
             ReapplyAxisColors(TempDbChart);
             TempDbChart.Refresh();
             return;
         }
 
-        var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+        var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var userObj = data.Select(d => d.UserObjectReservedMb).ToArray();
         var internalObj = data.Select(d => d.InternalObjectReservedMb).ToArray();
         var versionStore = data.Select(d => d.VersionStoreReservedMb).ToArray();
@@ -227,7 +224,7 @@ public partial class ViewerServerTab : IDisposable
         ChartStyle.StyleScatter(vsPlot);
         _tempDbHover?.Add(vsPlot, "Version Store");
 
-        TempDbChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         TempDbChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
@@ -248,12 +245,12 @@ public partial class ViewerServerTab : IDisposable
         ApplyTheme(TempDbSizeChart);
         _tempDbSizeHover?.Clear();
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
-            TempDbSizeChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             TempDbSizeChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
             ReapplyAxisColors(TempDbSizeChart);
             TempDbSizeChart.Refresh();
@@ -261,7 +258,7 @@ public partial class ViewerServerTab : IDisposable
         }
 
         var sorted = data.OrderBy(d => d.CollectionTime).ToList();
-        var times = sorted.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+        var times = sorted.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var totals = sorted.Select(d => d.TotalReservedMb + d.UnallocatedMb).ToArray();
 
         var sizePlot = TempDbSizeChart.Plot.Add.TimeSeries(times, totals);
@@ -269,7 +266,7 @@ public partial class ViewerServerTab : IDisposable
         ChartStyle.StyleScatter(sizePlot);
         _tempDbSizeHover?.Add(sizePlot, "Allocated MB");
 
-        TempDbSizeChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ReapplyAxisColors(TempDbSizeChart);
         TempDbSizeChart.Plot.YLabel("Allocated MB");
         TempDbSizeChart.Plot.Axes.AutoScaleY();
@@ -283,12 +280,12 @@ public partial class ViewerServerTab : IDisposable
         _tempDbFileIoHover?.Clear();
         ApplyTheme(TempDbFileIoChart);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
-            TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             TempDbFileIoChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
             ReapplyAxisColors(TempDbFileIoChart);
             TempDbFileIoChart.Refresh();
@@ -308,7 +305,7 @@ public partial class ViewerServerTab : IDisposable
         foreach (var fileGroup in files)
         {
             var points = fileGroup.OrderBy(d => d.CollectionTime).ToList();
-            var times = points.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
             var latency = points.Select(d => d.AvgReadLatencyMs + d.AvgWriteLatencyMs).ToArray();
             var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             colorIdx++;
@@ -324,7 +321,7 @@ public partial class ViewerServerTab : IDisposable
             }
         }
 
-        TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         TempDbFileIoChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(TempDbFileIoChart);
         TempDbFileIoChart.Plot.YLabel("tempdb File I/O Latency (ms)");

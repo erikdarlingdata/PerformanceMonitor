@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -319,9 +320,145 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The top query-stats groups for one server over [<paramref name="startUtc"/>,
     /// <paramref name="endUtc"/>], pre-sorted by total elapsed time descending (the grid's default sort).
+    ///
+    /// <para>#4231 stage 3: routes to Raw or the hourly rollup exactly as the MCP reader's
+    /// <c>DarlingDataReader.GetTopQueriesByCpuRoutedAsync</c> does — the tier decided over
+    /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (out of scope for this lane).
+    /// An hourly-routed page carries only what the rollup has: <c>host_object_name</c>/
+    /// <c>module_*</c>/DOP/grant/spill/thread columns are unavailable and read as their defaults, exactly the
+    /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. An hourly-routed page
+    /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
+    /// does not add the hour that begins there). Use
+    /// <see cref="GetTopQueriesByCpuTierAsync"/> to also learn which tier answered.</para>
     /// </summary>
     public async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        var (rows, _) = await GetTopQueriesByCpuTierAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        return rows;
+    }
+
+    /// <summary>#4231 stage 3: <see cref="GetTopQueriesByCpuAsync"/>'s routed form, also returning which tier
+    /// answered ("raw" or "hourly") — the Queries-tab header suffix reads this.</summary>
+    public async Task<(List<ViewerQueryStatsRow> Rows, string Tier)> GetTopQueriesByCpuTierAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var routedTier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
+        if (routedTier == RetentionTier.Daily)
+        {
+            routedTier = RetentionTier.Hourly;
+        }
+
+        if (routedTier == RetentionTier.Hourly)
+        {
+            var hourlyRows = await GetTopQueriesByCpuHourlyAsync(coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+            return (hourlyRows, "hourly");
+        }
+
+        return (await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw");
+    }
+
+    /// <summary>#4231 stage 3: the hourly-rollup arm — builds its FROM clause ONLY through
+    /// <see cref="RollupCoverage.StitchedRelationSql"/> (never a literal rollup name), groups by
+    /// <c>(database_name, query_hash)</c> (the rollup has no host_object_name), and resolves each row's
+    /// <c>query_text</c> with a follow-up lookup mirroring <see cref="DarlingDataReader"/>'s MCP twin.</summary>
+    private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
+        RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
+        IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+    {
+        var fromClause = coverage.StitchedRelationSql(
+            TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        var sql = BuildTopQueriesHourlySql(fromClause);
+
+        var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long MinWorkerTime, long MaxWorkerTime)>();
+        await using (var command = _dataSource.CreateCommand(sql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            AddServerWindowParameters(command, serverId, startUtc, endUtc);
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
+            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                ranked.Add((
+                    reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                    reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                    reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                    reader.IsDBNull(6) ? 0 : reader.GetInt64(6)));
+            }
+        }
+
+        var rows = new List<ViewerQueryStatsRow>(ranked.Count);
+        foreach (var r in ranked)
+        {
+            var queryText = "";
+            await using (var textCommand = _dataSource.CreateCommand(
+                "SELECT query_text FROM v_query_stats WHERE server_id = $1 AND database_name = $2 AND query_hash = $3 AND query_text IS NOT NULL ORDER BY collection_time DESC LIMIT 1"))
+            {
+                textCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                textCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.Database });
+                textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.QueryHash });
+                var textResult = await textCommand.ExecuteScalarAsync(cancellationToken);
+                if (textResult is string text)
+                {
+                    queryText = text;
+                }
+            }
+
+            rows.Add(new ViewerQueryStatsRow
+            {
+                DatabaseName = r.Database,
+                QueryHash = r.QueryHash,
+                TotalExecutions = r.TotalExecutions,
+                TotalCpuUs = r.TotalCpuUs,
+                TotalElapsedUs = r.TotalElapsedUs,
+                MinCpuUs = r.MinWorkerTime,
+                MaxCpuUs = r.MaxWorkerTime,
+                QueryText = queryText,
+                /* #4231 stage 3: the rollup has no host_object_name column. */
+                HostObjectName = null,
+            });
+        }
+
+        return rows;
+    }
+
+    /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
+    /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>): a range whose To is 14:00 sums the
+    /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
+    /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
+    /// test can read the text.</summary>
+    internal static string BuildTopQueriesHourlySql(string fromClause) => $"""
+        SELECT
+            database_name,
+            query_hash,
+            CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
+            CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
+            MIN(worker_time_min) AS min_worker_time,
+            MAX(worker_time_max) AS max_worker_time
+        FROM {fromClause}
+        WHERE server_id = $1
+        AND   bucket >= $2
+        AND   bucket < $3
+        AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        GROUP BY database_name, query_hash
+        HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
+        ORDER BY SUM(elapsed_time_sum) DESC
+        LIMIT $4
+        """;
+
+    /// <summary>The Raw-tier read, unchanged — what <see cref="GetTopQueriesByCpuAsync"/> ran before #4231
+    /// stage 3 added the hourly arm.</summary>
+    private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuRawAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
         var rows = new List<ViewerQueryStatsRow>();
 
@@ -386,6 +523,18 @@ public sealed partial class ViewerDataService
 
         return rows;
     }
+
+    /// <summary>
+    /// #4231: the raw floor for <c>query_stats</c> over [<paramref name="startUtc"/>, <paramref name="endUtc"/>]
+    /// — the shared probe (<see cref="RawWindowFloor"/>), never a second, hand-copied floor query. The
+    /// Queries tab's <c>LoadTopQueriesAsync</c> reads this beside
+    /// <see cref="GetTopQueriesByCpuAsync"/> so the grid header can disclose a window the raw tier no longer
+    /// fully holds, the same fact <c>get_top_queries_by_cpu</c> reports over MCP.
+    /// </summary>
+    public Task<DateTime?> GetQueryStatsWindowFloorAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStats, serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
     /// Top-Queries comparison — Lite's <c>GetQueryStatsComparisonAsync</c> ported. Unions the top-100
@@ -629,12 +778,13 @@ public sealed partial class ViewerDataService
     /// for <see cref="FormatServerClock"/> instead — <c>query_store_stats</c>' first- and last-execution
     /// times, which Query Store returns as <c>datetimeoffset</c> and <c>QueryStoreCollector</c> normalises
     /// through <c>DateTimeOffset.UtcDateTime</c>. Inlining
-    /// <c>ViewerTimeHelper.ForDisplay(x).ToString(...)</c> would work identically; a named method beside its
-    /// opposite is what makes the choice reviewable.</para>
+    /// <c>ViewerTimeHelper.FormatForDisplay(x, ...)</c> would work identically; a named method beside its
+    /// opposite is what makes the choice reviewable. A time in the repeated autumn hour carries its UTC offset
+    /// (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>).</para>
     /// </summary>
     public static string FormatStoredUtc(DateTime? naiveUtc)
         => naiveUtc.HasValue
-            ? ViewerTimeHelper.ForDisplay(naiveUtc.Value).ToString("yyyy-MM-dd HH:mm:ss")
+            ? ViewerTimeHelper.FormatForDisplay(naiveUtc.Value, "yyyy-MM-dd HH:mm:ss")
             : "";
 
     /// <summary>

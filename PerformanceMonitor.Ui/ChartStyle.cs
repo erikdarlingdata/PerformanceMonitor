@@ -276,6 +276,30 @@ namespace PerformanceMonitor.Ui
         }
 
         /// <summary>
+        /// The baseline-discontinuity marker (#3653 A5): a thin dashed vertical line at <paramref name="x"/>
+        /// (an OADate on the chart's display clock) carrying <paramref name="legendText"/> — the shared
+        /// <c>baseline discontinuity at {time} ({reason})</c> sentence — so the legend names the instant a
+        /// series was re-baselined and the eye finds it on the axis. Shared by Lite's <c>ServerTab.Charts</c>
+        /// and the Darling viewer's <c>ViewerServerTab.QueryTrends</c> so the two hosts draw one marker. A
+        /// vertical line rather than a title clause because a discontinuity has a POSITION on the time axis
+        /// and the reader's question is "which step is the instrument"; the accent colour is chart chrome
+        /// (<c>ChartPalette.AccentColor("Discontinuity")</c>, gold like a threshold), never a series colour,
+        /// so it cannot be read as data. No axis label: the legend carries the words and the axis keeps its
+        /// ticks. Callers add it AFTER the series and BEFORE their explicit axis limits, which every trend
+        /// chart here sets, so the line neither autoscales the plot nor widens the legend padding rule.
+        /// </summary>
+        public static ScottPlot.Plottables.VerticalLine AddDiscontinuityMarker(WpfPlot chart, double x, string legendText)
+        {
+            var line = chart.Plot.Add.VerticalLine(x);
+            line.Color = ScottPlot.Color.FromHex(PerformanceMonitor.Common.ChartPalette.AccentColor("Discontinuity"));
+            line.LineWidth = 1;
+            line.LinePattern = ScottPlot.LinePattern.Dashed;
+            line.LegendText = legendText;
+            line.LabelText = string.Empty;
+            return line;
+        }
+
+        /// <summary>
         /// Marker size chosen by point density (see <see cref="StyleScatter"/>). Public so callers
         /// that build scatters in a non-standard way can reuse the same density curve.
         /// </summary>

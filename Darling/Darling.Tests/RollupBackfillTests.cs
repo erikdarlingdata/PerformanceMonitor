@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -89,6 +90,94 @@ public sealed class RollupBackfillTests
 
         /* And the honest cost of waiting, so it is not oversold either. */
         Assert.Contains("Raw keeps growing", refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The free space the preflight judges is the data directory's own: the read is asked for the directory
+    /// itself, never for the drive root above it. A data directory on a volume mounted at a folder is on a
+    /// different volume from its drive root, so the drive root's free space could pass a backfill the mounted
+    /// volume has no room for.
+    /// </summary>
+    [Fact]
+    public void ResolveDirectoryFreeSpace_AsksTheDataDirectoryItself_NotItsDriveRoot()
+    {
+        var dataDirectory = Directory.CreateTempSubdirectory("pm-free-space-").FullName;
+        try
+        {
+            var asked = new List<string>();
+
+            var (freeBytes, error) = DarlingCliCommands.ResolveDirectoryFreeSpace(dataDirectory, directory =>
+            {
+                asked.Add(directory);
+                return 4242;
+            });
+
+            Assert.Null(error);
+            Assert.Equal(4242L, freeBytes);
+            Assert.Equal(new[] { dataDirectory }, asked);
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory);
+        }
+    }
+
+    /// <summary>A read that fails keeps the refusal the preflight always gave for an unreadable volume: no
+    /// number, and an error that names the directory and the reason, so the run stops instead of guessing.</summary>
+    [Fact]
+    public void ResolveDirectoryFreeSpace_ReadFails_ReportsTheDirectoryAndTheReason()
+    {
+        var dataDirectory = Directory.CreateTempSubdirectory("pm-free-space-").FullName;
+        try
+        {
+            var (freeBytes, error) = DarlingCliCommands.ResolveDirectoryFreeSpace(
+                dataDirectory, _ => throw new IOException("the volume is not ready"));
+
+            Assert.Equal(0L, freeBytes);
+            Assert.Equal($"could not read free space for {dataDirectory}: the volume is not ready.", error);
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory);
+        }
+    }
+
+    /// <summary>Left to itself the read answers for a real directory: a positive free space and no error.</summary>
+    [Fact]
+    public void ResolveDirectoryFreeSpace_RealDirectory_ReportsItsVolumesFreeSpace()
+    {
+        var dataDirectory = Directory.CreateTempSubdirectory("pm-free-space-").FullName;
+        try
+        {
+            var (freeBytes, error) = DarlingCliCommands.ResolveDirectoryFreeSpace(dataDirectory);
+
+            Assert.Null(error);
+            Assert.True(freeBytes > 0);
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory);
+        }
+    }
+
+    /// <summary>The two refusals that come before any read stay: a setting the login cannot read, and a data
+    /// directory that is not on this machine. Neither asks the volume, because either would ask the wrong one.</summary>
+    [Fact]
+    public void ResolveDirectoryFreeSpace_NoUsableDirectory_RefusesWithoutReading()
+    {
+        Func<string, long> mustNotRead = directory => throw new InvalidOperationException("must not be asked: " + directory);
+
+        foreach (var unreadable in new[] { null, "", "   " })
+        {
+            var (freeBytes, error) = DarlingCliCommands.ResolveDirectoryFreeSpace(unreadable, mustNotRead);
+            Assert.Equal(0L, freeBytes);
+            Assert.Contains("could not read the store's data_directory", error, StringComparison.Ordinal);
+        }
+
+        var missing = Path.Combine(Path.GetTempPath(), "pm-free-space-missing-" + Guid.NewGuid().ToString("N"));
+        var (missingFree, missingError) = DarlingCliCommands.ResolveDirectoryFreeSpace(missing, mustNotRead);
+        Assert.Equal(0L, missingFree);
+        Assert.Contains("does not exist on this machine", missingError, StringComparison.Ordinal);
     }
 
     /// <summary>Sizes are formatted invariantly — this text goes to an operator's console and into a refusal, so
@@ -612,19 +701,37 @@ public sealed class RollupBackfillTests
     }
 
     /// <summary>
-    /// The backfill covers exactly the rollups the ROUTER can route to. A rollup the router uses but the
-    /// backfill skips would stay permanently un-materialized — its windows served from raw forever, and its raw
-    /// purge held forever, which is #1759 unfixed for that table.
+    /// The backfill covers exactly the rollups the ROUTER can route to, EXCEPT the six #3653 LC froze. A
+    /// rollup the router uses but the backfill skips would ordinarily stay permanently un-materialized — its
+    /// windows served from raw forever, and its raw purge held forever, which is #1759 unfixed for that table
+    /// — but a frozen rollup's watermark never advances again by construction (no refresh policy —
+    /// <see cref="TimescaleSupport.FrozenRollupAggregates"/>), so there is nothing left for a backfill to
+    /// converge toward, and its raw purge is no longer gated on it either (<see cref="TimescaleSupport.RawTierCoverage"/>
+    /// moved that to the successors). The router still routes to it below the successor's floor, which is why
+    /// it stays in <see cref="TimescaleSupport.RollupViews"/> even though it leaves this list.
     /// </summary>
     [Fact]
     public void Targets_CoverEveryRoutedRollup_WithItsOwnRawTable()
     {
+        var routedAndBackfillable = TimescaleSupport.RollupViews
+            .Select(r => r.View)
+            .Where(v => !TimescaleSupport.IsFrozenRollupAggregate(v))
+            .OrderBy(v => v, StringComparer.Ordinal)
+            .ToArray();
+
         Assert.Equal(
-            TimescaleSupport.RollupViews.Select(r => r.View).OrderBy(v => v, StringComparer.Ordinal).ToArray(),
+            routedAndBackfillable,
             RollupBackfill.Targets.Select(t => t.View).OrderBy(v => v, StringComparer.Ordinal).ToArray());
 
-        /* And each target names the same raw table the router falls back to, or the backfill would chase a
-           coverage target the router never compares against. */
+        /* The frozen six are routed but deliberately absent from the backfill plan. */
+        foreach (var (_, view) in TimescaleSupport.FrozenRollupAggregates)
+        {
+            Assert.Contains(view, TimescaleSupport.RollupViews.Select(r => r.View));
+            Assert.DoesNotContain(view, RollupBackfill.Targets.Select(t => t.View));
+        }
+
+        /* And each remaining target names the same raw table the router falls back to, or the backfill would
+           chase a coverage target the router never compares against. */
         foreach (var target in RollupBackfill.Targets)
         {
             Assert.Equal(RollupCoverage.RawTableFor(target.View), target.RawTable);

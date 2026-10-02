@@ -94,7 +94,7 @@ SELECT table_name
 FROM information_schema.tables
 WHERE table_schema = 'main'
 AND   table_type = 'BASE TABLE'
-AND   table_name NOT IN ('schema_version', 'analysis_schema_version')";
+AND   table_name NOT IN ('schema_version', 'analysis_schema_version', 'store_identity')";
         using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {

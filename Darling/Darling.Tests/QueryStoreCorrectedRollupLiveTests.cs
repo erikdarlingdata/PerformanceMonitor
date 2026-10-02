@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -683,7 +684,10 @@ public sealed class QueryStoreCorrectedRollupLiveTests
             TimescaleSupport.QueryStoreStatsCorrectedDailyView,
             TimescaleSupport.QueryStoreStatsIntervalDailyView,
             TimescaleSupport.QueryStoreStatsDayGrainDailyView,
-            TimescaleSupport.QueryStatsHourlyView,
+            // #3653 LC: RawTierCoverage now requires BOTH successor hourlies; legacy query_stats_hourly
+            // is frozen and excluded from coverage checks, so refresh the two live successors instead.
+            TimescaleSupport.QueryStatsIntervalHourlyView,
+            TimescaleSupport.QueryStatsDbIntervalHourlyView,
         })
         {
             await RefreshRangeAsync(connection, view, span.From, span.To, ct);
@@ -721,7 +725,9 @@ public sealed class QueryStoreCorrectedRollupLiveTests
         }
 
         await using (var drop = new NpgsqlCommand(
-            $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.QueryStatsHourlyView} CASCADE", connection))
+            // #3653 LC: coverage now probes query_stats_interval_hourly (not the frozen legacy hourly);
+            // drop it so IsRawTierDropSafeAsync returns Unknown → false (fail-closed, #1793).
+            $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.QueryStatsIntervalHourlyView} CASCADE", connection))
         {
             await drop.ExecuteNonQueryAsync(ct);
         }
@@ -1156,15 +1162,27 @@ VALUES
         return value is DBNull or null ? null : (DateTime)value;
     }
 
+    /// <summary>
+    /// #4299 (d′): a raw relation's armed verdict is <c>darling_armed</c> (never scheduled, which this
+    /// build converges to false unconditionally for the three raw jobs); every other relation keeps the
+    /// original <c>scheduled</c> read. Mirrors the product's own branch in <c>EnsureRetentionPoliciesAsync</c>
+    /// so the test and the product cannot disagree about which column answers "is this armed".
+    /// </summary>
     private static async Task<bool> IsArmedAsync(NpgsqlConnection connection, string relation, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(@"
+        var isRawRelation = TimescaleSupport.RawRelations.Any(r => r == relation);
+        await using var command = new NpgsqlCommand(
+            isRawRelation ? TimescaleSupport.RawArmedStateSql(relation) : @"
 SELECT COALESCE(bool_or(j.scheduled), false)
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = $1", connection);
-        command.Parameters.AddWithValue(relation);
-        return (bool)(await command.ExecuteScalarAsync(ct))!;
+        if (!isRawRelation)
+        {
+            command.Parameters.AddWithValue(relation);
+        }
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is bool flag && flag;
     }
 }

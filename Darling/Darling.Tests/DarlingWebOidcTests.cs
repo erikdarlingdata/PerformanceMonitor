@@ -650,6 +650,18 @@ public sealed class DarlingWebOidcTests
     [InlineData("tab\tseparated", true)]
     [InlineData("nul\u0000byte", true)]
     [InlineData("del\u007fchar", true)]
+    [InlineData("nel\u0085char", true)]  // #4286 review, Low 4: C1 control (NEL) -- was ASCII-only before
     public void SubjectCarriesControlCharacters_Matrix(string subject, bool expected)
         => Assert.Equal(expected, DarlingWebOidc.SubjectCarriesControlCharacters(subject));
+
+    /// <summary>#4286 review, Low 4: U+2028 (Unicode LINE SEPARATOR) is not char.IsControl, so it needs its
+    /// own check -- a separate Fact rather than another InlineData row, because a raw U+2028 is itself a
+    /// line terminator to the C# lexer (it cannot appear, escaped or not, inside another attribute's
+    /// constant without tripping "newline in constant"); built at runtime here instead.</summary>
+    [Fact]
+    public void SubjectCarriesControlCharacters_UnicodeLineSeparator_IsTrue()
+    {
+        var subject = "before" + (char)0x2028 + "after";
+        Assert.True(DarlingWebOidc.SubjectCarriesControlCharacters(subject));
+    }
 }

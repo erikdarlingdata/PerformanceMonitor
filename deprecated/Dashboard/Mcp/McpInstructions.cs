@@ -61,8 +61,8 @@ internal static class McpInstructions
         ### Blocking & Deadlock Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_blocking` | Recent blocking events with chains and query text | `server_name`, `hours_back`, `limit` |
-        | `get_deadlocks` | Recent deadlock events with victim info | `server_name`, `hours_back`, `limit` |
+        | `get_blocking` | Recent blocking events with chains and query text. `events_returned` is the page, not the window; `truncated` says whether rows were dropped (null when the reader filled to `limit_applied_by_reader`) | `server_name`, `hours_back`, `limit` |
+        | `get_deadlocks` | Recent deadlock events with victim info. `deadlocks_returned` is the page, not the window; `truncated` as for `get_blocking` | `server_name`, `hours_back`, `limit` |
         | `get_deadlock_detail` | Full deadlock graph XML for deep analysis | `server_name`, `hours_back`, `limit` |
         | `get_blocked_process_xml` | Raw blocked process report XML | `server_name`, `hours_back`, `limit` |
         | `get_blocking_deadlock_stats` | Aggregated blocking/deadlock statistics: counts, durations, patterns | `server_name`, `hours_back` |
@@ -102,7 +102,7 @@ internal static class McpInstructions
         ### Alert Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_alert_history` | Recent alert history: what fired, when, email status | `hours_back` (default 24), `limit` (default 50) |
+        | `get_alert_history` | Recent alert history: what fired, when, email status. `alerts_returned` is the page; `truncated` is true when the window held more | `hours_back` (default 24), `limit` (default 50) |
         | `get_alert_settings` | Current alert thresholds and SMTP configuration | none |
 
         ### Job Tools
@@ -192,7 +192,7 @@ internal static class McpInstructions
         | `compare_analysis` | Compares two time periods showing severity deltas for each fact | `server_name`, `hours_back` (default 4), `baseline_hours_back` (default 28) |
         | `audit_config` | Edition-aware configuration audit: CTFP, MAXDOP, max memory, max worker threads | `server_name` |
         | `get_analysis_findings` | Retrieves persisted findings from previous analysis runs | `server_name`, `hours_back` (default 24) |
-        | `mute_analysis_finding` | Mutes a finding pattern by story_path_hash | `story_path_hash` (required), `server_name`, `reason` |
+        | `mute_analysis_finding` | Mutes a finding pattern by story_path_hash. Reports what the write did: `registered`, and `matched_now` — how many stored findings for the server carry the hash (status `muted_unmatched` when 0: the mute is kept, but check the hash) | `story_path_hash` (required), `server_name`, `reason` |
 
         ## Recommended Workflow
 

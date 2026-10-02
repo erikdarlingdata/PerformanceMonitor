@@ -27,16 +27,18 @@
  * never clobbered by a background refresh.
  */
 
-import { el, mount, apiGet, readTool } from "./util.js";
+import { el, mount, apiGetFleet, readToolWithinKeptHistory } from "./util.js";
 import { renderPanel, VIZ } from "./panels.js";
 import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
 import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
+import { refreshChoiceOf } from "./refresh-policy.js";
+import { buildRefreshControl } from "./refresh-control.js";
 import * as derive from "./derive.js";
 
 /** The FORMATTERS keys the format pickers offer (mirrors util.js FORMATTERS). */
-const FORMAT_OPTIONS = ["text", "int", "num1", "num2", "pct", "ms", "mb", "time", "reltime", "bool"];
+const FORMAT_OPTIONS = ["text", "int", "num1", "num2", "rate", "pct", "ms", "mb", "time", "reltime", "bool"];
 const PREVIEW_DEBOUNCE_MS = 350;
 
 /** The view-level default time-range choices (hours) offered in the composer + the rendered view's chrome. */
@@ -97,7 +99,7 @@ export async function renderEditor(main, id) {
     loadedVersion = res.data.version;
     model = viewToModel(res.data);
   } else {
-    model = { name: "", description: "", panels: [newPanel()], variables: [], rangeHours: null };
+    model = { name: "", description: "", panels: [newPanel()], variables: [], rangeHours: null, refresh: null };
   }
 
   buildEditor(main, { model, editingId, loadedVersion, catalog, fleet });
@@ -109,7 +111,7 @@ export async function renderEditor(main, id) {
    dropdown reads only value/label, so the extra fields are inert there. Exported so the notebook composer — which
    greys the same way — shares this one enrichment. */
 export async function loadFleetOptions() {
-  const res = await apiGet("/api/fleet");
+  const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
   return [...(res.data.cards || [])]
     .map((c) => ({
@@ -129,7 +131,7 @@ export async function loadFleetOptions() {
    <select> render the hierarchy with indentation. Cycle- and dangling-parent-safe, the same projection the
    fleet page groups with. Empty when no tags are defined. */
 export async function loadFleetTagOptions() {
-  const res = await apiGet("/api/fleet");
+  const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
   const forest = Array.isArray(res.data.tags) ? res.data.tags : [];
   const known = new Set(forest.map((t) => t.id));
@@ -199,6 +201,7 @@ function viewToModel(view) {
     panels: panels.length ? panels : [newPanel()],
     variables: parseVariables(def.variables),
     rangeHours: def.range && typeof def.range.hours === "number" ? def.range.hours : null,
+    refresh: typeof def.refresh === "string" ? def.refresh : null,
   };
 }
 
@@ -372,6 +375,7 @@ function modelToDefinition(model) {
     .map((v) => (v.default ? { name: v.name, dimension: v.dimension, default: v.default } : { name: v.name, dimension: v.dimension }));
   if (variables.length) def.variables = variables;
   if (model.rangeHours) def.range = { hours: model.rangeHours };
+  if (model.refresh) def.refresh = model.refresh;
   return def;
 }
 
@@ -514,6 +518,8 @@ function buildEditor(main, ctx) {
     el("div", { class: "page-head" }, [
       el("a", { href: backHash, text: "← Back" }),
       el("h2", { text: ctx.editingId != null ? "Edit view" : "New view" }),
+      el("div", { class: "spacer" }),
+      buildRefreshControl(refreshChoiceOf(model, false), (choice) => { model.refresh = choice; }).root,
     ]),
     el("div", { class: "editor-meta" }, [field("Name", nameInput), field("Description", descInput)]),
     viewScopeSection,
@@ -603,12 +609,17 @@ function hasFieldConfig(p) {
 
 /* Auto-derive-on-save feeder (B1): fetch a live sample for each field-less table/line/stat panel and seed its
    vizcfg via derive.js, so the author rarely hits the fieldConfigProblem backstop. Skips a panel with no read / an
-   unfilled required param / no live sample — those the backstop reports. */
+   unfilled required param / no live sample — those the backstop reports.
+
+   Every sample read here goes through readToolWithinKeptHistory, the rule the preview's renderPanel applies: a
+   read that keeps less history than the panel's `hours` answers for the hours it keeps. A plain readTool would
+   get the refusal instead, so the preview would show data while Auto-detect, the field lists and Save found no
+   sample. The narrowed sample has the same shape, which is all field detection reads. */
 async function ensureFieldConfigs(model, catalog) {
   for (const p of model.panels) {
     if (!needsFieldConfig(p) || hasFieldConfig(p)) continue;
     if (!p.read || missingRequired(p, catalog).length) continue;
-    const res = await readTool(p.read, cleanParams(p.params));
+    const res = await readToolWithinKeptHistory(p.read, cleanParams(p.params));
     if (res.kind === "data" && res.data) {
       p.vizcfg = derive.deriveVizConfig(res.data, p.viz, SERIES_COLORS);
     }
@@ -838,7 +849,7 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
       lastSample = null;
       return;
     }
-    const res = await readTool(p.read, cleanParams(p.params));
+    const res = await readToolWithinKeptHistory(p.read, cleanParams(p.params));
     if (res.kind !== "data" || !res.data) {
       lastSample = null;
       if (force) mount(vizcfgBox, el("div", { class: "muted", text: sampleUnavailableText(res) }));
@@ -859,7 +870,7 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
   /* Prime a sample for an EXISTING panel (populates the field dropdowns) WITHOUT clobbering its saved config. */
   async function primeSample() {
     if (!p.read || missingRequired(p, catalog).length) return;
-    const res = await readTool(p.read, cleanParams(p.params));
+    const res = await readToolWithinKeptHistory(p.read, cleanParams(p.params));
     if (res.kind === "data" && res.data) {
       lastSample = res.data;
       rebuildVizcfg();
@@ -1243,7 +1254,7 @@ export function buildComposedPanelBody(p, opts) {
     const sel = el("select", { class: "editor-select", "aria-label": "Second measure" });
     sel.appendChild(el("option", { value: "", text: "— none —" }));
     for (const x of sameSource.sort((a, b) => a.displayName.localeCompare(b.displayName))) {
-      sel.appendChild(el("option", { value: x.key, text: x.displayName + (x.kind === "ratio" ? " (ratio)" : "") }));
+      sel.appendChild(el("option", { value: x.key, text: x.displayName + (x.labelSuffix || "") }));
     }
     sel.value = p.overlay && p.overlay.measure ? p.overlay.measure : "";
     sel.addEventListener("change", () => {
@@ -1744,7 +1755,7 @@ function buildComposedMeasureSelect(compose, current, scopeServer, onChange) {
   for (const [cat, ms] of [...byCat.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const group = el("optgroup", { label: cat });
     for (const m of ms.sort((a, b) => a.displayName.localeCompare(b.displayName))) {
-      const suffix = m.kind === "ratio" ? " (ratio)" : "";
+      const suffix = m.labelSuffix || "";
       const caption = measureCaption(m, compose);
       /* D4: when the view is scoped to one concrete server this measure can't collect on, grey (disable) the option
          — but keep an already-CHOSEN measure selectable so re-scoping never silently drops the panel's metric (the

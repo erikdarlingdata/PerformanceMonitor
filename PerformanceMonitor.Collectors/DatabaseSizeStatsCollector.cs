@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -49,6 +50,10 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
     /// sibling arm (#2643) deliberately emits them as NULL: <c>sys.resource_stats</c> has no
     /// per-file breakdown, so a sibling row carries a database name and a total size and honestly
     /// nothing else. Both stores hold the columns nullable (#3262).
+    ///
+    /// <para><c>TotalSizeMb</c> is nullable for one row: the LOG file of an Azure SQL Database Hyperscale
+    /// database, whose size is not allocated storage (the log lives in the log service). See
+    /// <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.</para>
     /// </summary>
     public readonly record struct Row(
         string DatabaseName,
@@ -57,7 +62,7 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
         string FileTypeDesc,
         string FileName,
         string? PhysicalName,
-        decimal TotalSizeMb,
+        decimal? TotalSizeMb,
         decimal? UsedSizeMb,
         decimal? AutoGrowthMb,
         decimal? MaxSizeMb,
@@ -235,6 +240,25 @@ ORDER BY
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+/* Hyperscale keeps its transaction log in the log service, and sys.database_files still lists a LOG row for it,
+   sized at about 1 TB (1,046,528 MB) - the ceiling on the log's ACTIVE portion, not storage the database holds
+   or pays for. Hyperscale bills allocated DATA storage only (Microsoft Learn, 'What is the Hyperscale service
+   tier?'), so that row's size, growth and ceiling are not reported: a NULL here becomes 'n/a (log service)' in
+   every reader and stays out of every allocated total. The data file keeps its real size.
+
+   DATABASEPROPERTYEX needs only the current database, so this adds no permission to the Azure path. Learn's
+   DATABASEPROPERTYEX page describes Edition as 'the database edition or service tier' and its list of returned
+   values does not name Hyperscale; the tier string itself is the one Learn shows for
+   sys.database_service_objectives.edition (which needs dbmanager, so it is not usable here). CONVERT because
+   DATABASEPROPERTYEX returns sql_variant, the same way Recovery is read below. */
+DECLARE
+    @is_hyperscale bit =
+        CASE
+            WHEN CONVERT(nvarchar(64), DATABASEPROPERTYEX(DB_NAME(), N'Edition')) = N'Hyperscale'
+            THEN 1
+            ELSE 0
+        END;
+
 DECLARE
     @database_sizes TABLE
 (
@@ -269,17 +293,25 @@ SELECT
     file_name = df.name,
     physical_name = df.physical_name,
     total_size_mb =
-        CONVERT(decimal(19,2), df.size * 8.0 / 1024.0),
+        CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(decimal(19,2), NULL)
+            ELSE CONVERT(decimal(19,2), df.size * 8.0 / 1024.0)
+        END,
     used_size_mb =
         CONVERT(decimal(19,2), FILEPROPERTY(df.name, N'SpaceUsed') * 8.0 / 1024.0),
     auto_growth_mb =
         CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(decimal(19,2), NULL)
             WHEN df.is_percent_growth = 1
             THEN CONVERT(decimal(19,2), NULL)
             ELSE CONVERT(decimal(19,2), df.growth * 8.0 / 1024.0)
         END,
     max_size_mb =
         CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(decimal(19,2), NULL)
             WHEN df.max_size = -1
             THEN CONVERT(decimal(19,2), -1)
             WHEN df.max_size = 268435456
@@ -299,40 +331,82 @@ SELECT
     volume_free_mb =
         CONVERT(decimal(19,2), NULL),
     is_percent_growth =
-        df.is_percent_growth,
+        CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(bit, NULL)
+            ELSE df.is_percent_growth
+        END,
     growth_pct =
-        CASE WHEN df.is_percent_growth = 1 THEN df.growth ELSE NULL END,
+        CASE
+            WHEN ls.is_log_service = 0
+            AND  df.is_percent_growth = 1
+            THEN df.growth
+            ELSE NULL
+        END,
     vlf_count =
         CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END
-FROM sys.database_files AS df;
+FROM sys.database_files AS df
+CROSS APPLY
+(
+    /* The one place that decides which row is the log service's: the LOG row (type 1) of a Hyperscale
+       database. Used space and the VLF count stay as collected - neither feeds an allocated total. */
+    SELECT
+        is_log_service =
+            CASE
+                WHEN @is_hyperscale = 1
+                AND  df.type = 1 /*LOG*/
+                THEN CONVERT(bit, 1)
+                ELSE CONVERT(bit, 0)
+            END
+) AS ls;
 
 /* The sibling databases, on the one connection that can see them. Newest sample per database: the older
    ones are a growth series worth having later, and taking them all would multiply every database by the
    retention window. The connected database is excluded because the arm above already reported it with
-   real files. */
+   real files.
+
+   Each sibling is one row, in the same terms as the file rows above: total_size_mb is the ALLOCATED size
+   and used_size_mb is the space USED. Both come from the master-only view read below, whose two columns
+   Microsoft Learn describes this way:
+     allocated_storage_in_megabytes: 'The amount of formatted file space in MB made available for storing
+       database data. Formatted file space is also referred to as data space allocated.'
+     storage_in_megabytes: 'Maximum storage size in megabytes for the time period, including database data,
+       indexes, stored procedures, and metadata.'
+   The row used to store storage_in_megabytes as its total. That put a database's USED space where every
+   other row has the allocated size: 119 MB beside 10,240 MB for a Hyperscale database. Neither column
+   mentions the transaction log, so the row is data space only and its log size is not known. There is no
+   log row for a sibling, and the readers say so (AzureSiblingDatabaseSize.LogNote).
+
+   The newest sample where BOTH columns are filled: a sample with only one of them would give a size
+   without a used space, or the reverse. Both filters sit in the WHERE of the SELECT that ranks, so they
+   apply before the ranking. The file name is the one AzureSiblingDatabaseSize owns: the growth reads use
+   it to leave out the rows stored before this mapping, which hold the used space as their total. */
 IF DB_NAME() = N'master'
 BEGIN
     INSERT
         @database_sizes
     (
-        database_name, file_type_desc, file_name, total_size_mb, state_desc
+        database_name, file_type_desc, file_name, total_size_mb, used_size_mb, state_desc
     )
     EXEC sys.sp_executesql N'
 SELECT
     rs.database_name,
     file_type_desc = N''ROWS'',
-    file_name = N''(whole database)'',
-    total_size_mb = CONVERT(decimal(19,2), rs.storage_in_megabytes),
+    file_name = N''" + AzureSiblingDatabaseSize.FileName + @"'',
+    total_size_mb = CONVERT(decimal(19,2), rs.allocated_storage_in_megabytes),
+    used_size_mb = CONVERT(decimal(19,2), rs.storage_in_megabytes),
     state_desc = N''ONLINE''
 FROM
 (
     SELECT
         r.database_name,
         r.storage_in_megabytes,
+        r.allocated_storage_in_megabytes,
         rn = ROW_NUMBER() OVER (PARTITION BY r.database_name ORDER BY r.end_time DESC)
     FROM sys.resource_stats AS r
     WHERE r.database_name <> DB_NAME()
     AND   r.storage_in_megabytes IS NOT NULL
+    AND   r.allocated_storage_in_megabytes IS NOT NULL
 ) AS rs
 WHERE rs.rn = 1;';
 END;
@@ -458,7 +532,9 @@ OPTION(RECOMPILE);";
                 reader.GetString(3),
                 reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.GetDecimal(6),
+                /* Ordinal 6 is NULL on the Hyperscale log row (the log service is not allocated storage);
+                   an unguarded GetDecimal here would kill the whole batch the way #3262 did. */
+                reader.IsDBNull(6) ? null : reader.GetDecimal(6),
                 reader.IsDBNull(7) ? null : reader.GetDecimal(7),
                 reader.IsDBNull(8) ? null : reader.GetDecimal(8),
                 reader.IsDBNull(9) ? null : reader.GetDecimal(9),

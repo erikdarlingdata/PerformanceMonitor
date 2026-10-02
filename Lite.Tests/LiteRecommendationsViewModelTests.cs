@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using Xunit;
 
@@ -56,6 +57,37 @@ public class LiteRecommendationsViewModelTests
     {
         var vm = LiteRecommendationsViewModel.InsufficientData("   ");
         Assert.Equal(LiteRecommendationsViewModel.DefaultInsufficientDataMessage, vm.InsufficientDataMessage);
+    }
+
+    [Fact]
+    public void WindowEmpty_UsesEngineMessage_AndPointsAtCollectionHealth()
+    {
+        // #3524/#3551: zero facts in the window is a dead-collector shape — a distinct state carrying
+        // the engine's message plus the in-app pointer, never the all-clear.
+        var vm = LiteRecommendationsViewModel.WindowEmpty("No facts were collected in the analysis window.");
+        Assert.Equal(LiteRecommendationsState.WindowEmpty, vm.State);
+        Assert.Empty(vm.Sections);
+        Assert.StartsWith("No facts were collected in the analysis window.", vm.WindowEmptyMessage);
+        Assert.EndsWith(LiteRecommendationsViewModel.WindowEmptyCollectionHealthPointer, vm.WindowEmptyMessage);
+        Assert.Equal(string.Empty, vm.InsufficientDataMessage);
+    }
+
+    [Fact]
+    public void WindowEmpty_BlankMessage_FallsBackToDefault_StillWithThePointer()
+    {
+        var vm = LiteRecommendationsViewModel.WindowEmpty("   ");
+        Assert.StartsWith(LiteRecommendationsViewModel.DefaultWindowEmptyMessage, vm.WindowEmptyMessage);
+        Assert.EndsWith(LiteRecommendationsViewModel.WindowEmptyCollectionHealthPointer, vm.WindowEmptyMessage);
+    }
+
+    [Fact]
+    public void WindowEmptyMessage_IsEmptyOutsideTheWindowEmptyState()
+    {
+        // The genuine all-clear (facts measured, zero findings) keeps its state and carries no
+        // window-empty prose — the distinction #3551 exists for.
+        Assert.Equal(string.Empty, LiteRecommendationsViewModel.FromItems(Array.Empty<LiteRecommendationItem>()).WindowEmptyMessage);
+        Assert.Equal(string.Empty, LiteRecommendationsViewModel.InsufficientData("x").WindowEmptyMessage);
+        Assert.Equal(string.Empty, LiteRecommendationsViewModel.Loading().WindowEmptyMessage);
     }
 
     [Fact]
@@ -181,7 +213,7 @@ public class LiteRecommendationsViewModelTests
         // +60 min offset shifts the 10:00–12:00 UTC window to 11:00–13:00 server-local.
         var card = new LiteRecommendationCardViewModel(
             Item(LiteRecommendationSeverity.Critical, 1.6, title: "High CPU", serverName: "PRODSQL"),
-            utcOffsetMinutes: 60);
+            ServerClock.FixedOffset(60));
 
         var prompt = card.AskAiPrompt;
 

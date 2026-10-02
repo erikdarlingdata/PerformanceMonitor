@@ -50,8 +50,19 @@ internal static class StoreTlsCertificates
         var notAfter = notBefore.AddYears(validityYears);
 
         using var caKey = RSA.Create(2048);
+        /* The random mint tag makes every generated root's SUBJECT unique, and that uniqueness is
+           load-bearing (#3557): Windows silently caches each root a TLS client ever saw into that
+           user's intermediate-CA store, one entry per rotation, forever. When rotations all share
+           one subject, that cached pile grows until the chain engine's subject-matched issuer walk
+           fails outright — "unknown chain building error" from X509Chain.Build, measured at ~50
+           cached same-subject roots, killing SslStreamCertificateContext.Create and the
+           default-trust build a viewer's SslStream runs. (SKI/AKI does NOT prevent it; tested.)
+           Distinct subjects mean cached copies of other rotations are never candidate issuers for
+           this chain, so the pile never forms. Distinct names are also honest X.509: each rotation
+           IS a different CA, and two CAs sharing a DN with different keys is the pathology. */
+        var mintTag = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(4));
         var caRequest = new CertificateRequest(
-            $"CN=PerformanceMonitor Darling store root ({hostName})", caKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            $"CN=PerformanceMonitor Darling store root ({hostName} {mintTag})", caKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         /* pathLenConstraint 0: this root may sign end-entity certs only — even with the key discarded,
            the constraint documents the intent in the certificate itself. */
         caRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, true, 0, true));

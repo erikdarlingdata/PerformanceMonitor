@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -24,7 +25,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// packs Lite/Dashboard use), the General-Throughput default selection, the 12-counter cap on pack
 /// fills / "Select All", the checked-to-top ordering, the search filter, "Clear All" clearing only the
 /// FILTERED visible set, the reentrancy guard on programmatic checkbox writes, and the
-/// generation-guarded batched chart update with its 12-series cap plotting <c>DeltaValue</c>. Series
+/// generation-guarded batched chart update with its 12-series cap plotting <c>DeltaValue</c> — THROUGH
+/// the row's stored interval since #3653 A7 (see <see cref="UpdatePerfmonChartFromPickerAsync"/>). Series
 /// ride the shared cycling <see cref="ChartPalette"/> colors (via <c>SeriesColors</c>, declared in
 /// ViewerServerTab.Charts.cs) and the <see cref="ChartStyle.StyleScatter"/> line polish, and the hover
 /// helper carries Lite's empty unit. Lite's per-chart drill-down context menu is intentionally NOT
@@ -51,7 +53,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadPerfmonAsync()
     {
-        _perfmonHover ??= new ChartHoverHelper(PerfmonChart, "");
+        _perfmonHover ??= new ChartHoverHelper(PerfmonChart, "", displayZone: ViewerTimeHelper.CurrentDisplayZone);
 
         var (startUtc, endUtc) = GetWindowUtc();
         var counters = await _dataService.GetDistinctPerfmonCountersAsync(_server.ServerId, startUtc, endUtc);
@@ -75,6 +77,7 @@ public partial class ViewerServerTab
             IsSelected = previouslySelected.Contains(c)
                 || (previouslySelected.Count == 0 && _defaultPerfmonCounters.Contains(c))
         }).ToList();
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
     }
 
@@ -118,6 +121,7 @@ public partial class ViewerServerTab
         }
 
         _isUpdatingPerfmonSelection = false;
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
         _ = UpdatePerfmonChartFromPickerAsync();
     }
@@ -158,6 +162,7 @@ public partial class ViewerServerTab
             }
         }
         _isUpdatingPerfmonSelection = false;
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
         _ = UpdatePerfmonChartFromPickerAsync();
     }
@@ -168,17 +173,49 @@ public partial class ViewerServerTab
         var visible = (PerfmonCountersList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _perfmonCounterItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingPerfmonSelection = false;
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
         _ = UpdatePerfmonChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _perfmonRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void PerfmonCounter_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingPerfmonSelection) return;
-        RefreshPerfmonListOrder();
-        _ = UpdatePerfmonChartFromPickerAsync();
+        (_perfmonRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshPerfmonListOrder();
+                _ = UpdatePerfmonChartFromPickerAsync();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_perfmonCounterItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
+    /// <summary>
+    /// Redraws the picker's selected counters (mirrors Lite's method of the same name). Each series goes
+    /// through <see cref="DeltaSeriesShaping"/> before it reaches ScottPlot (#3653 A7): the reader has
+    /// fetched <c>MAX(sample_interval_seconds)</c> onto every row since #2234 and this chart plotted the raw
+    /// delta beside it under a Y axis that said "Value" — <c>Batch Requests/sec</c> drew batches-per-sweep
+    /// (a ~300 s sweep on the measured fleet, so ~300x the number its name promises), and a restart's
+    /// fabricated (0, 0) drew as a real trough. Each series is classified by its STORED <c>cntr_type</c>
+    /// (V132, #3653 A7): a rate counter plots delta / interval; a gauge plots its raw value as the level it is
+    /// (the store held it all along; only the type was missing); everything else plots its raw delta with
+    /// " (Δ/interval)" on its legend entry. The #3702 name-suffix proxy (<c>/sec</c> = rate) is the fallback
+    /// for a series with no stored type — rows written before the rung, or a counter whose instances mix
+    /// types — and never says "gauge", so history renders as it did before the rung until a row carries the
+    /// type. A counter's type does not change, so the series takes ANY point's non-null type: a gauge's whole
+    /// window plots as a level the morning after the upgrade. A stored interval of 0 plots NaN on a delta
+    /// series, which ScottPlot draws as a line break — the restart reads as absence, composing with #1944's
+    /// cadence gap rule that <c>Add.TimeSeries</c> already applies on X; a level ignores the interval. The Y
+    /// label is composed from the bases actually plotted, so a mixed selection is labelled as mixed rather
+    /// than under one unit. The Y ceiling ignores the NaNs (an all-restart window still gets an axis).
+    /// </summary>
     private async Task UpdatePerfmonChartFromPickerAsync()
     {
         /* Bump a generation on entry; after each (now genuinely async) query, bail if a newer
@@ -195,10 +232,11 @@ public partial class ViewerServerTab
 
             if (selected.Count == 0) { PerfmonChart.Refresh(); return; }
 
-            /* The per-server toolbar's settable window (preset or custom From/To). The store is naive-UTC;
-               display converts via ViewerTimeHelper.ForDisplay. */
+            /* The per-server toolbar's settable window (preset or custom From/To). The store is naive-UTC and the chart
+               plots it as is; the labels are drawn in ViewerTimeHelper.CurrentDisplayZone. */
             var (startUtc, endUtc) = GetWindowUtc();
             double globalMax = 0;
+            var plottedBases = new List<DeltaBasis>();
 
             // Batched fetch: one query for all selected counters (mirrors Lite's batched read).
             var trendsByCounter = await _dataService.GetPerfmonTrendsByCountersAsync(
@@ -209,26 +247,50 @@ public partial class ViewerServerTab
             {
                 if (!trendsByCounter.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
-                var values = trend.Select(t => (double)t.DeltaValue).ToArray();
+                var counterName = selected[i].DisplayName;
+                /* The series' type is any point's non-null type — a counter's type does not change, and the
+                   read reports one only where the point's instance rows agree. Null on every point means
+                   pre-rung rows or a mixed-type family: the name proxy decides, as it did before V132. */
+                var seriesType = trend.Select(t => t.CntrType).LastOrDefault(t => t.HasValue);
+                var basis = DeltaSeriesShaping.BasisFor(counterName, seriesType);
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
+                var values = DeltaSeriesShaping.Shape(
+                    trend.Select(t => new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds, t.Value)).ToList(),
+                    basis);
+                var label = DeltaSeriesShaping.LegendLabel(counterName, basis);
 
                 var plot = PerfmonChart.Plot.Add.TimeSeries(times, values);
-                plot.LegendText = selected[i].DisplayName;
+                plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
-                _perfmonHover?.Add(plot, selected[i].DisplayName);
+                _perfmonHover?.Add(plot, label);
+                plottedBases.Add(basis);
 
-                if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+                globalMax = Math.Max(globalMax, DeltaSeriesShaping.MaxFinite(values, 0));
             }
 
-            PerfmonChart.Plot.Axes.DateTimeTicksBottomDateChange();
-            var rangeStart = ViewerTimeHelper.ForDisplay(startUtc);
-            var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc);
+            PerfmonChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
+            var rangeStart = startUtc;
+            var rangeEnd = endUtc;
             PerfmonChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(PerfmonChart);
-            PerfmonChart.Plot.YLabel("Value");
+            PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases));
             SetChartYLimitsWithLegendPadding(PerfmonChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(PerfmonChart);
+
+            /* #4476: a chart-chrome title naming how many one-sample Wait Statistics spikes this window's
+               plotted counters set aside — null when none, so nothing is shown for the common case. */
+            var artifactsSetAside = PerfmonChartArtifactSummary.TotalArtifactsSetAside(
+                trendsByCounter, selected.Select(s => s.DisplayName));
+            var caption = WaitStatisticsArtifact.ChartCaption(artifactsSetAside);
+            if (caption != null)
+            {
+                PerfmonChart.Plot.Title(caption);
+                PerfmonChart.Plot.Axes.Title.Label.ForeColor = PerfmonChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+                PerfmonChart.Plot.Axes.Title.Label.FontSize = 11;
+                PerfmonChart.Plot.Axes.Title.Label.Bold = false;
+            }
+
             PerfmonChart.Refresh();
         }
         catch

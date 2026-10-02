@@ -97,6 +97,10 @@ public sealed class ViewerOverviewSqlTests
         Assert.Contains("FROM v_dmv_blocking_snapshots", sql, StringComparison.Ordinal);
         Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
+        /* #3895: every WINDOWED read carries the partition-column floor, and the two "ever" reads none — a
+           floor would change what "newest event ever" answers. */
+        Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(sql, @"event_time >= \$2 AND collection_time >= \$3\)").Count);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"\(SELECT MAX\(event_time\)\s+FROM \w+\s+WHERE server_id = \$1\)").Count);
     }
 
     [Fact]
@@ -109,13 +113,40 @@ public sealed class ViewerOverviewSqlTests
         Assert.Contains("deadlock_time >= $2", sql, StringComparison.Ordinal);
         /* Newest deadlock ever (unbounded) for the "Last: N ago" detail. */
         Assert.Contains("MAX(deadlock_time)", sql, StringComparison.Ordinal);
+        /* #3895: the windowed count carries the partition-column floor; the "ever" read does not. */
+        Assert.Contains("deadlock_time >= $2 AND collection_time >= $3)", sql, StringComparison.Ordinal);
+        Assert.Matches(@"\(SELECT MAX\(deadlock_time\) FROM v_deadlocks WHERE server_id = \$1\)", sql);
+    }
+
+    /// <summary>
+    /// #3539: the PostgreSQL arm of the same card read — the server's own <c>pg_stat_database.deadlocks</c>
+    /// counter differenced per database over the window, clamped at zero across a reset, summed, with the
+    /// sample that first showed the newest step as "last". Never <c>SUM(deadlocks)</c>: the column is a
+    /// lifetime counter repeated in every sample. Per-server, so partitioned by database only.
+    /// </summary>
+    [Fact]
+    public void SummaryPgDeadlockSql_DifferencesTheCounterPerDatabase_OverTheWindow()
+    {
+        var sql = ViewerDataService.ServerSummaryPgDeadlockSql;
+        Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(sampled.collection_time) FILTER (WHERE sampled.raw_delta > 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
     public void SummaryLastCollectionSql_TakesTheNewestCollectionTime()
     {
         var sql = ViewerDataService.ServerSummaryLastCollectionSql;
-        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        /* #3976: ORDER BY ... DESC LIMIT 1, not MAX(collection_time) — ExecuteScalarAsync reads the same
+           null either way, but this shape lets TimescaleDB stop at the newest chunk with a row instead of
+           planning every retained one to prove a MAX. */
+        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
     }
@@ -131,6 +162,7 @@ public sealed class ViewerOverviewSqlTests
             ViewerDataService.ServerSummaryThreadsSql,
             ViewerDataService.ServerSummaryBlockingSql,
             ViewerDataService.ServerSummaryDeadlockSql,
+            ViewerDataService.ServerSummaryPgDeadlockSql,
             ViewerDataService.ServerSummaryLastCollectionSql,
         })
         {
@@ -453,22 +485,54 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal(expectedDetail, item.MemoryDetail);
     }
 
+    /// <summary>#3539 A3: the count arm is a RATE over the card's window, so the fixture declares the hour
+    /// the card reads — one to four reports is the measured quiet mode and Healthy by count, five the
+    /// Warning tier, twenty the Critical one; the wait arms band whatever the rate.</summary>
     [Theory]
     [InlineData(0, 0, HealthSeverity.Healthy)]
-    [InlineData(1, 0, HealthSeverity.Warning)]        // any blocking at all → Warning
-    [InlineData(2, 0, HealthSeverity.Warning)]        // still the "any blocking" arm; #3368 removed the indistinguishable >=2 one
-    [InlineData(5, 0, HealthSeverity.Critical)]       // >=5 events → Critical
-    [InlineData(1, 10000, HealthSeverity.Warning)]    // 10s max wait → Warning
+    [InlineData(1, 0, HealthSeverity.Healthy)]        // 1/hr — the quiet mode, Healthy by count
+    [InlineData(4, 0, HealthSeverity.Healthy)]
+    [InlineData(5, 0, HealthSeverity.Warning)]        // 5/hr → Warning
+    [InlineData(20, 0, HealthSeverity.Critical)]      // 20/hr → Critical
+    [InlineData(1, 10000, HealthSeverity.Warning)]    // 10s max wait → Warning, whatever the rate
     [InlineData(1, 59000, HealthSeverity.Warning)]
-    [InlineData(1, 60000, HealthSeverity.Critical)]   // 60s max wait → Critical
-    public void BlockingSeverity_BandsOnCountAndDuration(int count, long maxWaitMs, HealthSeverity expected)
+    [InlineData(1, 60000, HealthSeverity.Critical)]   // 60s max wait → Critical, whatever the rate
+    public void BlockingSeverity_BandsOnRateAndDuration(int count, long maxWaitMs, HealthSeverity expected)
     {
-        Assert.Equal(expected, new ServerSummaryItem { BlockingCount = count, MaxBlockingWaitMs = maxWaitMs }.BlockingSeverity);
+        Assert.Equal(expected, new ServerSummaryItem
+        {
+            BlockingCount = count,
+            MaxBlockingWaitMs = maxWaitMs,
+            BlockingWindow = TimeSpan.FromHours(1),
+        }.BlockingSeverity);
+    }
+
+    /// <summary>A card built with no blocking window bands the count on the unrateable arm — a non-zero
+    /// count Warning, never Critical by count, a zero count Unknown — and publishes no rate; the same
+    /// count over a declared 24-hour window is a rate of its own. The pin that goes red on a revert to
+    /// counting, on the viewer's own card.</summary>
+    [Fact]
+    public void BlockingSeverity_NeedsTheWindow_ToBandTheCount()
+    {
+        var undeclared = new ServerSummaryItem { BlockingCount = 20 };
+        Assert.Equal(HealthSeverity.Warning, undeclared.BlockingSeverity);
+        Assert.Null(undeclared.BlockingRatePerHour);
+        Assert.Equal(HealthSeverity.Unknown, new ServerSummaryItem { BlockingCount = 0 }.BlockingSeverity);
+
+        var day = new ServerSummaryItem { BlockingCount = 20, BlockingWindow = TimeSpan.FromHours(24) };
+        Assert.Equal(HealthSeverity.Healthy, day.BlockingSeverity);   // 0.8/hr
+        Assert.Equal(20 / 24.0, day.BlockingRatePerHour!.Value, precision: 6);
     }
 
     [Fact]
     public void BlockingDetail_MaxWhenBlocked_LastAgoWhenClear_BlankWhenNever()
     {
+        /* #3539 A3: the banded RATE leads while blocking is present (the deadlock detail's rule), then the
+           worst wait; an undeclared window prints the wait alone. */
+        Assert.Equal("3.0/hr, max: 42s", new ServerSummaryItem
+        {
+            BlockingCount = 3, MaxBlockingWaitMs = 42000, BlockingWindow = TimeSpan.FromHours(1),
+        }.BlockingDetail);
         Assert.Equal("max: 42s", new ServerSummaryItem { BlockingCount = 3, MaxBlockingWaitMs = 42000 }.BlockingDetail);
         /* Window clear but blocking happened earlier → the Dashboard's "Last: N ago". */
         Assert.Equal("Last: 3h ago", new ServerSummaryItem { BlockingCount = 0, LastBlockingMinutesAgo = 180 }.BlockingDetail);
@@ -527,12 +591,37 @@ public sealed class ViewerServerSummaryDisplayTests
     [Fact]
     public void CollectorSeverity_FailingIsWarning_HealthyOtherwise()
     {
-        Assert.Equal(HealthSeverity.Healthy, new ServerSummaryItem { HealthyCollectorCount = 30 }.CollectorSeverity);
-        var failing = new ServerSummaryItem { HealthyCollectorCount = 28, FailedCollectorCount = 2 };
+        Assert.Equal(HealthSeverity.Healthy, new ServerSummaryItem { HealthyCollectorCount = 30, CollectorCount = 30 }.CollectorSeverity);
+        var failing = new ServerSummaryItem { HealthyCollectorCount = 28, FailedCollectorCount = 2, CollectorCount = 30 };
         Assert.Equal(HealthSeverity.Warning, failing.CollectorSeverity);
         Assert.Equal("2 failed", failing.CollectorDisplay);
         Assert.Equal("Healthy: 28, Failing: 2", failing.CollectorDetail);
-        Assert.Equal("OK", new ServerSummaryItem { HealthyCollectorCount = 30 }.CollectorDisplay);
+        Assert.Equal("OK", new ServerSummaryItem { HealthyCollectorCount = 30, CollectorCount = 30 }.CollectorDisplay);
+
+        /* #3539 A6: with NO collector banded the dot is Unknown and the word is the card's "no reading"
+           spelling, not a green "OK" — a reachable server nothing has classified yet is not a clean one. */
+        var nothingBanded = new ServerSummaryItem { IsOnline = true };
+        Assert.Equal(HealthSeverity.Unknown, nothingBanded.CollectorSeverity);
+        Assert.Equal("--", nothingBanded.CollectorDisplay);
+        Assert.Equal("Healthy: 0, Failing: 0", nothingBanded.CollectorDetail);
+    }
+
+    /// <summary>#3539 A8d: the collector dot is graded on the FAILING share — one of forty is Warning,
+    /// nine of forty (past the collector-health classifier's 20% bar) is Critical, forty of forty is
+    /// Critical; a card with no denominator declared is Warning and never Critical.</summary>
+    [Fact]
+    public void CollectorSeverity_GradesOnTheFailingShare()
+    {
+        Assert.Equal(HealthSeverity.Warning, new ServerSummaryItem { FailedCollectorCount = 1, CollectorCount = 40 }.CollectorSeverity);
+        Assert.Equal(HealthSeverity.Warning, new ServerSummaryItem { FailedCollectorCount = 8, CollectorCount = 40 }.CollectorSeverity);
+        Assert.Equal(HealthSeverity.Critical, new ServerSummaryItem { FailedCollectorCount = 9, CollectorCount = 40 }.CollectorSeverity);
+        Assert.Equal(HealthSeverity.Critical, new ServerSummaryItem { FailedCollectorCount = 40, CollectorCount = 40 }.CollectorSeverity);
+        Assert.Equal(HealthSeverity.Warning, new ServerSummaryItem { FailedCollectorCount = 40 }.CollectorSeverity);
+
+        /* The graded dot rides into the card's overall band through ToHealthMetrics — a server with half
+           its collection dark for a day is a Critical card, not an amber one. */
+        var dark = new ServerSummaryItem { IsOnline = true, FailedCollectorCount = 20, CollectorCount = 40 };
+        Assert.Equal(HealthSeverity.Critical, dark.OverallMetricSeverity);
     }
 
     [Fact]
@@ -557,19 +646,19 @@ public sealed class ViewerServerSummaryDisplayTests
 
         // A GENUINE collector failure on a reachable server still surfaces red / "N failed" — not swallowed
         // into Stale.
-        var failing = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 28, FailedCollectorCount = 2 };
+        var failing = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 28, FailedCollectorCount = 2, CollectorCount = 30 };
         Assert.Equal("2 failed", failing.CollectorDisplay);
         Assert.Equal(HealthSeverity.Warning, failing.CollectorSeverity);
 
-        // A healthy ONLINE server is unchanged — green "OK".
-        var healthy = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 30, FailedCollectorCount = 0 };
+        // A healthy ONLINE server is unchanged — green "OK" (its thirty banded collectors declared, #3539 A6).
+        var healthy = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 30, FailedCollectorCount = 0, CollectorCount = 30 };
         Assert.Equal("OK", healthy.CollectorDisplay);
         Assert.Equal("Healthy: 30, Failing: 0", healthy.CollectorDetail);
         Assert.Equal(HealthSeverity.Healthy, healthy.CollectorSeverity);
 
         // Not-yet-connection-classified (IsOnline null — awaiting first collection) keeps the normal reading:
         // "Stale" is for a KNOWN-offline server only, matching the web's strict `is_online === false`.
-        var notChecked = new ServerSummaryItem { HealthyCollectorCount = 30, FailedCollectorCount = 0 };
+        var notChecked = new ServerSummaryItem { HealthyCollectorCount = 30, FailedCollectorCount = 0, CollectorCount = 30 };
         Assert.False(notChecked.IsOffline);
         Assert.Equal("OK", notChecked.CollectorDisplay);
         Assert.Equal(HealthSeverity.Healthy, notChecked.CollectorSeverity);
@@ -664,9 +753,9 @@ public sealed class ViewerAlertHistoryW2aSqlTests
     {
         var sql = ViewerDataService.AlertHistoryAllServersSql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE alert_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE a.alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("dismissed = FALSE", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY alert_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY a.alert_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $2", sql, StringComparison.Ordinal);
         /* No per-server predicate in the all-servers read (that's the per-server read's $2). */
         Assert.DoesNotContain("server_id = $", sql, StringComparison.Ordinal);
@@ -684,7 +773,7 @@ public sealed class ViewerAlertHistoryW2aSqlTests
         }
 
         /* Per-server read keeps its scoping predicate + limit. */
-        Assert.Contains("server_id = $2", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
+        Assert.Contains("a.server_id = $2", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $3", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
     }
 
@@ -903,17 +992,23 @@ public sealed class ViewerW2aLivePostgresTests
             Assert.True(summary.HasMemoryPressure);
             Assert.Equal(HealthSeverity.Critical, summary.MemorySeverity);
 
-            /* Blocking — count + worst wait, both from the XE source; last-event read populated. */
+            /* Blocking — count + worst wait, both from the XE source; last-event read populated. Two in
+               the card's hour is 2.0/hr (the quiet mode); the 42 s wait is the arm that bands Warning
+               (#3539 A3), and the detail names both. */
             Assert.Equal(2, summary.BlockingCount);
             Assert.Equal(42000, summary.MaxBlockingWaitMs);
-            Assert.Equal("max: 42s", summary.BlockingDetail);
+            Assert.Equal(TimeSpan.FromHours(1), summary.BlockingWindow);
+            Assert.Equal("2.0/hr, max: 42s", summary.BlockingDetail);
             Assert.Equal(HealthSeverity.Warning, summary.BlockingSeverity);
             Assert.NotNull(summary.LastBlockingMinutesAgo);
 
-            /* Collectors — REUSE of the 7-day banding (one HEALTHY, one FAILING). */
+            /* Collectors — REUSE of the 7-day banding (one HEALTHY, one FAILING). One of two banded
+               collectors failing is a 50% share, past the 20% bar, so the graded dot reads Critical
+               (#3539 A8d) — the presence-flat Warning it used to read is the defect. */
             Assert.Equal(1, summary.HealthyCollectorCount);
             Assert.Equal(1, summary.FailedCollectorCount);
-            Assert.Equal(HealthSeverity.Warning, summary.CollectorSeverity);
+            Assert.Equal(2, summary.CollectorCount);
+            Assert.Equal(HealthSeverity.Critical, summary.CollectorSeverity);
 
             bodySucceeded = true;
         }

@@ -50,9 +50,14 @@ public sealed class ViewerCollectorCoverageTests
         // database_states is read by ViewerDataService.DatabaseStates.cs (the override editor's backing
         // store), so it is covered by the reader-layer scan and needs no allow-list entry.
 
-        // EMPTY, and it stays empty. The nine PostgreSQL collector tables were the last entries here,
-        // carrying "remove each when the PostgreSQL tab ships" — and #2530 shipped exactly those tabs, so
-        // all nine came off in one commit. Every table in the catalog now has a Darling viewer reader.
+        // It was EMPTY from #2530 (the nine PostgreSQL collector tables came off in one commit when their
+        // tabs shipped) until V136 (#3691), which lands the per-database size series AHEAD of its readers on
+        // purpose — the consumer lanes want a day of rows waiting when they land. The entry carries the
+        // UNBUILT UI marker and comes off the moment a viewer read names the table (the ratchet below
+        // deletes it for you).
+
+        // UNBUILT UI (parity board Tier 1) -- remove when the tab ships (#3691 object growth / disk-free)
+        "pg_database_size_stats",
     };
 
     [Fact]

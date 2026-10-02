@@ -723,15 +723,31 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         /* The choice. The write lock is not banned outright — it is banned from these three without a
            reason, which is what a failing test forces someone to supply. */
         Assert.DoesNotContain("AcquireWriteLock", source, StringComparison.Ordinal);
-        Assert.Equal(6, CountOf(source, "_duckDb.AcquireReadLock("));
+        /* Nine sites: the three write paths (#2455), the three read-backs, CountStoredFindingsAsync (#3541
+           A14 — the mute verb's matched_now read, a READ taking the read lock, tokened), and — since #3653
+           item 3 — GetPriorOccurrencesAsync, the recurrence labeler's prior-weeks read: a READ on the analysis
+           pass, taking the read lock WITH the pass token like the mute filter beside it, so the pass-token
+           census needs no exemption for it either. Nine since #3916: GetMutedStoryHashesAsync, the mute
+           registry re-read the analysis notification service makes at its hold-back flush, so a mute applied
+           inside the window drops the queued page. A READ, under the read lock like the mute filter it
+           mirrors, taking the flush's own token (there is no analysis pass at flush time). The count is pinned
+           so a new lock site is a decision someone makes here, not a tidy-up. */
+        Assert.Equal(9, CountOf(source, "_duckDb.AcquireReadLock("));
 
         /* The explanation, at the class and at each write site — whichever one a reader lands on. */
         Assert.Contains("The read lock around the WRITES is deliberate (#2455)", source, StringComparison.Ordinal);
         Assert.Contains("A READ lock", Between(source, "public async Task<List<AnalysisFinding>> InsertFindingsAsync(", "public async Task<List<AnalysisFinding>> SaveFindingsAsync("), StringComparison.Ordinal);
-        Assert.Contains("see the class note (#2455)", Between(source, "public async Task MuteStoryAsync(", "await cmd.ExecuteNonQueryAsync();"), StringComparison.Ordinal);
+        /* #3653 A15/A16: the mute write is a guarded INSERT ... RETURNING now (ExecuteScalar reads the one
+           row back), so its window ends at that call rather than at ExecuteNonQuery. */
+        Assert.Contains("see the class note (#2455)", Between(source, "public async Task<MuteWriteResult> MuteStoryAsync(", "await cmd.ExecuteScalarAsync();"), StringComparison.Ordinal);
         Assert.Contains("see the class note (#2455)", Between(source, "public async Task CleanupOldFindingsAsync(", "await cmd.ExecuteNonQueryAsync();"), StringComparison.Ordinal);
 
-        /* And the reason the shared lock is SUFFICIENT: no read-modify-write is left under it. */
+        /* And the reason the shared lock is SUFFICIENT: no read-modify-write is left under it in C#. The one
+           read-then-write that remains is INSIDE a single statement (#3653 A15/A16: the mute's NOT EXISTS
+           guard), and the method states why a duplicate that slips past it under the shared lock is the
+           pre-#3653 state the readers already tolerate rather than an invariant the lock must defend —
+           pinned here so the guard is never mistaken for a reason to take the write lock. */
+        Assert.Contains("not an invariant the lock has to defend", Between(source, "public async Task<MuteWriteResult> MuteStoryAsync(", "await cmd.ExecuteScalarAsync();"), StringComparison.Ordinal);
         Assert.DoesNotContain("private long _nextId", source, StringComparison.Ordinal);
         Assert.Contains("FindingId = NextId(),", source, StringComparison.Ordinal);
         Assert.Contains("Value = NextId() }", source, StringComparison.Ordinal);

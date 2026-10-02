@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -72,16 +73,18 @@ public partial class ViewerServerTab
         if (_pendingActiveQueriesWindow is { } pending)
         {
             _pendingActiveQueriesWindow = null;
-            var pendingSnapshots = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter);
+            var (pendingTotalCount, pendingSnapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(pendingSnapshots);
-            LatestSnapshotIndicator.Text = pending.Indicator;
+            LatestSnapshotIndicator.Text = pendingSnapshots.Count < pendingTotalCount
+                ? $"{pending.Indicator} — Showing the newest 1,000 of {pendingTotalCount:N0}"
+                : pending.Indicator;
             await LoadActiveQueriesSlicerAsync(pending.FromUtc.AddHours(-1), pending.ToUtc.AddHours(1));
             return;
         }
 
-        var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
-        LatestSnapshotIndicator.Text = "";
+        LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
         await LoadActiveQueriesSlicerAsync(startUtc, endUtc);
     }
 
@@ -98,9 +101,9 @@ public partial class ViewerServerTab
     {
         try
         {
-            var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
-            LatestSnapshotIndicator.Text = "";
+            LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
         }
         catch (Exception ex)
         {
@@ -182,7 +185,7 @@ public partial class ViewerServerTab
             var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(rows);
             LatestSnapshotIndicator.Text = batchTime.HasValue
-                ? $"Latest snapshot: {ViewerTimeHelper.ForDisplay(batchTime.Value):yyyy-MM-dd HH:mm:ss}"
+                ? $"Latest snapshot: {ViewerTimeHelper.FormatForDisplay(batchTime.Value, "yyyy-MM-dd HH:mm:ss")}"
                 : "No snapshots stored";
         }
         catch (Exception ex)
@@ -201,7 +204,7 @@ public partial class ViewerServerTab
     private void OpenSnapshotEstimatedPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: ViewerQuerySnapshotRow row })
-            OpenSnapshotEstimatedPlan(row);
+            _ = OpenSnapshotEstimatedPlan(row);
     }
 
     /// <summary>Opens the snapshot's stored ACTUAL (live) plan in the Plan Viewer (gated on HasLiveQueryPlan).
@@ -209,7 +212,7 @@ public partial class ViewerServerTab
     private void OpenSnapshotActualPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: ViewerQuerySnapshotRow row })
-            OpenSnapshotActualPlan(row);
+            _ = OpenSnapshotActualPlan(row);
     }
 
     /// <summary>Right-click "View Estimated Plan" on the snapshot grid — resolves the right-clicked row from the
@@ -218,35 +221,90 @@ public partial class ViewerServerTab
     private void ViewSnapshotEstimatedPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is MenuItem menuItem && FindParentDataGrid(menuItem)?.CurrentItem is ViewerQuerySnapshotRow row)
-            OpenSnapshotEstimatedPlan(row);
+            _ = OpenSnapshotEstimatedPlan(row);
     }
 
     /// <summary>Right-click "View Actual Plan" on the snapshot grid (see <see cref="ViewSnapshotEstimatedPlan_Click"/>).</summary>
     private void ViewSnapshotActualPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is MenuItem menuItem && FindParentDataGrid(menuItem)?.CurrentItem is ViewerQuerySnapshotRow row)
-            OpenSnapshotActualPlan(row);
+            _ = OpenSnapshotActualPlan(row);
     }
 
-    /// <summary>Opens the snapshot row's stored estimated plan (shared by the button + context-menu handlers).</summary>
-    private void OpenSnapshotEstimatedPlan(ViewerQuerySnapshotRow row)
+    /// <summary>Opens the snapshot row's estimated plan (shared by the button + context-menu handlers):
+    /// in-row first (the live "Current Active Queries" grid already carries it inline), else fetches it by
+    /// the row's natural key (#4239 — a stored-row read no longer carries plan XML in every row).</summary>
+    private async Task OpenSnapshotEstimatedPlan(ViewerQuerySnapshotRow row)
     {
-        if (string.IsNullOrEmpty(row.QueryPlan)) return;
-        _ = OpenPlanTab(row.QueryPlan, $"Estimated Plan — Session {row.SessionId}", row.QueryText);
+        if (!row.HasQueryPlan) return;
+        await OpenSnapshotPlanAsync(live: false, row);
     }
 
-    /// <summary>Opens the snapshot row's stored actual plan (shared by the button + context-menu handlers).</summary>
-    private void OpenSnapshotActualPlan(ViewerQuerySnapshotRow row)
+    /// <summary>Opens the snapshot row's actual (live) plan (shared by the button + context-menu handlers).
+    /// See <see cref="OpenSnapshotEstimatedPlan"/> for the in-row-first / fetch-fallback rule.</summary>
+    private async Task OpenSnapshotActualPlan(ViewerQuerySnapshotRow row)
     {
-        if (string.IsNullOrEmpty(row.LiveQueryPlan)) return;
-        _ = OpenPlanTab(row.LiveQueryPlan, $"Live Plan — Session {row.SessionId}", row.QueryText);
+        if (!row.HasLiveQueryPlan) return;
+        await OpenSnapshotPlanAsync(live: true, row);
+    }
+
+    /// <summary>
+    /// In-row-first / fetch-fallback plan open for one Active-Queries snapshot row (#4239). The live "Current
+    /// Active Queries" grid's rows already carry their plan XML in-row (<see cref="ViewerQuerySnapshotRow.QueryPlan"/>
+    /// / <see cref="ViewerQuerySnapshotRow.LiveQueryPlan"/>, set straight from the live DMV read) — that row
+    /// was never persisted at that exact collection_time, so a keyed store fetch would find nothing for it.
+    /// The stored QuerySnapshotsGrid's rows carry only the has-plan flags, so those fetch on demand by the
+    /// row's natural key. Mirrors <see cref="ViewPlan_Click"/>'s loading-overlay / cancellation pattern.
+    /// </summary>
+    private async Task OpenSnapshotPlanAsync(bool live, ViewerQuerySnapshotRow row)
+    {
+        var label = $"{(live ? "Live" : "Estimated")} Plan — Session {row.SessionId}";
+        var planXml = live ? row.LiveQueryPlan : row.QueryPlan;
+
+        if (string.IsNullOrEmpty(planXml))
+        {
+            ShowPlanLoading(label);
+            _planLoadCts?.Dispose();
+            _planLoadCts = new CancellationTokenSource();
+
+            try
+            {
+                planXml = await _dataService.GetQuerySnapshotPlanXmlAsync(
+                    _server.ServerId, row.CollectionTime, row.SessionId, row.RequestId, live, _planLoadCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                HidePlanLoading();
+                return;
+            }
+            catch (Exception ex)
+            {
+                HidePlanLoading();
+                MessageBox.Show($"Failed to load the execution plan:\n\n{ex.Message}", "Plan Load Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(planXml))
+            {
+                HidePlanLoading();
+                MessageBox.Show(
+                    "No execution plan was captured for this row. The plan may not have been collected yet, " +
+                    "or it aged out of the store's retention window.",
+                    "No Plan Available",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+        }
+
+        _ = OpenPlanTab(planXml, label, row.QueryText);
     }
 
     /// <summary>
     /// Deep-link entry from the aggregate Recommendations tab's "Open in Active Queries" button: navigate
     /// this (possibly freshly-opened) server tab straight to Active Queries scoped to a finding's window.
     /// The shell opens/focuses the tab first (its existing per-server-tab path); this then points the
-    /// process-wide time helper at THIS server's offset (so the grid/indicator render in the tab's own
+    /// process-wide time helper at THIS server's clock (so the grid/indicator render in the tab's own
     /// time), sets a one-shot window <see cref="_pendingActiveQueriesWindow">shield</see> so the concurrent
     /// tab-activation refresh loads the SAME narrow window (race-free — see the field comment), builds the
     /// indicator, then reuses the shared <see cref="NavigateToActiveQueriesForWindowAsync"/> the within-tab
@@ -255,13 +313,12 @@ public partial class ViewerServerTab
     /// </summary>
     internal async Task DeepLinkToActiveQueriesAsync(DateTime fromUtc, DateTime toUtc)
     {
-        /* Load + apply this server's UTC offset before rendering (the tab may be freshly opened and not yet
-           refreshed). EnsureServerOffsetLoadedAsync caches its Task, so this shares the one load with any
-           concurrent activation refresh. */
-        await EnsureServerOffsetLoadedAsync();
-        ApplyServerOffsetToHelper();
+        /* Read + apply this server's clock before rendering (the tab may be freshly opened and not yet
+           refreshed). */
+        await RefreshServerClockAsync();
+        ApplyServerClockToHelper();
 
-        var indicator = $"Finding window: {ViewerTimeHelper.ForDisplay(fromUtc):yyyy-MM-dd HH:mm} → {ViewerTimeHelper.ForDisplay(toUtc):HH:mm}";
+        var indicator = $"Finding window: {ViewerTimeHelper.FormatForDisplay(fromUtc, "yyyy-MM-dd HH:mm")} → {ViewerTimeHelper.FormatForDisplay(toUtc, "HH:mm")}";
         _pendingActiveQueriesWindow = (fromUtc, toUtc, indicator);
         await NavigateToActiveQueriesForWindowAsync(fromUtc, toUtc, indicator);
     }
@@ -289,9 +346,11 @@ public partial class ViewerServerTab
             _suppressDrillDownAutoRefresh = false;
         }
 
-        var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter);
+        var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter);
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
-        LatestSnapshotIndicator.Text = indicator;
+        LatestSnapshotIndicator.Text = snapshots.Count < totalCount
+            ? $"{indicator} — Showing the newest 1,000 of {totalCount:N0}"
+            : indicator;
 
         await LoadActiveQueriesSlicerAsync(fromUtc.AddHours(-1), toUtc.AddHours(1));
     }

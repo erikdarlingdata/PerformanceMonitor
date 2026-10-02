@@ -1,6 +1,7 @@
 <Window x:Class="PerformanceMonitorLite.Windows.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
         Title="Settings"
         Height="750" Width="750"
         MinHeight="500" MinWidth="600"
@@ -152,6 +153,16 @@
                         <ComboBoxItem Content="Cool Breeze" Tag="CoolBreeze"/>
                     </ComboBox>
                 </StackPanel>
+                <!-- #3577: the operator's own colors for the theme the combo shows. The shared panel
+                     (PerformanceMonitor.Ui.ThemeColorsPanel, one copy for Lite and the Darling viewer)
+                     follows the combo's live preview through ThemeManager.ThemeChanged, so it always edits
+                     the theme on screen. Collapsed by default: it is twelve rows, and most visits to this
+                     window are for something else. Its Apply writes theme-overrides.json and re-applies at
+                     once, independent of this window's Save - the theme combo is the setting this window
+                     saves; the colors are a file the panel owns. -->
+                <Expander Header="Colors" IsExpanded="False" Margin="0,10,0,0">
+                    <ui:ThemeColorsPanel Margin="0,8,0,0"/>
+                </Expander>
             </StackPanel>
         </Border>
 
@@ -246,11 +257,16 @@
                     <TextBox x:Name="AlertDeadlockThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
-                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) avg wait &#x2265;" VerticalAlignment="Center"
+                    <!-- #3539 A4: the alert grades wait ACCUMULATED over a rolling ten-minute window against fixed,
+                         fleet-calibrated bars shared with the PostgreSQL edition (PoisonWaitEvaluator). The ms box was the
+                         retired per-wait-average bar; it stays so saved settings round-trip, disabled and labelled so nobody
+                         tunes a number nothing reads. The preview line below the section states the live bars. -->
+                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) — accumulated wait over a 10-minute window; legacy avg-ms bar (no longer used):" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
-                    <TextBox x:Name="AlertPoisonWaitThresholdBox" Width="45" Text="500" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBox x:Name="AlertPoisonWaitThresholdBox" Width="45" Text="500" Margin="6,0,0,0" VerticalAlignment="Center" IsEnabled="False"
+                             ToolTip="Retired. The Poison Wait alert no longer judges an average ms per wait; it fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL). Kept so existing settings round-trip."/>
                     <TextBlock Text="ms" VerticalAlignment="Center" Margin="2,0,0,0"
-                               Foreground="{DynamicResource ForegroundBrush}"/>
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
@@ -284,6 +300,20 @@
                 <CheckBox x:Name="LrqExcludeCdcCheckBox"
                           Content="Exclude CDC capture jobs (sp__MScdc__capture__job, sp__cdc__scan)"
                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,0"/>
+                <!-- #3653 (A5, Q5): the opt-out knob for permanent background requests. Excluded sessions are
+                     not evaluated at all (not read, not counted, not fingerprinted) — unlike a mute rule, which
+                     silences a fire already decided. The two boxes open SEEDED with the production read's
+                     defaults (the job-step program prefix; the two NT AUTHORITY logins); emptying a box
+                     clears that default for good, and "Reset to defaults" puts the seeds back. -->
+                <TextBlock Text="Exclude sessions whose program name STARTS WITH (comma-separated, case-insensitive; no wildcards):"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,6,0,4" FontSize="12"/>
+                <TextBox x:Name="AlertLrqExcludedProgramNamePrefixesBox" Margin="20,0,0,4"/>
+                <TextBlock Text="Exclude sessions whose login IS (comma-separated, case-insensitive, whole name):"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
+                <TextBox x:Name="AlertLrqExcludedLoginsBox" Margin="20,0,0,4"/>
+                <TextBlock Text="Defaults from a 7-day read of one large production store: SQL Agent job steps (program prefix 'SQLAgent - TSQL JobStep', ~460 sessions/week, 35–62 min medians) and the NT AUTHORITY\SYSTEM / NT AUTHORITY\NETWORK SERVICE logins (the multi-day CDC-shaped background). The application's admin login is NOT a default: it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share. Named humans are never excluded — they are what the alert is for. An excluded session is never evaluated (the opposite of a mute); the alert card counts how many each list removed. Empty a box to disable that default."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,0,0,0" TextWrapping="Wrap"/>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertTempDbSpaceCheckBox" Content="tempdb space usage over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
@@ -312,10 +342,10 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
-                    <CheckBox x:Name="AlertFileGrowthCheckBox" Content="Database file grew over" VerticalAlignment="Center"
+                    <CheckBox x:Name="AlertFileGrowthCheckBox" Content="Database file growing over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertFileGrowthRiseMbBox" Width="60" Text="10240" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                    <TextBlock Text="MB within" VerticalAlignment="Center" Margin="2,0,0,0"
+                    <TextBlock Text="MB/hr averaged over" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertFileGrowthLookbackMinutesBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="min, or is over" VerticalAlignment="Center" Margin="2,0,0,0"
@@ -440,6 +470,14 @@
                     <TextBlock Text="minutes (30 - 10080)" VerticalAlignment="Center" Margin="4,0,0,0"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
+                <!-- #3712: confidence chooses the channel. Checked (the default) keeps a LONE-FACT finding — one fact in
+                     its chain, no matched co-fire check — off email, the webhooks and the tray; it is still recorded in
+                     the Alerts tab (status Digest) and shown in Recommendations with a not-paged marker. Unchecked
+                     restores pre-#3712 delivery of every finding at or above the severity floor. A corroborated
+                     finding is delivered either way. -->
+                <CheckBox x:Name="AnalysisUncorroboratedDigestCheckBox"
+                          Content="Only notify on corroborated findings (a lone uncorroborated fact is recorded, not delivered)"
+                          Margin="20,6,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
                 <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,4,0,0" TextWrapping="Wrap"/>

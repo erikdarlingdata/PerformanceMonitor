@@ -1,0 +1,10 @@
+# DarlingMcpConfigTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_database_config 448
+param get_database_config.database_name 54
+param get_database_config.server_name 28
+
+tool get_server_config 571
+param get_server_config.server_name 28
+
+tool get_trace_flags 333
+param get_trace_flags.server_name 28

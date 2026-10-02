@@ -33,6 +33,10 @@ internal static class DarlingMcpReadParameters
     public static void AddNullableText(NpgsqlCommand command, string? value) =>
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)value ?? DBNull.Value });
 
+    /// <summary>Binds a boolean flag — a read's <c>NOT $N::boolean OR ...</c> "filter off" branch (#3541 A13).</summary>
+    public static void AddBoolean(NpgsqlCommand command, bool value) =>
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = value });
+
     /// <summary>Binds a naive-UTC timestamp (Kind=Unspecified → the store's timestamp columns).</summary>
     public static void AddTimestamp(NpgsqlCommand command, DateTime value) =>
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(value, DateTimeKind.Unspecified) });

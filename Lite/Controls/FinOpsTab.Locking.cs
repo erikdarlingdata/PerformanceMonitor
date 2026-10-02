@@ -83,6 +83,24 @@ public partial class FinOpsTab : UserControl
             _indexLockingFilterMgr!.UpdateData(data);
             NoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IndexLockingCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+
+            /* Writers on an optimized-locking database wait on transaction-ID locks the grid's counters do not count. */
+            string? optimizedLockingNote = null;
+            try
+            {
+                optimizedLockingNote = await Task.Run(() => _dataService.GetOptimizedLockingNoteAsync(serverId));
+            }
+            catch (Exception noteEx)
+            {
+                /* A failed flag read leaves the note collapsed; the grid above has loaded. */
+                AppLogger.Error("FinOps", $"Failed to load optimized locking note: {noteEx.Message}");
+            }
+            if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
+            var separatelyMonitoredNote = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(serverId);
+            LockingSeparatelyMonitoredNoteText.Text = separatelyMonitoredNote ?? "";
+            LockingSeparatelyMonitoredNoteText.Visibility = separatelyMonitoredNote is null ? Visibility.Collapsed : Visibility.Visible;
+            OptimizedLockingNoteText.Text = optimizedLockingNote ?? "";
+            OptimizedLockingNoteText.Visibility = optimizedLockingNote is null ? Visibility.Collapsed : Visibility.Visible;
         }
         catch (Exception ex)
         {

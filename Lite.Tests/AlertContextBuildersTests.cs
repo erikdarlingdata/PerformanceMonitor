@@ -288,6 +288,39 @@ public class AlertContextBuildersTests
         Assert.Equal(key, Assert.Single(unresolved!.Incidents!).DedupKey);
     }
 
+    /* ---------------- #3742: the excluded-databases receipt beside the knob's ---------------- */
+
+    [Fact]
+    public void BuildLongRunningQueryExcludedDatabasesItem_IsItsOwnItem_WithTheCountAndTheList()
+    {
+        /* #3742 moved excludedDatabases INTO both SQL Server reads ahead of the cap (it was dropped client-side
+           after LIMIT, so an excluded database's sessions could consume the whole page), and the card now says how
+           many it removed. Its own item, not fields on the knob's: the knob item's heading says "by the opt-out
+           knob" and its Excluded Count has always been the knob's two arms — a database count inside it would make
+           the heading false and the count ambiguous. Singular/plural heading, the count under the shared label
+           constant, the list as the operator spelled it. */
+        var six = AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem(new[] { "ReportingDb", "Staging" }, 6);
+        Assert.Equal("6 sessions over the threshold were in excluded databases", six.Heading);
+        Assert.Equal("6", Assert.Single(six.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel).Value);
+        Assert.Equal("ReportingDb, Staging", Assert.Single(six.Fields, f => f.Label == "Excluded Databases").Value);
+        Assert.Equal(2, six.Fields.Count);
+
+        var one = AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem(new[] { "ReportingDb" }, 1);
+        Assert.Equal("1 session over the threshold was in an excluded database", one.Heading);
+
+        /* "0" is a receipt too — the engine renders the item whenever the list is set (and never when it is empty). */
+        var none = AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem(new[] { "ReportingDb" }, 0);
+        Assert.Equal("0 sessions over the threshold were in excluded databases", none.Heading);
+        Assert.Equal("0", Assert.Single(none.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel).Value);
+
+        /* The label is distinct from the knob's three so a reader of context_json cannot confuse the two receipts. */
+        Assert.Equal("Excluded By Database", AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel);
+        Assert.NotEqual(AlertContextBuilders.LongRunningQueryExcludedCountLabel, AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel);
+        Assert.NotEqual(AlertContextBuilders.LongRunningQueryExcludedByLoginLabel, AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel);
+
+        Assert.Throws<ArgumentNullException>(() => AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem(null!, 0));
+    }
+
     /* ---------------- #3495: the High CPU active-maintenance annotation ---------------- */
 
     [Fact]
@@ -709,9 +742,14 @@ public class AlertContextBuildersTests
            PerformanceMonitor.Alerting — so the app's public API must now surface the SHARED types. */
         Assert.Equal("PerformanceMonitor.Alerting", typeof(FailedJobInfo).Namespace);
 
-        Assert.Equal(typeof(Task<List<PoisonWaitDelta>>),
-            typeof(LocalDataService).GetMethod("GetLatestPoisonWaitAvgsAsync")!.ReturnType);
-        Assert.Equal(typeof(Task<List<LongRunningQueryInfo>>),
+        /* #3539 A4: the alert's DuckDB read is the window accumulation; PoisonWaitDelta itself stays
+           shared for the deprecated Dashboard and BuildPoisonWaitContext. */
+        Assert.Equal(typeof(Task<List<PoisonWaitAccumulation>>),
+            typeof(LocalDataService).GetMethod("GetPoisonWaitAccumulationAsync")!.ReturnType);
+        Assert.Equal("PerformanceMonitor.Alerting", typeof(PoisonWaitDelta).Namespace);
+        /* #3653 (A5, Q5): the read returns the shared result record (sessions + the opt-out knob's excluded
+           count) — still the Alerting namespace's type, which is what this pin is about. */
+        Assert.Equal(typeof(Task<LongRunningQueryReadResult>),
             typeof(LocalDataService).GetMethod("GetLongRunningQueriesAsync")!.ReturnType);
         Assert.Equal(typeof(Task<List<VolumeFreeSpaceInfo>>),
             typeof(LocalDataService).GetMethod("GetVolumeFreeSpaceAsync")!.ReturnType);

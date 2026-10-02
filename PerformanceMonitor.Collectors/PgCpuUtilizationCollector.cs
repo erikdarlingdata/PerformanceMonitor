@@ -51,6 +51,29 @@ namespace PerformanceMonitor.Collectors;
 /// the CONFIGURED ceiling is reached, which is an incident. See
 /// <c>ServerHealthClassifier.CpuSeverity</c> for the banding rule and
 /// <c>RdsCpuIngestor</c> for why all four metrics arrive on one API call.</para>
+///
+/// <para><b>Since V136 the row also carries the host's MEMORY (#3691, design §4b)</b> — six columns after
+/// the capacity four, from the same Performance Insights response: <c>os.memory.total / free / cached /
+/// buffers / active</c> as BYTES (PI publishes them in kilobytes; stored ×1024 so every byte column in the
+/// store means one thing), and <c>configured_memory_bytes</c>, the Serverless v2 capacity of that minute ×
+/// <see cref="BytesPerAcu"/> — what the instance is entitled to right now, as distinct from the host's RAM,
+/// which does not move with the capacity; NULL on a provisioned instance class. Memory is a column family on
+/// THIS row rather than a table of its own for two reasons. It IS this row: one <c>GetResourceMetrics</c>
+/// response, one minute stamp, one watermark, one COPY — a sibling table would have re-stored the same
+/// identity with its own resume point and its own hypertable for the privilege of a second name. And the
+/// second name had a cost the plan did not see: every collector table is a hypertable, the compression grid
+/// spreads them at <c>CompressionPhaseMaxPerMinute</c> per minute, and a 73rd hypertable widened the band
+/// past what the hour can pay — the heaviest refresh's watch line would have dropped below its recorded
+/// ceiling (896 s), which <c>TimescaleSupport</c> documents as a scheduling decision, not a renumbering. Six
+/// nullable columns cost none of that (V130 made the same choice for the log-event numbers).</para>
+///
+/// <para><b>A stock PostgreSQL target has no row here at all, and that absence is the memory series'
+/// honesty arm.</b> There is no host-memory figure inside the engine — <c>pg_settings</c> says what was
+/// configured, <c>pg_stat_*</c> what was used of it, neither what the host HAS — so a consumer that finds no
+/// row must read <c>unavailable</c>, never "no memory"; and a row with the memory columns NULL is a minute PI
+/// had no memory sample for (or a target whose Performance Insights does not publish <c>os.memory.*</c>, in
+/// which case the ingestor's fallback asked for the pre-V136 four and these stay NULL forever, truthfully).
+/// Nothing reads the six yet; the composition checks are #3691's later slices.</para>
 /// </summary>
 public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<PgCpuUtilizationCollector.Row>
 {
@@ -59,6 +82,15 @@ public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<
     private PgCpuUtilizationCollector()
     {
     }
+
+    /// <summary>
+    /// Bytes of memory per Aurora capacity unit: 2 GiB. AWS's definition of the unit — "each ACU is a
+    /// combination of approximately 2 gibibytes (GiB) of memory, corresponding CPU, and networking" (the
+    /// Aurora Serverless v2 capacity documentation) — so this is vendor-defined, not a measurement, and it is
+    /// the factor behind <c>configured_memory_bytes</c>. Public so the ingestor that derives the column and
+    /// the test that pins the arithmetic share one spelling.
+    /// </summary>
+    public const long BytesPerAcu = 2L * 1024 * 1024 * 1024;
 
     /// <param name="SampleTime">The Performance Insights data point's own timestamp — distinct from the
     /// prefix <c>collection_time</c> (when the ingestor's cycle ran), exactly like SQL Server's
@@ -81,12 +113,28 @@ public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<
     /// ceiling, the denominator. Recorded per sample rather than looked up when read, because it is a
     /// setting someone can change and a ratio taken against today's ceiling would misdescribe last week's
     /// samples.</param>
+    /// <param name="MemoryTotalBytes"><c>os.memory.total.avg</c> × 1024 — the host's RAM (V136).</param>
+    /// <param name="MemoryFreeBytes"><c>os.memory.free.avg</c> × 1024 — unassigned memory (V136).</param>
+    /// <param name="MemoryCachedBytes"><c>os.memory.cached.avg</c> × 1024 — the file-system cache, PostgreSQL's
+    /// second buffer tier and the figure <c>effective_cache_size</c> is supposed to describe (V136).</param>
+    /// <param name="MemoryBuffersBytes"><c>os.memory.buffers.avg</c> × 1024 — I/O buffering ahead of the
+    /// storage device (V136).</param>
+    /// <param name="MemoryActiveBytes"><c>os.memory.active.avg</c> × 1024 — assigned memory (V136).</param>
+    /// <param name="ConfiguredMemoryBytes">Aurora Serverless v2 only: <paramref name="ServerlessCapacityAcu"/> ×
+    /// <see cref="BytesPerAcu"/>, the memory the instance is entitled to at this minute. NULL on a provisioned
+    /// instance class and wherever the capacity metric had no sample (V136).</param>
     public readonly record struct Row(
         System.DateTime SampleTime,
         double? CpuPercent,
         double? AcuUtilizationPercent,
         double? ServerlessCapacityAcu,
-        double? MaxConfiguredAcu);
+        double? MaxConfiguredAcu,
+        long? MemoryTotalBytes = null,
+        long? MemoryFreeBytes = null,
+        long? MemoryCachedBytes = null,
+        long? MemoryBuffersBytes = null,
+        long? MemoryActiveBytes = null,
+        long? ConfiguredMemoryBytes = null);
 
     public override string Name => "pg_cpu_utilization";
 
@@ -112,6 +160,15 @@ public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<
         new CollectorColumn("acu_utilization_percent", CollectorColumnType.Double),
         new CollectorColumn("serverless_capacity_acu", CollectorColumnType.Double),
         new CollectorColumn("max_configured_acu", CollectorColumnType.Double),
+        /* V136 (#3691): the host's memory, BYTES, appended LAST so every pre-V136 row and every positional
+           reader keeps its ordinals. bigint rather than double: PI's kilobyte averages are rounded to whole
+           bytes by the ingestor, and a byte count is an integer. */
+        new CollectorColumn("memory_total_bytes", CollectorColumnType.BigInt),
+        new CollectorColumn("memory_free_bytes", CollectorColumnType.BigInt),
+        new CollectorColumn("memory_cached_bytes", CollectorColumnType.BigInt),
+        new CollectorColumn("memory_buffers_bytes", CollectorColumnType.BigInt),
+        new CollectorColumn("memory_active_bytes", CollectorColumnType.BigInt),
+        new CollectorColumn("configured_memory_bytes", CollectorColumnType.BigInt),
     };
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
@@ -136,6 +193,14 @@ public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<
                capacity in use" / "no ceiling configured", which are measurements nobody took. */
             .Value(row.AcuUtilizationPercent)
             .Value(row.ServerlessCapacityAcu)
-            .Value(row.MaxConfiguredAcu);
+            .Value(row.MaxConfiguredAcu)
+            /* V136: the six memory columns, each independently nullable for the same reason — a 0 here would
+               read as "no memory free" / "no memory at all", which are measurements nobody took. */
+            .Value(row.MemoryTotalBytes)
+            .Value(row.MemoryFreeBytes)
+            .Value(row.MemoryCachedBytes)
+            .Value(row.MemoryBuffersBytes)
+            .Value(row.MemoryActiveBytes)
+            .Value(row.ConfiguredMemoryBytes);
     }
 }

@@ -8,10 +8,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -69,6 +74,51 @@ public sealed class DarlingWebEndpointsTests
         Assert.True(extra.Length == 0, "/api/read endpoints with no matching read-only tool: " + string.Join(", ", extra));
     }
 
+    /// <summary>#4782: the test-only extra dispatch entry belongs to the async flow that set it. It is not a
+    /// process-wide switch: <c>ReadLatencyWebRecordingTests</c> sets one route while other test classes, outside
+    /// its collection, run at the same time and call <see cref="DarlingWebEndpoints.BuildReadDispatch"/>. With a
+    /// plain static, any of them could see that route, and <c>DarlingCustomViewsTests</c> failed on it (it
+    /// compares the dispatch keys with the Custom Views catalog). The same flow still sees the route (the
+    /// recording test builds its server there), and a flow that does not inherit the caller's context does not.</summary>
+    [Fact]
+    public async Task TheTestOnlyExtraDispatchEntry_IsSeenBySameFlow_AndNotByAFlowThatDoesNotInheritIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var routeName = "__test_flow_local_" + Guid.NewGuid().ToString("N");
+
+        try
+        {
+            DarlingWebEndpoints.TestOnlyExtraDispatchEntry = (routeName, (_, _, _) => Task.FromResult("{}"));
+
+            Assert.True(
+                DarlingWebEndpoints.BuildReadDispatch().ContainsKey(routeName),
+                "the flow that set the entry must see it in its own BuildReadDispatch (the recording test builds its server there)");
+
+            var seenByOtherFlow = await ReadDispatchContainsInAFlowThatDoesNotInherit(routeName, ct);
+            Assert.False(
+                seenByOtherFlow,
+                "a flow that does not inherit the setter's context must not see the entry: a test class running at the same time would otherwise get an extra read route");
+        }
+        finally
+        {
+            DarlingWebEndpoints.TestOnlyExtraDispatchEntry = null;
+        }
+
+        Assert.False(DarlingWebEndpoints.BuildReadDispatch().ContainsKey(routeName), "the entry is cleared once the fact is done");
+    }
+
+    /// <summary>Starts the dispatch build on a task whose <see cref="ExecutionContext"/> is NOT the caller's --
+    /// the same position a test class running beside another one is in. Kept in its own synchronous method so
+    /// the <see cref="ExecutionContext.SuppressFlow"/> scope opens and closes on one thread, which the API
+    /// requires (an <c>await</c> inside the <c>using</c> would break that).</summary>
+    private static Task<bool> ReadDispatchContainsInAFlowThatDoesNotInherit(string routeName, CancellationToken ct)
+    {
+        using (ExecutionContext.SuppressFlow())
+        {
+            return Task.Run(() => DarlingWebEndpoints.BuildReadDispatch().ContainsKey(routeName), ct);
+        }
+    }
+
     [Fact]
     public void ExcludedToolNames_AreAllRealToolsInTheCatalog()
     {
@@ -93,15 +143,16 @@ public sealed class DarlingWebEndpointsTests
            so they STAY excluded from the generic mirror for the same reason those do, while
            update_alert_settings remains a write with no web surface at all — and the two server-onboarding
            WRITE tools (add_servers / remove_server). All with no /api/read/{tool} 1:1 mirror, like
-           mute_analysis_finding. */
+           mute_analysis_finding. get_tool_guide (#3898) reads no data: it serves the MCP tools' reading guides from
+           the MCP host's registration-time catalog, so there is nothing for a web read to mirror. */
         Assert.Equal(
             new[]
             {
                 "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
                 "analyze_server", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "delete_custom_alert_rule",
-                "delete_custom_view", "delete_mute_rule", "describe_custom_view_catalog", "get_custom_alert_rule", "get_custom_view",
+                "delete_custom_view", "delete_mute_rule", "delete_notification_route", "describe_custom_view_catalog", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
                 "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
-                "set_mute_rule_enabled", "test_custom_alert_rule", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "validate_custom_alert_rule", "validate_custom_view",
+                "set_mute_rule_enabled", "set_notification_route_enabled", "test_custom_alert_rule", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "validate_custom_alert_rule", "validate_custom_view",
             },
             DarlingWebEndpoints.ExcludedToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
@@ -124,7 +175,22 @@ public sealed class DarlingWebEndpointsTests
         Assert.Contains("get_ag_health", DarlingWebEndpoints.BuildReadDispatch().Keys);
     }
 
-    /* ── response-kind mapping (the '{'-sniff, error -> 500, status-envelope -> 200) ── */
+    [Fact]
+    public void ReadEndpoints_ActiveQueries_KeepsTheTwoThousandCharacterWebPreview()
+    {
+        /* #4198 lane W2: the MCP default fell to a 500-char query_text preview (QueryTextPreviewLength), but
+           the web viewer isn't that budget's caller — its /api/read row calls the internal budget-taking
+           overload with an explicit 2000, the pre-#4198 McpHelpers.Truncate budget every caller got, so the
+           Active Queries tab doesn't shrink under it. A regression here (dropping the overload, or the literal
+           2000) silently starves that tab's query text down to 500 characters. Source-text pin rather than a
+           live call: no rig in this lane. */
+        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        Assert.Contains(
+            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), c.RequestAborted),",
+            source, StringComparison.Ordinal);
+    }
+
+    /* ── response-kind mapping (the error envelope -> 500, the invalid envelope -> 400 as the body, the '{'-sniff -> 200, miss envelope -> 200) ── */
 
     [Theory]
     [InlineData("{\"cpu_percent\":42}")]
@@ -132,22 +198,103 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("[]")]
     [InlineData("[{\"a\":1}]")]
     [InlineData("{\"status\":\"empty\",\"message\":\"nothing\"}")] // the miss envelope passes through as 200
+    [InlineData("{\"status\":\"precondition\",\"message\":\"Query Store is off\",\"hints\":{\"statement\":\"ALTER DATABASE\"}}")]
+    [InlineData("{\"status_counts\":{\"error\":2}}")]      // a data key that merely begins with "status" is data
     public void ClassifyToolResponse_JsonPassesThrough(string result) =>
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.JsonPassthrough, DarlingWebEndpoints.ClassifyToolResponse(result));
 
+    /// <summary>
+    /// The tools' caught exception is the <c>{"status":"error", ...}</c> envelope since #3653 Q11 (a WIRE CHANGE
+    /// for the 214 tools that answered with the bare sentence), and it is a 500 — tested against the REAL
+    /// producer, not a hand-written literal, so a change to <c>McpHelpers.FormatError</c>'s serialization
+    /// that the recognizer did not follow fails here rather than as every failure quietly becoming a 200.
+    /// The PostgreSQL tools already answered with this envelope before the ruling, and the '{'-sniff was
+    /// passing their failures through as 200 — the ordering this pins is the fix for that too.
+    ///
+    /// <para>The third case is the ruling #3719 asked for, made (#3739): a hand-built <c>Status("error", …)</c>
+    /// around a refusal sentence is STILL read as a fault here — the classifier cannot know better — which is
+    /// exactly why the tree may no longer build one: nine PostgreSQL <c>limit</c> / <c>family</c> /
+    /// <c>min_severity</c> refusals wore this word and answered 500 for a typo between #3719 and #3739. They
+    /// now return <c>McpHelpers.Refusal</c>'s <c>invalid</c> envelope (the next fact), and
+    /// <c>McpPayloadContractCensusTests.TheFailureWord_HasOneProducer_OnBothSkus</c> holds that <c>FormatError</c>
+    /// is the only thing that builds the failure word.</para>
+    /// </summary>
+    [Fact]
+    public void ClassifyToolResponse_TheErrorEnvelope_IsServerError()
+    {
+        var wire = McpHelpers.FormatError("get_wait_stats", new InvalidOperationException("connection reset"));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError, DarlingWebEndpoints.ClassifyToolResponse(wire));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError, DarlingWebEndpoints.ClassifyToolResponse("  " + wire));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError,
+            DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.Status("error", "Invalid limit value '0'. Must be a positive integer (1-1000).")));
+    }
+
+    /// <summary>
+    /// The REFUSAL is the <c>{"status":"invalid", ...}</c> envelope and it is a 400 (#3739) — tested against the
+    /// REAL producers, not a hand-written literal: <c>McpHelpers.Refusal</c> itself, every shared validator past
+    /// its bound, both resolvers' miss, the web dispatch's own missing-parameter arm, and the write tools'
+    /// <c>Outcome("invalid", …)</c> bytes, which the same recognizer must fire on so the read and write surfaces
+    /// read one word by one rule. It is tested BEFORE the <c>{</c>-sniff (which would answer 200 over it — what
+    /// the nine PostgreSQL refusals got before #3719) and is NOT the error envelope (which would answer 500 —
+    /// what they got after it). Neither code was the 400 a client-correctable refusal deserves; this is it.
+    /// </summary>
+    [Fact]
+    public void ClassifyToolResponse_TheInvalidEnvelope_IsARefusal()
+    {
+        var wire = McpHelpers.Refusal("limit", "Invalid limit value '0'. Must be a positive integer (1-1000).");
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(wire));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse("  " + wire));
+
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.ValidateHoursBack(9999)!));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.ValidateTop(0)!));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.ValidateWindow(4, "not-a-time", out _)!));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.ParseSummaryDate("01/02/2026", out _)!));
+
+        var (_, miss) = DarlingServerResolver.ResolveOrError(
+            new[] { new DarlingServerResolver.RegisteredServer(1, "SQL2022", null) }, "no-such-server", DarlingPeerDirectory.Snapshot.Empty);
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(miss!));
+
+        /* The write tools' own builder — same word, same bytes, same code. */
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal,
+            DarlingWebEndpoints.ClassifyToolResponse("{\"status\":\"invalid\",\"message\":\"rule_id is required.\"}"));
+
+        /* And the neighbours it must not fire on: a data key that begins with the word, a miss envelope. */
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.JsonPassthrough,
+            DarlingWebEndpoints.ClassifyToolResponse("{\"status\":\"invalid_count\",\"message\":\"x\"}"));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.JsonPassthrough,
+            DarlingWebEndpoints.ClassifyToolResponse("{\"invalid\":true}"));
+    }
+
+    /// <summary>The pre-#3653 bare sentence is still a 500: an un-migrated producer must not fall through to
+    /// the client-correctable 400 arm, which would tell a caller to fix a request that was fine.</summary>
     [Fact]
     public void ClassifyToolResponse_ErrorDuring_IsServerError() =>
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError,
             DarlingWebEndpoints.ClassifyToolResponse("Error during get_wait_stats: connection reset"));
 
+    /// <summary>The bare-string arm survives as the floor under everything the producers no longer emit: the
+    /// four sentences here WERE the wire shape of these refusals until #3739 (they are the envelope's <c>message</c>
+    /// now, and classify as <c>Refusal</c> above); what still reaches this arm is the <c>list_servers</c> miss on
+    /// an empty registry. The resolver's registry-read fault used to reach it too; since #4283 it is a server error
+    /// (the fact below). Kept at 400 so a producer nobody shaped is still refused rather than passed through as
+    /// data.</summary>
     [Theory]
     [InlineData("Could not resolve server. Available servers:\nSQL2022")]
     [InlineData("Invalid hours_back value '9999'. Must be a positive integer (1-168).")]
     [InlineData("Missing required parameter 'wait_type'.")]
     [InlineData("baseline_hours_back must be greater than hours_back.")]
+    [InlineData("No servers are registered yet. The service registers each monitored server on its first successful connection.")]
     [InlineData("")]
     public void ClassifyToolResponse_OtherBareStrings_AreClientErrors(string result) =>
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ClientError, DarlingWebEndpoints.ClassifyToolResponse(result));
+
+    /// <summary>#4283: the resolver's registry-read fault is a store fault, not a refusal, so it answers 500 with the
+    /// fixed body rather than 400 with the sentence (which carries the store's own error text).</summary>
+    [Fact]
+    public void ClassifyToolResponse_TheResolversRegistryReadFault_IsAServerError() =>
+        Assert.Equal(
+            DarlingWebEndpoints.ToolResponseKind.ServerError,
+            DarlingWebEndpoints.ClassifyToolResponse(DarlingServerResolver.RegistryReadFaultPrefix + "connection refused"));
 
     /* ── query-string parse helpers (invariant, default-on-miss) ── */
 
@@ -207,6 +354,27 @@ public sealed class DarlingWebEndpointsTests
     }
 
     /// <summary>
+    /// The integer twin (#3897), for <c>bucket_minutes</c>: absent means "let the read size the points", so an
+    /// unreadable width falling back to that would chart a different width than the one asked for. A fraction is
+    /// unreadable here, not rounded; zero and a negative bind, and the tool's range refusal answers them.
+    /// </summary>
+    [Theory]
+    [InlineData(null, true, null)]
+    [InlineData("15", true, 15)]
+    [InlineData("0", true, 0)]
+    [InlineData("-5", true, -5)]
+    [InlineData("1.5", false, null)]
+    [InlineData("abc", false, null)]
+    [InlineData("99999999999", false, null)]
+    public void TryParseOptionalInt_RefusesGarbageRatherThanChoosingAWidth(string? raw, bool expectedOk, int? expectedValue)
+    {
+        var ok = DarlingWebEndpoints.TryParseOptionalInt(raw, out var value);
+
+        Assert.Equal(expectedOk, ok);
+        Assert.Equal(expectedValue, value);
+    }
+
+    /// <summary>
     /// And the sibling this is NOT: <c>ParseDouble</c> really does swallow the same garbage, so the theory
     /// above is pinning a difference rather than restating shared behaviour.
     /// </summary>
@@ -238,15 +406,34 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("{\"status\":\"unchanged\",\"mute_rule\":{}}", 200, 200)]    // retry-safe "already so" shares the success code; the envelope carries the distinction
     [InlineData("{\"status\":\"deleted\",\"rule_id\":\"x\"}", 200, 200)]
     [InlineData("{\"status\":\"invalid\",\"message\":\"bad field\"}", 201, 400)]   // a refusal outranks whatever success the route hoped for
+    [InlineData("{\"status\":\"invalid\",\"message\":\"Invalid limit value '0'.\",\"hints\":{\"parameter\":\"limit\"}}", 200, 400)] // McpHelpers.Refusal's bytes (#3739): the same word, the same 400, by the same rule as the read surface
     [InlineData("{\"status\":\"not_found\",\"message\":\"no rule\"}", 200, 404)]
+    [InlineData("{\"status\":\"already_exists\",\"rule_id\":\"x\",\"mute_rule\":{}}", 201, 409)]   // #4734: a create that repeats a rule in force is a conflict, and the body keeps the envelope with the existing id
+    [InlineData("{ \"status\" : \"invalid\", \"message\": \"spaced\" }", 200, 400)]       // the parsed switch's belt-and-braces: an envelope serialized some other way still reads as invalid
     public void MuteRuleEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.MuteRuleEnvelopeStatus(envelope, successStatus));
 
+    /// <summary>The refusal a shared producer builds reaches the write surface's status mapping through the
+    /// same classifier arm the read surface uses (#3739): one recognizer, one word, one code — executed
+    /// against the real builder rather than a literal.</summary>
     [Fact]
-    public void MuteRuleEnvelopeStatus_TheCoresCaughtException_IsAServerError() =>
-        /* The cores swallow their own exceptions into "Error during ..." — the same shape the read surface
-           maps to 500, classified by the same ClassifyToolResponse. */
+    public void MuteRuleEnvelopeStatus_TheSharedRefusal_IsAClientError() =>
+        Assert.Equal(400, DarlingWebEndpoints.MuteRuleEnvelopeStatus(McpHelpers.Refusal("rule_id", "rule_id is required."), 201));
+
+    [Fact]
+    public void MuteRuleEnvelopeStatus_TheCoresCaughtException_IsAServerError()
+    {
+        /* The cores swallow their own exceptions into McpHelpers.FormatError — the {"status":"error"} envelope
+           since #3653 Q11 — the same shape the read surface maps to 500, classified by the same
+           ClassifyToolResponse BEFORE the verb-status switch, so "error" is never read as a verb outcome and
+           handed the route's success code. The bare sentence the cores produced before the ruling still
+           maps the same way. */
+        Assert.Equal(500, DarlingWebEndpoints.MuteRuleEnvelopeStatus(
+            McpHelpers.FormatError("update_mute_rule", new InvalidOperationException("connection reset")), 200));
+        Assert.Equal(500, DarlingWebEndpoints.MuteRuleEnvelopeStatus(
+            McpHelpers.FormatError("create_mute_rule", new InvalidOperationException("connection reset")), 201));
         Assert.Equal(500, DarlingWebEndpoints.MuteRuleEnvelopeStatus("Error during update_mute_rule: connection reset", 200));
+    }
 
     [Fact]
     public void MuteRuleEnvelopeStatus_ABareString_IsAClientError() =>
@@ -323,5 +510,83 @@ public sealed class DarlingWebEndpointsTests
         var never = Assert.IsType<JsonObject>(array[1]);
         Assert.True(never.ContainsKey("last_fired"));
         Assert.Null(never["last_fired"]);
+    }
+
+    /// <summary>
+    /// #4198: <c>get_analysis_findings</c> grew a default <c>limit</c> (18 chains) and a default text preview
+    /// (<c>full_text: false</c>), sized for a chat caller watching its own token budget. The web viewer's two
+    /// "Analysis Findings" tables never asked for that budget and render no field the preview cuts — a
+    /// regression here would silently drop rows past the 18th from the table with no error, which a JSON-shape
+    /// test cannot catch because the response is still well-formed, just short. No rig: this reads the
+    /// dispatch-row SOURCE rather than invoking it, because invoking it needs a live Postgres connection.
+    /// </summary>
+    [Fact]
+    public void GetAnalysisFindingsRow_PassesTheOldViewerDefaults_EveryChainFullText()
+    {
+        var source = ReadSource(WebEndpointsSourcePath);
+
+        var line = source
+            .Split('\n')
+            .FirstOrDefault(l => l.Contains("[\"get_analysis_findings\"] = (c, pg, an) =>", StringComparison.Ordinal));
+
+        Assert.True(line is not null,
+            "#4198: the /api/read dispatch row for get_analysis_findings has moved or been renamed; update this pin's search text.");
+
+        Assert.Contains("Rows(c, \"limit\", MaxRowLimit)", line, StringComparison.Ordinal);
+        Assert.Contains("QueryBool(c, \"full_text\", true)", line, StringComparison.Ordinal);
+
+        /* #4316 M2: GetAnalysisFindings grew a trailing ILogger? logger parameter so a web-path force-plan
+           read failure logs instead of riding along unlabelled in the payload note. This row builds the
+           service off the DI-resolved postgres/an directly, not through a logger-less helper, so dropping the
+           argument here is the whole regression — there is no second call site downstream to catch it. */
+        Assert.Contains("logger: logger", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4316 M2: <c>MapAll</c> used to build the web host's <see cref="DarlingAnalysisService"/> with no
+    /// logger, so both fact collectors on the web path (audit_config, get_analysis_facts) logged nothing on
+    /// failure and the collection-failure note's "the log has the full error" was false there. No rig: this
+    /// reads the construction site's SOURCE rather than invoking it.
+    /// </summary>
+    [Fact]
+    public void MapAll_BuildsTheAnalysisServiceWithTheHostsLogger()
+    {
+        var source = ReadSource(WebEndpointsSourcePath);
+
+        var line = source
+            .Split('\n')
+            .FirstOrDefault(l => l.Contains("new DarlingAnalysisService(", StringComparison.Ordinal));
+
+        Assert.True(line is not null,
+            "#4316: the web host's DarlingAnalysisService construction has moved or been renamed; update this pin's search text.");
+
+        Assert.Contains("logger: logger", line, StringComparison.Ordinal);
+    }
+
+    private static string ReadSource(string relative)
+    {
+        var path = Path.Combine(RepoRoot(), relative);
+
+        Assert.True(File.Exists(path), $"#4198 scan target not found: {path}");
+
+        return File.ReadAllText(path);
+    }
+
+    private const string WebEndpointsSourcePath =
+        "Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs";
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+
+        while (dir is not null
+               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
+               && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 }

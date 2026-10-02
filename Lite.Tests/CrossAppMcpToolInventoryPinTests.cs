@@ -86,6 +86,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_pg_io_trend",
         "get_pg_database_trend",
         "get_pg_deadlock_detail",
+        /* #3601: the classified log-event pipeline's read. Same SKU boundary as every entry around it. */
+        "get_pg_log_events",
         "get_pg_server_config_changes",
         "get_pg_replication_stats",
         "get_pg_top_queries",
@@ -102,6 +104,19 @@ public sealed class CrossAppMcpToolInventoryPinTests
            is the closest thing conceptually and it is not close - it is a database-scoped feature with its
            own health read (get_query_store_health) rather than a set of preload-only server GUCs. */
         "get_pg_plan_capture_readiness",
+
+        /* get_pg_logging_audit (#3607) - readiness's facet-and-remedy shape over the rest of the logging
+           surface (log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints,
+           log_connections / log_disconnections, log_min_duration_statement), judged from the stored
+           pg_server_config snapshot. Same architectural reason as the entry above: the settings are
+           PostgreSQL GUCs and the snapshot is a PostgreSQL collector's table Lite never creates.
+
+           The near-twin worth naming is get_server_config on the SQL Server side, and it is not one: that
+           is a LISTING of sp_configure values, this is a JUDGMENT of seven logging GUCs against what each
+           unlocks. SQL Server's closest concept - whether the error log and default trace capture a class
+           of event - has no per-setting audit here either, so there is no Lite twin for this to be missing
+           from. */
+        "get_pg_logging_audit",
         "get_pg_wraparound_risk",
         "get_pg_xmin_horizon",
         "get_pg_replication_slots",
@@ -159,6 +174,19 @@ public sealed class CrossAppMcpToolInventoryPinTests
            twin to point at, so this is a SKU boundary rather than a porting to-do. */
         "get_store_log",
 
+        /* #3899: the store's own per-statement timings (get_store_query_stats) over pg_stat_statements in the
+           central Postgres store, split by the role that ran each statement. Darling-ONLY by architecture, the
+           get_store_log reason: Lite's store is embedded DuckDB, with no server, no roles and no
+           pg_stat_statements to read. A SKU boundary rather than a porting to-do. */
+        "get_store_query_stats",
+
+        /* #4214 part 2: the store HOST profile read (get_store_host) — platform/RAM/data volume, PostgreSQL
+           and TimescaleDB facts, and a per-setting verdict against the managed sizing this store's host was
+           derived from. Darling-ONLY by architecture, the get_store_metrics reason: Lite has no managed
+           PostgreSQL store for a host profile to be OF, and never writes the managed conf blocks the verdict
+           compares against. A SKU boundary rather than a porting to-do. */
+        "get_store_host",
+
         /* #2674: the collector-cost read (get_collector_cost) over collect.collector_cost — the tool measuring
            its OWN per-collector cost on the monitored servers. Darling-ONLY by architecture, the same as
            get_store_metrics: it is an internal self-metric over the central store, which Lite has no twin of. */
@@ -174,6 +202,13 @@ public sealed class CrossAppMcpToolInventoryPinTests
            forensics, port this and delete the entry; the ratchet only shrinks. */
         "get_collector_stall_probes",
 
+        /* #4442 scope 2: the read-latency read (get_read_latency) over collect.read_latency - the tool
+           measuring its OWN read speed on the web dashboard and MCP server. Darling-ONLY by architecture,
+           the get_collector_cost reason: it is an internal self-metric over the central store's read
+           pipeline, which Lite (a single-instance app with no central store and no /api/read/* dispatch
+           loop of this shape) has no twin of. */
+        "get_read_latency",
+
         /* #3398: the oversized-plan backlog read (get_oversized_plan_backlog) over
            collect.oversized_plan_backlog - which cached plans the capture cap declined, and what the
            out-of-band sweep has since done about each one. Darling-ONLY by architecture rather than a porting
@@ -186,6 +221,21 @@ public sealed class CrossAppMcpToolInventoryPinTests
            ever gains the backlog table and a sweep, port this and delete the entry; the ratchet only
            shrinks. */
         "get_oversized_plan_backlog",
+
+        /* #3797: the Query Store clutter view (get_query_store_clutter) - per database the query_store
+           collector's read cost off collection_log's fan-out rollup, plan churn off the raw query_store_stats
+           plan identities, and the query_store_health options row; per server the non-sleep QDS_* wait deltas
+           and the Query Store memory clerk. Unlike most entries above this IS a "not ported yet", and the
+           brief that built it said so after checking: Lite has EVERY input. Its collection_log carries the
+           same fanout_item_count / slowest_item / slowest_item_ms columns (Schema.cs, written by
+           RemoteCollectorService), its query_store_stats / query_store_health / wait_stats / memory_clerks
+           tables are generated from the same shared collector definitions, and the plan-churn arm needs only
+           plan_id on the fact rows - not the query_store_plan_map / query_plan_dim pair, which Lite does not
+           have and which the Darling reader does not read either. A Lite twin is a DuckDB port of
+           DarlingQueryStoreClutterReader's four statements (percentile_disc becomes quantile_disc) over the
+           same pure QueryStoreClutter judgment. Sequenced behind the Darling reader + MCP tool and the two
+           viewer surfaces (#3797's own ordering); port it, then remove this entry - the ratchet only shrinks. */
+        "get_query_store_clutter",
 
         /* #1562: the pre-banded fleet-overview read born from the web dashboard's DarlingFleetReader.
            Lite twin = a DuckDB fleet reader over the SAME shared ServerHealthClassifier (Common) — tracked
@@ -240,6 +290,15 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "update_mute_rule",
         "delete_mute_rule",
         "set_mute_rule_enabled",
+
+        /* #3598: the notification-route write tools — set_notification_route_enabled / delete_notification_route
+           over config.config_notification_routes (V131), the shape of set_mute_rule_enabled / delete_mute_rule.
+           Darling-ONLY by architecture, the same entry kind as the alert-tuning tools above: a route is a row
+           in the central store's config plane that the headless service hot-reloads, and Lite has no routes
+           table (every alert goes to every configured channel). The READ half, get_notification_routes, IS
+           shared: Lite's twin publishes the same family taxonomy and states routes_supported: false. */
+        "set_notification_route_enabled",
+        "delete_notification_route",
 
         /* Darling MCP server-onboarding write tools — add/remove the monitored servers in the CENTRAL store the
            whole fleet shares (config.config_monitored_servers). add_servers bulk-onboards (validate + in-process

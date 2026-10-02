@@ -46,7 +46,7 @@ public sealed class ViewerHistoryWindowTests
     }
 
     [Fact]
-    public void ProcStatsHistorySql_FiltersOneSchemaObjectOverTheWindow_AndDerivesTheInterval()
+    public void ProcStatsHistorySql_FiltersOneSchemaObjectOverTheWindow_AndPrefersTheStoredInterval()
     {
         var sql = ViewerDataService.ProcStatsHistorySql;
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
@@ -57,7 +57,12 @@ public sealed class ViewerHistoryWindowTests
         Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $6", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
-        /* procedure_stats has no sample_interval_seconds column — it's derived from the previous row's gap. */
+        /* #3540 (V128): procedure_stats carries sample_interval_seconds now. The STORED value is shown where
+           the row has one — a 0 included, the Interval (sec) 0 the query-stats history grid has always shown
+           for an unknowable row — and a pre-V128 row (NULL) keeps the interval this read always derived from
+           the previous row's gap. COALESCE, not CASE: a displayed interval is not a rate, so the stored 0
+           stays a 0 here rather than becoming NULL. */
+        Assert.Contains("COALESCE(sample_interval_seconds, CAST(extract(epoch FROM", sql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("total_spills", sql, StringComparison.Ordinal);
         AssertPgPositionalDialect(sql);

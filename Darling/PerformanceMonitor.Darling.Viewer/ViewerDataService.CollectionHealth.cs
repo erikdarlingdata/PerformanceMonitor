@@ -8,11 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -138,7 +140,26 @@ public sealed partial class ViewerDataService
             -- — the EXTENSION_MISSING status the fault mapper split out of PERMISSIONS, counted apart so
             -- the banding stops calling an uninstalled optional extension NO_PERMISSIONS. APPENDED, never
             -- inserted: this result set is read positionally by one shared mapper.
-            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+            -- #3819: the two instants that, with last_run_time above, say whether this collector
+            -- STOPPED producing rather than never having produced here. The same named skip carries
+            -- opposite meanings on those two rows, and the band read both as the benign resting state.
+            -- This grid bands through the SAME shared classifier as the service's reads, so it has to
+            -- feed it the same inputs — left unselected they default to null, this COMPILES, and the
+            -- grid would call a regressed collector HEALTHY while get_collection_health called it
+            -- WARNING. That is #3240's lesson and #2804's before it. The FINDING that names the rows and
+            -- the status is deliberately not carried here: this projection has no rows_stored to count
+            -- and the grid has no column to render prose in, so the band is the whole of what this
+            -- surface needs to agree about. APPENDED, read positionally by the one shared mapper.
+            MAX(CASE WHEN status IS NULL
+                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                     THEN collection_time END) AS last_non_skip_time,
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+            -- #4748: the note the collector's NEWEST run left, which is not last_note above (that is the
+            -- newest run that CARRIED a note, so a clean run after a partial-failure cycle still shows the
+            -- older cycle's note there). The band reads only this one, because the loss an older note names
+            -- is not the collector's current state. APPENDED, read positionally by the one shared mapper.
+            MAX(CASE WHEN recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -173,7 +194,15 @@ public sealed partial class ViewerDataService
                     ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) IS NULL,
                              collection_time DESC,
                              error_message DESC
-                ) AS error_rank
+                ) AS error_rank,
+                -- #4748: newest run first, so latest_run_note above takes the newest run's note. status DESC
+                -- only breaks an exact-timestamp tie, the way the Darling service read breaks it.
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY collection_time DESC,
+                             status DESC
+                ) AS recency_rank
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -184,8 +213,12 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// #1591: how many DISTINCT collectors were permission-denied in the window — the badge count for the
-    /// Collection Health tab header. Lite's twin is
-    /// <c>LocalDataService.GetPermissionDeniedCollectorCountAsync</c>.
+    /// Collection Health tab header. Lite's twin, <c>LocalDataService.GetPermissionDeniedCollectorCountAsync</c>,
+    /// still runs this shape directly (DuckDB has no rollup to route through). The Darling viewer's own
+    /// <see cref="GetPermissionDeniedCollectorCountAsync"/> no longer runs it: every server-tab refresh (auto
+    /// default 1 min, plus tab activation) used to issue this as its OWN raw <c>v_collection_log</c> scan per
+    /// open tab; it now filters the shared fleet-by-server rollup read instead (#4226), so this constant is
+    /// kept only as the documented raw shape the pins below hold it to.
     ///
     /// <para>Its own narrow COUNT rather than a reuse of <see cref="CollectionHealthSql"/>: that one is
     /// per-collector and only runs when its tab is selected, which is exactly why a permission problem stayed
@@ -200,16 +233,78 @@ public sealed partial class ViewerDataService
         AND   status = 'PERMISSIONS'
         """;
 
-    /// <summary>Runs <see cref="PermissionDeniedCollectorCountSql"/> over the same 7-day window the health grid uses.</summary>
+    /// <summary>
+    /// #3691 part a2: <c>collect.analysis_collection_caveats</c> (V141, part a1) — the data families the
+    /// scheduled analysis pass could not read on this server, as of its most recent run. $1 server_id.
+    /// </summary>
+    public const string CollectionCaveatsSql = """
+        SELECT family, reason, first_seen_utc, last_seen_utc
+        FROM collect.analysis_collection_caveats
+        WHERE server_id = $1
+        ORDER BY family
+        """;
+
+    /// <summary>
+    /// Reads <see cref="CollectionCaveatsSql"/> for one server — gated on the same connect-time schema probe
+    /// every other rung-dependent Viewer read uses (<see cref="GetStoreSchemaVersionAsync"/>), because V141
+    /// is the newest rung and a store behind it has no <c>collect.analysis_collection_caveats</c> table at
+    /// all. Returns an empty list both below V141 and on any read failure, rather than letting a lagging
+    /// store's missing-relation error (42P01) reach the Collection Health tab: this section is purely
+    /// informational, so a store that can't answer reads the same as a store with nothing to report.
+    /// </summary>
+    public async Task<List<CollectionCaveatRow>> GetCollectionCaveatsAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var items = new List<CollectionCaveatRow>();
+
+        /* #4767: the cached field the Query Store and trend reads use. This tab refreshes every 30 seconds by
+           default and the probe is one round trip of about 130 EXISTS arms, so it is read once per session; a
+           null result (the probe could not answer) is not cached and reads again. A store upgraded mid-session
+           keeps reading as the older rung until the viewer reconnects, the same as those two reads. */
+        var storeVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+        if (storeVersion is not int version || version < 141)
+        {
+            return items;
+        }
+
+        try
+        {
+            await using var command = _dataSource.CreateCommand(CollectionCaveatsSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                items.Add(new CollectionCaveatRow
+                {
+                    Family = reader.GetString(0),
+                    Reason = reader.GetString(1),
+                    FirstSeenUtc = reader.GetDateTime(2),
+                    LastSeenUtc = reader.GetDateTime(3),
+                });
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new List<CollectionCaveatRow>();
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// #1591's badge count, one server's slice of the same 7-day window the health grid uses — served from the
+    /// shared fleet-by-server rollup read (#4226) instead of its own raw <c>v_collection_log</c> scan. That read
+    /// already carries <see cref="CollectorHealthRow.PermissionDeniedCount"/> per (server, collector), so the
+    /// badge is a filter over rows already in memory (rollup-backed when usable, memoized briefly — see
+    /// <see cref="GetFleetCollectionHealthByServerAsync"/>) rather than a fourth per-tick read of its own.
+    /// </summary>
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(PermissionDeniedCollectorCountSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified) });
-
-        var scalar = await command.ExecuteScalarAsync(cancellationToken);
-        return scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+        var byServer = await GetFleetCollectionHealthByServerAsync(cancellationToken);
+        return byServer.TryGetValue(serverId, out var rows)
+            ? rows.Count(row => row.PermissionDeniedCount > 0)
+            : 0;
     }
 
     /// <summary>
@@ -240,6 +335,12 @@ public sealed partial class ViewerDataService
     /// no single $1 to probe the inventory for: a truthful fleet version would be a second cross-collector
     /// join across every enabled server, on a query the status bar re-runs on every aggregate-tab refresh
     /// — precisely the cost #1855 measured and declined. The column exists to hold the ordinal.
+    /// </para>
+    /// <para>
+    /// #4748: the one note this read DOES carry is the newest run's partial-database-failure note
+    /// (<c>latest_run_note</c>), because the band reads it and a fleet total that banded a collector
+    /// differently from its own tab is the #3240 disagreement. It rides plain aggregates rather than the
+    /// ranks above, for the cost those ranks were measured at; <c>last_note</c> itself stays NULL.
     /// </para>
     /// </summary>
     public const string FleetCollectionHealthSql = $"""
@@ -281,7 +382,21 @@ public sealed partial class ViewerDataService
             -- so it must feed it the same inputs — an unselected count defaults to 0, COMPILES, and
             -- quietly bands an extension-missing collector FAILING here while the per-server grid says
             -- EXTENSION_MISSING (the #2804 lesson, same shape). APPENDED, read positionally.
-            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+            -- #3819: #3240's reasoning again — this rollup bands through the same shared classifier as
+            -- the per-server grid, so the regression floor has to see the same inputs on both or the
+            -- status bar's fleet total would disagree with the tab beside it.
+            --
+            -- Both are plain aggregates, so this cumulative read gains no subquery and no sort.
+            MAX(CASE WHEN status IS NULL
+                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                     THEN collection_time END) AS last_non_skip_time,
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+            -- #4748: the newest run's partial-database-failure note, as plain aggregates only (no window
+            -- function, no ordered aggregate, so the parallel hash aggregate survives). It is the fleet
+            -- reads' one shared expression (CollectionHealthRollupSupport.LatestRunNoteRawSql, #4812), so
+            -- this read, the per-server fleet read and the hourly rollup keep the same run's note.
+            {CollectionHealthRollupSupport.LatestRunNoteRawSql}
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
@@ -392,10 +507,175 @@ public sealed partial class ViewerDataService
         return items;
     }
 
-    /// <summary>Maps one row of the shared 16-column health projection (per-server or fleet, ordinals 0-15) to a
+    /// <summary>
+    /// The per-(server, collector) breakdown <see cref="FleetCollectionHealthSql"/> groups by but does not
+    /// project (#4226): identical eleven aggregates, with <c>server_id</c> added as column 0 so the Overview
+    /// cards, the status bar and the server-tab badge can take their per-server counts from ONE fleet-wide
+    /// read instead of one raw <c>CollectionHealthSql</c> / <see cref="PermissionDeniedCollectorCountSql"/>
+    /// scan per server. Shaped for <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — fourteen
+    /// columns (#4812 appended the newest run note), in the order it requires.
+    ///
+    /// <para><b>Scoped to <c>server_id &lt;&gt; 0</c> (the fleet-maintenance sentinel), NOT to
+    /// <c>config_monitored_servers.is_enabled</c> — a #4226 regression, found by
+    /// <c>ServerSummary_ReadsEnrichedThreadsMemoryBlockingCollectors_AgainstDevPostgres</c>.</b> An earlier
+    /// version of this statement copied <see cref="FleetCollectionHealthSql"/>'s <c>is_enabled</c> scope,
+    /// on the reasoning that the two shared "identical" scope — but that scope belongs to a DIFFERENT
+    /// consumer (the status bar's fleet-cumulative total, where a removed server's aged-out rows should
+    /// not read as erroring). Every caller of THIS statement, through
+    /// <see cref="GetFleetCollectionHealthByServerAsync"/>, keys its lookup by ONE server's own
+    /// <c>server_id</c> — the Overview card, the badge, and a per-server status-bar tab all need that
+    /// server's exact rows whether or not it is currently enabled, or even registered in
+    /// <c>config_monitored_servers</c> yet (the bootstrap window before the config store is seeded, see
+    /// <c>IsConfigSeededAsync</c>), exactly as their old raw per-server scans (<see cref="CollectionHealthSql"/>,
+    /// <see cref="PermissionDeniedCollectorCountSql"/>) never filtered by enable state either. The right
+    /// precedent was the service's own by-server fleet read this statement mirrors
+    /// (<c>DarlingFleetReader.FleetCollectionHealthSql</c>, moved here via <see cref="CollectionHealthRollupSupport"/>):
+    /// <c>server_id &lt;&gt; 0</c> only, same as the aggregate this composes with
+    /// (<see cref="TimescaleSupport.CreateCollectionHealthHourlySql"/>). The one caller that still wants
+    /// "enabled fleet only" — the status bar's cumulative branch, no tab scope selected — applies that
+    /// filter itself against the registry already in memory (<c>MainWindow.ServerManagement.cs</c>'s
+    /// <c>UpdateCollectorHealthTextAsync</c>), rather than baking it into the shared read every other
+    /// caller also pays for.</para>
+    /// </summary>
+    public const string FleetCollectionHealthByServerSql = $"""
+        SELECT
+            server_id,
+            collector_name,
+            COUNT(*) AS total_runs,
+            SUM(CASE WHEN status = 'SUCCESS'
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                     THEN 1 ELSE 0 END) AS success_count,
+            SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
+            MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
+            SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
+            MAX(collection_time) AS last_run_time,
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                     THEN 1 ELSE 0 END) AS abandoned_count,
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+            MAX(CASE WHEN status IS NULL
+                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                     THEN collection_time END) AS last_non_skip_time,
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+            MAX(CASE WHEN NOT (status = 'SUCCESS'
+                               AND COALESCE(rows_collected, 0) = 0
+                               AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+                     THEN collection_time END) AS last_zero_row_streak_break_time,
+            -- #4812: the newest run's partial-database-failure note, so the Overview cards band a collector that
+            -- lost half its databases the way its own Collection Health tab does (the rollup keeps the same value
+            -- per hour). Plain aggregates only. APPENDED, read positionally.
+            {CollectionHealthRollupSupport.LatestRunNoteRawSql}
+        FROM v_collection_log
+        WHERE collection_time >= $1
+        AND   server_id <> 0
+        GROUP BY server_id, collector_name
+        """;
+
+    /// <summary><see cref="FleetCollectionHealthByServerSql"/> served from
+    /// <c>collect.collection_health_hourly</c> when <see cref="CollectionHealthRollupSupport.RollupUsableAsync"/>
+    /// says the rollup is usable, computed once (#4226).</summary>
+    private static readonly string FleetCollectionHealthByServerComposedSql =
+        CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthByServerSql);
+
+    /// <summary>#4477: the single-flight, TTL-memoized gate <see cref="GetFleetCollectionHealthByServerAsync"/>
+    /// reads through — <see cref="SingleFlightTtlCache{T}"/> in <c>PerformanceMonitor.Common</c>. The old
+    /// "benignly racy" TTL cache let every concurrent caller that missed a cold cache start its OWN fleet-wide
+    /// scan, because nothing was shared until the first one finished and wrote back — on a production fleet
+    /// the Overview loader's per-server lanes did this once per card, measured at 40 store round trips in one
+    /// 4.5-minute session (#4477). Re-probed at most every 20 s (#4226): a fresh call within the window is
+    /// served from memory with no store round trip at all.</summary>
+    private readonly SingleFlightTtlCache<Dictionary<int, List<CollectorHealthRow>>> _fleetHealthByServerCache =
+        new(TimeSpan.FromSeconds(20));
+
+    /// <summary>
+    /// The 7-day per-(server, collector) health breakdown, ONE store round trip (rollup-backed when usable,
+    /// else the exact raw scan), grouped by server for the caller — the read #4226 gives the Overview cards and
+    /// the status bar so a 30 s refresh tick costs one fleet-wide read instead of 43 per-server raw scans plus a
+    /// second raw fleet scan. Memoized for the 20 s TTL <see cref="_fleetHealthByServerCache"/> carries, and
+    /// single-flighted (#4477) so a whole Overview refresh — every card's lane racing a cold cache at once —
+    /// still issues exactly one fleet-wide statement rather than one per racing lane.
+    /// </summary>
+    public Task<Dictionary<int, List<CollectorHealthRow>>> GetFleetCollectionHealthByServerAsync(CancellationToken cancellationToken = default)
+        => _fleetHealthByServerCache.GetOrStartAsync(FetchFleetCollectionHealthByServerAsync, cancellationToken);
+
+    /// <summary>The actual fleet-wide fetch behind <see cref="GetFleetCollectionHealthByServerAsync"/>'s
+    /// single-flight gate — runs exactly once per cold cache regardless of how many callers are racing it.
+    /// Runs with <see cref="CancellationToken.None"/> (via <see cref="SingleFlightTtlCache{T}"/>): it is
+    /// shared work, not any one caller's, so one caller cancelling its own wait must not cancel the read for
+    /// the others still waiting on it.</summary>
+    private async Task<Dictionary<int, List<CollectorHealthRow>>> FetchFleetCollectionHealthByServerAsync()
+    {
+        var now = DateTime.UtcNow;
+        var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
+        var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(_dataSource, headEnd, CancellationToken.None);
+
+        /* #4477: any hole hours below the watermark are read raw alongside the rollup instead of forcing this
+           whole 7-day window to the raw scan — the shape that sent the Viewer's fleet health read to the raw
+           arm 819 times in three days on a store measured at 6.6 s (raw) against 184 ms (composed). */
+        var composedSql = plan.Usable
+            ? (plan.HoleHours.Count > 0
+                ? CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthByServerSql, plan.HoleHours)
+                : FleetCollectionHealthByServerComposedSql)
+            : null;
+        await using var command = _dataSource.CreateCommand(composedSql ?? FleetCollectionHealthByServerSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+        if (plan.Usable)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = headEnd });
+            if (plan.HoleHours.Count > 0)
+            {
+                command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
+            }
+        }
+
+        var byServer = new Dictionary<int, List<CollectorHealthRow>>();
+        await using var reader = await command.ExecuteReaderAsync(CancellationToken.None);
+        while (await reader.ReadAsync(CancellationToken.None))
+        {
+            var serverId = reader.GetInt32(0);
+            if (!byServer.TryGetValue(serverId, out var rows))
+            {
+                rows = new List<CollectorHealthRow>();
+                byServer[serverId] = rows;
+            }
+
+            rows.Add(MapFleetByServerRow(reader));
+        }
+
+        return byServer;
+    }
+
+    /// <summary>Maps one row of <see cref="FleetCollectionHealthByServerSql"/> / its composed twin (ordinals
+    /// 0-13) to a <see cref="CollectorHealthRow"/>. Only the fields <see cref="CollectorHealthRow.HealthStatus"/>
+    /// and <see cref="CollectorHealthRow.RegressedFromProductive"/> read are populated — the Overview cards and
+    /// the status bar band collectors and count them, and render neither an exemplar message nor a note
+    /// (#4226); AvgDurationMs, LastError(Time), YieldCount, LastNote, NoteCount and TargetHasUserDatabases stay
+    /// at their defaults, as they never reach this projection.</summary>
+    internal static CollectorHealthRow MapFleetByServerRow(System.Data.Common.DbDataReader reader) => new()
+    {
+        CollectorName = reader.GetString(1),
+        TotalRuns = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+        SuccessCount = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
+        ErrorCount = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4)),
+        LastSuccessTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+        PermissionDeniedCount = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
+        LastRunTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+        AbandonedCount = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8)),
+        ExtensionMissingCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+        LastNonSkipTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+        LastProductiveTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+        /* Appended (#4812): the newest run's partial-database-failure note, which the band reads. Left unmapped,
+           the Overview card would band a collector that lost half its databases HEALTHY beside its own tab's
+           WARNING. */
+        LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
+    };
+
+    /// <summary>Maps one row of the shared 19-column health projection (per-server or fleet, ordinals 0-18) to a
     /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY
-    /// through this one mapper, so it must match them exactly (16 since #3240 appended
-    /// extension_missing_count at ordinal 15; #2804's abandoned_count sits at 14).</summary>
+    /// through this one mapper, so it must match them exactly (19 since #4748 appended latest_run_note at
+    /// ordinal 18; #3819's last_non_skip_time and last_productive_time sit at ordinals 16-17,
+    /// #3240's extension_missing_count at 15 and #2804's abandoned_count at 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
@@ -420,6 +700,12 @@ public sealed partial class ViewerDataService
         /* Appended (#3240). Both reads compute it, for the same reason: the band it feeds must agree
            between the per-server grid and the fleet rollup. */
         ExtensionMissingCount = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
+        /* Appended (#3819). Computed by BOTH reads, for the reason the two counts above are: the band
+           floor they feed must agree between the grid and the fleet total. */
+        LastNonSkipTime = reader.IsDBNull(16) ? null : reader.GetDateTime(16),
+        LastProductiveTime = reader.IsDBNull(17) ? null : reader.GetDateTime(17),
+        /* Appended (#4748). Both reads compute it, so the band agrees between the grid and the fleet total. */
+        LatestRunNote = reader.IsDBNull(18) ? null : reader.GetString(18),
     };
 
     /// <summary>
@@ -466,6 +752,60 @@ public sealed partial class ViewerDataService
         return await ReadCollectionLogAsync(command, cancellationToken);
     }
 
+    /// <summary>
+    /// #4825: the run records a manual <c>purge_now</c> writes when its background run finishes. The purge is fleet-wide,
+    /// so they sit under the reserved fleet server_id (0, <c>DarlingObservability.FleetServerId</c>) as
+    /// <c>data_retention</c> rows, which is why this reads the table rather than the per-server
+    /// <c>v_collection_log</c> reads above. Two records per run: the sweep's totals, then (on a TimescaleDB store)
+    /// the raw-table line whose text contains <c>, raw tables:</c>. Both lead with the run label, "Manual purge
+    /// (purge_now" plus a custom horizon when one was set, which is what tells them apart from the daily purge's
+    /// rows. Oldest first. $1 is the lower bound: the <c>startedAtUtc</c> the service answered the command with
+    /// (naive UTC, the service's own clock, the one <c>collection_time</c> is written from).
+    /// </summary>
+    public const string ManualPurgeRunRecordsSql = """
+        SELECT
+            collection_time,
+            status,
+            error_message,
+            rows_collected,
+            duration_ms
+        FROM collect.collection_log
+        WHERE server_id = 0
+        AND   collector_name = 'data_retention'
+        AND   collection_time >= $1
+        AND   error_message LIKE 'Manual purge (purge_now%'
+        ORDER BY collection_time
+        """;
+
+    /// <summary>
+    /// The manual purge's run records written at or after <paramref name="sinceUtc"/> (see
+    /// <see cref="ManualPurgeRunRecordsSql"/>), oldest first. <paramref name="sinceUtc"/> is the service's
+    /// <c>startedAtUtc</c>; it goes in as naive UTC.
+    /// </summary>
+    public async Task<List<ManualPurgeRunRecord>> GetManualPurgeRunRecordsAsync(DateTime sinceUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(ManualPurgeRunRecordsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified),
+        });
+
+        var items = new List<ManualPurgeRunRecord>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new ManualPurgeRunRecord(
+                reader.GetDateTime(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : Convert.ToInt32(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : Convert.ToInt32(reader.GetValue(4))));
+        }
+
+        return items;
+    }
+
     /// <summary>Shared reader for the two collection-log projections (identical column list).</summary>
     private static async Task<List<CollectionLogRow>> ReadCollectionLogAsync(NpgsqlCommand command, CancellationToken cancellationToken)
     {
@@ -492,11 +832,22 @@ public sealed partial class ViewerDataService
 }
 
 /// <summary>
+/// One <c>data_retention</c> run record a manual <c>purge_now</c> wrote to collection_log (#4825): the sweep's
+/// totals line, or the raw-table line written after the gated raw step. <see cref="ErrorMessage"/> carries the
+/// summary text (the column holds the message for every status, not only failures); the raw-table record is the
+/// one whose text contains <c>, raw tables:</c>.
+/// </summary>
+public sealed record ManualPurgeRunRecord(
+    DateTime CollectionTime, string Status, string? ErrorMessage, int? RowsCollected, int? DurationMs);
+
+/// <summary>
 /// One row of the Collection Log grid / drill window — a single collector run's outcome. Copied
 /// VERBATIM from Lite's <c>CollectionLogRow</c> (LocalDataService.CollectionHealth.cs): every display
 /// property is a pure format of stored values, and <see cref="CollectionTimeFormatted"/> routes the
 /// store's naive-UTC collection_time through <see cref="ViewerTimeHelper.ForDisplay"/> — the viewer's
-/// mode-aware Server/Local/UTC conversion every other Darling timestamp also uses.
+/// mode-aware Server/Local/UTC conversion for text, which every other Darling grid timestamp also uses. The
+/// collector-duration chart does not use it: it plots <c>CollectionTime</c> itself as X, the naive-UTC
+/// instant, and draws it in the display zone (#4766).
 /// <see cref="DuckDbDurationMs"/> keeps its store column name (<c>duckdb_duration_ms</c>)
 /// but in the Darling store that column records the POSTGRES write phase — the Collection Log grid
 /// labels it "Store (ms)".
@@ -516,7 +867,7 @@ public class CollectionLogRow
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
 
-    public string CollectionTimeFormatted => ViewerTimeHelper.ForDisplay(CollectionTime).ToString("g");
+    public string CollectionTimeFormatted => ViewerTimeHelper.FormatForDisplay(CollectionTime, "g");
 
     public string DurationFormatted => DurationMs.HasValue
         ? (DurationMs.Value < 1000 ? $"{DurationMs.Value} ms" : $"{DurationMs.Value / 1000.0:F1} s")
@@ -557,6 +908,37 @@ public class CollectorHealthRow
     /// extension stops banding NO_PERMISSIONS. Always 0 for SQL Server collectors.</summary>
     public long ExtensionMissingCount { get; set; }
 
+    /* ── Regressed from productive (#3819) ────────────────────────────────────────────────────────
+       A named skip on a collector that had been producing is a different fact from the same status on
+       one that never has. These two instants are what tells them apart; the
+       predicate below is composed from the shared classifier so this grid, the service's MCP tool and
+       Lite's grid cannot answer differently. The SENTENCE that names the rows and the status stays with
+       the two surfaces that have a rows_stored to count and a field to render it in. */
+
+    /// <summary>
+    /// The newest run whose status was NOT one of <c>CollectorRuntimePrecondition.NamedSkipStatuses</c>
+    /// (<c>last_non_skip_time</c>) — the instant the current skip streak began after. Null when every
+    /// run in the window was a skip, which is the never-produced-here case the benign band already
+    /// describes correctly.
+    /// </summary>
+    public DateTime? LastNonSkipTime { get; set; }
+
+    /// <summary>
+    /// The newest run that stored anything (<c>last_productive_time</c>). Its ORDER against
+    /// <see cref="LastNonSkipTime"/> is what makes a regression a regression rather than two unrelated
+    /// facts.
+    /// </summary>
+    public DateTime? LastProductiveTime { get; set; }
+
+    /// <summary>
+    /// Whether this collector WAS producing rows and now reports a named skip every cycle (#3819) — the
+    /// distinction <see cref="HealthStatus"/> could not make on its own, because the benign skip bands
+    /// are gated on the window holding no success and a regressed collector's window holds its
+    /// productive days.
+    /// </summary>
+    public bool RegressedFromProductive => CollectorHealthClassifier.RegressedFromProductive(
+        LastRunTime, LastNonSkipTime, LastProductiveTime);
+
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
@@ -574,6 +956,15 @@ public class CollectorHealthRow
 
     /// <summary>How many of <see cref="TotalRuns"/> carried a <see cref="LastNote"/>.</summary>
     public long NoteCount { get; set; }
+
+    /// <summary>
+    /// The note the collector's NEWEST run left (#4748), or null when that run left none. Unlike
+    /// <see cref="LastNote"/>, which is the newest note in the window whatever run wrote it, this is the
+    /// newest RUN's, so a clean run after a partial-failure cycle clears it. It is the one note the band reads
+    /// (<see cref="CollectorHealthClassifier.Classify"/>): a cycle that lost half or more of its databases
+    /// still records SUCCESS, and the note is the only record of the loss.
+    /// </summary>
+    public string? LatestRunNote { get; set; }
 
     /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
@@ -605,31 +996,46 @@ public class CollectorHealthRow
         ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
         : HoursSinceLastSuccess;
 
-    /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
-    /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
+    /// <summary>The collector's cadence, routed through <c>EffectiveRecurringIntervalMinutes</c> (#4000) so an
+    /// on-load collector's catalog 0 reads as the daily recapture interval, which is what lets
+    /// <see cref="CollectorHealthClassifier.Classify"/> band it on the SAME ladder as any other. A name the
+    /// catalog doesn't know keeps 0 and the classifier's floor thresholds, as before #4000: resolving it to
+    /// daily too would leave a collector that went dark HEALTHY for a day and a half. The banding uses the
     /// shipped default, not any per-install override: the viewer has no cheap per-collector effective
-    /// frequency at the row level, and using the same default across all three surfaces keeps them in parity.</summary>
+    /// frequency at the row level, and using the same default across all three surfaces keeps them in
+    /// parity.</summary>
     private int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
+        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+            ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
+            : 0;
 
-    public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
+    /// <summary>
+    /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
+    /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
+    /// answer everywhere else. Applied outside <c>Classify</c> because that signature takes RUN-CLASS
+    /// COUNTS (plus, since #4748, the newest run's partial-failure note - the run's own outcome) and nothing
+    /// about output, a discipline both suites pin off the type.
+    /// </summary>
+    public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
+        CollectorHealthClassifier.Classify(
+            TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
+        RegressedFromProductive);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"
         : $"{AvgDurationMs / 1000:F1} s";
 
     public string LastSuccessFormatted => LastSuccessTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastSuccessTime.Value).ToString("g")
+        ? ViewerTimeHelper.FormatForDisplay(LastSuccessTime.Value, "g")
         : "Never";
 
     public string LastRunFormatted => LastRunTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastRunTime.Value).ToString("g")
+        ? ViewerTimeHelper.FormatForDisplay(LastRunTime.Value, "g")
         : "Never";
 
     public string LastErrorFormatted => LastErrorTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastErrorTime.Value).ToString("g")
+        ? ViewerTimeHelper.FormatForDisplay(LastErrorTime.Value, "g")
         : "";
 
     /// <summary>
@@ -641,4 +1047,20 @@ public class CollectorHealthRow
     /// </summary>
     public string NoteFormatted =>
         CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases);
+}
+
+/// <summary>
+/// One row of <see cref="ViewerDataService.CollectionCaveatsSql"/> (#3691 part a2) — a data family the
+/// analysis pass currently cannot read on this server, and why. Feeds the Collection Health tab's
+/// "Analysis could not read these data families" section.
+/// </summary>
+public class CollectionCaveatRow
+{
+    public string Family { get; set; } = "";
+    public string Reason { get; set; } = "";
+    public DateTime FirstSeenUtc { get; set; }
+    public DateTime LastSeenUtc { get; set; }
+
+    public string FirstSeenFormatted => ViewerTimeHelper.FormatForDisplay(FirstSeenUtc, "g");
+    public string LastSeenFormatted => ViewerTimeHelper.FormatForDisplay(LastSeenUtc, "g");
 }

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -9,7 +10,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpPerfmonTools
 {
-    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results.")]
+    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values (batch requests/sec, compilations/sec, deadlocks/sec, and more). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected; use get_perfmon_trend for history. counter_kind: gauge = value IS the reading, delta_value null; rate = value is cumulative, delta_value its per-interval change, per_second that change per second (null when unknowable); other = a non-rate per-interval change; null counter_kind predates the column, classify by name (ends in /sec = rate). <<GUIDE>> Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time. Each row carries counter_kind from the stored cntr_type: 'gauge' means value IS the reading (a level such as Total Server Memory (KB); delta_value is null because a level has no delta), 'rate' means value is a cumulative count (a running total, not a rate), delta_value is its change over the last collection interval, and per_second is that change divided by the interval's seconds: the counter's rate, the figure to report for it, and null when no delta was knowable (a first collection, a counter reset or a restart), 'other' means an average/fraction numerator whose delta_value is a per-interval change and not a rate; null counter_kind is a row written before the type was stored — classify it by name (a counter whose name ends in /sec is a rate, and carries per_second).")]
     public static async Task<string> GetPerfmonStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -35,17 +36,19 @@ public sealed class McpPerfmonTools
             if (!string.IsNullOrEmpty(instance_name))
                 filtered = filtered.Where(r => r.InstanceName != null && r.InstanceName.Contains(instance_name, StringComparison.OrdinalIgnoreCase));
 
-            var result = filtered.Select(r => new
-            {
-                counter_name = r.CounterName,
-                instance_name = r.InstanceName,
-                value = r.Value,
-                delta_value = r.DeltaValue
-            });
+            /* One row per counter, built by the shared TrendPayloads.PerfmonLatestRow that Darling's
+               DarlingMcpDataTools calls too: counter_kind is the stored type's three-way reading (v62, #3653 A7),
+               delta_value is null on a gauge because the collector writes none, and a rate row adds per_second,
+               its delta over the stored interval, so the running total in value is never the only number a
+               reader gets. */
+            var result = filtered.Select(r => TrendPayloads.PerfmonLatestRow(
+                r.CounterName, r.InstanceName, r.Value, r.DeltaValue, r.SampleIntervalSeconds, r.CntrType));
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3541 A10: taken from the unfiltered snapshot, so a filter that matches nothing still says when. */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 counters = result
             }, McpHelpers.JsonOptions);
         }
@@ -55,14 +58,15 @@ public sealed class McpPerfmonTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names.")]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable), and each point carries it as per_second (null where the interval is 0); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetPerfmonTrend(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -72,7 +76,13 @@ public sealed class McpPerfmonTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetPerfmonTrendAsync(resolved.ServerId, counter_name, hours_back, asOfUtc: windowEnd);
+            /* #3960: bucketed as on Darling; the desktop chart's per-collection read (GetPerfmonTrendAsync) is untouched. */
+            var budget = TrendBudget.Mcp(TrendBuckets.PerfmonMaxPoints);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+            if (bucketError != null) return bucketError;
+
+            var bucketsResult = await dataService.GetPerfmonBucketsAsync(resolved.ServerId, counter_name, hours_back, windowEnd, bucketMinutes);
+            var points = bucketsResult.Points;
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-counter probe, not after it. Both are on
@@ -114,24 +124,19 @@ public sealed class McpPerfmonTools
                     new { collected_counters = collected });
             }
 
-            var result = points.Select(p => new
-            {
-                time = p.CollectionTime.ToString("o"),
-                value = p.Value,
-                delta_value = p.DeltaValue,
-                /* The delta's denominator. 0 means no delta was knowable, so delta_value = 0 with an
-                   interval of 0 must NOT be read as "no activity"; derive rates as
-                   delta_value / sample_interval_seconds rather than assuming a fixed cadence (#2234). */
-                sample_interval_seconds = p.SampleIntervalSeconds
-            });
+            /* counter_kind is the series' stored type read three ways (v62, #3653 A7): the type of any point
+               that has one, because a counter's type does not change and the read reports a type only where
+               the point's instance rows agree; null when no point has one. A gauge's points publish null
+               delta_value and null sample_interval_seconds — the collector writes neither for a level — and
+               value is the bucket's average reading. sample_interval_seconds is the delta's denominator: 0 means
+               no delta was knowable, so delta_value = 0 with an interval of 0 must NOT be read as "no activity"
+               (#2234). TrendPayloads.PerfmonTrend builds both SKUs' envelope. */
+            /* #3653 A5: the window's baseline discontinuities as the trailing key — see BaselineDiscontinuities. */
+            var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                counter_name,
-                hours_back,
-                trend = result
-            }, McpHelpers.JsonOptions);
+            return TrendPayloads.PerfmonTrend(
+                resolved.ServerName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), bucketsResult.ArtifactsSetAside);
         }
         catch (Exception ex)
         {

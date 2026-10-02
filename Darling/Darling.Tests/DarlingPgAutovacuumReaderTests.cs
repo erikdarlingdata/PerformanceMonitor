@@ -191,6 +191,20 @@ public class DarlingPgAutovacuumReaderTests
         Assert.Equal("critical_far_past_threshold", DarlingMcpPgAutovacuumTools.Classify(false, 25.0, true));
     }
 
+    /// <summary>
+    /// Growth null — a one-sample window — never escalates to the growing verdict and never reads as
+    /// flat's "blocked or not running" implication either: the band's plain label carries it, and the
+    /// bands growth does not refine are untouched by it.
+    /// </summary>
+    [Fact]
+    public void UnknownGrowthNeverEscalatesAndNeverReadsFlat()
+    {
+        Assert.Equal("warning_past_threshold", DarlingMcpPgAutovacuumTools.Classify(false, 3.0, null));
+        Assert.Equal("critical_far_past_threshold", DarlingMcpPgAutovacuumTools.Classify(false, 25.0, null));
+        Assert.Equal("info_at_threshold", DarlingMcpPgAutovacuumTools.Classify(false, 1.5, null));
+        Assert.Equal("ok", DarlingMcpPgAutovacuumTools.Classify(false, 0.5, null));
+    }
+
     /// <summary>Every severity is a distinct string, so a caller can switch on it.</summary>
     [Fact]
     public void SeveritiesAreDistinct()

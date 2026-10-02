@@ -88,22 +88,28 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "validate_custom_view"), Description(
-        "Dry-run: validates a custom-view definition against the measure catalog and the composer rules WITHOUT " +
-        "persisting anything. Returns {valid:true} or {valid:false, error:\"...\"} naming the first problem. This is " +
-        "the exact authority create_custom_view / update_custom_view run before saving, so use it to iterate on a " +
-        "generated definition until it is valid. The definition is a dashboard {\"panels\":[...]} or a notebook " +
-        "{\"kind\":\"notebook\",\"cells\":[...]}; a composed panel names a catalog 'source' + 'measure'|'ratio', an " +
-        "'aggregate', an optional 'timeBucket' (time series), 'topN' (ranked), or both together (the bucketed " +
-        "trend of the top-N groups by window total; optional 'includeOther' folds the remainder into one " +
-        "'(other)' series), 'filters', 'groupBy', 'unit', 'viz', and optionally an " +
-        "'overlay' second measure (scatter's y axis, or a dual-axis line/area). Unknown keys are ERRORS at every " +
-        "level (root, panel, cell, filter, overlay), with a did-you-mean for a near-miss — a typo'd key can never " +
-        "silently validate as a different panel. Note a notebook panel cell is FLAT (the cell object carries " +
-        "'type':'panel' plus the panel's own keys); only run_custom_view_panel's spec nests under 'panel'. A " +
-        "notebook panel cell may also carry its own 'range' — {\"hours\":n} or {\"windowStart\",\"windowEnd\"} " +
-        "(ISO-8601 UTC, one shape only) — pinning that cell's window over the notebook's view-level range so a " +
-        "comparison document (say, two Fridays side by side) stays a LIVE view; absent means the cell follows the " +
-        "view window. The view-level 'range' itself stays relative ({\"hours\":n} only).")]
+        "Dry-run: validates a custom-view definition (dashboard {\"panels\":[...]} or notebook " +
+        "{\"kind\":\"notebook\",\"cells\":[...]}) against the measure catalog and composer rules WITHOUT " +
+        "persisting anything. Returns {valid:true} or {valid:false, error:\"...\"} naming only the FIRST problem " +
+        "found; fixing it can reveal more. Unknown keys are ERRORS at every level (root, panel, cell, filter, " +
+        "overlay), never silently dropped. A notebook cell is FLAT (carries the panel's own keys directly); only " +
+        "run_custom_view_panel's spec nests under 'panel'. <<GUIDE>> Dry-run: validates a custom-view definition " +
+        "against the measure catalog and the composer rules WITHOUT persisting anything. Returns {valid:true} or " +
+        "{valid:false, error:\"...\"} naming the first problem. This is the exact authority create_custom_view / " +
+        "update_custom_view run before saving, so use it to iterate on a generated definition until it is valid. " +
+        "The definition is a dashboard {\"panels\":[...]} or a notebook {\"kind\":\"notebook\",\"cells\":[...]}; " +
+        "a composed panel names a catalog 'source' + 'measure'|'ratio', an 'aggregate', an optional 'timeBucket' " +
+        "(time series), 'topN' (ranked), or both together (the bucketed trend of the top-N groups by window " +
+        "total; optional 'includeOther' folds the remainder into one '(other)' series), 'filters', 'groupBy', " +
+        "'unit', 'viz', and optionally an 'overlay' second measure (scatter's y axis, or a dual-axis line/area). " +
+        "Unknown keys are ERRORS at every level (root, panel, cell, filter, overlay), with a did-you-mean for a " +
+        "near-miss — a typo'd key can never silently validate as a different panel. Note a notebook panel cell is " +
+        "FLAT (the cell object carries 'type':'panel' plus the panel's own keys); only run_custom_view_panel's " +
+        "spec nests under 'panel'. A notebook panel cell may also carry its own 'range' — {\"hours\":n} or " +
+        "{\"windowStart\",\"windowEnd\"} (ISO-8601 UTC, one shape only) — pinning that cell's window over the " +
+        "notebook's view-level range so a comparison document (say, two Fridays side by side) stays a LIVE view; " +
+        "absent means the cell follows the view window. The view-level 'range' itself stays relative " +
+        "({\"hours\":n} only).")]
     public static Task<string> ValidateCustomView(
         [Description("The view definition JSON to validate (NOT persisted).")] string definition)
     {
@@ -155,7 +161,10 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "update_custom_view"), Description(
-        "Updates an existing custom view in place (a full replacement of name/description/definition). The " +
+        "Updates an existing custom view in place: name and definition are REQUIRED and replace the stored ones; " +
+        "description is optional and follows the one write vocabulary shared with update_custom_alert_rule - " +
+        "OMITTED means UNCHANGED (the stored description is kept), an EMPTY string \"\" means CLEARED, any other " +
+        "text replaces it. The " +
         "definition is VALIDATED first; an invalid one returns {status:\"invalid\", ...} and changes nothing. Pass " +
         "the 'version' you last read via get_custom_view — if someone else changed the view since, this returns " +
         "{status:\"conflict\", ...} rather than silently overwriting their edit (reload and re-apply). A missing id " +
@@ -167,7 +176,7 @@ public sealed class DarlingMcpCustomViewTools
         [Description("The view name (unique, max 200 characters).")] string name,
         [Description("The full replacement view definition JSON. Validate it with validate_custom_view first.")] string definition,
         [Description("The version you last read from get_custom_view (optimistic concurrency; a mismatch is a conflict, not an overwrite).")] int version,
-        [Description("Optional human-readable description.")] string? description = null)
+        [Description("Optional human-readable description. Omit to keep the current description; send an empty string \"\" to clear it.")] string? description = null)
     {
         try
         {
@@ -178,8 +187,23 @@ public sealed class DarlingMcpCustomViewTools
             }
 
             var store = new CustomViewStore(postgres);
+
+            /* #3541 A14: read the row first so an OMITTED description is carried forward rather than written as
+               NULL. The store's UpdateAsync is a full replacement (right for the web editor, which always sends
+               the whole form); over MCP an omitted argument arrives as null, and before this a rename or a
+               definition edit that did not restate the description silently erased it - while the sibling
+               update_custom_alert_rule kept it. Same rule, same helper, on both tools now: omitted = unchanged,
+               empty = cleared (see DarlingMcpCustomAlertTools.ResolveOptionalText). The extra read is one
+               indexed primary-key SELECT before a write the caller has already paid a round trip for. */
+            var current = await store.GetAsync(view_id);
+            if (current is not CustomViewResult.Ok currentOk || currentOk.View is null)
+            {
+                return Outcome("not_found", $"No custom view with id {view_id}.");
+            }
+
             var result = await store.UpdateAsync(
-                view_id, name, description, definition, version, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
+                view_id, name, DarlingMcpCustomAlertTools.ResolveOptionalText(description, currentOk.View.Description),
+                definition, version, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
             return result switch
             {
                 CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
@@ -217,20 +241,28 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "run_custom_view_panel"), Description(
+        "Runs one composed (v2) panel and returns DATA: {sql, rows, annotations, notice?}, with no 'status' " +
+        "field on success. Failures return {status, message}: \"invalid\" for a bad spec or panel, or a " +
+        "failed or timed-out query; \"error\" for an internal fault. notice means retention covered only " +
+        "part of the window, or the row cap truncated the result; absent means neither happened. Window ends " +
+        "now: 'hours' (default 24), unless ISO-8601 'windowStart'+'windowEnd' win instead (max 90 days; old " +
+        "windows read rollups). 'server' omitted or \"All\" runs the whole fleet. Only 'panel' is " +
+        "required. <<GUIDE>> " +
         "Runs a single composed (v2) panel and returns the DATA it produces — {sql, rows, annotations, notice?} " +
-        "(notice = a partial-window caveat when the store's retention cannot cover the whole requested range) — so a " +
-        "generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the web " +
-        "composer's live preview uses: the panel is validated, compiled to catalog-only bound SQL, and executed " +
-        "against the collected store under a statement_timeout. The spec is a JSON object " +
-        "{\"panel\":{...}, \"variables\":[...], \"values\":{...}, \"server\":\"NAME\"|[\"A\",\"B\"], \"hours\":N} — only " +
-        "'panel' is required (a composed panel, the same shape a dashboard panel or a notebook panel cell uses); " +
-        "omit 'server' (or use \"All\") for the whole fleet, and 'hours' defaults to 24. For an ABSOLUTE window " +
-        "(historical analysis), pass ISO-8601 'windowStart' + 'windowEnd' instead — they win over 'hours', the span " +
-        "is capped at 90 days, and old windows are served from the retention rollups automatically. To read back a " +
-        "SAVED view, call get_custom_view and run each of its composed panels here.")]
+        "(notice = a partial-window caveat when the store's retention cannot cover the whole requested range) — " +
+        "so a generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the " +
+        "web composer's live preview uses: the panel is validated, compiled to catalog-only bound SQL, and " +
+        "executed against the collected store under a statement_timeout. The spec is a JSON object " +
+        "{\"panel\":{...}, \"variables\":[...], \"values\":{...}, \"server\":\"NAME\"|[\"A\",\"B\"], \"hours\":N} " +
+        "— only 'panel' is required (a composed panel, the same shape a dashboard panel or a notebook panel cell " +
+        "uses); omit 'server' (or use \"All\") for the whole fleet, and 'hours' defaults to 24. For an ABSOLUTE " +
+        "window (historical analysis), pass ISO-8601 'windowStart' + 'windowEnd' instead — they win over 'hours', " +
+        "the span is capped at 90 days, and old windows are served from the retention rollups automatically. To " +
+        "read back a SAVED view, call get_custom_view and run each of its composed panels here.")]
     public static async Task<string> RunCustomViewPanel(
         NpgsqlDataSource postgres,
-        [Description("The composed-panel run spec as JSON (see the tool description for the shape). Only 'panel' is required.")] string spec)
+        [Description("The composed-panel run spec as JSON (see the tool description for the shape). Only 'panel' is required.")] string spec,
+        ReadLatencyRecorder? readLatency = null)
     {
         try
         {
@@ -249,7 +281,10 @@ public sealed class DarlingMcpCustomViewTools
                 return Outcome("invalid", "spec must be a JSON object with a 'panel'.");
             }
 
-            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None);
+            /* #4782: readLatency is a DI service (never in the advertised schema), the MCP host's read-latency
+               seat; the shared runner records this run into it as one Compose sample. Optional, so a direct
+               caller (a test) records nothing. */
+            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None, readLatency);
             return outcome.Payload is not null
                 ? outcome.Payload.ToJsonString(McpHelpers.JsonOptions)
                 : Outcome(outcome.IsServerError ? "error" : "invalid", outcome.Error!);
@@ -261,16 +296,38 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "describe_custom_view_catalog"), Description(
+        "Returns the COMPOSE CATALOG: the exact vocabulary (measures, dimensions, aggregates, units, timeBuckets, viz) " +
+        "a composed (v2) panel may use; the compiler emits ONLY these identifiers. CALL THIS FIRST before " +
+        "create/update/validate/run_custom_view_panel. Default is COMPACT (#4198, see guide); source/full_detail " +
+        "get more. On query_stats, ad-hoc SQL carries the literal '(ad hoc)' " +
+        "module; a neq filter on procedure name still INCLUDES those rows (the dimension value is never null). " +
+        "Static reference data: no server, time window, or collected-data read. <<GUIDE>> " +
         "Returns the COMPOSE CATALOG — the exact vocabulary a composed (v2) custom-view panel may draw from — so you " +
         "can build a VALID panel without guessing at names. CALL THIS FIRST before create_custom_view / " +
         "update_custom_view / validate_custom_view / run_custom_view_panel: the panel's 'source', 'measure'/'ratio', " +
         "'aggregate', 'unit', 'groupBy'/'filters' dimensions, 'timeBucket', and 'viz' must all come from this " +
         "catalog (the compiler emits ONLY these identifiers), and the validation errors do not enumerate the legal " +
-        "names, so guessing them is slow. Returns {measures, dimensions, annotationSources, universalDimensions, " +
-        "unitFamilies, aggregates, timeBuckets, filterOps, viz}. Each measure names its 'source' (collector table), " +
+        "names, so guessing them is slow. " +
+        "DEFAULT CALL (#4198 — the full catalog is 98 KB, three times this tool's budget): {sources: [{source, " +
+        "measures: [{key, displayName, kind, unitFamily, validAggregates}]}], annotationSources (key/displayName/" +
+        "category only), universalDimensions, unitFamilies, aggregates, timeBuckets, filterOps, viz, compact: true, " +
+        "note}. displayName is the measure's one-line purpose; kind is scalar|ratio (use the key as the panel's " +
+        "'measure', or as 'ratio' when kind='ratio'); validAggregates is what the panel's 'aggregate' may be — it " +
+        "is the one field that VARIES within a source (a ratio measure's list differs from its source's scalars), " +
+        "so it stays inline, because the compact form drops allowedDimensions and dimensions, and `source=<name>` returns them. " +
+        "SOURCE DRILL-DOWN (source=\"wait_stats\", a name from the default call's sources[].source): {source, " +
+        "measures (every field below, filtered to this source), dimensions (this source's filterable/groupable " +
+        "columns), annotationSources, ...the same small vocabularies}. An unmatched source comes back with empty " +
+        "measures/dimensions and a note, not an error. " +
+        "FULL_DETAIL=true (or full_detail with source: same, unfiltered): today's original shape, {measures, " +
+        "dimensions, annotationSources, universalDimensions, unitFamilies, aggregates, timeBuckets, filterOps, " +
+        "viz}, every measure/dimension/annotationSource at every field — the same shape web /api/catalog serves " +
+        "the Custom Views editor (unrelated to this default; the editor always gets the full catalog). " +
+        "Each measure names its 'source' (collector table), " +
         "its 'key' (use as the panel's 'measure', or as 'ratio' when kind='ratio'), its 'kind' (scalar|ratio), the " +
         "'validAggregates' and 'allowedDimensions' legal for it, its unit family + default/native unit, and " +
-        "'appliesTo' (which server types — onPrem/azureSqlDb/azureMi/awsRds — can collect it). A panel then names a " +
+        "'appliesTo' (which server types — onPrem/azureSqlDb/azureMi/awsRds — can collect it; a UI greying hint, " +
+        "not a compose-time restriction). A panel then names a " +
         "'source' + 'measure'|'ratio', an 'aggregate' from that measure's validAggregates, a 'unit' from its family, " +
         "an optional 'timeBucket' (time series; prefer 'auto', which adapts the grain minute/hour/day to the " +
         "panel's window so any range renders), 'topN' (ranked), or BOTH (the bucketed trend of exactly the top-N " +
@@ -288,11 +345,20 @@ public sealed class DarlingMcpCustomViewTools
         "null). For a true top-statements panel group by 'statement' instead: procedures keep their module name " +
         "and ad-hoc statements stay distinct by query_hash. Static " +
         "reference data — no server or time window needed; it reads no monitored server and no collected data.")]
-    public static Task<string> DescribeCustomViewCatalog()
+    public static Task<string> DescribeCustomViewCatalog(
+        [Description("Drill into ONE source (collector table, e.g. 'wait_stats') for its full per-measure detail plus its " +
+            "dimensions. A name from the default call's sources[].source. Default null (no filter).")] string? source = null,
+        [Description("Return the complete catalog at full per-entry detail, ungrouped, instead of the compact default. Default false.")] bool full_detail = false)
     {
         try
         {
-            return Task.FromResult(DarlingWebEndpoints.BuildComposeCatalogNode().ToJsonString(McpHelpers.JsonOptions));
+            var full = DarlingWebEndpoints.BuildComposeCatalogNode();
+            var result = source is not null
+                ? DarlingWebEndpoints.FilterComposeCatalogNodeBySource(full, source)
+                : full_detail
+                    ? full
+                    : DarlingWebEndpoints.BuildComposeCatalogCompactNode(full);
+            return Task.FromResult(result.ToJsonString(McpHelpers.JsonOptions));
         }
         catch (Exception ex)
         {

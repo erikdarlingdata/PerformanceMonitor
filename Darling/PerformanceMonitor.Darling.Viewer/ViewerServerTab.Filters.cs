@@ -35,6 +35,7 @@ public partial class ViewerServerTab : UserControl
     private DataGridFilterManager<DatabaseConfigRow>? _databaseConfigFilterMgr;
     private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
     private DataGridFilterManager<QueryStoreHealthRow>? _queryStoreHealthFilterMgr;
+    private DataGridFilterManager<ViewerDataService.QueryStoreClutterRow>? _queryStoreClutterFilterMgr;
     private DataGridFilterManager<AutomaticTuningRow>? _automaticTuningFilterMgr;
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
     private DataGridFilterManager<RunningJobRow>? _runningJobsFilterMgr;
@@ -61,6 +62,7 @@ public partial class ViewerServerTab : UserControl
         _databaseConfigFilterMgr = new DataGridFilterManager<DatabaseConfigRow>(DatabaseConfigGrid);
         _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
         _queryStoreHealthFilterMgr = new DataGridFilterManager<QueryStoreHealthRow>(QueryStoreHealthGrid);
+        _queryStoreClutterFilterMgr = new DataGridFilterManager<ViewerDataService.QueryStoreClutterRow>(QueryStoreClutterGrid);
         _automaticTuningFilterMgr = new DataGridFilterManager<AutomaticTuningRow>(AutomaticTuningGrid);
         _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
         _runningJobsFilterMgr = new DataGridFilterManager<RunningJobRow>(RunningJobsGrid);
@@ -83,6 +85,7 @@ public partial class ViewerServerTab : UserControl
         _filterManagers[DatabaseConfigGrid] = _databaseConfigFilterMgr;
         _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
         _filterManagers[QueryStoreHealthGrid] = _queryStoreHealthFilterMgr;
+        _filterManagers[QueryStoreClutterGrid] = _queryStoreClutterFilterMgr;
         _filterManagers[AutomaticTuningGrid] = _automaticTuningFilterMgr;
         _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
         _filterManagers[RunningJobsGrid] = _runningJobsFilterMgr;
@@ -122,12 +125,21 @@ public partial class ViewerServerTab : UserControl
 
         await Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, queryStoreHealthTask, automaticTuningTask, traceFlagsTask);
 
+        /* The six are done, and the not-collected note below may read the store once more. Release here so that read is not priced
+           against contention that has already finished. */
+        readFanOut.Release();
+
         _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
         _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
         _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
         _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
         _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
         _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
+
+        /* Where the collector cannot run (Azure SQL Database) or has never run for this server, an empty grid says so. Keyed on the
+           unfiltered row count. */
+        await ShowEngineGapAsync(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count);
+        await ShowEngineGapAsync(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count);
     }
 
     /* Host/apply plumbing lives in the shared Ui controller. Lazy (a field initializer can't reference the

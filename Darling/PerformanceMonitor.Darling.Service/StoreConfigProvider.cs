@@ -15,8 +15,10 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -960,7 +962,18 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
 
         /* Every knob rung APPENDS to this column list and to the bindings below in the same order, so
            no existing placeholder ordinal moves: #2349's four file-growth gates, then #3297's two
-           Retention Held ratios (V119), then #3368's two deadlock-rate tiers (V120).
+           Retention Held ratios (V119), then #3368's two deadlock-rate tiers (V120), ..., then #3653's two
+           Long-Running Query opt-out lists (text[], the excluded_databases shape).
+
+           ONE column the read selects is DELIBERATELY ABSENT here: analysis_uncorroborated_route (#3712, V137),
+           the store half of the uncorroborated-finding route knob. It is a nullable tri-state whose NULL means
+           "not set in the store; darling.json's analysis.uncorroboratedRoute governs", and the precedence the
+           resolver applies is store non-NULL wins over file. Seeding the file's value INTO it would make the
+           store win from the first start on every install, so the file could never govern again without an
+           operator clearing the column -- the third state would exist in the schema and be reachable on no
+           store. Omitted from the INSERT, the column takes its NULL, which is exactly what an upgraded store
+           reads too; the file keeps governing until someone writes a route through the Viewer or
+           update_alert_settings. The rung doc (PgMigrations V137) says the same from the DDL side.
 
            ANNOTATE HERE. THE COLUMN LIST CARRIES NO COMMENTS AT ALL, and that is a hard rule rather
            than a preference: ConfigSeedStatementArityTests parses this statement with one regex that
@@ -992,11 +1005,13 @@ INSERT INTO config_alert_settings (
     retention_hold_warn_ratio, retention_hold_critical_ratio,
     deadlock_warn_per_hour, deadlock_critical_per_hour,
     pg_deadlock_count_threshold, pg_blocking_count_threshold,
-    fleet_sweep_enabled, fleet_sweep_interval_minutes)
+    fleet_sweep_enabled, fleet_sweep_interval_minutes,
+    self_disk_free_warn_gb,
+    long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67)
+        $64, $65, $66, $67, $68, $69, $70)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1088,6 +1103,17 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
            holds is what get_alert_settings reports back. */
         command.Parameters.AddWithValue(a.FleetSweepEnabled);
         command.Parameters.AddWithValue(a.FleetSweepIntervalMinutes);
+        /* #3528, bound in the same order the V126 column was appended. Seeded RAW like every sibling:
+           the floor-at-0 lives on DarlingAlertSettings, so what the store holds is what
+           get_alert_settings reports back. */
+        command.Parameters.AddWithValue(a.SelfDiskFreeWarnGb);
+        /* #3653 (A5, Q5), bound in the same order the two text[] columns were appended (V135). Seeded through
+           the shared normaliser (trim, blanks dropped, case-insensitive dedupe) so the store holds the list the
+           engine will apply and get_alert_settings reports back. On a fresh install these are darling.json's
+           values, which default to the production read's seeds (the job-step program prefix; the two NT
+           AUTHORITY logins) — the same values the rung's column DEFAULT gives a pre-rung row. */
+        AddTextArray(command, LongRunningQueryExclusions.Normalize(a.LongRunningQueryExcludedProgramNamePrefixes));
+        AddTextArray(command, LongRunningQueryExclusions.Normalize(a.LongRunningQueryExcludedLogins));
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1196,6 +1222,35 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
             var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
 
+            /* #3712: analysis.uncorroboratedRoute is the FILE half of a two-source knob whose STORE half
+               (config_alert_settings.analysis_uncorroborated_route, V137) ReadAlertSettingsAsync has just read
+               into analysis.StoreUncorroboratedRoute. The file half lives inside the AnalysisConfig section that
+               ApplyToConfig swaps WHOLESALE, so the fresh store-built section would drop it on the first reload;
+               it is carried across from the held config, which is darling.json's value on the first load and
+               the previous carry on every later one -- the BuildServerFromRow shape (a file-only value
+               backfilled from bootstrap onto a store-built object). The carry SURVIVED the column on purpose:
+               the precedence is store non-NULL wins over file, and "over file" needs the file's value to still
+               exist when the store column is NULL -- including the moment an operator clears it back to NULL
+               to hand the decision back to the file. DarlingAlertSettings.ResolveUncorroboratedRoute reads the
+               pair. */
+            analysis.UncorroboratedRoute = bootstrap.Analysis.UncorroboratedRoute;
+
+            /* The one reading the resolver cannot report itself: a store value that is neither 'digest' nor
+               'page'. The V137 CHECK makes that a write error at the store, so on a healthy store this never
+               fires; on a store whose CHECK was dropped by hand it is the difference between "the operator's
+               PAGE silently became the file's digest" and a warning naming the value. Logged here rather than
+               in the resolver because this is the one caller with a logger, and once per reload rather than
+               per evaluation because reloads happen only on a config_version bump. The value is left as read
+               (the resolver ignores it) so get_alert_settings, which reads the row directly, reports the same
+               fall-through this process applied. */
+            var resolved = DarlingAlertSettings.ResolveUncorroboratedRoute(analysis.StoreUncorroboratedRoute, analysis.UncorroboratedRoute);
+            if (resolved.StoreValueIgnored)
+            {
+                _logger?.LogWarning(
+                    "config_alert_settings.analysis_uncorroborated_route holds '{StoreValue}', which is neither 'digest' nor 'page' (the V137 CHECK should have refused it) — ignoring it; the {Source} route '{Route}' governs uncorroborated findings until the column is set to a valid route or cleared to NULL",
+                    analysis.StoreUncorroboratedRoute, resolved.Source, resolved.RouteText);
+            }
+
             /* The notification row is the ONLY read here that touches secret columns — the SMTP password and
                username, and the Teams/Slack/generic/PagerDuty bearer URLs. DarlingManagedRoles deliberately
                revokes table-wide SELECT on config_notification from BOTH viewer and mcp and re-grants only
@@ -1208,6 +1263,11 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
                is the worker or a test on the privileged connection, so the row is read unconditionally and
                the skip parameter is gone with its last caller. */
             var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
+
+            /* #3598 (V131): the routes layered over that row, read on the same privileged connection for the
+               same reason — four of its five destination columns are the same bearer secrets. Zero rows is the
+               ordinary state and resolves to the parent row exactly. */
+            var routes = await ReadNotificationRoutesAsync(connection, cancellationToken);
 
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
             var schedules = await ReadScheduleOverridesAsync(connection, cancellationToken);
@@ -1242,6 +1302,7 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
                 Analysis = analysis,
                 Smtp = smtp,
                 Webhooks = webhooks,
+                NotificationRoutes = routes,
                 EnabledServers = servers,
                 ScheduleOverrides = schedules,
             };
@@ -1305,7 +1366,7 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
     internal const int MaxComposeStatementTimeoutSeconds = 600;
 
     internal static int ClampComposeStatementTimeoutSeconds(int value) =>
-        Math.Clamp(value <= 0 ? 15 : value, MinComposeStatementTimeoutSeconds, MaxComposeStatementTimeoutSeconds);
+        Math.Clamp(value <= 0 ? 60 : value, MinComposeStatementTimeoutSeconds, MaxComposeStatementTimeoutSeconds);
 
     /// <summary>#2171: unknown values normalize to 'gzip' (fail to the shipped default) so a hand-edited
     /// row cannot switch the writer into an undefined mode; the V62 CHECK constraint enforces the same
@@ -1361,7 +1422,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        retention_hold_warn_ratio, retention_hold_critical_ratio,
        deadlock_warn_per_hour, deadlock_critical_per_hour,
        pg_deadlock_count_threshold, pg_blocking_count_threshold,
-       fleet_sweep_enabled, fleet_sweep_interval_minutes
+       fleet_sweep_enabled, fleet_sweep_interval_minutes,
+       self_disk_free_warn_gb,
+       long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins,
+       analysis_uncorroborated_route
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1486,6 +1550,22 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
                default on every worker start. */
             FleetSweepEnabled = reader.GetBoolean(64),
             FleetSweepIntervalMinutes = reader.GetInt32(65),
+
+            /* #3528 store-disk-warn GB floor appended (V126) at ordinal 66. Same reachability rule as
+               every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column selected
+               but not read here -- or read but not selected -- would silently reset the floor to the
+               shipped default on every worker start. */
+            SelfDiskFreeWarnGb = reader.GetInt32(66),
+
+            /* #3653 (A5, Q5) Long-Running Query opt-out lists appended at ordinals 67-68 (V135), text[] NOT
+               NULL, DEFAULT the two seeded lists (NOT '{}' like excluded_databases: the seeds are what a row
+               that never held the key should read as, and an operator's cleared list is stored as an explicit
+               '{}', which is honoured). Same reachability rule as every appended knob: ApplyToConfig
+               replaces config.Alerts wholesale, so a column selected but not read here -- or read but not
+               selected -- would silently reset the knob on every worker start, and the sessions an
+               operator excluded would page again while get_alert_settings still showed the list. */
+            LongRunningQueryExcludedProgramNamePrefixes = ReadTextArray(reader, 67),
+            LongRunningQueryExcludedLogins = ReadTextArray(reader, 68),
         };
         var analysis = new AnalysisConfig
         {
@@ -1493,6 +1573,19 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             IntervalMinutes = reader.GetInt32(24),
             NotificationsEnabled = reader.GetBoolean(25),
             NotifySeverity = reader.GetDouble(26),
+
+            /* #3712 (V137): the route knob's STORE half appended at ordinal 69 -- nullable text under a CHECK, no
+               DEFAULT, and NULL is a value ("not set in the store; darling.json's analysis.uncorroboratedRoute
+               governs"), so the DBNull arm is the EXPECTED reading on every store the morning after the upgrade
+               and on every fresh seed, not a mid-migration guard. Read into its own member, never folded into
+               UncorroboratedRoute (the file half, which LoadViewAsync carries across the swap): the resolver on
+               DarlingAlertSettings needs both to say which one decided, and an operator clearing the column
+               back to NULL needs the file's value still to be there. Same reachability rule as every appended
+               knob: ApplyToConfig replaces config.Analysis wholesale, so a column selected but not read here --
+               or read but not selected -- would silently reset the store half to NULL on every worker start,
+               and a route an operator set to PAGE in the Viewer would read as the file's digest while
+               get_alert_settings (which reads the row directly) still showed page. */
+            StoreUncorroboratedRoute = reader.IsDBNull(69) ? null : reader.GetString(69),
         };
         return (alerts, analysis);
     }
@@ -1539,7 +1632,10 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
         return (smtp, webhooks);
     }
 
-    private static async Task<IReadOnlyList<MonitoredServer>> ReadMonitoredServersAsync(
+    /// <summary>Internal, not private (#4214): <c>--validate-config</c>'s registry-based pre-flight calls this
+    /// directly with its own connection, rather than the file's darling.json list, so it tests the servers the
+    /// store will actually collect from.</summary>
+    internal static async Task<IReadOnlyList<MonitoredServer>> ReadMonitoredServersAsync(
         NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct)
     {
         var servers = new List<MonitoredServer>();
@@ -1631,6 +1727,35 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         return server;
     }
 
+    /// <summary>The routes SELECT, public-const so the viewer's writer and the tests can pin column parity
+    /// against it the way <c>NotificationColumns</c> is pinned against <see cref="ReadNotificationAsync"/>.
+    /// Ordered by <c>route_id</c> so "first matching route wins" in the resolver is a statement about the
+    /// table rather than about row order.</summary>
+    public const string NotificationRoutesSelectSql =
+        "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled "
+        + "FROM config_notification_routes ORDER BY route_id";
+
+    private static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var routes = new List<NotificationRoute>();
+        using var command = new NpgsqlCommand(NotificationRoutesSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            routes.Add(new NotificationRoute(
+                reader.GetInt32(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.GetString(6),
+                reader.GetBoolean(7)));
+        }
+
+        return routes;
+    }
+
     private static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var overrides = new List<ScheduleOverride>();
@@ -1679,6 +1804,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         config.Analysis = view.Analysis;
         config.Smtp = view.Smtp;
         config.Webhooks = view.Webhooks;
+        /* #3598: the routes swap with the row they layer over, so DarlingAlertSettings.NotificationRoutes
+           reads the new list by reference on the next firing — the hot-reload path the V131 trigger bumps. */
+        config.NotificationRoutes = view.NotificationRoutes;
         config.CapturePlans = view.CapturePlans;
         config.QueryStoreBackfillEnabled = view.QueryStoreBackfillEnabled;
         config.QueryStoreTextBudgetMb = view.QueryStoreTextBudgetMb;
@@ -1733,10 +1861,14 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         }
 
         /* Sanitize operator-supplied overrides before they drive scheduling / a destructive purge: a
-           negative frequency or a retention < 1 (0 would invert the purge cutoff and wipe the table)
-           is treated as "no override" and falls through to the next level. Defense in depth with the
-           V17 CHECK constraints and the DarlingRetention sink clamp. */
-        var frequency = ValidFrequency(perServer?.FrequencyMinutes) ?? ValidFrequency(fleet?.FrequencyMinutes) ?? def.FrequencyMinutes;
+           negative frequency, a retention < 1 (0 would invert the purge cutoff and wipe the table), or a
+           delta-family cadence past the gap-policy cap (#3532 — every cycle would exceed
+           CollectorDeltaCalculator.DefaultMaxGapSeconds, re-baseline, and store a zero delta forever) is
+           treated as "no override" and falls through to the next level. Defense in depth with the
+           V17 CHECK constraints, the viewer editor's ValidateSchedule, and the DarlingRetention sink clamp. */
+        /* #3896: the frequency rule lives in CollectorScheduleDefaults so the analysis pass bounds its
+           latest-value reads by exactly the cadence this schedules the collector at. */
+        var frequency = CollectorScheduleDefaults.ResolveFrequencyMinutes(collectorName, perServer?.FrequencyMinutes, fleet?.FrequencyMinutes);
         var retention = ValidRetention(perServer?.RetentionDays) ?? ValidRetention(fleet?.RetentionDays) ?? def.RetentionDays;
         /* No override row falls back to the collector's shared default enabled state — true for nearly
            every collector, but false for an opt-in one like long_query_completions (#1496). Falling back
@@ -1750,24 +1882,29 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// The effective FLEET-WIDE retention horizon for a collector (a per-server override can't apply to a
     /// shared-table purge): the fleet override (<c>server_id</c> NULL) <c>retention_days</c> if set, else the
     /// <see cref="CollectorScheduleDefaults"/> default. Pure. Feeds <see cref="DarlingRetention"/>.
+    /// <para>#3653: this locates the fleet row; the RULE (valid override else default, where valid is the same
+    /// <see cref="ValidRetention"/> bound) is <see cref="DarlingRetentionHorizons.ResolveFleetRetentionDays"/>
+    /// in Storage, so the viewer's Performance Calendar — which cannot see this assembly — judges a day against
+    /// the horizon this purge enforces rather than a re-derivation of it. One fleet row per collector exists
+    /// (<c>ux_config_collector_schedules_fleet</c>), so first-match is the match.</para>
     /// </summary>
     public static int ResolveFleetRetentionDays(string collectorName, IReadOnlyList<ScheduleOverride> overrides)
     {
-        var def = CollectorScheduleDefaults.All[collectorName];
+        int? fleetOverrideDays = null;
         if (overrides is not null)
         {
             foreach (var o in overrides)
             {
                 if (o.ServerId is null
-                    && string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase)
-                    && ValidRetention(o.RetentionDays) is int days)
+                    && string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
                 {
-                    return days;
+                    fleetOverrideDays = o.RetentionDays;
+                    break;
                 }
             }
         }
 
-        return def.RetentionDays;
+        return DarlingRetentionHorizons.ResolveFleetRetentionDays(collectorName, fleetOverrideDays);
     }
 
     /// <summary>
@@ -1830,10 +1967,6 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// <summary>A retention override is honored only when &gt;= 1 day; 0/negative would invert the purge
     /// cutoff and delete everything, so it degrades to "no override" (fall through to the default).</summary>
     private static int? ValidRetention(int? days) => days is int v && v >= 1 ? v : null;
-
-    /// <summary>A frequency override is honored only when &gt;= 0 (0 = on-load-only); negative degrades to
-    /// "no override" so a bad value can't make a collector run every sweep.</summary>
-    private static int? ValidFrequency(int? minutes) => minutes is int v && v >= 0 ? v : null;
 
     /* ---------------- helpers ---------------- */
 
@@ -1906,7 +2039,7 @@ public sealed class StoreConfigView
     /// clamped to [5,600]; 15 reproduces the constant it replaced. The provisioning DDL applies it, and that
     /// DDL re-runs on every managed start, so a change here reaches an existing install on its next restart.
     /// </summary>
-    public int ComposeStatementTimeoutSeconds { get; init; } = 15;
+    public int ComposeStatementTimeoutSeconds { get; init; } = 60;
 
     /// <summary>
     /// The #2171 plan-XML storage codec (config_service, V62), already normalized to 'gzip' or 'none'.
@@ -1929,6 +2062,11 @@ public sealed class StoreConfigView
     public AnalysisConfig Analysis { get; init; } = new();
     public SmtpConfig Smtp { get; init; } = new();
     public WebhooksConfig Webhooks { get; init; } = new();
+
+    /// <summary>#3598 (V131): the sparse notification routes, ordered by <c>route_id</c>. Empty on every store
+    /// that has not authored one, which resolves every firing to the parent row exactly.</summary>
+    public IReadOnlyList<NotificationRoute> NotificationRoutes { get; init; } = Array.Empty<NotificationRoute>();
+
     public IReadOnlyList<MonitoredServer> EnabledServers { get; init; } = Array.Empty<MonitoredServer>();
     public IReadOnlyList<ScheduleOverride> ScheduleOverrides { get; init; } = Array.Empty<ScheduleOverride>();
 }

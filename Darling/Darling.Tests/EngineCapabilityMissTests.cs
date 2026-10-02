@@ -313,14 +313,26 @@ public sealed class EngineCapabilityReadWiringTests
 
     private static readonly Regex ToolMark = new(@"McpServerTool\(Name = ""([a-z_0-9]+)""", RegexOptions.Compiled);
 
-    /* The last argument of a NotCollectedStatusAsync call: a quoted collector name, or a const that names
-       one. No argument in these calls contains a parenthesis, so the non-greedy [^)]* is safe. */
+    /* The collector argument of a NotCollectedStatusAsync call: a quoted collector name, or a const that names
+       one, optionally followed by the call's cancellation token (#4203) and nothing else. No argument in these
+       calls contains a parenthesis, so the non-greedy [^)]* is safe. The negative lookahead on the bare-identifier
+       branch keeps a call whose collector argument is a TYPE-QUALIFIED const (e.g. SomeReader.CollectorName,
+       which this file's own `consts` lookup cannot resolve — it only sees `private const string X = "..."`
+       declared in the SAME file) from backtracking past the dot and mis-capturing the trailing token word itself
+       as the collector name; it falls back to not matching that call at all, its behavior before #4203 added the
+       token argument, rather than asserting a wrong name. */
     private static readonly Regex WiringCall = new(
-        @"NotCollectedStatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|([A-Za-z_][A-Za-z0-9_]*))\)",
+        @"NotCollectedStatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|(?!cancellationToken\b|ct\b|CancellationToken\.None\b)([A-Za-z_][A-Za-z0-9_]*))(?:\s*,\s*(?:cancellationToken|ct|CancellationToken\.None))?\s*\)",
         RegexOptions.Compiled);
 
     private static readonly Regex CollectorConst = new(
         @"private const string (\w+) = ""([a-z_0-9]+)"";", RegexOptions.Compiled);
+
+    /* A private helper a tool body may delegate its miss path to (#3541 A12: the health-parser family's
+       shared EmptyAsync ladder). A wiring call inside one is attributed to every tool whose body calls the
+       helper — the read still asks the question, one method further down. */
+    private static readonly Regex HelperDeclaration = new(
+        @"private static async Task<string> (\w+)(?:<\w+>)?\(", RegexOptions.Compiled);
 
     /// <summary>
     /// Every collector name a shipped read asks the capability question about, across both SKUs. Exposed so
@@ -353,6 +365,8 @@ public sealed class EngineCapabilityReadWiringTests
             var consts = CollectorConst.Matches(source)
                 .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
             var marks = ToolMark.Matches(source);
+            var helpers = HelperDeclaration.Matches(source);
+            var viaHelper = new Dictionary<string, SortedSet<string>>(StringComparer.Ordinal);
 
             foreach (Match call in WiringCall.Matches(source))
             {
@@ -360,8 +374,22 @@ public sealed class EngineCapabilityReadWiringTests
                     ? call.Groups[1].Value
                     : consts.TryGetValue(call.Groups[2].Value, out var resolved) ? resolved : call.Groups[2].Value;
 
-                /* The enclosing tool is the last McpServerTool mark before the call. */
+                /* The enclosing tool is the last McpServerTool mark before the call — unless a private
+                   helper is declared between that mark and the call, in which case the call belongs to the
+                   helper and reaches every tool that calls it (#3541 A12). */
                 var owner = marks.Where(m => m.Index < call.Index).LastOrDefault();
+                var helper = helpers.Where(h => h.Index < call.Index && (owner is null || h.Index > owner.Index)).LastOrDefault();
+                if (helper is not null)
+                {
+                    if (!viaHelper.TryGetValue(helper.Groups[1].Value, out var helperCollectors))
+                    {
+                        viaHelper[helper.Groups[1].Value] = helperCollectors = new SortedSet<string>(StringComparer.Ordinal);
+                    }
+
+                    helperCollectors.Add(collector);
+                    continue;
+                }
+
                 Assert.True(owner is not null, $"{Path.GetFileName(file)}: a capability call sits outside any MCP tool");
 
                 if (!wired.TryGetValue(owner!.Groups[1].Value, out var collectors))
@@ -370,6 +398,39 @@ public sealed class EngineCapabilityReadWiringTests
                 }
 
                 collectors.Add(collector);
+            }
+
+            /* Each tool body (from its mark to the next) that calls a wired helper asks the helper's question. */
+            for (var i = 0; i < marks.Count; i++)
+            {
+                var end = i + 1 < marks.Count ? marks[i + 1].Index : source.Length;
+                var body = source[marks[i].Index..end];
+                foreach (var (helperName, helperCollectors) in viaHelper)
+                {
+                    if (!Regex.IsMatch(body, $@"\b{Regex.Escape(helperName)}\("))
+                    {
+                        continue;
+                    }
+
+                    if (!wired.TryGetValue(marks[i].Groups[1].Value, out var collectors))
+                    {
+                        wired[marks[i].Groups[1].Value] = collectors = new SortedSet<string>(StringComparer.Ordinal);
+                    }
+
+                    collectors.UnionWith(helperCollectors);
+                }
+            }
+
+            /* A helper nobody calls would let the question go unasked while this scan still counted it. */
+            foreach (var helperName in viaHelper.Keys)
+            {
+                Assert.True(
+                    Enumerable.Range(0, marks.Count).Any(i =>
+                    {
+                        var end = i + 1 < marks.Count ? marks[i + 1].Index : source.Length;
+                        return Regex.IsMatch(source[marks[i].Index..end], $@"\b{Regex.Escape(helperName)}\(");
+                    }),
+                    $"{Path.GetFileName(file)}: helper {helperName} asks the capability question but no tool calls it");
             }
         }
 
@@ -594,8 +655,21 @@ public sealed class EngineCapabilityMissLivePostgresTests
             Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(azureTrace));
             Assert.Contains("default_trace_events", azureTrace, StringComparison.Ordinal);
 
-            /* ── An Enterprise box, same empty store: every one of them keeps its own miss ── */
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, BoxServerName)));
+            /* audit_config's empty answer asks the same engine question get_server_config does, for the same
+               collector: "the config collector may not have run yet" is false on an engine that never runs it. */
+            var analysisService = new PerformanceMonitor.Darling.Analysis.DarlingAnalysisService(postgres);
+            var azureAudit = await DarlingMcpTools.AuditConfig(analysisService, postgres, AzureServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(azureAudit));
+            Assert.Contains("server_config", azureAudit, StringComparison.Ordinal);
+            Assert.DoesNotContain("may not have run yet", azureAudit, StringComparison.Ordinal);
+
+            /* ── An Enterprise box, same empty store: every one of them keeps its own miss. For the
+                  health-parser family that own miss is "unavailable" since #3541 A12 (a server whose
+                  system_health session has never been read into the store is not a clean bill), the answer
+                  significant_waits alone used to give and the other eight now share. ── */
+            var boxHealth = await DarlingMcpHealthParserTools.GetSystemHealth(postgres, BoxServerName);
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(boxHealth));
+            Assert.Contains("system_health session is started", boxHealth, StringComparison.Ordinal);
 
             var boxWaits = await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, BoxServerName);
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(boxWaits));
@@ -603,6 +677,7 @@ public sealed class EngineCapabilityMissLivePostgresTests
 
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetTraceFlags(postgres, BoxServerName)));
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, BoxServerName)));
+            Assert.Equal("no_config_data", DarlingMcpTestData.StatusOf(await DarlingMcpTools.AuditConfig(analysisService, postgres, BoxServerName)));
 
             /* A read whose collector runs everywhere is untouched on BOTH servers — the helper must not have
                become a blanket "Azure gets not_collected" rule. */
@@ -703,8 +778,10 @@ public sealed class EngineCapabilityMissLivePostgresTests
             Assert.Contains("runs PostgreSQL.", stockFlags, StringComparison.Ordinal);
             Assert.DoesNotContain("Aurora", stockFlags, StringComparison.Ordinal);
 
-            /* ── And the server nobody has probed keeps every one of its old misses ── */
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, UnprobedServerName)));
+            /* ── And the server nobody has probed keeps every one of its old misses — for the health-parser
+                  family that own miss is "unavailable" since #3541 A12 (a never-read session is not a clean
+                  bill); the point here is that it is NOT "not_collected": unknown is not never. ── */
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, UnprobedServerName)));
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetTraceFlags(postgres, UnprobedServerName)));
 
             var unprobedWaits = await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, UnprobedServerName);
@@ -743,7 +820,9 @@ public sealed class EngineCapabilityMissLivePostgresTests
         {
             await RegisterAsync(connection, ct, BoxServerId, BoxServerName, engineEdition: null);
 
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, BoxServerName)));
+            /* The health parsers' own miss for a never-read session is "unavailable" (#3541 A12) — the
+               claim under test is that an unprobed edition does not turn it into "not_collected". */
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, BoxServerName)));
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, BoxServerName)));
 
             bodySucceeded = true;

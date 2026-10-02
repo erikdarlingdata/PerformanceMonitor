@@ -79,12 +79,16 @@ OPTION(RECOMPILE);";
                 "delta_spins",
                 "delta_sleep_time",
                 "delta_backoffs",
+                "sample_interval_seconds",
             },
             names);
 
         /* spins_per_collision is the DMV's real ratio — mapped to a double, not a delta. */
         var spinsPerCollision = SpinlockStatsCollector.Instance.PayloadColumns.Single(c => c.Name == "spins_per_collision");
         Assert.Equal(CollectorColumnType.Double, spinsPerCollision.Type);
+
+        /* #3540: the interval is the TRAILING column, INTEGER like perfmon_stats' and query_stats'. */
+        Assert.Equal(CollectorColumnType.Integer, SpinlockStatsCollector.Instance.PayloadColumns[^1].Type);
     }
 
     [Fact]
@@ -113,10 +117,11 @@ OPTION(RECOMPILE);";
 
         SpinlockStatsCollector.Instance.WritePayload(row, writer, context);
 
-        /* Payload order: raw values (spins_per_collision passed through as a double) then the four
-           deltas (recording calculator returns value * 10). */
+        /* Payload order: raw values (spins_per_collision passed through as a double), the four deltas
+           (recording calculator returns value * 10), then the measured interval (#3540) — the fake reports
+           0, the calculator's "no delta knowable" marker. */
         Assert.Equal(
-            new object?[] { "SOS_SUSPEND_QUEUE", 100L, 5000L, 2.5, 10L, 3L, 1000L, 50000L, 100L, 30L },
+            new object?[] { "SOS_SUSPEND_QUEUE", 100L, 5000L, 2.5, 10L, 3L, 1000L, 50000L, 100L, 30L, 0 },
             writer.Values);
 
         /* Delta contract: group names, key = spinlock_name, host collection time, the shared gap policy.
@@ -127,5 +132,28 @@ OPTION(RECOMPILE);";
         Assert.Equal(("spinlock_stats_sleep_time", "SOS_SUSPEND_QUEUE", 10L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[2]);
         Assert.Equal(("spinlock_stats_backoffs", "SOS_SUSPEND_QUEUE", 3L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[3]);
         Assert.All(deltas.Calls, _ => Assert.Equal(42, deltas.LastServerId));
+    }
+
+    /// <summary>
+    /// #3540: the measured interval reaches the payload, and it is the MINIMUM over the row's four groups.
+    /// This is the one family where the groups can genuinely disagree without a DMV reset — backoffs is a
+    /// 32-bit int on SQL Server 2016/2017 and wraps on its own — so the backoffs group is the one driven to
+    /// 0 here: the row is stored unknowable rather than reporting the wrapped counter's 0 as "no backoffs".
+    /// </summary>
+    [Fact]
+    public void WritePayload_WritesTheMeasuredInterval_AsTheMinimumOverTheRowsGroups()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
+        var context = CollectorTestContext.Make(deltas);
+        var row = new SpinlockStatsCollector.Row("SOS_SUSPEND_QUEUE", 100, 5000, 2.5, 10, 3);
+
+        var writer = new RecordingCollectorRowWriter();
+        SpinlockStatsCollector.Instance.WritePayload(row, writer, context);
+        Assert.Equal(137, writer.Values[^1]);
+
+        deltas.IntervalByGroup["spinlock_stats_backoffs"] = 0;
+        writer = new RecordingCollectorRowWriter();
+        SpinlockStatsCollector.Instance.WritePayload(row, writer, context);
+        Assert.Equal(0, writer.Values[^1]);
     }
 }

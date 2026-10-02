@@ -64,9 +64,167 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
 
         var pageioFact = facts.First(f => f.Key == "PAGEIOLATCH_SH");
 
-        /* 10,000,000 ms / 14,400,000 ms ≈ 0.694 */
+        /* 10,000,000 ms / 14,400,000 ms ≈ 0.694 — and since #3538 A2 the divisor is the OBSERVED
+           collection time, which for this fully collected series equals the window, so the figure the
+           scenario documents is unchanged. That equality is the regression pin: a coverage witness that
+           under-credited a full series (an off-by-one interval, a boundary excluded) would inflate every
+           scenario's fractions and land here first. */
         Assert.InRange(pageioFact.Value, 0.68, 0.71);
         Assert.Equal(TestDataSeeder.TestServerId, pageioFact.ServerId);
+
+        Assert.NotNull(context.Coverage);
+        Assert.InRange(context.Coverage!.Fraction, 0.999, 1.0);
+        Assert.False(context.Coverage.IsPartial);
+        Assert.DoesNotContain(facts, f => f.Key == WindowCoverage.FactKey);
+        Assert.InRange(pageioFact.Metadata["coverage_fraction"], 0.999, 1.0);
+        Assert.Equal(TestDataSeeder.TestPeriodDurationMs, pageioFact.Metadata["period_duration_ms"]);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════
+       #3538 A2: rates and fractions divide by the time the collector actually observed.
+       The gap scenario is the memory-starved server at the SAME wait intensity with the
+       collector down for three of the window's four hours; the honest figures are the
+       memory-starved scenario's own, and the nominal division would have quartered them.
+       ═══════════════════════════════════════════════════════════════════ */
+
+    [Fact]
+    public async Task CollectFacts_CollectorGap_FractionsDivideByObservedTime_NotTheNominalWindow()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.SeedCollectorGapServerAsync();
+
+        var collector = new DuckDbFactCollector(_duckDb);
+        var context = TestDataSeeder.CreateTestContext();
+        var facts = await collector.CollectFactsAsync(context);
+
+        var pageio = facts.First(f => f.Key == "PAGEIOLATCH_SH");
+
+        /* 2,500,000 ms over the ONE observed hour = 0.694 — the memory-starved figure. Divided by the
+           nominal four hours it would have read 0.174, under every PAGEIOLATCH bar. */
+        Assert.InRange(pageio.Value, 0.68, 0.71);
+        var nominalFraction = pageio.Metadata["wait_time_ms"] / context.PeriodDurationMs;
+        Assert.InRange(pageio.Value / nominalFraction, 3.9, 4.1);
+        Assert.InRange(pageio.Metadata["coverage_fraction"], 0.24, 0.26);
+
+        /* The divisor is recoverable from the metadata exactly as documented on the fact. */
+        var divisorMs = pageio.Metadata["period_duration_ms"] * pageio.Metadata["coverage_fraction"];
+        Assert.InRange(pageio.Metadata["wait_time_ms"] / divisorMs, pageio.Value - 0.001, pageio.Value + 0.001);
+
+        /* The grouped families sum their constituents' fractions, so they share the divisor too. */
+        var cx = facts.First(f => f.Key == "CXPACKET");
+        Assert.InRange(cx.Value, 0.10, 0.11); // 375,000 / 3,600,000
+        Assert.InRange(cx.Metadata["coverage_fraction"], 0.24, 0.26);
+
+        /* Blocking and deadlocks are per OBSERVED hour: 40 events and 8 deadlocks in the hour the
+           collector was up are 40/hr and 8/hr, not the 10/hr and 2/hr the nominal window claimed. */
+        var blocking = facts.First(f => f.Key == "BLOCKING_EVENTS");
+        Assert.InRange(blocking.Value, 39.5, 40.5);
+        Assert.InRange(blocking.Metadata["observed_hours"], 0.99, 1.01);
+        Assert.Equal(4.0, blocking.Metadata["period_hours"], precision: 6);
+
+        /* #3871's ≤4h degeneracy on this fixture too: a 4-hour window is one bucket under the
+           window-start origin, and the peak divides by min(4, observed) = the one observed hour, so the
+           graded value is exactly the 40/hr this pin has always asserted. */
+        Assert.InRange(blocking.Metadata["events_per_hour_peak_4h"], 39.5, 40.5);
+        Assert.Equal(40.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
+
+        var deadlocks = facts.First(f => f.Key == "DEADLOCKS");
+        Assert.InRange(deadlocks.Value, 7.9, 8.1);
+        Assert.InRange(deadlocks.Metadata["observed_hours"], 0.99, 1.01);
+    }
+
+    [Fact]
+    public async Task CollectFacts_CollectorGap_EmitsTheCoverageFact_WithTheFractionAndTheLargestGap()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.SeedCollectorGapServerAsync();
+
+        var collector = new DuckDbFactCollector(_duckDb);
+        var context = TestDataSeeder.CreateTestContext();
+        var facts = await collector.CollectFactsAsync(context);
+
+        /* The stamp on the context: one observed hour of four, largest hole the three-hour tail. */
+        var coverage = context.Coverage!;
+        Assert.True(coverage.IsObserved);
+        Assert.True(coverage.IsPartial);
+        Assert.InRange(coverage.Fraction, 0.24, 0.26);
+        Assert.InRange(coverage.ObservedMs, 3_599_000, 3_601_000);
+        Assert.InRange(coverage.LargestGapMs, 10_799_000, 10_801_000);
+        Assert.Equal(5, coverage.SampleCount); // the baseline reading plus four deltas
+
+        /* The context fact beside the facts it qualifies: Value = the fraction, scored nothing. */
+        var gap = Assert.Single(facts, f => f.Key == WindowCoverage.FactKey);
+        Assert.Equal(WindowCoverage.FactSource, gap.Source);
+        Assert.InRange(gap.Value, 0.24, 0.26);
+        Assert.InRange(gap.Metadata["largest_gap_ms"], 10_799_000, 10_801_000);
+        Assert.InRange(gap.Metadata["unobserved_ms"], 10_799_000, 10_801_000);
+        Assert.Equal(TestDataSeeder.TestPeriodDurationMs, gap.Metadata["nominal_ms"]);
+
+        new FactScorer().ScoreAll(facts);
+        Assert.Equal(0, gap.Severity);
+        Assert.Equal(0, gap.BaseSeverity);
+    }
+
+    [Fact]
+    public async Task CollectFacts_UnobservedWindow_EmitsNoRateFacts_AndStampsZeroCoverage()
+    {
+        /* The dead-collector shape that still has SOMETHING in the window: a single reading with no
+           predecessor. Its delta is unknowable (the calculator's first sighting), so is the time it
+           stands for, and a fraction computed against it would be a number about nothing. */
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.ClearTestDataAsync();
+        await seeder.SeedTestServerAsync();
+        await seeder.SeedWaitStatsInRangeAsync(
+            TestDataSeeder.TestPeriodStart.AddMinutes(30), TestDataSeeder.TestPeriodStart.AddMinutes(45),
+            new Dictionary<string, (long waitTimeMs, long waitingTasks, long signalMs)>
+            {
+                ["PAGEIOLATCH_SH"] = (9_000_000, 1_000, 0)
+            }, samples: 1);
+        await seeder.SeedBlockingEventsAsync(40, avgWaitTimeMs: 20_000);
+        await seeder.SeedDeadlocksAsync(8);
+        await seeder.SeedServerConfigAsync(ctfp: 50, maxdop: 8, maxMemoryMb: 57344);
+
+        var collector = new DuckDbFactCollector(_duckDb);
+        var context = TestDataSeeder.CreateTestContext();
+        var facts = await collector.CollectFactsAsync(context);
+
+        Assert.NotNull(context.Coverage);
+        Assert.False(context.Coverage!.IsObserved);
+        Assert.Equal(0, context.ObservedDurationMs);
+        Assert.Equal(1, context.Coverage.SampleCount);
+
+        /* The largest SINGLE unobserved stretch, not the whole window: the orphan splits it into a
+           30-minute lead-in and a 210-minute tail, and the tail is the figure — 12,600,000 ms. (The
+           whole window is unobserved, but in two stretches; only a window with no rows at all reports
+           the nominal length here.) */
+        Assert.InRange(context.Coverage.LargestGapMs, 12_599_000, 12_601_000);
+
+        /* No rate fact, no fabricated zero, no Infinity — and no gap fact either: "unobserved" is the
+           service's unavailable envelope, not a partial reading. */
+        Assert.DoesNotContain(facts, f => f.Source == "waits");
+        Assert.DoesNotContain(facts, f => f.Key is "BLOCKING_EVENTS" or "DEADLOCKS");
+        Assert.DoesNotContain(facts, f => f.Key == WindowCoverage.FactKey);
+        Assert.All(facts, f => Assert.False(double.IsInfinity(f.Value) || double.IsNaN(f.Value)));
+
+        /* The point-in-time facts still read: they are not measurements of the window. */
+        Assert.Contains(facts, f => f.Source == "config");
+    }
+
+    [Fact]
+    public async Task CollectFacts_EmptyWindow_StampsUnobservedCoverage()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.ClearTestDataAsync();
+        await seeder.SeedTestServerAsync();
+
+        var collector = new DuckDbFactCollector(_duckDb);
+        var context = TestDataSeeder.CreateTestContext();
+        await collector.CollectFactsAsync(context);
+
+        Assert.NotNull(context.Coverage);
+        Assert.False(context.Coverage!.IsObserved);
+        Assert.Equal(0, context.Coverage.SampleCount);
+        Assert.Equal(0, context.Coverage.Fraction);
     }
 
     [Fact]
@@ -213,6 +371,64 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         var facts = await SeedAndCollectAsync(s => s.SeedEverythingOnFireServerAsync());
 
         Assert.True(facts.ContainsKey("PERFMON_BATCH_REQ_SEC"), "PERFMON_BATCH_REQ_SEC should be collected");
+
+        /* #3527: the seeder plants delta 30000 over a measured 60s interval — the fact must be the
+           per-second rate 500, not the raw per-interval delta. */
+        var batch = facts["PERFMON_BATCH_REQ_SEC"];
+        Assert.Equal(500.0, batch.Value);
+        Assert.Equal(30000, batch.Metadata["delta_cntr_value"]);
+        Assert.Equal(60, batch.Metadata["sample_interval_seconds"]);
+    }
+
+    /// <summary>
+    /// #3527 fixture: delta 6000 over a measured 60s interval is 100 requests/sec — the fact value is
+    /// the division, with the raw delta and the divisor preserved in metadata. Before the fix the fact
+    /// carried the raw 6000 (60x truth at this cadence).
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_Perfmon_DividesDeltaByMeasuredInterval()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.ClearTestDataAsync();
+            await s.SeedTestServerAsync();
+            await s.SeedPerfmonRawAsync("Batch Requests/sec", deltaValue: 6000, sampleIntervalSeconds: 60);
+        });
+
+        var batch = facts["PERFMON_BATCH_REQ_SEC"];
+        Assert.Equal(100.0, batch.Value);
+        Assert.Equal(6000, batch.Metadata["delta_cntr_value"]);
+        Assert.Equal(60, batch.Metadata["sample_interval_seconds"]);
+    }
+
+    /// <summary>
+    /// #3527: sample_interval_seconds = 0 means NO delta was knowable (first sighting, counter reset,
+    /// gap past the delta policy) — such a row must never become a fact of 0 or of the raw delta. The
+    /// newest usable row wins instead, and a counter with ONLY unusable rows emits no fact at all.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_Perfmon_SkipsIntervalZeroRows()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.ClearTestDataAsync();
+            await s.SeedTestServerAsync();
+
+            /* Older usable row, then a NEWER interval-0 row: the fact must come from the usable row. */
+            await s.SeedPerfmonRawAsync("Batch Requests/sec", deltaValue: 6000, sampleIntervalSeconds: 60,
+                collectionTime: TestDataSeeder.TestPeriodEnd.AddMinutes(-5));
+            await s.SeedPerfmonRawAsync("Batch Requests/sec", deltaValue: 0, sampleIntervalSeconds: 0);
+
+            /* A counter whose only row in the window is interval-0: no fact, not a fact of 0. */
+            await s.SeedPerfmonRawAsync("SQL Re-Compilations/sec", deltaValue: 0, sampleIntervalSeconds: 0);
+        });
+
+        var batch = facts["PERFMON_BATCH_REQ_SEC"];
+        Assert.Equal(100.0, batch.Value);
+        Assert.Equal(60, batch.Metadata["sample_interval_seconds"]);
+
+        Assert.False(facts.ContainsKey("PERFMON_RECOMPILATIONS_SEC"),
+            "a counter with only interval-0 rows must emit no fact — 0 is not a knowable rate");
     }
 
     [Fact]
@@ -274,6 +490,47 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         var jobs = facts["RUNNING_JOBS"];
         Assert.Equal("jobs", jobs.Source);
         Assert.Equal(3, jobs.Value); // 3 running long
+
+        /* #3653: the scenario's three long rows are IDENTICAL on percent_of_average (400) and on
+           current_duration_seconds (10,800), so the name can only come from the final job_name tie-break —
+           the ordinal-first of "Test Job 0/1/2". A collector that dropped that tie-break would pick
+           whichever row the aggregate happened to see first, and this pin would flicker; the composed
+           advice is frozen into the persisted finding, so a flickering pick rewrites findings. */
+        Assert.Equal("Test Job 0", jobs.ObjectName);
+    }
+
+    /// <summary>
+    /// #3653: the RUNNING_JOBS fact names the job furthest past its OWN history, chosen among the rows
+    /// that were running long and by percent_of_average before duration. Three rows, planted so each
+    /// ordering mistake picks a different name: the not-long row has the highest duration AND the
+    /// highest percent (a FILTER dropped names it); the long row with the LONGER runtime has the lower
+    /// percent (duration-first names it); the right answer is the long row at 400%. The counts and the
+    /// window maxima keep their pre-#3653 per-row meaning over every running row — asserted so the
+    /// change is provably the one column and not a quiet re-scoping of the figures beside it.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_RunningJobs_NamesTheJobFurthestPastItsOwnHistory_AmongTheLongRowsOnly()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedTestServerAsync();
+            await s.SeedRunningJobRowsAsync(
+                ("Weekly CHECKDB", currentDurationSeconds: 9_000, isRunningLong: true, percentOfAverage: 250),
+                ("Nightly Index Maintenance", currentDurationSeconds: 7_200, isRunningLong: true, percentOfAverage: 400),
+                ("Long Steady ETL", currentDurationSeconds: 99_999, isRunningLong: false, percentOfAverage: 900));
+        });
+
+        var jobs = facts["RUNNING_JOBS"];
+        Assert.Equal("Nightly Index Maintenance", jobs.ObjectName);
+
+        Assert.Equal(2, jobs.Value);
+        Assert.Equal(3, jobs.Metadata["running_count"]);
+        Assert.Equal(2, jobs.Metadata["running_long_count"]);
+        Assert.Equal(900, jobs.Metadata["max_percent_of_average"]);
+        Assert.Equal(99_999, jobs.Metadata["max_duration_seconds"]);
+
+        /* The name is a string in the string slot; Metadata stays doubles-only (the lane-7 #3542 lesson). */
+        Assert.DoesNotContain(jobs.Metadata.Keys, k => k.Contains("name", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

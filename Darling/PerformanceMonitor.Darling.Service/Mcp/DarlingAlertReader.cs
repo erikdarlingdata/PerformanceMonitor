@@ -39,58 +39,108 @@ internal static class DarlingAlertReader
 {
     /* ─────────────────────────── alert history ─────────────────────────── */
 
+    /// <summary><paramref name="Dismissed"/> is the operator's Viewer acknowledgement (#3541 A3): a row the
+    /// operator hid from the Alert History grid. Always false on the default read, which excludes those rows;
+    /// carried so a read that INCLUDES them can label each one.
+    /// <para><paramref name="ContextJson"/> (#3539 A8e) is the persisted context, read so the tool can report
+    /// the tier the alert FIRED at through <c>AlertHistoryRowSeverity</c> rather than the colour its name
+    /// implies; null on resolution rows and rows written with no context.</para></summary>
     public sealed record AlertHistoryReadRow(
         DateTime AlertTime, int ServerId, string ServerName, string MetricName,
         double CurrentValue, double ThresholdValue, bool AlertSent, string NotificationType,
-        string? SendError, bool Muted, string? DetailText);
+        string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null);
 
     private const string AlertHistorySelectColumns = @"
-    alert_time,
-    server_id,
-    server_name,
-    metric_name,
-    current_value,
-    threshold_value,
-    alert_sent,
-    notification_type,
-    send_error,
-    muted,
-    detail_text";
+    a.alert_time,
+    a.server_id,
+    COALESCE(s.display_name, a.server_name) AS server_name,
+    a.metric_name,
+    a.current_value,
+    a.threshold_value,
+    a.alert_sent,
+    a.notification_type,
+    a.send_error,
+    a.muted,
+    a.detail_text,
+    a.context_json,
+    a.dismissed";
 
     /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
-    /// end, $3 server_id, $4 limit (naive UTC / naive UTC / int / int).
+    /// end, $3 server_id, $4 limit, $5 include-dismissed (naive UTC / naive UTC / int / int / bool).
     ///
     /// <para>The upper edge is bounded rather than open (#2495): the row cap is applied by the database, so
     /// trimming after the read would spend the whole LIMIT on rows newer than the anchor and hand back an
-    /// empty window that looks like a quiet one.</para></summary>
+    /// empty window that looks like a quiet one.</para>
+    ///
+    /// <para><b>The <c>dismissed = FALSE</c> filter is now a caller's choice rather than a hidden one (#3541
+    /// A3).</b> Dismissal is the Viewer operator's acknowledgement — "I have seen this row, hide it from the
+    /// grid" — and hiding it from the grid is the right default for a person at the grid. It is NOT a fact
+    /// about whether the alert fired, and an agent reconstructing an incident from <c>get_alert_history</c>
+    /// was handed a window with its acknowledged criticals silently removed, under a field that called the
+    /// remainder <c>total_alerts</c>. The default stays the grid's (so a caller who never sends the flag reads
+    /// what they always read), the payload now SAYS the filter applied and how many rows it removed, and
+    /// <c>$5 = TRUE</c> switches it off. Spelled <c>(dismissed = FALSE OR $5)</c> rather than as two more
+    /// consts so the pinned exclusion literal stays one string in one place.</para></summary>
     public const string AlertHistorySql = @"
 SELECT" + AlertHistorySelectColumns + @"
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.alert_time <= $2
+AND   a.server_id = $3
+AND   (a.dismissed = FALSE OR $5)
+ORDER BY a.alert_time DESC
+LIMIT $4";
+
+    /// <summary>All-servers alert history (the fleet default) — the viewer's <c>AlertHistoryAllServersSql</c>.
+    /// $1 window start, $2 window end, $3 limit, $4 include-dismissed (naive UTC / naive UTC / int / bool).</summary>
+    public const string AlertHistoryAllServersSql = @"
+SELECT" + AlertHistorySelectColumns + @"
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.alert_time <= $2
+AND   (a.dismissed = FALSE OR $4)
+ORDER BY a.alert_time DESC
+LIMIT $3";
+
+    /// <summary>How many rows in the window the default read's <c>dismissed = FALSE</c> filter removes, per
+    /// server. $1 window start, $2 window end, $3 server_id. The count is what turns "dismissed rows are
+    /// excluded" from a disclaimer into a measurement: zero means the filter hid nothing, and a caller can
+    /// decide whether the hidden rows matter before re-reading with them included.</summary>
+    public const string DismissedAlertCountSql = @"
+SELECT COUNT(*)
 FROM config_alert_log
 WHERE alert_time >= $1
 AND   alert_time <= $2
 AND   server_id = $3
-AND   dismissed = FALSE
-ORDER BY alert_time DESC
-LIMIT $4";
+AND   dismissed = TRUE";
 
-    /// <summary>All-servers alert history (the fleet default) — the viewer's <c>AlertHistoryAllServersSql</c>.
-    /// $1 window start, $2 window end, $3 limit (naive UTC / naive UTC / int).</summary>
-    public const string AlertHistoryAllServersSql = @"
-SELECT" + AlertHistorySelectColumns + @"
+    /// <summary>The fleet-wide twin of <see cref="DismissedAlertCountSql"/>. $1 window start, $2 window end.</summary>
+    public const string DismissedAlertCountAllServersSql = @"
+SELECT COUNT(*)
 FROM config_alert_log
 WHERE alert_time >= $1
 AND   alert_time <= $2
-AND   dismissed = FALSE
-ORDER BY alert_time DESC
-LIMIT $3";
+AND   dismissed = TRUE";
 
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History read. With no
     /// <paramref name="serverId"/> it aggregates ALL servers (the fleet default); with one it scopes to that
-    /// server. Mirrors the viewer's optional-serverId <c>GetAlertHistoryAsync</c>.
+    /// server. Mirrors the viewer's optional-serverId <c>GetAlertHistoryAsync</c>. The grid's semantics,
+    /// kept for the callers that want the grid's answer (the triage endpoint); the MCP tool reads through
+    /// <see cref="GetAlertHistoryPageAsync"/> so it can also ask for the dismissed rows.
     /// </summary>
-    public static async Task<List<AlertHistoryReadRow>> GetAlertHistoryAsync(
-        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, CancellationToken cancellationToken = default)
+    public static Task<List<AlertHistoryReadRow>> GetAlertHistoryAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, CancellationToken cancellationToken = default) =>
+        GetAlertHistoryPageAsync(postgres, sinceUtc, untilUtc, serverId, limit, includeDismissed: false, cancellationToken);
+
+    /// <summary>
+    /// <see cref="GetAlertHistoryAsync"/> with the dismissed filter as a parameter. Callers detecting
+    /// truncation pass <c>limit + 1</c> and read the extra row as the signal.
+    /// </summary>
+    public static async Task<List<AlertHistoryReadRow>> GetAlertHistoryPageAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, bool includeDismissed, CancellationToken cancellationToken = default)
     {
         var rows = new List<AlertHistoryReadRow>();
 
@@ -103,25 +153,161 @@ LIMIT $3";
             DarlingMcpReadParameters.AddInt(command, serverId.Value);
         }
         DarlingMcpReadParameters.AddInt(command, limit);
+        /* Typed bool so Npgsql binds a boolean rather than inferring from an object — the predicate is
+           `(dismissed = FALSE OR $N)` and an untyped parameter there is a runtime type error, not a compile one. */
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeDismissed });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new AlertHistoryReadRow(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                reader.IsDBNull(2) ? "" : reader.GetString(2),
-                reader.IsDBNull(3) ? "" : reader.GetString(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
-                reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
-                !reader.IsDBNull(6) && reader.GetBoolean(6),
-                reader.IsDBNull(7) ? "" : reader.GetString(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8),
-                !reader.IsDBNull(9) && reader.GetBoolean(9),
-                reader.IsDBNull(10) ? null : reader.GetString(10)));
+            rows.Add(ReadHistoryRow(reader));
         }
 
         return rows;
+    }
+
+    /// <summary>One <see cref="AlertHistoryReadRow"/> from a reader positioned on a row of
+    /// <see cref="AlertHistorySelectColumns"/> (both the page read and the first-row-after reads use it, so the
+    /// two can never disagree about a column).</summary>
+    private static AlertHistoryReadRow ReadHistoryRow(NpgsqlDataReader reader) =>
+        new(
+            reader.GetDateTime(0),
+            reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+            reader.IsDBNull(2) ? "" : reader.GetString(2),
+            reader.IsDBNull(3) ? "" : reader.GetString(3),
+            reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+            reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
+            !reader.IsDBNull(6) && reader.GetBoolean(6),
+            reader.IsDBNull(7) ? "" : reader.GetString(7),
+            reader.IsDBNull(8) ? null : reader.GetString(8),
+            !reader.IsDBNull(9) && reader.GetBoolean(9),
+            reader.IsDBNull(10) ? null : reader.GetString(10),
+            /* context_json sits at ordinal 11 and dismissed stays the LAST column at 12 — the viewer's
+               own column order, and the "dismissed is selected" pin anchors on it closing the list. */
+            !reader.IsDBNull(12) && reader.GetBoolean(12),
+            reader.IsDBNull(11) ? null : reader.GetString(11));
+
+    /* ─────────── the first row after an alert (#4755) ─────────── */
+
+    /// <summary>The fixed head of the two "first row after an alert" reads (#4755): rows STRICTLY after the
+    /// anchor ($1), no later than the read's "now" ($2), whose stored <c>metric_name</c> is one of the names in
+    /// $3 (a <c>text[]</c>, matched exactly as the product writes them). Dismissed rows are INCLUDED: the
+    /// viewer's "Dismiss all" marks resolution rows dismissed too, so the grid's <c>dismissed = FALSE</c> filter
+    /// hid the very row these reads look for.</summary>
+    private const string FirstAlertAfterHead = @"
+SELECT" + AlertHistorySelectColumns + @"
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time > $1
+AND   a.alert_time <= $2
+AND   a.metric_name = ANY($3)";
+
+    /// <summary>The tail of the "first row after an alert" reads: the EARLIEST match, one row. There is no
+    /// window and no shared row cap, so the row is found wherever it sits (a resolution 30 hours later, or
+    /// behind hundreds of other servers' newer rows).</summary>
+    private const string FirstAlertAfterTail = @"
+ORDER BY alert_time
+LIMIT 1";
+
+    /// <summary>The "first row after an alert" read (#4755): $1 anchor (exclusive), $2 read-time now
+    /// (inclusive), $3 the metric names, then <c>server_id = $4</c> when <paramref name="serverScoped"/> (a
+    /// fleet-level alert has no server id, so the read spans every server), then <c>alert_time &lt;&gt; $N</c>
+    /// with the next free number when <paramref name="excludesAlertTime"/> (the re-fire read skips the matched
+    /// row itself). Naive UTC / naive UTC / text[] / int / naive UTC. The index on
+    /// <c>(server_id, metric_name, alert_time)</c> serves the server-scoped shape.</summary>
+    public static string FirstAlertAfterSql(bool serverScoped, bool excludesAlertTime)
+    {
+        var sql = FirstAlertAfterHead;
+        var next = 4;
+        if (serverScoped)
+        {
+            sql += "\nAND   a.server_id = $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            next++;
+        }
+
+        if (excludesAlertTime)
+        {
+            sql += "\nAND   a.alert_time <> $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return sql + FirstAlertAfterTail;
+    }
+
+    /// <summary>
+    /// The FIRST resolution row after an alert (#4755): the earliest row after <paramref name="anchorUtc"/> (and
+    /// no later than <paramref name="untilUtc"/>) whose stored name is one of <paramref name="resolutionNames"/>,
+    /// dismissed rows included, scoped to <paramref name="serverId"/> only when it is known. Null when there is
+    /// none (or when no name was given). The notebook's status arm 1 reads this instead of scanning a 24-hour,
+    /// 200-row, dismissed-excluded window, which missed a resolution that landed later than that, sat behind
+    /// other servers' newer rows, or had been dismissed.
+    /// </summary>
+    public static Task<AlertHistoryReadRow?> GetFirstResolutionAfterAsync(
+        NpgsqlDataSource postgres, DateTime anchorUtc, DateTime untilUtc, int? serverId,
+        IReadOnlyList<string> resolutionNames, CancellationToken cancellationToken = default) =>
+        ReadFirstAlertAfterAsync(postgres, anchorUtc, untilUtc, serverId, resolutionNames, excludedAlertTimeUtc: null, cancellationToken);
+
+    /// <summary>
+    /// The FIRST later firing of a metric (#4755): the earliest row after <paramref name="anchorUtc"/> whose
+    /// stored name is exactly <paramref name="firingMetricName"/> and whose time is not
+    /// <paramref name="matchedAlertTimeUtc"/> (the alert the page is about is not its own re-fire). Same
+    /// unwindowed, dismissed-included shape as <see cref="GetFirstResolutionAfterAsync"/>; the notebook's
+    /// status arm 2.
+    /// </summary>
+    public static Task<AlertHistoryReadRow?> GetFirstRefireAfterAsync(
+        NpgsqlDataSource postgres, DateTime anchorUtc, DateTime untilUtc, int? serverId,
+        string firingMetricName, DateTime? matchedAlertTimeUtc, CancellationToken cancellationToken = default) =>
+        ReadFirstAlertAfterAsync(postgres, anchorUtc, untilUtc, serverId, new[] { firingMetricName }, matchedAlertTimeUtc, cancellationToken);
+
+    private static async Task<AlertHistoryReadRow?> ReadFirstAlertAfterAsync(
+        NpgsqlDataSource postgres, DateTime anchorUtc, DateTime untilUtc, int? serverId,
+        IReadOnlyList<string> metricNames, DateTime? excludedAlertTimeUtc, CancellationToken cancellationToken)
+    {
+        if (metricNames.Count == 0)
+        {
+            return null;
+        }
+
+        await using var command = postgres.CreateCommand(FirstAlertAfterSql(serverId.HasValue, excludedAlertTimeUtc.HasValue));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddTimestamp(command, anchorUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
+        var names = new string[metricNames.Count];
+        for (var i = 0; i < names.Length; i++)
+        {
+            names[i] = metricNames[i];
+        }
+
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = names });
+        if (serverId.HasValue)
+        {
+            DarlingMcpReadParameters.AddInt(command, serverId.Value);
+        }
+
+        if (excludedAlertTimeUtc.HasValue)
+        {
+            DarlingMcpReadParameters.AddTimestamp(command, excludedAlertTimeUtc.Value);
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadHistoryRow(reader) : null;
+    }
+
+    /// <summary>How many dismissed rows the window (and server scope) holds — the rows the default read hides.
+    /// See <see cref="DismissedAlertCountSql"/>.</summary>
+    public static async Task<long> CountDismissedAlertsAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(serverId.HasValue ? DismissedAlertCountSql : DismissedAlertCountAllServersSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
+        if (serverId.HasValue)
+        {
+            DarlingMcpReadParameters.AddInt(command, serverId.Value);
+        }
+
+        var count = await command.ExecuteScalarAsync(cancellationToken);
+        return count is long l ? l : Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /* ─────────────────────────── alert settings ─────────────────────────── */
@@ -178,7 +364,20 @@ LIMIT $3";
         /* #3466 (V124): the fleet sweep's cadence knobs. APPENDED, same reason. Darling-only: Lite has
            no fleet to sweep, so McpAlertSettingsKeyTests records the omitted group as a decision. */
         bool FleetSweepEnabled,
-        int FleetSweepIntervalMinutes);
+        int FleetSweepIntervalMinutes,
+        /* #3528 (V126): the Store Disk Pressure warning's GB floor. APPENDED, same reason. */
+        int SelfDiskFreeWarnGb,
+        /* #3653 (A5, Q5): the Long-Running Query opt-out knob's two lists — program_name PREFIXES and exact
+           logins (text[], the excluded_databases shape; V135, DEFAULT the production read's seeds). APPENDED,
+           same reason. */
+        IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes,
+        IReadOnlyList<string> LongRunningQueryExcludedLogins,
+        /* #3712 (V137): the uncorroborated-finding route knob's STORE half — the raw column, nullable, where
+           NULL means "not set in the store; darling.json's analysis.uncorroboratedRoute governs". APPENDED,
+           same reason. Carried RAW rather than resolved so the payload builder can say which of the knob's two
+           homes decided (DarlingAlertSettings.ResolveUncorroboratedRoute takes this beside the published file
+           value) and so a store whose CHECK was dropped reports the same fall-through the service applied. */
+        string? AnalysisUncorroboratedRoute);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -209,7 +408,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        retention_hold_warn_ratio, retention_hold_critical_ratio,
        deadlock_warn_per_hour, deadlock_critical_per_hour,
        pg_deadlock_count_threshold, pg_blocking_count_threshold,
-       fleet_sweep_enabled, fleet_sweep_interval_minutes
+       fleet_sweep_enabled, fleet_sweep_interval_minutes,
+       self_disk_free_warn_gb,
+       long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins,
+       analysis_uncorroborated_route
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -260,7 +462,15 @@ WHERE id = 1";
             /* #3444: V122 PostgreSQL Deadlocks/Blocking count thresholds at 62–63. */
             reader.GetInt32(62), reader.GetInt32(63),
             /* #3466: V124 fleet-sweep cadence knobs at 64–65. */
-            reader.GetBoolean(64), reader.GetInt32(65));
+            reader.GetBoolean(64), reader.GetInt32(65),
+            /* #3528: V126 store-disk-warn GB floor at 66. */
+            reader.GetInt32(66),
+            /* #3653 (A5, Q5): the Long-Running Query opt-out lists at 67–68. */
+            reader.IsDBNull(67) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(67),
+            reader.IsDBNull(68) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(68),
+            /* #3712 (V137): the route knob's store half at 69 — NULL is the expected reading on every store that
+               has not had a route written, not a mid-migration guard. */
+            reader.IsDBNull(69) ? null : reader.GetString(69));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

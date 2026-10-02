@@ -69,8 +69,12 @@ OPTION(RECOMPILE);";
                 "delta_waiting_requests_count",
                 "delta_wait_time_ms",
                 "delta_max_wait_time_ms",
+                "sample_interval_seconds",
             },
             names);
+
+        /* #3540: the interval is the TRAILING column, INTEGER like perfmon_stats' and query_stats'. */
+        Assert.Equal(CollectorColumnType.Integer, LatchStatsCollector.Instance.PayloadColumns[^1].Type);
     }
 
     [Fact]
@@ -99,8 +103,9 @@ OPTION(RECOMPILE);";
 
         LatchStatsCollector.Instance.WritePayload(row, writer, context);
 
-        /* Payload order: raw values then the three deltas (recording calculator returns value * 10). */
-        Assert.Equal(new object?[] { "BUFFER", 7L, 300L, 20L, 70L, 3000L, 200L }, writer.Values);
+        /* Payload order: raw values, the three deltas (recording calculator returns value * 10), then the
+           measured interval (#3540) — the fake reports 0, the calculator's "no delta knowable" marker. */
+        Assert.Equal(new object?[] { "BUFFER", 7L, 300L, 20L, 70L, 3000L, 200L, 0 }, writer.Values);
 
         /* Delta contract: group names, key = latch_class, the host collection time, the shared gap policy. */
         Assert.Equal(3, deltas.Calls.Count);
@@ -108,5 +113,22 @@ OPTION(RECOMPILE);";
         Assert.Equal(("latch_stats_wait_time", "BUFFER", 300L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[1]);
         Assert.Equal(("latch_stats_max_wait", "BUFFER", 20L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[2]);
         Assert.All(deltas.Calls, _ => Assert.Equal(42, deltas.LastServerId));
+    }
+
+    /// <summary>#3540: the measured interval reaches the payload, and it is the MINIMUM over the row's three
+    /// groups — one unknowable group marks the row unknowable (see WaitStatsCollectorDefinitionTests).</summary>
+    [Fact]
+    public void WritePayload_WritesTheMeasuredInterval_AsTheMinimumOverTheRowsGroups()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
+        var context = CollectorTestContext.Make(deltas);
+        var writer = new RecordingCollectorRowWriter();
+        LatchStatsCollector.Instance.WritePayload(new LatchStatsCollector.Row("BUFFER", 7, 300, 20), writer, context);
+        Assert.Equal(137, writer.Values[^1]);
+
+        deltas.IntervalByGroup["latch_stats_max_wait"] = 0;
+        writer = new RecordingCollectorRowWriter();
+        LatchStatsCollector.Instance.WritePayload(new LatchStatsCollector.Row("BUFFER", 7, 300, 20), writer, context);
+        Assert.Equal(0, writer.Values[^1]);
     }
 }

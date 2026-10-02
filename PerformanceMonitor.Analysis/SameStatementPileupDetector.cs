@@ -486,7 +486,12 @@ public static class SameStatementPileupDetector
         /* The story path doubles as the mute/cooldown key (its hash), so it carries the statement
            identity: muting one statement's pileup must not silence every other statement's, and the
            notification cooldown must answer this statement's question with this statement's history
-           (#3459's rule). */
+           (#3459's rule).
+
+           #3859: the arrow here joins a fact key to a STATEMENT HASH, which is not a fact key and never was —
+           the one place the rendered path carries something the typed Path below deliberately does not. That is
+           why the consumers had to stop splitting this string: a split reader saw a 16-hex-char "fact key" on
+           every pileup finding and silently matched nothing, and the typed Path (root only) is the honest list. */
         var storyPath = RootFactKey + " → " + identity;
 
         var story = new AnalysisStory
@@ -496,8 +501,12 @@ public static class SameStatementPileupDetector
                concurrent sessions in the pack. The pack's minimum elapsed rides as the leaf value. */
             RootFactValue = sessions,
             Severity = severity,
-            /* Single-observation story — the symptom is directly measured, no traversal to dilute
-               (the InferenceEngine convention: single-node paths carry confidence 1.0). */
+            /* 1.0 BY CONSTRUCTION, not by the engine's formula: the convoy is observed directly — N
+               concurrent sessions on one statement, each past that statement's own duration baseline —
+               so there is no corroboration left to look for. Since #3538 A6 the InferenceEngine scores a
+               lone symptom LOW (StoryConfidence: 0.20 uncorroborated), and StoryConfidence.DescribeBasis
+               names this root key so the MCP basis string says "detector-measured" rather than reading
+               this 1.0 as a legacy path-shape value. */
             Confidence = 1.0,
             Category = "queries",
             Path = [RootFactKey],

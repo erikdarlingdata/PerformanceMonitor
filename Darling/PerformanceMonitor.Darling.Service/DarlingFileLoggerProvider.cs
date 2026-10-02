@@ -161,7 +161,13 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
 
                 if (sb.Length > 0)
                 {
-                    File.AppendAllText(CurrentLogFile(), sb.ToString());
+                    /* #4281 review, finding 1 (Medium): the no-arg overload uses a STRICT UTF-8 encoder that
+                       throws EncoderFallbackException on a lone surrogate and writes ZERO bytes -- dropping
+                       every OTHER line already dequeued into this batch, not just the offending one. A
+                       permissive UTF-8 encoding (U+FFFD instead of a throw) keeps one malformed line from
+                       costing its batch-mates. Still BOM-less, like the strict encoder it replaces. */
+                    File.AppendAllText(
+                        CurrentLogFile(), sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 }
             }
             catch (Exception ex)
@@ -272,6 +278,11 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
 
         public bool IsEnabled(LogLevel logLevel) => logLevel != LogLevel.None;
 
+        /// <summary>The prefix a continuation line gets after a kept line feed (#4286 review, Low 5): long
+        /// enough that a continuation line can never be mistaken, at a glance or by a naive "does this line
+        /// start with a timestamp" reader, for the start of a new entry.</summary>
+        private const string ContinuationIndent = "    ";
+
         public void Log<TState>(
             LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
@@ -288,12 +299,64 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
                     line += $" | {exception.GetType().Name}: {exception.Message}";
                 }
 
-                _provider.Enqueue(line);
+                _provider.Enqueue(CleanLineForLog(line));
             }
             catch
             {
                 /* A formatter that throws must never take down the caller. */
             }
+        }
+
+        /// <summary>
+        /// #4281 review, finding 5 and its #4286 follow-up (Low 5): exception.Message (or ANY text a call
+        /// site pastes into the formatted message, most commonly the `LogError("... {Message}", ex.Message)`
+        /// idiom -- about 80 call sites across the service and storage projects) can repeat request text (a
+        /// PostgreSQL cast error echoes the bad value; KeyNotFoundException echoes the key). CR/LF in it could
+        /// forge a second entry the same way an unsanitized route could. The OLD fix sanitized only
+        /// exception.Message when the exception OBJECT was passed to the logger -- it never saw text a call
+        /// site had already baked into the formatted message via a template argument, which is the common
+        /// idiom. Cleaning the WHOLE assembled line here, at the one sink every ILogger call funnels through,
+        /// covers both.
+        ///
+        /// <para>Control characters (the #4286 review, Low 4 sense: <see cref="char.IsControl(char)"/>, plus
+        /// U+2028/U+2029) map to '.', with no length cap -- unlike a request-supplied route, this sink already
+        /// accepts an unbounded formatted message, and an operator needs the exception text in full. Line feed
+        /// and tab are the exception: DarlingWorker's once-per-start "Store host profile" line embeds '\n' on
+        /// purpose to print a readable multi-line block, and that text is never request-supplied, so it must
+        /// stay a real multi-line block rather than turn into a run of dots. A CR immediately before a kept LF
+        /// counts as the SAME line feed (a Windows-formatted embedded string must not print a blank line); a
+        /// bare CR with no following LF is a plain control character. Every kept line feed is followed by
+        /// <see cref="ContinuationIndent"/>, so a continuation line can never start in column 0 -- where a
+        /// reader looks for the next entry's timestamp -- which is what would let embedded text pass for a
+        /// second entry.</para>
+        /// </summary>
+        private static string CleanLineForLog(string line)
+        {
+            var builder = new StringBuilder(line.Length);
+            for (var i = 0; i < line.Length; i++)
+            {
+                var c = line[i];
+                if (c == '\r' && i + 1 < line.Length && line[i + 1] == '\n')
+                {
+                    /* CRLF is ONE line feed -- drop the CR, let the LF branch below fire on the next char. */
+                    continue;
+                }
+
+                if (c == '\n')
+                {
+                    builder.Append('\n').Append(ContinuationIndent);
+                }
+                else if (c == '\t' || !(char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029))
+                {
+                    builder.Append(c);
+                }
+                else
+                {
+                    builder.Append('.');
+                }
+            }
+
+            return builder.ToString();
         }
 
         private static string Abbreviate(LogLevel level) => level switch

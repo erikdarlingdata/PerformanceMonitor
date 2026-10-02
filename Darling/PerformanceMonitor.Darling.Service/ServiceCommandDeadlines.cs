@@ -12,11 +12,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// Explicit command deadlines for this project's store access (#2874), one constant per BUDGET REGIME.
 ///
 /// <para><c>.Service</c> is roughly fifteen regimes, not one, and they are being closed a regime at a
-/// time; this file is where each one's constant lands. Eleven are here: the collection sweep (#2928),
-/// the post-analysis force-plan hook and the two CLI verbs (group E), the startup/bootstrap path and
-/// its connect probe and the serial collection-loop thread (#2946), and the command plane, the
-/// actual-plan store resolve, the Query Store backfill's reads and the control-plane reload beacon
-/// (group D).
+/// time; this file is where each one's constant lands. Twelve are here: the collection sweep (#2928),
+/// the post-analysis force-plan hook and the two CLI verbs (group E), the startup/bootstrap path, its
+/// connect probe, the serial collection-loop thread and the once-per-start host/settings profile log
+/// (#2946, #4214), and the command plane, the actual-plan store resolve, the Query Store backfill's
+/// reads and the control-plane reload beacon (group D).
 /// <b>Do not reuse a constant across regimes</b> — the four numbers this sweep has already produced
 /// (60 s in <c>.Analysis</c> from a 120 s <c>CancelAfter</c>, 10 s for the alert pass from its 30 s
 /// cadence, <c>.Storage</c>'s five, <c>.Viewer</c>'s 15/5/10 from a connection permit) each came from a
@@ -86,7 +86,11 @@ public static class ServiceCommandDeadlines
     ///
     /// <para>It happens to land on the same 10 s the alert pass uses. That is two derivations meeting,
     /// not a number being reused: the alert pass is bounded above by its own 30 s sweep interval and
-    /// below by a 1,744.9 ms forced-plan read, neither of which appears anywhere above.</para>
+    /// below by a 1,744.9 ms forced-plan read, neither of which appears anywhere above. (That read has
+    /// since been re-pathed — #3573 found it streaming the whole fleet's window per server, and the
+    /// covering index in <c>PgTableTuning</c> made it an Index Only Scan — so its 1,744.9 ms is now the
+    /// recorded cost of a replaced plan rather than a live figure. Nothing here rested on it, which is
+    /// the point of this paragraph.)</para>
     /// </summary>
     public const int CollectionSweepSeconds = 10;
 
@@ -129,7 +133,14 @@ public static class ServiceCommandDeadlines
     /// deliberately pathological 2,925-row window (the volume a per-query cooldown of zero would produce).
     /// Those figures are from a local container, so the floor is anchored on the one COLD store read this
     /// sweep has measured in production instead: #2882's forced-plan read at <b>1,744.9 ms</b> over ~6.0 GB.
-    /// A value under ~2 s could fire on a cold read; 5 s carries ~2.9x over it.</para>
+    /// A value under ~2 s could fire on a cold read; 5 s carries ~2.9x over it. That anchor has since aged
+    /// in both directions and still holds as a floor: the table it was measured over grew to 23 GB and the
+    /// read's cold tail reached 10.3 s (#3573) — because its plan walked the entire fleet's two-hour slice and
+    /// filtered one server out of it, a fleet-width tax that scales with servers, not with this table — and
+    /// then the covering index in <c>PgTableTuning</c> made it an Index Only Scan over one server's rows. So
+    /// 1,744.9 ms is the recorded cost of a cold store read under an access path that no longer exists; as
+    /// a stand-in for "what a cold store read can cost here" it is, if anything, generous, and the
+    /// arithmetic above is unchanged.</para>
     ///
     /// <para><b>So the CEILING is what fixes this number, not the floor.</b> The pass budget puts it at
     /// 6 s or less and the floor only rules out the bottom two, which is worth saying plainly rather than
@@ -257,9 +268,10 @@ public static class ServiceCommandDeadlines
     /// <para><b>BELOW the budget the same startup path gives its heaviest statements.</b>
     /// <c>PgMigrations.MigrationCommandTimeoutSeconds</c> is 300 s per rung, and its lock wait is five
     /// multiples of that. Those bound data-MOVING DDL on a cold busy store. The sites here are catalog
-    /// reads, single-row <c>config</c> seeds, one <c>count(*)</c> and one idempotent grant batch — strictly
-    /// cheaper by construction, so granting them a migration rung's budget would be borrowing a number
-    /// rather than deriving one. 60 s is also exactly 2x the default it replaces, which keeps the change
+    /// reads, single-row <c>config</c> seeds, one <c>count(*)</c>, one idempotent grant batch and the
+    /// first start's <c>CREATE DATABASE</c> (a copy of the few-megabyte <c>template1</c>, measured at
+    /// 19-68 ms) — strictly cheaper by construction, so granting them a migration rung's budget would be
+    /// borrowing a number rather than deriving one. 60 s is also exactly 2x the default it replaces, which keeps the change
     /// legible: it widens by one multiple and names why.</para>
     ///
     /// <para><b>What this is NOT derived from.</b> Not #1772, which is this group's justification but not
@@ -280,36 +292,40 @@ public static class ServiceCommandDeadlines
     public const int BootstrapSeconds = 60;
 
     /// <summary>
-    /// The two commands in <c>DarlingManagedPostgres.EnsureDatabaseOnceAsync</c> — the
-    /// <c>pg_database</c> probe and <c>CREATE DATABASE</c> — which are the bootstrap's first real
-    /// interaction with the freshly started server, and the ONLY sites in this group with a retry above
-    /// them.
+    /// The <c>pg_database</c> probe in <c>DarlingManagedPostgres.OpenProbedMaintenanceConnectionAsync</c>,
+    /// which is the bootstrap's first real interaction with the freshly started server, and the ONLY site in
+    /// this group with a retry above it.
     ///
-    /// <para><b>Why they cannot take <see cref="BootstrapSeconds"/>.</b> <c>EnsureDatabaseAsync</c> wraps
-    /// the whole unit in six attempts separated by 2 s, and an Npgsql command deadline is inside what that
-    /// loop retries. Measured against Npgsql 10.0.3: a command that exceeds its <c>CommandTimeout</c>
+    /// <para><b>Why it cannot take <see cref="BootstrapSeconds"/>.</b> The connect and this probe retry as
+    /// one unit, six attempts separated by 2 s, and an Npgsql command deadline is inside what that loop
+    /// retries. Measured against Npgsql 10.0.3: a command that exceeds its <c>CommandTimeout</c>
     /// throws <c>NpgsqlException("Exception while reading from stream")</c> wrapping a
     /// <c>TimeoutException</c>, and <c>IsTransientConnectionFault</c> walks the inner chain and returns
     /// true for exactly that. (A SERVER-side <c>statement_timeout</c> is the mirror image — it arrives as
     /// <c>PostgresException 57014</c>, which that same test rejects as "the server replied", so it is not
     /// retried. The same wall-clock event, named two ways, and only one of them gets six chances.) So the
-    /// deadline here multiplies: the worst-case bootstrap delay this pair can contribute is
+    /// deadline here multiplies: the worst-case bootstrap delay the probe can contribute is
     /// <c>6 x deadline + 10 s</c> of pauses before the throw reaches <c>LogCritical</c>-and-exit. At the
     /// inherited 30 s that is 190 s; at <see cref="BootstrapSeconds"/> it would be 370 s. At 10 s it is
     /// 70 s, which sits just past the installers' 60 s <c>WaitForStatus('Running')</c> and inside the
     /// 2-minute variant — i.e. inside the window an operator is already waiting through, rather than
     /// several minutes beyond it.</para>
     ///
-    /// <para><b>ABOVE the measured worst case with room to spare.</b> The probe measured 12-14 ms and
-    /// <c>CREATE DATABASE</c> 19-68 ms, so 10 s is ~147x the slower of the two. And it is generous for the
+    /// <para><b>ABOVE the measured worst case with room to spare.</b> The probe measured 12-14 ms, so 10 s
+    /// is ~700x it. And it is generous for the
     /// fault the retry actually exists for, which is not slowness at all: a Windows backend that loses the
     /// shared-memory reservation race authenticates and then DIES on its first query, which arrives as a
     /// reset in milliseconds. Waiting a full <see cref="BootstrapSeconds"/> for a backend that is already
     /// gone spends the retry's whole purpose — getting a fresh one quickly — on a corpse.</para>
     ///
-    /// <para>These two are also the only sites in the group that run against the MAINTENANCE database
-    /// (<c>postgres</c>) rather than the store, which is what makes their floor a connection probe's floor
-    /// rather than a query's.</para>
+    /// <para><b>Why <c>CREATE DATABASE</c> is not under it.</b> The create runs once, after the probe, on the
+    /// probe's own connection, so its backend has already survived the race the retry exists for, and it
+    /// takes <see cref="BootstrapSeconds"/>. A timeout there means the template copy is slow, and a retry
+    /// cannot help: the timeout cancels the statement, the server rolls the partial copy back, and the next
+    /// attempt starts the copy over under the same deadline (#4352).</para>
+    ///
+    /// <para>The probe runs against the MAINTENANCE database (<c>postgres</c>) rather than the store, which
+    /// is what makes its floor a connection probe's floor rather than a query's.</para>
     /// </summary>
     public const int BootstrapConnectProbeSeconds = 10;
 
@@ -412,6 +428,62 @@ public static class ServiceCommandDeadlines
     public const int SerialLoopSeconds = 5;
 
     /// <summary>
+    /// The once-per-start store host/settings profile log (#4214 ruling 9): after the store migrates,
+    /// <c>DarlingWorker</c> wraps <c>DarlingStoreHostProfile.GatherStartupProfileAsync</c> in one linked CTS
+    /// at this bound — the host facts, the <c>pg_settings</c> read and the managed conf-file attribution for
+    /// the eight sizing settings. Deliberately excludes the STORE facts that scale with the store (size,
+    /// uncompressed-chunk totals): those stay in <c>--check-settings</c> and the later MCP read, under
+    /// <see cref="CliStoreReadSeconds"/> or a budget of their own, off this path entirely — see
+    /// <c>SerialLoopStoreSizeSourceTests</c> (#3199) for why that split is load-bearing rather than
+    /// cosmetic.
+    ///
+    /// <para><b>Why this is its own regime and not <see cref="BootstrapSeconds"/>.</b> Every bootstrap
+    /// site's failure is terminal — <c>LogCritical</c> then <c>return</c> — which is why that regime errs
+    /// long: waiting is the cheap direction when the alternative is a dead service. This step is the
+    /// opposite. Ruling 9 requires it to "never fail or delay startup," so a slow-but-healthy store here
+    /// degrades to one missing log line, not to a stalled start, and the deadline stays short rather than
+    /// generous — the collection loop must not sit behind a diagnostic.</para>
+    ///
+    /// <para><b>ABOVE the one query it wraps, not an independent number.</b>
+    /// <c>GatherSettingProfilesAsync</c>'s single <c>pg_settings</c> read already carries
+    /// <see cref="CliStoreReadSeconds"/> as its own <c>CommandTimeout</c> — it is the same shared helper
+    /// <c>--check-settings</c> calls, so that per-statement bound is not this constant's to change. This
+    /// constant only has to backstop what that command timeout does not cover: <c>OpenAsync</c> and the
+    /// eight settings' conf-file reads (local disk, small files, sub-millisecond in practice). Set to
+    /// <see cref="CliStoreReadSeconds"/> + 5 for the same reason <see cref="CliBudgetBackstopSeconds"/> sits
+    /// above the query it backstops rather than tying it.</para>
+    /// </summary>
+    public const int StartupHostProfileSeconds = CliStoreReadSeconds + 5;
+
+    /// <summary>
+    /// The <c>get_store_host</c> MCP read's own regime (#4214 part 2): a linked CTS wrapped around
+    /// <c>DarlingStoreHostProfile.GatherAsync</c> — the SAME orchestration <c>--check-settings</c> calls,
+    /// store facts included, unlike <see cref="StartupHostProfileSeconds"/>'s startup profile which never
+    /// reaches <c>GatherStoreFactsAsync</c> at all (ruling 9).
+    ///
+    /// <para><b>Why the MCP surface needs its own outer bound where the CLI verb needs none.</b>
+    /// <c>CliStoreReadSeconds</c> IS the bound for <c>--check-settings</c> because nothing waits behind an
+    /// operator's own console command. An MCP tool call is different: <c>McpCommandDeadlines</c>'s own
+    /// header states that none of the <c>[McpServerTool]</c> methods take a <c>CancellationToken</c>, so a
+    /// caller that gives up leaves the read running with nothing to cancel it — exactly the gap that sweep
+    /// closed for the other 124 shipped reads. This read cannot simply take their constant
+    /// (<c>McpCommandDeadlines.ReadSeconds</c>, 20s): unlike every read that constant covers, this one's
+    /// component queries scale with the STORE (#3199) rather than the row, so this needed a regime of its
+    /// own rather than joining one sized for the opposite kind of read.</para>
+    ///
+    /// <para><b>ABOVE the sum of what it wraps, not tied to any one query in it.</b>
+    /// <c>GatherAsync</c> runs, sequentially, the version/buffer/size/uncompressed-chunk reads
+    /// (<c>GatherStoreFactsAsync</c>, each individually bounded at <see cref="CliStoreReadSeconds"/>) and
+    /// then the <c>pg_settings</c> read (<c>GatherSettingProfilesAsync</c>, same per-statement bound) plus
+    /// eight local conf-file reads (sub-millisecond). Only two of those five statements are store-scaling
+    /// (<c>StoreSizeSql</c>, <c>UncompressedChunkSizeSql</c> — <c>SerialLoopStoreSizeSourceTests</c>'
+    /// regex), so the backstop clears TWO store-scaling statements at their own ceiling plus the same 5s
+    /// margin <see cref="StartupHostProfileSeconds"/> carries for everything outside the one query it
+    /// backstops.</para>
+    /// </summary>
+    public const int McpStoreHostProfileSeconds = (CliStoreReadSeconds * 2) + 5;
+
+    /// <summary>
     /// The store&lt;-&gt;service COMMAND plane's own bookkeeping — the stale-command reaper, the atomic
     /// claim, the desired-state store write a claimed command dispatches, the terminal result report,
     /// and the <c>pg_statement_text</c> lookup <c>test_hypothetical_index</c> resolves its statement
@@ -450,8 +522,9 @@ public static class ServiceCommandDeadlines
     /// <para><b>It NARROWS the lease overrun rather than closing it</b>, following #2888's lock wait
     /// and #2901's own command plane. <c>DarlingCommandExecutor.StaleCommandTimeout</c> is five
     /// minutes with no heartbeat, and what a command spends is dominated by work this deadline does not
-    /// bound — a full collector sweep for <c>snapshot_now</c>, a fleet-wide retention purge for
-    /// <c>purge_now</c>, 120 s of re-execution for <c>execute_actual_plan</c>. So the lease is not the
+    /// bound — a full collector sweep for <c>snapshot_now</c>, 120 s of re-execution for
+    /// <c>execute_actual_plan</c> (<c>purge_now</c> used to be here too; since #4825 it starts the purge in the
+    /// background and answers at once). So the lease is not the
     /// instrument this constant moves; it is the instrument that MISREPORTS when the report write
     /// fails, and the report failing fast is strictly better than it failing slow.</para>
     /// </summary>
@@ -506,19 +579,31 @@ public static class ServiceCommandDeadlines
     /// at <b>30.0 s</b> with <c>Exception while reading from stream</c>: the 300 s was never reached,
     /// and the value that decided was the undocumented one.</para>
     ///
-    /// <para><b>ABOVE the worst case, which for this regime means ABOVE Npgsql's default.</b> Both
-    /// reads are unbounded across retention on <c>query_store_stats</c>, and both are in #2795's
-    /// production cancellation census: the candidate scan's own form <b>631 times in one day</b>, and
-    /// the <c>MIN</c>'s shape-twin <c>MAX</c> <b>2,092 times</b>, measured at <b>40,743-50,560 ms
-    /// cold</b> and 9,279 ms warm on the 62.5 GB / 19-chunk table. The candidate scan's
-    /// <c>collection_time &gt; now() - CandidateWindow</c> predicate is INERT: <c>CandidateWindow</c>
-    /// is 7 days while <c>TimescaleSupport.RawRetentionSpan</c> is 4, so no chunk that exists is ever
-    /// excluded — which is why a nominally bounded read is in that census at all. And the <c>MIN</c>
-    /// cannot be bounded the way #2344 and #2795 bounded their <c>MAX</c> siblings: it exists to find
-    /// the OLDEST stored row, so a <c>collection_time</c> floor would hide exactly what it looks for.
-    /// 120 s clears the twin's 50.6 s cold worst with 2.4x headroom. Both failures are swallowed at
-    /// <c>LogDebug</c> and return "no candidates" / "skip this database", which reads as no backfill
-    /// work — the silent-degradation shape of #2795 and #2796, one loop over.</para>
+    /// <para><b>ABOVE the worst case, which for this regime means ABOVE Npgsql's default.</b> AT THE
+    /// TIME, both reads were unbounded across retention on <c>query_store_stats</c>, and both are in
+    /// #2795's production cancellation census: the candidate scan's own form <b>631 times in one
+    /// day</b>, and the <c>MIN</c>'s shape-twin <c>MAX</c> <b>2,092 times</b>, measured at
+    /// <b>40,743-50,560 ms cold</b> and 9,279 ms warm on the 62.5 GB / 19-chunk table. The candidate
+    /// scan's <c>collection_time &gt; now() - CandidateWindow</c> predicate WAS inert: <c>CandidateWindow</c>
+    /// was 7 days while <c>TimescaleSupport.RawRetentionSpan</c> is 4, so no chunk that existed was ever
+    /// excluded — which is why a nominally bounded read was in that census at all. And the <c>MIN</c>
+    /// could not be bounded the way #2344 and #2795 bounded their <c>MAX</c> siblings: it exists to find
+    /// the OLDEST stored row, so a plain <c>collection_time</c> floor would have hidden exactly what it
+    /// looks for. 120 s clears the twin's 50.6 s cold worst with 2.4x headroom. Both failures are
+    /// swallowed at <c>LogDebug</c> and return "no candidates" / "skip this database", which reads as no
+    /// backfill work — the silent-degradation shape of #2795 and #2796, one loop over.</para>
+    ///
+    /// <para><b>#4197: both reads are now bounded, and this budget is a safety margin rather than the
+    /// expected cost.</b> The candidate scan binds <c>floorLimit</c> (<c>HorizonFor</c> — 23 hours on a
+    /// store with continuous aggregates, 3 days without) instead of the inert 7-day window, so it plans
+    /// against only the newest 1-2 chunks; on a rig's heavy server this took the read from 206 ms /
+    /// 21,411 buffers to 1.7-2.1 ms / under 800 buffers (see the PR body's measured table). The <c>MIN</c>
+    /// no longer needs to stay unbounded either: an <c>EXISTS ... collection_time &lt;= floorLimit LIMIT
+    /// 1</c> answers "is this database done" without a scan, and only the miss path falls through to a
+    /// MIN bounded at <c>collection_time &gt; floorLimit</c> — exact, because
+    /// <c>last_execution_time</c> never exceeds its own row's <c>collection_time</c>. 120 s is left
+    /// unchanged: it is now far above the typical case, which is the right side to err on for a budget
+    /// that only matters when a store is unhealthy.</para>
     ///
     /// <para><b>BELOW the point where the loop walks away from a live statement.</b> Strictly under the
     /// 300 s <c>BackfillSliceDeadline</c>, so the statement dies before the step abandons it and the

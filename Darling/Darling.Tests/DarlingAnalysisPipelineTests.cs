@@ -173,8 +173,14 @@ public sealed class DarlingAnalysisPipelineTests
         /* 17 collect methods, one query each, except CollectQueriesAtSpike (peak lookup +
            queries-at-peak = 2). The reconstructed-chain method's DMV-snapshot fallback runs
            through the shared PgBlockingPairRowQuery.DmvSnapshotSql, already pinned in the
-           fact-collector suite. */
-        Assert.Equal(LiteDrillDownMethodSurface.Length + 1, PgDrillDownCollector.AllSql.Count);
+           fact-collector suite. Plus the regressed-queries read's #3953 table twin, which Lite has no
+           store for: its DuckDB keeps no latest-snapshot interval table. And the parameter-sensitivity
+           drill-down's text read (#4821): its main read runs before the cap, so resolving text there would
+           resolve it for every plan its rough filter passes; Lite carries that text inline and has no such
+           second statement. */
+        Assert.Equal(LiteDrillDownMethodSurface.Length + 3, PgDrillDownCollector.AllSql.Count);
+        Assert.Contains(PgDrillDownCollector.RegressedQueriesTableSql, PgDrillDownCollector.AllSql);
+        Assert.Contains(PgDrillDownCollector.ParameterSensitiveTextSql, PgDrillDownCollector.AllSql);
     }
 
     [Fact]
@@ -211,11 +217,15 @@ public sealed class DarlingAnalysisPipelineTests
            It is deliberate in the plan-regression re-detection and nowhere else — the same
            confinement the fact collector pins for its PlanRegressionSql. */
         Assert.Contains("any_value(query_text)", PgDrillDownCollector.RegressedQueriesSql, StringComparison.Ordinal);
+        Assert.Contains("any_value(query_text)", PgDrillDownCollector.RegressedQueriesTableSql, StringComparison.Ordinal);
         foreach (var sql in PgDrillDownCollector.AllSql)
         {
             if (sql.Contains("any_value", StringComparison.OrdinalIgnoreCase))
             {
-                Assert.Equal(PgDrillDownCollector.RegressedQueriesSql, sql);
+                /* The two regressed-queries reads (#3953: raw, and its interval-table twin), and nothing else. */
+                Assert.True(
+                    sql == PgDrillDownCollector.RegressedQueriesSql || sql == PgDrillDownCollector.RegressedQueriesTableSql,
+                    "any_value() outside the regressed-queries reads:\n" + sql);
             }
         }
     }
@@ -237,8 +247,10 @@ public sealed class DarlingAnalysisPipelineTests
            passthrough views. #2150's query_store_text is the first one a drill-down reads, because
            statement text moved out of the fact row and has to be resolved back. Sourced from the store
            class's own TableName rather than spelled here, so a rename cannot leave this guard asserting
-           against a table that no longer exists. */
-        var sideTables = new[] { QueryStoreTextStore.TableName }
+           against a table that no longer exists. query_text_dim is the second (#3902): the
+           parameter-sensitivity drill-down resolves text for its five output rows by digest rather than
+           reading v_query_stats, whose join resolves it for every row in the window. */
+        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable, QueryStoreIntervalLatest.TableName }
             .Select(t => t.Contains('.', StringComparison.Ordinal) ? t.Split('.')[^1] : t)
             .ToHashSet(StringComparer.Ordinal);
 
@@ -440,6 +452,7 @@ public sealed class DarlingAnalysisPipelineTests
                 f => f.ServerId.ToString(),
                 NullLogger<AnalysisNotificationService>.Instance);
             await notifier.NotifyAsync(findings);
+            await notifier.FlushPendingAsync();
 
             var expectedNotified = findings.Where(f => f.Severity >= 0.3).ToList();
             Assert.NotEmpty(expectedNotified);
@@ -452,8 +465,28 @@ public sealed class DarlingAnalysisPipelineTests
             Assert.Equal(anomaly.Severity, sentAnomaly.Severity);
             Assert.Equal(0.3, sentAnomaly.NotifyThreshold);
 
+            /* #3712: the corroboration components rode from BuildStory through PgFindingStore onto the
+               finding — ANOMALY_WAIT_PROFILE's catalogue defines five co-fire checks, and with only wait rows
+               planted none can match — and the gate's decision rides the alert: a lone fact with no matched
+               check takes the digest road, with the reason on the context the row persists. The sender still
+               receives it (the count assertion above holds), so nothing the digest road does hides the finding. */
+            if (anomaly.StoryPath.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.Ordinal))
+            {
+                Assert.Equal(5, anomaly.DefinedAmplifiers);
+            }
+            var expectedDecision = FindingRouting.Classify(anomaly, FindingRoute.Digest);
+            Assert.Equal(expectedDecision.Route, sentAnomaly.Route);
+            Assert.NotNull(sentAnomaly.Context.Routing);
+            Assert.Equal(expectedDecision.RouteText, sentAnomaly.Context.Routing!.Route);
+            Assert.Equal(expectedDecision.Reason, sentAnomaly.Context.Routing.Reason);
+            if (anomaly.FactCount == 1 && anomaly.MatchedAmplifiers == 0)
+            {
+                Assert.Equal(FindingRoute.Digest, sentAnomaly.Route);
+            }
+
             /* Inside the cooldown, an identical batch does not re-notify. */
             await notifier.NotifyAsync(findings);
+            await notifier.FlushPendingAsync();
             Assert.Equal(expectedNotified.Count, sender.Sent.Count);
 
             /* ---- mute: the second run re-detects the same story and the mute filter drops
@@ -524,13 +557,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
     {
         public List<FindingAlert> Sent { get; } = new();
 
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
             => Task.FromResult<DateTime?>(null);
 
-        public Task SendFindingAlertAsync(FindingAlert alert)
+        /// <summary>#3916: what the fake reports the row recorded. Null = not delivered.</summary>
+        public AlertDelivery? Delivery { get; set; }
+        public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
         {
             Sent.Add(alert);
-            return Task.CompletedTask;
+            return Task.FromResult<AlertDelivery?>(Delivery);
+        }
+        /// <summary>#3916: each over-the-cap summary, as the list of pages it named; returns <see cref="Delivery"/>.</summary>
+        public List<IReadOnlyList<FindingAlert>> Summaries { get; } = new();
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Summaries.Add(named);
+            return Task.FromResult<AlertDelivery?>(Delivery);
         }
     }
 
@@ -563,6 +605,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity { get; init; } = 1.5;
         public int AnalysisNotifyCooldownMinutes { get; init; } = 360;
+        public int AnalysisPageCap { get; init; } = 5;
         public string TriageBaseUrl { get; init; } = "";
     }
 }

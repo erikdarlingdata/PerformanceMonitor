@@ -52,9 +52,60 @@ namespace PerformanceMonitor.Collectors;
 /// failed-jobs alert path. Managed Instance (edition 8), on-prem, and AWS RDS all have Agent and collect
 /// normally.</para>
 /// </summary>
-public sealed class JobHistoryCollector : CollectorDefinitionBase<JobHistoryCollector.Row>
+public sealed class JobHistoryCollector : CollectorDefinitionBase<JobHistoryCollector.Row>, INaturalKeyDedupedCollector<JobHistoryCollector.Row>
 {
     public static JobHistoryCollector Instance { get; } = new();
+
+    /// <summary>
+    /// The natural key <see cref="INaturalKeyDedupedCollector{TRow}"/> dedupes on, EXCLUDING server_id
+    /// (the host's stored-key read already scopes to one server): <c>instance_id</c> alone is ambiguous
+    /// across an identity epoch that returns (two different runs can share the same id under two epochs),
+    /// so the pre-insert dedupe keys on the full tuple instead.
+    /// </summary>
+    public IReadOnlyList<string> NaturalKeyColumns { get; } =
+        new[] { "instance_id", "job_id", "step_id", "run_datetime" };
+
+    /// <inheritdoc />
+    public (long InstanceId, string JobId, int StepId, DateTime RunDateTime) GetNaturalKey(Row row) =>
+        (row.InstanceId, row.JobId, row.StepId, ToMicroseconds(row.RunDateTime ?? DateTime.MinValue));
+
+    /// <summary>
+    /// Truncates a <see cref="DateTime"/> to whole microseconds (drops any sub-microsecond ticks), so the
+    /// in-memory natural-key comparison matches regardless of the source's tick precision: PostgreSQL's
+    /// <c>timestamp</c> and DuckDB's <c>TIMESTAMP</c> both store microsecond precision, but
+    /// <see cref="DateTime.UtcNow"/> carries 100 ns ticks on Windows (and whole microseconds on other
+    /// platforms), so an untruncated batch-side key never matched a stored key read back from either
+    /// store. The <see cref="DateTime.Kind"/> is preserved.
+    /// </summary>
+    internal static DateTime ToMicroseconds(DateTime t) =>
+        new DateTime(t.Ticks - (t.Ticks % 10), t.Kind);
+
+    /// <summary>
+    /// Pure filter (#4487): drops rows whose natural key the host says is already stored, in the same
+    /// relative order, mutating neither argument. <c>run_datetime</c> is nullable on the row but not
+    /// part of the SQL Server payload's actual domain (every real history row carries one); a null maps
+    /// to <see cref="DateTime.MinValue"/> so it still participates in the key rather than throwing.
+    /// </summary>
+    public List<Row> DropAlreadyStored(
+        List<Row> rows,
+        IReadOnlySet<(long InstanceId, string JobId, int StepId, DateTime RunDateTime)> storedKeys)
+    {
+        if (storedKeys.Count == 0)
+        {
+            return rows;
+        }
+
+        var kept = new List<Row>(rows.Count);
+        foreach (var row in rows)
+        {
+            if (!storedKeys.Contains(GetNaturalKey(row)))
+            {
+                kept.Add(row);
+            }
+        }
+
+        return kept;
+    }
 
     private JobHistoryCollector()
     {
@@ -165,6 +216,193 @@ AND   DATEADD
       ) >= DATEADD(HOUR, -{0}, GETDATE())",
         ArchivalEmptyFallbackHours);
 
+    /// <summary>
+    /// The archival-emptied window as a bare CONJUNCTION — <see cref="ArchivalEmptyFilter"/> with its
+    /// leading <c>AND</c> stripped — so the identity-regression arm of
+    /// <see cref="IdentityGuardedWatermarkFilter"/> can nest the SAME window inside an OR without a second
+    /// copy of the predicate drifting from the first. Derived, never re-typed: one definition of "the
+    /// bounded recent window" in this file, and the archival branch's own text stays byte-for-byte what it
+    /// was before the guard existed.
+    /// </summary>
+    private static readonly string ArchivalEmptyWindowPredicate =
+        ArchivalEmptyFilter.StartsWith(ArchivalEmptyFilterPrefix, StringComparison.Ordinal)
+            ? ArchivalEmptyFilter[ArchivalEmptyFilterPrefix.Length..]
+            : ArchivalEmptyFilter.TrimStart();
+
+    /// <summary>The <c>AND</c> lead-in <see cref="ArchivalEmptyFilter"/> opens with, stripped to derive <see cref="ArchivalEmptyWindowPredicate"/>.</summary>
+    private const string ArchivalEmptyFilterPrefix = "\r\nAND   ";
+
+    /// <summary>
+    /// The failback (A→B→A) lookback horizon, in days (#4487). After a target flips back to an epoch it
+    /// already stored rows under, the honest arm's <c>instance_id &gt; @last_instance_id</c> alone would
+    /// re-collect every already-stored row from the returning (higher) epoch that still sits above the
+    /// lower watermark the away leg left behind — potentially the server's entire retained history.
+    /// Bounding by <c>run_datetime</c> caps that re-read to this many days, once per failback, the same
+    /// shape <see cref="ArchivalEmptyFallbackHours"/> already gives the reseed case. The trade this makes:
+    /// <c>sysjobhistory</c> stamps a row with its run's START time but writes the row only when the run
+    /// ENDS, so a job STEP that has been running longer than this many days when it finally completes is
+    /// silently missed by the bound. Days, not hours, because a failback can leave the target on the
+    /// returning epoch for a while before the host's next cycle observes it — unlike the reseed case, where
+    /// the very next cycle self-heals.
+    /// </summary>
+    public const int FailbackLookbackDays = 7;
+
+    /// <summary>
+    /// The failback bound's own cap (a review finding on #4487): a target whose clock was ever wrong can
+    /// have stored a FUTURE <c>run_datetime</c>, which would carry <c>@min_run_datetime</c> into the future
+    /// too and starve the steady arm of every real (present-day) row until that future date arrives — the
+    /// same silent-zero-rows shape #3885 already ended for the identity guard, now reachable through the
+    /// timestamp bound instead. Clamped in the collector's OWN SQL, on the TARGET's own local clock (like
+    /// <see cref="ArchivalEmptyFilter"/>'s GETDATE() already is — a host-supplied UTC cutoff would be
+    /// timezone-skewed the same way), so the last <see cref="FailbackLookbackDays"/> days are always
+    /// collected regardless of what the store believes it last saw. T-SQL has no LEAST before 2022, hence
+    /// the CASE. Built once from <see cref="FailbackLookbackDays"/>, never a second literal, so a change to
+    /// the constant cannot leave the cap and the lookback disagreeing.
+    /// </summary>
+    private static readonly string MinRunDateTimeCapExpression = string.Format(
+        CultureInfo.InvariantCulture,
+        "CASE WHEN @min_run_datetime > DATEADD(DAY, -{0}, GETDATE()) THEN DATEADD(DAY, -{0}, GETDATE()) ELSE @min_run_datetime END",
+        FailbackLookbackDays);
+
+    /// <summary>
+    /// The failback bound as a bare boolean expression (#4487): true with no restriction when the host has
+    /// no timestamp watermark yet (nothing stored means nothing to fail back FROM), otherwise the same
+    /// sargable run_date pre-filter plus exact decoded-run_datetime bound <see cref="ArchivalEmptyFilter"/>
+    /// uses — anchored on <see cref="MinRunDateTimeCapExpression"/> (the host-supplied <c>@min_run_datetime</c>
+    /// parameter, capped, per the guard above) instead of <c>GETDATE()</c> directly.
+    /// <c>OPTION(RECOMPILE)</c> on the template lets the optimizer fold the <c>IS NULL</c> branch away once
+    /// the literal parameter value is known, the same reason the guard's own target-max comparison can be a
+    /// runtime scalar rather than a second round trip. <c>run_datetime</c> is the target's own local wall
+    /// clock, and so is the stored <c>run_datetime</c> the host's watermark was read from, so the two
+    /// compare like with like — the cap keeps that true even when the stored value cannot be trusted.
+    /// </summary>
+    private static readonly string MinRunDateTimeBoundPredicate = string.Format(
+        CultureInfo.InvariantCulture,
+        @"
+(
+    @min_run_datetime IS NULL
+    OR
+    (
+        jh.run_date >= CONVERT(integer, CONVERT(varchar(8), {0}, 112))
+        AND   DATEADD
+              (
+                  SECOND,
+                  (jh.run_time / 10000) * 3600 +
+                  ((jh.run_time / 100) % 100) * 60 +
+                  (jh.run_time % 100),
+                  CONVERT(datetime, CONVERT(varchar(8), jh.run_date))
+              ) >= {0}
+    )
+)",
+        MinRunDateTimeCapExpression);
+
+    /// <summary>
+    /// The target's OWN current high-water mark, read on the same round trip as the rows (a scalar
+    /// aggregate over <c>sysjobhistory</c>'s clustered <c>instance_id</c> key — a one-row backward top,
+    /// not a scan). <c>ISNULL(..., -1)</c> because a freshly purged <c>sysjobhistory</c> with nothing
+    /// written since returns NULL, and a NULL on either side of a comparison makes BOTH arms of the guard
+    /// unknown — which is exactly the silent-zero-rows failure this fix exists to end.
+    /// </summary>
+    private const string TargetMaxInstanceIdScalar =
+        "ISNULL((SELECT MAX(h2.instance_id) FROM msdb.dbo.sysjobhistory AS h2), -1)";
+
+    /// <summary>
+    /// The steady-state filter, SELF-GUARDING against an identity regression in ONE statement (#3885).
+    ///
+    /// <para><b>The failure it ends.</b> <c>instance_id</c> is an IDENTITY, monotonic only while the
+    /// identity itself stands. It does NOT survive a reseed: a weekly cleanup window that purges
+    /// <c>sysjobhistory</c> and reseeds the identity drops the target's <c>MAX(instance_id)</c> into the
+    /// thousands while the store still remembers millions, and <c>jh.instance_id &gt; @last_instance_id</c>
+    /// then matches nothing FOREVER. The query stays valid and the run records SUCCESS with zero rows, so
+    /// no failure arm fires and the health surface bands the server healthy while its record-keeping is
+    /// dark — #3754's shape, one collector over. An <c>msdb</c> restore, an AG failover to a replica whose
+    /// <c>msdb</c> carries a lower identity, and a registration re-pointed at a different instance all
+    /// starve it the same way.</para>
+    ///
+    /// <para><b>Why one statement and no second round trip.</b> The guard is a T-SQL comparison of the
+    /// target's own max against the host-supplied watermark, evaluated inside the filter, so the decision
+    /// is made against the instance the connection ACTUALLY reaches at the instant the rows are read. A
+    /// host-side probe would be a second round trip, a second connection's worth of failure modes, and a
+    /// window between the probe and the read in which a failover could move the answer.</para>
+    ///
+    /// <para><b>What the regressed arm collects.</b> NOT everything: the same bounded
+    /// <see cref="ArchivalEmptyFallbackHours"/>-hour window the archival-emptied branch takes
+    /// (<see cref="ArchivalEmptyWindowPredicate"/>, composed from the one definition). The reseed is what
+    /// caused the regression, so what remains on the target is recent by construction; the window bounds
+    /// the re-read anyway, and on Lite it keeps the run from re-inserting rows already aged into parquet
+    /// that <c>v_job_history</c> would double-count.</para>
+    ///
+    /// <para><b>Self-healing, no operator action — but only once the host's own watermark read is honest
+    /// too (#4487).</b> The regressed run stores rows carrying the NEW epoch's ids, so the very next run's
+    /// <c>SELECT MAX(instance_id)</c> is the new max PROVIDED the host reads it as the max of the server's
+    /// NEWEST collected batch, not an all-time max: an all-time max would still return the OLD epoch's
+    /// higher number (it never stops being the largest id ever stored) and this arm would take the bounded
+    /// window every cycle forever, not once. Darling's <c>GetLastCollectedInstanceIdAsync</c> and Lite's
+    /// equivalent read the newest batch's max for exactly this reason. Darling also caches this watermark
+    /// in memory between runs (<c>ServerWatermarkCache</c>); a regressed batch invalidates that cache
+    /// entry rather than merging it in, so the next run re-seeds from the store's now-honest value instead
+    /// of keeping the cache pinned at the pre-reseed number the ordinary "keep the greater" rule would
+    /// otherwise preserve indefinitely. Pinned as two consecutive BuildQuery calls in
+    /// <c>JobHistoryIdentityEpochTests</c>; the host-side watermark and cache behaviour is pinned where the
+    /// host lives.</para>
+    ///
+    /// <para><b>An epoch that returns (a failover and failback) re-reads the returning epoch's own history,
+    /// and the pre-insert dedupe is what keeps that honest (#4487).</b> If the identity later flips back to
+    /// an epoch this server already stored rows under — a failover away and back, or a restore reverted —
+    /// the newest-batch watermark by itself is not enough: it sits at the LOWER epoch's max after the away
+    /// leg, and the following incremental read (<c>instance_id &gt; @last_instance_id</c>, unbounded in
+    /// time) would otherwise re-read every already-stored row from the higher epoch that is still above
+    /// that lower number. The honest arm ALSO requires <c>run_datetime &gt;= @min_run_datetime</c> whenever
+    /// the host supplies a watermark — <see cref="MinRunDateTimeBoundPredicate"/>, composed the same
+    /// sargable way as <see cref="ArchivalEmptyWindowPredicate"/>, anchored on the host's own newest stored
+    /// <c>run_datetime</c> minus <see cref="FailbackLookbackDays"/> days instead of <c>GETDATE()</c>. That
+    /// bounds a post-failback RE-READ to at most <see cref="FailbackLookbackDays"/> days of the returning
+    /// epoch's rows — the lookback stays this wide on purpose, for a job STEP that has been running for
+    /// longer than that when it finally completes (<c>sysjobhistory</c> stamps a step row with its START
+    /// time and writes it only when the step ENDS) and for the clock skew a failback can carry. What the
+    /// re-read is NOT allowed to do is turn back into duplicates: this class implements
+    /// <see cref="INaturalKeyDedupedCollector{TRow}"/>, and each host's write path
+    /// (Darling's <c>DarlingCollectorRunner.WriteBatchAsync</c>, Lite's
+    /// <c>RemoteCollectorService.DefinitionRunner.WriteBatch</c>) reads the batch's own natural keys
+    /// (<see cref="NaturalKeyColumns"/>: <c>instance_id</c>, <c>job_id</c>, <c>step_id</c>,
+    /// <c>run_datetime</c> — <c>instance_id</c> alone is ambiguous across an epoch that returns) back from
+    /// the store once, before the write, and calls <see cref="DropAlreadyStored"/> so a row this server
+    /// already stored under either epoch is never inserted twice. The lookback bounds how much gets
+    /// RE-READ; the dedupe is what closes the loop on what gets RE-STORED. No bound at all applies when the
+    /// host has no watermark yet (first run, or an archival-emptied Lite store) — nothing stored means
+    /// nothing to fail back FROM, and the dedupe read against an empty store finds nothing to drop.</para>
+    /// </summary>
+    private static readonly string IdentityGuardedWatermarkFilter = string.Format(
+        CultureInfo.InvariantCulture,
+        @"
+AND   (
+          (
+              {0} >= @last_instance_id
+              AND jh.instance_id > @last_instance_id
+              AND {2}
+          )
+          OR
+          (
+              {0} < @last_instance_id
+              AND {1}
+          )
+      )",
+        TargetMaxInstanceIdScalar,
+        ArchivalEmptyWindowPredicate,
+        MinRunDateTimeBoundPredicate);
+
+    /// <summary>
+    /// Count of job-history identity regressions this run observed (0 or 1) — the store-side marker for a
+    /// reseed, on the run's <c>collection_log</c> note (#3161's measurement seam). A count, never a verdict.
+    /// </summary>
+    public const string IdentityRegressionsMeasurement = "job_history_identity_regressions";
+
+    /// <summary>The store watermark the regressed target fell below, on the run that detected it.</summary>
+    public const string IdentityWatermarkMeasurement = "job_history_identity_store_watermark";
+
+    /// <summary>The first target <c>instance_id</c> read on the run that detected the regression — the new epoch's floor.</summary>
+    public const string IdentityTargetRowMeasurement = "job_history_identity_target_row";
+
     public override string Name => "job_history";
 
     public override string TargetTable => "job_history";
@@ -188,6 +426,12 @@ AND   DATEADD
     /// </summary>
     public override string? NumericWatermarkColumn => "instance_id";
 
+    /// <summary>#4197 part b: lets the host cache this collector's server-scoped watermark in memory.</summary>
+    public override Func<Row, DateTime?>? WatermarkValueAccessor => static row => row.RunDateTime;
+
+    /// <summary>#4197 part b: the numeric twin, for the same reason.</summary>
+    public override Func<Row, long?>? NumericWatermarkValueAccessor => static row => row.InstanceId;
+
     /// <summary>
     /// Collects on SQL Server, Azure SQL Managed Instance, and AWS RDS — everywhere SQL Agent exists. NOT
     /// Azure SQL Database (edition 5): there is no Agent / <c>msdb.dbo.sysjobhistory</c> there. NOT a login
@@ -200,7 +444,15 @@ AND   DATEADD
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         /* Incremental filter selection (the numeric high-water mark, with the Lite archival-emptied fallback):
-             - numeric watermark present             -> steady state, collect instance_id newer than it.
+             - numeric watermark present             -> steady state, collect instance_id newer than it,
+                                                        UNLESS the target's own MAX(instance_id) is BELOW
+                                                        that watermark, in which case the identity regressed
+                                                        (a purge-and-reseed cleanup window, an msdb restore,
+                                                        an AG failover to a lower-identity replica, a
+                                                        re-pointed registration) and the same statement
+                                                        collapses to the bounded window instead of matching
+                                                        nothing forever - see
+                                                        IdentityGuardedWatermarkFilter (#3885).
              - watermark null, never succeeded        -> TRUE first run, collect ALL of sysjobhistory.
              - watermark null, HAS succeeded (Lite)   -> hot store emptied by archival, use a BOUNDED recent
                                                          run_datetime window so we never re-scan rows already
@@ -211,10 +463,19 @@ AND   DATEADD
 
         if (context.NumericWatermark.HasValue)
         {
-            filter = "\r\nAND   jh.instance_id > @last_instance_id";
+            filter = IdentityGuardedWatermarkFilter;
+            /* #4487: the failback bound. context.Watermark is ALREADY the host's newest STORED run_datetime
+               for this server (job_history declares run_datetime as its WatermarkColumn precisely so a Lite
+               archival-emptied store can be told from a true first run — see the class remarks) — exactly
+               the anchor the honest arm's run_datetime bound needs, with no second host read. Null when
+               nothing has been stored yet, which MinRunDateTimeBoundPredicate treats as no restriction. */
+            var minRunDateTime = context.Watermark is { } newestStored
+                ? newestStored - TimeSpan.FromDays(FailbackLookbackDays)
+                : (DateTime?)null;
             parameters = new[]
             {
                 new CollectorParameter("@last_instance_id", context.NumericWatermark.Value, CollectorParameterType.BigInt),
+                new CollectorParameter("@min_run_datetime", minRunDateTime, CollectorParameterType.DateTime2),
             };
         }
         else if (context.HasCollectedBefore)
@@ -249,15 +510,69 @@ AND   DATEADD
         new CollectorColumn("message", CollectorColumnType.Varchar),
     };
 
+    /// <summary>
+    /// Reads the rows and, on the way past, notices an identity REGRESSION (#3885): a row whose
+    /// <c>instance_id</c> is at or below <see cref="CollectorContext.NumericWatermark"/> can only arrive on
+    /// the guarded filter's bounded-window arm, because the watermark arm's own predicate is
+    /// <c>jh.instance_id &gt; @last_instance_id</c>. So the rows themselves ARE the detection - no
+    /// projected guard column, no second scalar for the reader to consume, no extra bytes on every
+    /// ordinary run: the cheaper of the two shapes, and the one that cannot disagree with the filter that
+    /// produced the rows.
+    ///
+    /// <para><b>Once per run, not once per row.</b> A reseed leaves hundreds of low-id rows in the window;
+    /// the account is composed on the FIRST one and the flag suppresses the rest. Once per EPOCH follows
+    /// from the fix being self-healing: this run stores the new epoch's ids, so the host's
+    /// <c>MAX(instance_id)</c> is the new max next run and the watermark arm is honest again. A regressed
+    /// target with nothing inside the window returns no rows and nothing is said - true, and the next run
+    /// that does find a row says it.</para>
+    ///
+    /// <para><b>The carrier.</b> The count rides the run's <c>collection_log</c> note
+    /// (<see cref="IdentityRegressionsMeasurement"/>, #3161's measurement seam) and the sentence rides the
+    /// calculator's discontinuity queue, which both hosts drain and log after the run (#3653 A5). It is NOT
+    /// routed through <see cref="ServerEpoch.ObserveInstance"/>: that epoch is a (start time, server name)
+    /// pair whose change means every cumulative counter on the instance restarted, and it forgets EVERY
+    /// delta baseline for the server. A job-history reseed is a numeric epoch on one table and says nothing
+    /// about any counter, so borrowing that carrier would need <c>Stamp</c> widened to a numeric component
+    /// and would clear baselines that are perfectly good. Widening <c>ServerEpoch</c> to carry a numeric
+    /// epoch (and a persisted <c>job_history_identity</c> / <c>_previous</c> state pair, which would let the
+    /// read layer's <c>discontinuities[]</c> name this by itself) is the named follow-up on #3885.</para>
+    ///
+    /// <para><b>No forget call.</b> job_history keeps no delta baselines, so there is nothing to clear, and the
+    /// forget API (<c>ClearGroups</c> / <c>ClearServer</c>) belongs to the epoch comparator and the host remove
+    /// paths alone (measurement-contract rule 3). The regression is recorded as a MEASUREMENT on the run
+    /// (<see cref="IdentityRegressionsMeasurement"/> = 1), which the <c>collection_log</c> note and the host's
+    /// cycle line both render with the two numbers the operator needs beside it.</para>
+    /// </summary>
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        var regressionReported = false;
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            var instanceId = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
+
+            if (!regressionReported
+                && context.NumericWatermark.HasValue
+                && instanceId <= context.NumericWatermark.Value)
+            {
+                regressionReported = true;
+                context.Measure(IdentityRegressionsMeasurement, 1);
+                /* The two numbers an operator needs, on the same note: the watermark the store remembered and the
+                   first id the target now holds. Counts on the measurement seam are the definition's only channel
+                   to the run record, and these two are honest as numbers (#3161). */
+                context.Measure(IdentityWatermarkMeasurement, context.NumericWatermark.Value);
+                context.Measure(IdentityTargetRowMeasurement, instanceId);
+                /* The measurement IS the marker: the run's collection_log note renders identity_regressions=1 and
+                   the host's cycle line carries it, so the store and the log both say the reseed happened on this
+                   run. No ClearGroups/ClearServer: job_history keeps no delta baselines and the forget API is
+                   reserved for the epoch comparator and the host remove paths (MeasurementContractCensusTests
+                   rule 3) - a note is not a forget. */
+            }
+
             rows.Add(new Row
             {
-                InstanceId = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                InstanceId = instanceId,
                 JobId = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 JobName = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 JobEnabled = !reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3), CultureInfo.InvariantCulture),

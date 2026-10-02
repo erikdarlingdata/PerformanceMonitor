@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -54,6 +55,8 @@ public sealed class AlertEngineTests
         /* #1839: 0 = off, the shipped default — a test must opt in for the wait gate to run at all. */
         public int BlockingWaitSecondsThreshold { get; set; }
         public int DeadlockCountThreshold { get; set; } = 1;
+        /* #3653 (A8e): the shipped #3368 pair unless a test raises it — the grade a fire wears, never whether it fires. */
+        public DeadlockRateThresholds DeadlockRateThresholds { get; set; } = DeadlockRateThresholds.Default;
         public int PoisonWaitThresholdMs { get; set; } = 500;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30;
         public int LongRunningQueryMaxResults { get; set; } = 5;
@@ -62,6 +65,13 @@ public sealed class AlertEngineTests
         public bool LongRunningQueryExcludeBackups { get; set; } = true;
         public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
         public bool LongRunningQueryExcludeCdc { get; set; } = true;
+        /* #3653 (A5, Q5): the opt-out knob, empty unless a test sets it — every session evaluated. The SEEDING is
+           the hosts' (App / DarlingAlertSettings), not the engine's, so the engine fakes start empty and the pins
+           that want the seeds pass LongRunningQueryExclusions.Defaults explicitly. */
+        public List<string> LongRunningQueryExcludedProgramNamePrefixesList { get; } = new();
+        public List<string> LongRunningQueryExcludedLoginsList { get; } = new();
+        public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes => LongRunningQueryExcludedProgramNamePrefixesList;
+        public IReadOnlyList<string> LongRunningQueryExcludedLogins => LongRunningQueryExcludedLoginsList;
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
@@ -69,6 +79,7 @@ public sealed class AlertEngineTests
         public int DiskCriticalFreePercent { get; set; } = 3;
         public int DiskCriticalFreeGb { get; set; } = 2;
         public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int SelfDiskFreeWarnGb { get; set; } = 50;
         public int CollectionStaleMinutes { get; set; } = 30;
         public int CollectionFailureThreshold { get; set; } = 10;
         /* #1984: DarlingConfig defaults (40% / 1 GB); enable stays the class's opt-in OFF. */
@@ -92,12 +103,20 @@ public sealed class AlertEngineTests
     {
         public List<BlockedProcessAlertRow> Blocking { get; } = new();
         public List<DeadlockAlertRow> Deadlocks { get; } = new();
-        public List<PoisonWaitDelta> PoisonWaits { get; } = new();
+        /* #3539 A4: the accumulation rows the engine grades. Whatever a test puts here comes back
+           unfiltered — the seam contract is a dumb window sum; the engine does the thresholding. */
+        public List<PoisonWaitAccumulation> PoisonWaits { get; } = new();
+        public int PoisonWaitWindowMinutesAsked { get; private set; }
         public List<LongRunningQueryInfo> LongRunning { get; } = new();
         public List<VolumeFreeSpaceInfo> Volumes { get; } = new();
         public List<PvsPressureInfo> PvsDatabases { get; } = new();
         public TempDbSpaceInfo? TempDb { get; set; }
         public List<AnomalousJobInfo> AnomalousJobs { get; } = new();
+
+        /* #3653 (A5, Q5): the knob the engine handed the last LRQ read, so a pin can assert it travelled. The
+           fake applies it the way both real reads do — IN the read, ahead of the cap, counting what it removed
+           — through the shared C# rule, which is the same rule the SQL predicate spells. */
+        public LongRunningQueryExclusions? LastLrqExclusions { get; private set; }
 
         public int BlockingFetches { get; private set; }
         public int DeadlockFetches { get; private set; }
@@ -126,18 +145,20 @@ public sealed class AlertEngineTests
             return Task.FromResult(new List<DeadlockAlertRow>(Deadlocks));
         }
 
-        public Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(string serverKey, double thresholdMs, CancellationToken cancellationToken = default) =>
-            /* The seam contract: fetch-then-filter client-side, like Lite's loop. */
-            Task.FromResult(PoisonWaits.FindAll(w => w.AvgMsPerWait >= thresholdMs));
+        public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
+        {
+            PoisonWaitWindowMinutesAsked = windowMinutes;
+            return Task.FromResult(new List<PoisonWaitAccumulation>(PoisonWaits));
+        }
 
         /* #3495's degrade arm: the CPU card's fire-time maintenance probe rides this same seam, and the
            pin that a failed probe costs the annotation and never the alert needs a read that faults. */
         public bool ThrowOnLongRunningRead { get; set; }
 
-        public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+        public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
-            IReadOnlyList<string> excludedDatabases, CancellationToken cancellationToken = default)
+            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default)
         {
             if (ThrowOnLongRunningRead)
             {
@@ -145,17 +166,42 @@ public sealed class AlertEngineTests
             }
 
             LastLrqArgs = (thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases);
-            return Task.FromResult(new List<LongRunningQueryInfo>(LongRunning));
+            LastLrqExclusions = exclusions;
+            /* #3742: the database list is applied HERE, ahead of the cap, exactly as both SQL reads now apply it —
+               the rule the reads' third flag spells (exact, case-insensitive, normalised, a row with no database
+               name is kept) — so an engine-level pin can plant six excluded-database sessions ahead of one real
+               one and see the real one on a page of five. */
+            var excluded = LongRunningQueryExclusions.Normalize(excludedDatabases);
+            bool InExcludedDatabase(LongRunningQueryInfo q) => LongRunningQueryExclusions.MatchesExact(q.DatabaseName, excluded);
+            var kept = LongRunning.Where(q => !exclusions.Excludes(q.ProgramName, q.LoginName) && !InExcludedDatabase(q)).Take(Math.Clamp(maxResults, 1, 1000)).ToList();
+            /* Counts in SESSIONS (distinct session_id), split by arm through the shared Classify — a session matching
+               both arms lands under ProgramPrefix, exactly as the two SQL scalars count it; the database arm is LAST,
+               taken AND NOT either knob arm, as the third scalar counts it. */
+            var byProgram = LongRunning.Where(q => exclusions.Classify(q.ProgramName, q.LoginName) == LongRunningQueryExclusionArm.ProgramPrefix).Select(q => q.SessionId).Distinct().Count();
+            var byLogin = LongRunning.Where(q => exclusions.Classify(q.ProgramName, q.LoginName) == LongRunningQueryExclusionArm.Login).Select(q => q.SessionId).Distinct().Count();
+            var byDatabase = LongRunning.Where(q => InExcludedDatabase(q) && !exclusions.Excludes(q.ProgramName, q.LoginName)).Select(q => q.SessionId).Distinct().Count();
+            return Task.FromResult(new LongRunningQueryReadResult(kept, byProgram, byLogin, byDatabase));
         }
 
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>(Volumes));
 
-        /* #2349: empty on purpose. These tests exercise other alerts, and a fabricated file would
-           make the file-growth gate fire inside an unrelated scenario. */
+        /* #2349: EMPTY by default. These tests mostly exercise other alerts, and a fabricated file would
+           make the file-growth gate fire inside an unrelated scenario; the #3539 A8c pins below plant rows
+           and read back the lookback the engine asked for. #3636: a fetch counter beside it, like the
+           forced-plan seam, so the once-per-observation pins can assert both what fired and that the read
+           still happened on every pass. */
+        public List<DatabaseFileGrowthInfo> Files { get; } = new();
+        public int? FileGrowthLookbackAsked { get; private set; }
+        public int FileGrowthFetches { get; private set; }
+
         public Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
-            string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<DatabaseFileGrowthInfo>());
+            string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+        {
+            FileGrowthLookbackAsked = lookbackMinutes;
+            FileGrowthFetches++;
+            return Task.FromResult(new List<DatabaseFileGrowthInfo>(Files));
+        }
 
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
@@ -177,10 +223,13 @@ public sealed class AlertEngineTests
         public List<DatabaseStateInfo> DatabaseStates { get; } = new();
         public int DatabaseStateFetches { get; private set; }
 
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
+        /// <summary>When true the store has no verdict: the read returns null instead of a list.</summary>
+        public bool DatabaseStatesNoVerdict { get; set; }
+
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
         {
             DatabaseStateFetches++;
-            return Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
+            return Task.FromResult<List<DatabaseStateInfo>?>(DatabaseStatesNoVerdict ? null : new List<DatabaseStateInfo>(DatabaseStates));
         }
 
         /* #2157: plantable rows + a fetch counter, mirroring the database-state seam above so the
@@ -321,10 +370,24 @@ public sealed class AlertEngineTests
     {
         public List<AlertOutcome> Outcomes { get; } = new();
 
+        /// <summary>What the channels did with a delivery (#4752): the answer DeliverAndReportAsync gives
+        /// the engine. Null (the default) is "unreported", which reads as delivered.</summary>
+        public Func<AlertOutcome, AlertDelivery?>? Report { get; set; }
+
         public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
         {
             Outcomes.Add(outcome);
             return Task.CompletedTask;
+        }
+
+        /* #3580: DeliverAndReportAsync is REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store
+           Parity), so every fake answers it by hand. This one delivers, then answers what a test staged in
+           Report; with none staged it reports nothing: null is "unreported", which the two daily documents
+           and the engine's retry treat as delivered, exactly as every fire before #3580 was. */
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            await DeliverAsync(outcome, cancellationToken);
+            return Report?.Invoke(outcome);
         }
     }
 
@@ -339,6 +402,10 @@ public sealed class AlertEngineTests
         public List<FailedJobInfo> FailedJobs { get; } = new();
         public int FailedJobFetches { get; private set; }
         public bool Muted { get; set; }
+
+        /* #3539: an optional mute PROBE for pins that need to see which AlertMuteContext the engine asked
+           about (the poison-wait mute keys on the worst wait type); null keeps the flat Muted answer. */
+        public Func<AlertMuteContext, bool>? IsMuted { get; set; }
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /* #3013: the swallowed-read counter is an OPTIONAL harness input, defaulting to null, so every
@@ -355,7 +422,7 @@ public sealed class AlertEngineTests
 
         public AlertEngine Build(bool withFailedJobsFetcher = false, bool withAgentJobResolver = false) => new(
             Settings, Adapter, StateStore, Deliverer,
-            isAlertMuted: _ => Muted,
+            isAlertMuted: ctx => IsMuted?.Invoke(ctx) ?? Muted,
             failedJobsFetcher: withFailedJobsFetcher
                 ? (_, _, _) => { FailedJobFetches++; return Task.FromResult(new List<FailedJobInfo>(FailedJobs)); }
                 : null,
@@ -388,11 +455,13 @@ public sealed class AlertEngineTests
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
             bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
-            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false) =>
+            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false,
+            IReadOnlyList<string>? separatelyMonitored = null) =>
             new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
                 noCpuSampleTime
                     ? null
-                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
+                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)),
+                SeparatelyMonitoredDatabases: separatelyMonitored);
 
         /// <summary>The instant distinct sample times are counted from — arbitrary, only the ordering matters.</summary>
         public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -420,6 +489,77 @@ public sealed class AlertEngineTests
         DeadlockGraphXml =
             $@"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""{database}""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""{database}""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""{database}.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>"
     };
+
+    /// <summary>F14: the engine hands the snapshot's store id to the mute check, so an id-keyed rule silences
+    /// that server's alert and NOT a same-named sibling's (a blank display name falls back to the host, so
+    /// two registrations can read identically).</summary>
+    [Fact]
+    public async Task IdKeyedMuteRule_SuppressesThatServersAlert_AndNotASameNamedSiblings()
+    {
+        var rule = new MuteRule { ServerId = 7, ServerName = Name, MetricName = "Poison Wait" };
+        var muted = new List<bool>();
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.PoisonWaitEnabled = true;
+            h.IsMuted = ctx => rule.MatchesAt(ctx, h.Now);
+            h.Adapter.PoisonWaits.Add(Poison(6_000_000, waitType: "RESOURCE_SEMAPHORE", waits: 100));
+            var snapshot = Harness.Snapshot() with { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+            muted.Add(Assert.Single(h.Deliverer.Outcomes).Muted);
+        }
+
+        Assert.Equal(new[] { true, false }, muted);
+    }
+
+    /// <summary>F14: two registrations sharing a display name read alike in both snapshots; the dedup keys
+    /// must still differ (the fingerprint takes the store id), while the mute context and the alert row keep
+    /// the display name. A unique name is unchanged: the store id never reaches its key.</summary>
+    [Fact]
+    public async Task DeadlockDedupKey_SeparatesServersSharingADisplayName_AndLeavesTheMuteContextAlone()
+    {
+        var keys = new List<string>();
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            AlertMuteContext? muteAsked = null;
+            h.IsMuted = ctx => { muteAsked = ctx; return false; };
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "host1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id, ServerNameIsShared = true };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            keys.Add(Assert.Single(fired.Context!.Incidents!).DedupKey);
+            Assert.Equal("host1", muteAsked!.ServerName);
+            Assert.Equal("host1", fired.ServerName);
+        }
+
+        Assert.NotEqual(keys[0], keys[1]);
+    }
+
+    [Fact]
+    public async Task DeadlockDedupKey_ForNamedServers_IsUnchangedByTheStoreId()
+    {
+        var expected = AlertFingerprint.ForObjects(
+            "Prod SQL 1", AlertFingerprint.Deadlock,
+            DeadlockObjectExtractor.FromGraphXml(DeadlockRow().DeadlockGraphXml))!.DedupKey;
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "Prod SQL 1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Equal(expected, Assert.Single(fired.Context!.Incidents!).DedupKey);
+        }
+    }
 
     /* ---------------- master switch ---------------- */
 
@@ -493,7 +633,13 @@ public sealed class AlertEngineTests
         Assert.Equal("High CPU", fired.MetricName);
         Assert.Equal("80% (Total CPU)", fired.CurrentValue);    /* :82 current-value shape, :64 label */
         Assert.Equal("80%", fired.ThresholdValue);
-        Assert.Null(fired.Context);                              /* :91-98 — CPU passes no context */
+        /* :91-98 passed no context; since #3653 (A8e) the context exists for its grade alone — no details,
+           so every channel renders the same card plus the tier. 80% is at the knob and under the band's
+           Critical bar: Warning, on the context AND the outcome. */
+        Assert.NotNull(fired.Context);
+        Assert.Empty(fired.Context!.Details);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context.SeverityOverride);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
         /* #1830: the numerics are REQUIRED — without them the history stores text-parsed
            "80% (Total CPU)", failed on the parenthesized label, and stored 0 for every row. */
         Assert.Equal(80d, fired.NumericCurrentValue);
@@ -555,6 +701,128 @@ public sealed class AlertEngineTests
 
         /* Two genuinely new samples on top of that one observation reach the bar. */
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: stuck);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    /* ---------------- CPU: the #3744 identity rule — equality, not order ---------------- */
+
+    /// <summary>One sweep carrying one sample instant, breaching or not, with the same CPU pair the other CPU
+    /// fixtures use; the #3744 fixtures hand-pick each instant, so a shared driver would obscure the sequence.</summary>
+    private static Task ObserveCpuAsync(AlertEngine engine, DateTime sampleInstant, bool breaching) =>
+        engine.EvaluateServerAsync(Harness.Snapshot(
+            sqlCpu: breaching ? 70 : 20, totalCpu: breaching ? 95 : 30, cpuSampleTime: sampleInstant));
+
+    [Fact]
+    public async Task Cpu_AFallBack_RunsTheStampBackwards_AndTheStreakStillAdvances()
+    {
+        /* THE #3744 defect, first shape. cpu_utilization.sample_time is the monitored server's LOCAL wall
+           clock, and on a zone that observes DST that clock repeats an hour every autumn: 01:59 is followed
+           by 01:00. Under the pre-#3744 rule (fresh = strictly GREATER than the last counted instant) every
+           sample in the repeated hour read as stale, so a breach that began at 01:58 never reached the bar
+           and an open incident never cleared, for an hour, on every non-UTC server, once a year. The rule is
+           now equality — a different instant is a different sample whichever clock stamped it — and the two
+           samples one local hour apart across the fall-back are the DISTINCT identities they always were.
+
+           The instants are local-frame stamps on purpose: this is what the gate was fed before V134 and what
+           it is still fed off a pre-rung row, and the fix must hold there too, not only once the identity has
+           moved to the UTC twin. Under `>` the third observation below is "not fresh" and the fire never
+           comes; that is the assertion that reddens if the predicate goes back to order. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var local = new DateTime(2026, 11, 1, 1, 58, 0);              /* 01:58 EDT, Kind=Unspecified as stored */
+        await ObserveCpuAsync(engine, local, breaching: true);            /* 1 */
+        await ObserveCpuAsync(engine, local.AddMinutes(1), breaching: true); /* 01:59 EDT — 2 */
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var fallenBack = new DateTime(2026, 11, 1, 1, 0, 0);          /* 01:00 EST: one real minute later, 59 local minutes EARLIER */
+        Assert.True(fallenBack < local, "the fixture must run the stamp backwards, or it tests nothing #3744 changed");
+        await ObserveCpuAsync(engine, fallenBack, breaching: true);       /* 3 — the bar */
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The same rule on the falling edge: an incident open across the fall-back clears in the repeated
+           hour rather than waiting for the local clock to climb past 01:59 again. */
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: false);
+        Assert.Empty(h.Resolutions);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        Assert.Single(h.Resolutions);
+
+        /* And a repeat of the LAST counted instant is still the same sample: the streak holds and nothing is
+           written — equality lost none of #3282. */
+        var writes = h.StateStore.SavedPersistence.Count;
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_TheUpgradeFrameSwitch_EastOfUtc_IsFreshExactlyOnce_AndNeverFreezes()
+    {
+        /* THE #3744 defect, second shape — the one #3730 saw coming and worked around by leaving the gate's
+           identity on the local stamp. The identity is now the row's UTC twin where the store has one, so a
+           record persisted by a pre-#3744 build (a LOCAL instant) meets a UTC instant on the first post-upgrade
+           sweep. East of UTC the UTC instant reads EARLIER by the offset: at UTC+3, local 12:00 becomes UTC
+           09:00. Under `>` the gate would have seen no fresh sample until the UTC clock climbed past the last
+           local stamp — three hours of frozen CPU alerting on every server east of UTC, once, on upgrade day.
+           Under equality the switch is one new identity: counted ONCE, then the same UTC instant re-read is
+           the same sample, then `!=` within the UTC frame as the samples advance.
+
+           A new engine over the same store IS the restart the upgrade implies, so the seed path is the one
+           that hands the local record to the UTC-fed sweep. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        /* The pre-#3744 build: one breaching sample, identity = the local stamp. */
+        var local = new DateTime(2026, 9, 21, 12, 0, 0);
+        await ObserveCpuAsync(h.Build(), local, breaching: true);                                         /* 1 */
+        Assert.Equal(local, Assert.Single(h.StateStore.Persistence).Value.LastObservedSampleUtc);
+
+        /* The upgraded build's first sweep: the SAME sample, now identified by its UTC twin — three hours
+           earlier as a value. Fresh exactly once (the accepted one-time re-anchor), never frozen. */
+        var upgraded = h.Build();
+        var utc = local.AddHours(-3);
+        Assert.True(utc < local, "east of UTC the twin must read earlier than the local stamp, or this is the west fixture");
+        await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* 2 */
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* The re-read of that identity on the next sweep is the same sample: NOT counted, NOT written. If the
+           switch were treated as "fresh by frame" on every sweep rather than once, this is where the bar would
+           be reached early — the assertion that reddens if a re-anchor is not one-time. */
+        var writes = h.StateStore.SavedPersistence.Count;
+        await ObserveCpuAsync(upgraded, utc, breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
+
+        /* Within the UTC frame the samples advance and the bar is reached where it should be. */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 — the bar */
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(utc.AddMinutes(1), Assert.Single(h.StateStore.Persistence).Value.LastObservedSampleUtc);
+    }
+
+    [Fact]
+    public async Task Cpu_TheUpgradeFrameSwitch_WestOfUtc_CountsTheSameSampleOnceMoreAtMost()
+    {
+        /* The other direction of the same switch. West of UTC the twin reads LATER than the local stamp
+           (UTC−5: local 12:00 is UTC 17:00), so even under `>` the first post-upgrade sweep counted the
+           sample it had already counted — #3730 named that as the west-of-UTC cost of switching. Equality
+           has the same cost and the same bound, and this pins the bound: the same physical sample is counted
+           once more at the switch, the re-read of its UTC identity is held, and the streak then needs the
+           genuinely new samples it always needed. One extra count of one sample per server, once, is the
+           whole price of moving the identity to the honest clock. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var local = new DateTime(2026, 9, 21, 12, 0, 0);
+        await ObserveCpuAsync(h.Build(), local, breaching: true);                                         /* 1 */
+
+        var upgraded = h.Build();
+        var utc = local.AddHours(5);
+        await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* 2 — the once-more */
+        await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* held */
+        await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* held */
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 — the bar */
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -969,11 +1237,160 @@ public sealed class AlertEngineTests
         Assert.Equal("1", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
     }
 
-    /* ---------------- blocking wait time (#1839) ---------------- */
+    /* ---------------- Azure SQL Database master target: databases monitored as their own targets ---------------- */
 
-    /// <summary>A fresh snapshot totalling <paramref name="totalWaitMs"/> across <paramref name="sessions"/> SPIDs.</summary>
-    private static CurrentBlockingWaitResult WaitSnapshot(long totalWaitMs, int sessions = 3, bool fresh = true) =>
-        new(new DateTime(2026, 7, 1, 11, 59, 0), totalWaitMs, sessions, fresh);
+    private static readonly string[] Gp = ["GP"];
+
+    private static AlertServerSnapshot MasterSnapshot(IReadOnlyList<string>? separatelyMonitored = null) =>
+        Harness.Snapshot(isAzureSqlDb: true, separatelyMonitored: separatelyMonitored);
+
+    private static Harness MasterHarness()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingCountThreshold = 1;
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DeadlockCountThreshold = 1;
+        return h;
+    }
+
+    [Fact]
+    public async Task AzureMaster_EventsForASeparatelyMonitoredDatabase_DoNotAlert()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_TheSameEvents_AlertWhenTheDatabaseIsNotSeparatelyMonitored()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(null));
+
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_EventsForADatabaseNotInTheList_StillAlert()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "HS"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_Blocking_CountAndWatermarkCoverOnlyTheUnlistedDatabases()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(1, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(2, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(3, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(4, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(5, database: "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Equal("2", outcome.CurrentValue);
+        Assert.Equal("2 blocking session(s)", outcome.ShortMessage);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task AzureMaster_Deadlocks_CountAndWatermarkCoverOnlyTheUnlistedDatabases()
+    {
+        var h = MasterHarness();
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("HS"));
+        h.Adapter.Deadlocks.Add(DeadlockMixedRow("GP", "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+        Assert.Equal("2", outcome.CurrentValue);
+        Assert.Equal("2 deadlock(s) in the last hour", outcome.ShortMessage);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task AzureMaster_Blocking_RecountKeepsThePreferenceForExtendedEventRows()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(1, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(2, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(3, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(4, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(5, source: BlockedProcessAlertRow.DmvSnapshotSource, database: "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.Equal("2", Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected").CurrentValue);
+    }
+
+    private static DeadlockAlertRow DeadlockMixedRow(string first, string second) => new()
+    {
+        VictimProcessId = "process1",
+        VictimSqlText = "UPDATE Users SET Reputation = 1",
+        DeadlockGraphXml =
+            $@"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""{first}""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""{second}""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""{first}.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>"
+    };
+
+    /* ---------------- blocking wait time (#1839; gated by #3653 A5, ruling Q4) ---------------- */
+
+    /// <summary>A snapshot totalling <paramref name="totalWaitMs"/> across <paramref name="sessions"/> SPIDs, collected
+    /// at <paramref name="at"/> (a fixed instant when the test does not care) on a <paramref name="cadenceMinutes"/>
+    /// schedule. Fresh unless the test says otherwise.</summary>
+    private static CurrentBlockingWaitResult WaitSnapshot(
+        long totalWaitMs, int sessions = 3, bool fresh = true, DateTime? at = null, int? cadenceMinutes = 1) =>
+        new(at ?? new DateTime(2026, 7, 1, 11, 59, 0), totalWaitMs, sessions, fresh, cadenceMinutes);
+
+    /// <summary>
+    /// Drives <paramref name="samples"/> DISTINCT blocking snapshots through the engine, one collector cycle
+    /// (<paramref name="stepMinutes"/>) apart starting after <paramref name="from"/>, each totalling
+    /// <paramref name="totalWaitMs"/>. Returns the last collection instant so a test can thread it into the next
+    /// call — the gate keys on it, and a re-used instant is a sample already counted. The blocking-wait twin of
+    /// <c>DriveTempDbAsync</c>.
+    /// </summary>
+    private static async Task<DateTime> DriveBlockingWaitAsync(
+        AlertEngine engine, Harness h, long totalWaitMs, int samples, DateTime from,
+        int stepMinutes = 1, int? cadenceMinutes = 1, int sessions = 3, bool suppressed = false)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(stepMinutes);
+            h.Adapter.BlockingWait = WaitSnapshot(totalWaitMs, sessions, at: at, cadenceMinutes: cadenceMinutes);
+            await engine.EvaluateServerAsync(Harness.Snapshot(suppressed: suppressed));
+        }
+
+        return at;
+    }
+
+    /// <summary>The <c>Fired By</c> token on a Blocking Wait Time outcome's gate item, which the engine prepends.</summary>
+    private static string FiredBy(AlertOutcome fired)
+    {
+        Assert.NotNull(fired.Context);
+        var gateItem = fired.Context!.Details[0];
+        Assert.StartsWith("Blocking Wait Time — ", gateItem.Heading, StringComparison.Ordinal);
+        return Assert.Single(gateItem.Fields, f => f.Label == AlertContextBuilders.BlockingWaitFiredByLabel).Value;
+    }
 
     [Fact]
     public async Task BlockingWait_OffByDefault_NeverReadsOrFires()
@@ -993,14 +1410,17 @@ public sealed class AlertEngineTests
     [Fact]
     public async Task BlockingWait_FiresAtThresholdInclusive_WithRealNumericsAndContent()
     {
-        /* At/above, not strictly above — the same inclusive comparison every other threshold uses. */
+        /* At/above, not strictly above — the same inclusive comparison every other threshold uses. Since
+           #3653 (A5) a snapshot exactly AT the bar is under the single-snapshot multiple, so it takes
+           BlockingWaitBreachSamples consecutive collections to become an incident; the delivered shape is
+           what it always was, plus the gate item in front naming the arm. */
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 600;
-        h.Adapter.BlockingWait = WaitSnapshot(600_000, sessions: 3);
         h.Adapter.Blocking.Add(BlockingRow(55));
+        var engine = h.Build();
 
-        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        await DriveBlockingWaitAsync(engine, h, 600_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
         Assert.Equal("600s across 3 blocked session(s)", fired.CurrentValue);
@@ -1008,9 +1428,13 @@ public sealed class AlertEngineTests
         /* #1830: the numerics must carry the real values — the display text is prose no parser recovers. */
         Assert.Equal(600d, fired.NumericCurrentValue);
         Assert.Equal(600d, fired.NumericThresholdValue);
-        /* The reporter asked for today's Blocking Detected content, built from this sweep's rows. */
+        /* The reporter asked for today's Blocking Detected content, built from this sweep's rows — it is still
+           there, BEHIND the gate item. */
         Assert.NotNull(fired.Context);
+        Assert.Equal(AlertEngine.BlockingWaitFiredByConsecutive, FiredBy(fired));
+        Assert.Contains(fired.Context!.Details, d => d.Heading.StartsWith("Blocking chain", StringComparison.Ordinal));
         Assert.False(string.IsNullOrWhiteSpace(fired.DetailText));
+        Assert.Contains($"{AlertContextBuilders.BlockingWaitFiredByLabel}: {AlertEngine.BlockingWaitFiredByConsecutive}", fired.DetailText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1028,28 +1452,244 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
-    public async Task BlockingWait_IsLevelTriggered_CooldownSuppressesThenRefiresWhileStillAbove()
+    public async Task BlockingWait_ASingleSnapshotAtThreeTimesTheBar_FiresAtOnce_AndSaysSo()
     {
-        /* The distinguishing behavior vs the count gate's edge trigger: blocking that STAYS above the
-           threshold keeps announcing itself every cooldown instead of going quiet after one alert. */
+        /* THE Q4 RULING's first arm, and the pin the whole disjunction exists for: on the measured store class 97
+           of 102 episodes were ONE snapshot long — including the p99, 1,509 s across 145 sessions, gone by the next
+           collection — and a plain K = 3 gate drops every one of them. One fresh snapshot at N = 3× the bar is an
+           incident on its own, the card says which arm admitted it, and the record opens exactly as the
+           consecutive arm would have opened it. No blocked-process rows are planted: a DMV-only episode has no
+           report, and the fire must carry its gate evidence regardless. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase, sessions: 145);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Blocking Wait Time", fired.MetricName);
+        Assert.Equal("180s across 145 blocked session(s)", fired.CurrentValue);
+        Assert.Equal(AlertEngine.BlockingWaitFiredBySingleSnapshot, FiredBy(fired));
+        var gateItem = fired.Context!.Details[0];
+        Assert.Equal("180s", Assert.Single(gateItem.Fields, f => f.Label == "Total Blocked Wait").Value);
+        Assert.Equal("60s", Assert.Single(gateItem.Fields, f => f.Label == "Threshold").Value);
+        Assert.StartsWith("180s (3× threshold", Assert.Single(gateItem.Fields, f => f.Label == "Single-Snapshot Bar").Value, StringComparison.Ordinal);
+        /* #3422: the snapshot instant declares its clock. */
+        Assert.EndsWith("Z", Assert.Single(gateItem.Fields, f => f.Label == "Snapshot").Value, StringComparison.Ordinal);
+
+        /* "Still RECORDS the observation": the incident is open on the persisted record, under the arm's metric. */
+        var persisted = Assert.Single(h.StateStore.Persistence);
+        Assert.Equal(AlertEngine.BlockingWaitPersistenceMetric, persisted.Key.Metric);
+        Assert.True(persisted.Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task BlockingWait_JustUnderThreeTimesTheBar_IsSilentForTwoCollections_AndFiresOnTheThird()
+    {
+        /* The ruling's second arm: 1.5× the bar is over the threshold but under the single-snapshot multiple, so it
+           is the K = 3 consecutive-collections gate that decides — and exactly one fire on the third, named as such.
+           This is the assertion that reddens if either arm's number moves: a multiplier of 1 fires on the first
+           sample here, a K of 2 on the second. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Blocking Wait Time", fired.MetricName);
+        Assert.Equal(AlertEngine.BlockingWaitFiredByConsecutive, FiredBy(fired));
+        Assert.False(fired.Muted);
+    }
+
+    [Fact]
+    public async Task BlockingWait_JustUnderThreeTimesTheBar_ThenExactlyThreeTimes_FiresOnThatSnapshot()
+    {
+        /* The two arms compose: a streak that is one short of K and then WORSENS past the multiple fires on the
+           worsening snapshot, as the single-snapshot arm — the operator is not made to wait for a third collection
+           of a pile-up that just tripled. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: at);
+        Assert.Equal(AlertEngine.BlockingWaitFiredBySingleSnapshot, FiredBy(Assert.Single(h.Deliverer.Outcomes)));
+    }
+
+    [Fact]
+    public async Task BlockingWait_RepeatedSnapshotTime_DoesNotAdvanceTheStreak()
+    {
+        /* The reason the gate counts COLLECTIONS and not sweeps, and the pin that matters most on this arm: the
+           sweep is 30 s and the collector lands a snapshot about once a minute (~72 s measured), so the sweep
+           re-reads the same snapshot roughly every other pass. The SAME collection_time offered
+           BlockingWaitBreachSamples × 3 times is one observation: no fire. Without the freshness rule this fires,
+           and the measured one-snapshot flap comes straight back, one row re-counted three times in 90 seconds. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var stuck = Harness.SampleBase.AddMinutes(1);
+        for (var i = 0; i < AlertEngine.BlockingWaitBreachSamples * 3; i++)
+        {
+            h.Adapter.BlockingWait = WaitSnapshot(90_000, at: stuck);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Two genuinely new collections on top of that one observation reach the bar. */
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: stuck);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AStreakBrokenByAClearSnapshot_Restarts()
+    {
+        /* Breach, clear, breach, breach: three breaching snapshots in all and never three in a ROW, so nothing
+           fires — the reset is what makes "sustained" mean sustained rather than "often". */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: Harness.SampleBase);
+        at = await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 2, from: at);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AQuietCollectionBetweenTwoBreachingSnapshots_StartsANewEpisode()
+    {
+        /* WHAT MAKES THIS ARM UNLIKE TEMPDB'S: dmv_blocking_snapshot writes rows only while something is blocked,
+           so a quiet cycle leaves no row for the engine to see as a clear — the "latest snapshot" simply stops
+           advancing. Two breaching snapshots on a 1-minute cadence, then the next one three minutes later: at
+           least one collection in between found nothing to write, so the third is a NEW episode and restarts
+           the streak rather than completing it. Without the gap rule this fires here as "consecutive", which is
+           the measured one-snapshot flap re-created three episodes at a time. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at, stepMinutes: 3);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(1, Assert.Single(h.StateStore.Persistence).Value.State.ConsecutiveBreaches);
+
+        /* The restarted streak completes on its own two adjacent collections. */
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: at);
+        Assert.Equal(AlertEngine.BlockingWaitFiredByConsecutive, FiredBy(Assert.Single(h.Deliverer.Outcomes)));
+    }
+
+    [Fact]
+    public async Task BlockingWait_AnAdjacentCollectionAtTheMeasuredOverrun_IsStillConsecutive()
+    {
+        /* The bar the gap rule sits at: the measured collector ran at ~72 s against a 60 s schedule, and adjacent
+           snapshots at that spacing must still count as consecutive — 1.2 cadences is under the 1.5 factor. A
+           skipped cycle is at least 2.0. Pinned from both sides so the factor cannot drift into treating the
+           real collector's jitter as a gap (every episode restarting, never firing) or a skipped cycle as
+           adjacency. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = Harness.SampleBase;
+        for (var i = 0; i < AlertEngine.BlockingWaitBreachSamples; i++)
+        {
+            at = at.AddSeconds(72);
+            h.Adapter.BlockingWait = WaitSnapshot(90_000, at: at);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.InRange(AlertEngine.BlockingWaitEpisodeGapFactor, 1.21, 1.99);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AShortGapDoesNotRestartAnOpenIncident()
+    {
+        /* Only a streak that has not fired restarts on a gap. An OPEN incident holds across a quiet minute exactly
+           as the level-triggered arm always held it: one sustained event with a lull inside it is one incident,
+           reminded on cooldown, resolved by a fresh snapshot under the bar — not resolved and re-paged. */
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 60;
         h.Settings.CooldownMinutes = 5;
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at, stepMinutes: 4);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.Resolutions);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+        /* The reminder names the rule that admitted THIS snapshot — held on a breaching sample under the multiple. */
+        Assert.Equal(AlertEngine.BlockingWaitFiredByConsecutive, FiredBy(h.Deliverer.Outcomes[1]));
+
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task BlockingWait_NoCadence_CountsBreachingSnapshotsInsideTheFreshnessWindow()
+    {
+        /* The documented DEGRADATION for a host that supplies no cadence (CurrentBlockingWaitResult.CadenceMinutes):
+           the gap rule cannot run, so three breaching snapshots inside the freshness window are consecutive
+           whatever lies between them — weaker persistence, never silence, the same direction the CPU and tempdb
+           gates take on a missing instant. Pinned so the fallback is a decision rather than an accident. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase, stepMinutes: 4, cadenceMinutes: null);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task BlockingWait_IsLevelTriggered_CooldownSuppressesThenRefiresWhileStillAbove()
+    {
+        /* The distinguishing behavior vs the count gate's edge trigger: blocking that STAYS above the
+           threshold keeps announcing itself every cooldown instead of going quiet after one alert. The gate
+           changed what counts as an incident, deliberately not how often a standing one repeats — the same
+           line the CPU and tempdb gates drew. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
 
         /* Inside the cooldown, still above: no second alert. */
         h.Now = h.Now.AddMinutes(4);
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
 
         /* Cooldown elapsed, still above: it re-fires — no edge required. */
         h.Now = h.Now.AddMinutes(2);
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await DriveBlockingWaitAsync(engine, h, 120_000, samples: 1, from: at);
         Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Blocking Wait Time"));
         Assert.Empty(h.Resolutions);
     }
@@ -1060,44 +1700,112 @@ public sealed class AlertEngineTests
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 60;
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
 
-        h.Adapter.BlockingWait = WaitSnapshot(1_000);
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: AlertEngine.BlockingWaitClearSamples, from: at);
 
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("Blocking Wait Cleared", resolution.Title);
         Assert.Equal("Blocking Wait Time", resolution.MetricName);
+        Assert.Equal("SRV-A: Total blocked wait back under 60s", resolution.Message);
         /* A resolution is not a history row — nothing new was delivered. */
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+        Assert.False(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task BlockingWait_ThreeTimesFire_ThenOneClearSnapshot_ResolvesExactlyOnce()
+    {
+        /* The "still RECORDS the observation" half of the ruling, measured at the operator: one page from the
+           single-snapshot arm, one Cleared on the first fresh snapshot under the bar, and a second clear snapshot
+           produces nothing — the incident the 3× arm opened is the same incident the gate closes. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        at = await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
     public async Task BlockingWait_StaleSnapshot_NeitherFiresNorHoldsTheAlertActive()
     {
-        /* #1812's rule: a stopped collector leaves a "latest" snapshot that reads as NOW. A level-
-           triggered gate on frozen rows would re-fire every cooldown forever, so staleness is no
-           evidence — and it RESOLVES rather than latching (see CurrentBlockingWaitResult). */
+        /* #1812's rule, KEPT through the gate and the reason a stale snapshot is a clear here when a missing
+           tempdb row is not: the collector writes rows only while blocking exists, so a snapshot that has aged
+           past three cycles is the collector saying the blocking ended. A level-triggered gate latched on it
+           would re-fire every cooldown forever; it RESOLVES instead, on the first stale sweep (one clear), and a
+           stale snapshot from cold never fires however large its total. */
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 60;
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
 
-        /* Same over-threshold numbers, now stale: no re-fire even once the cooldown has elapsed. */
-        h.Adapter.BlockingWait = WaitSnapshot(120_000, fresh: false);
+        /* Same over-threshold numbers, same collection_time, now stale: no re-fire even once the cooldown has
+           elapsed, and a Cleared. */
+        h.Adapter.BlockingWait = WaitSnapshot(180_000, fresh: false, at: at);
         h.Now = h.Now.AddMinutes(30);
         await engine.EvaluateServerAsync(Harness.Snapshot());
 
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
         Assert.Equal("Blocking Wait Cleared", Assert.Single(h.Resolutions).Title);
+        Assert.False(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        /* Still stale on the next sweep: nothing more to say, and nothing more written. */
+        var writes = h.StateStore.SavedPersistence.Count;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Resolutions);
+        Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AStaleSnapshotFromCold_NeverFires_AndWritesNothing()
+    {
+        /* A server whose only snapshot is an old one it was never counted on has nothing to clear: no fire, no
+           Cleared, and no persistence row — the stale arm observes only subjects the gate has counted. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Adapter.BlockingWait = WaitSnapshot(180_000, fresh: false);
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+        Assert.Empty(h.StateStore.Persistence);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AStaleSnapshot_ResetsAPartialStreak()
+    {
+        /* Two breaching collections, then ten quiet minutes: the streak is over, and the next breaching snapshot
+           starts from one — the stale clear resets the count the same way a fresh sub-bar snapshot does. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: Harness.SampleBase);
+        h.Adapter.BlockingWait = WaitSnapshot(90_000, fresh: false, at: at);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Resolutions);
+        Assert.Equal(0, Assert.Single(h.StateStore.Persistence).Value.State.ConsecutiveBreaches);
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at.AddMinutes(10));
+        Assert.Empty(h.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -1117,6 +1825,35 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task BlockingWait_NoSnapshotAtAll_FreezesAnOpenIncident_RatherThanClearingIt()
+    {
+        /* NO-DATA FREEZES THE GATE (#3653 A5): the rows of an open incident going away — a retention pass, a reset
+           store — is an absence of evidence, not a recovery. The pre-gate arm read null as "not above" and
+           announced a Cleared off it. The incident holds, un-announced, until a real snapshot decides it. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.BlockingWait = null;
+        h.Now = h.Now.AddMinutes(30);
+        for (var i = 0; i < 5; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Resolutions);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
     public async Task BlockingWait_FollowsTheBlockingEnabledToggle()
     {
         /* Turning blocking alerts off silences BOTH gates — one toggle, as a user reading it expects. */
@@ -1132,16 +1869,42 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task BlockingWait_DisablingTheGate_IsNotAClear_AndReEnablingResumes()
+    {
+        /* The CPU arm's rule, now this arm's: switching the gate off is not the blocking clearing, so no Cleared
+           is announced and the record is left as it stands. The pre-gate arm reached the same silence but FORGOT
+           the incident; re-enabling here resumes it — a fresh snapshot under the bar resolves it, a breaching one
+           reminds. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Settings.BlockingWaitSecondsThreshold = 0;
+        at = await DriveBlockingWaitAsync(engine, h, 1_000, samples: 2, from: at);
+        Assert.Empty(h.Resolutions);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
     public async Task BlockingWait_IsADistinctMetricFromTheCountGate()
     {
         /* Both gates can be over threshold in the same sweep and must produce two separate alerts, so
-           muting or acknowledging one never silences the other. */
+           muting or acknowledging one never silences the other. The wait total is at the single-snapshot
+           multiple so both fire on the one sweep. */
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingCountThreshold = 1;
         h.Settings.BlockingWaitSecondsThreshold = 60;
         h.Adapter.Blocking.Add(BlockingRow(55));
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+        h.Adapter.BlockingWait = WaitSnapshot(180_000);
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
@@ -1157,12 +1920,133 @@ public sealed class AlertEngineTests
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 60;
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+        h.Adapter.BlockingWait = WaitSnapshot(180_000);
         h.Muted = true;
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         Assert.True(Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time").Muted);
+    }
+
+    [Fact]
+    public async Task BlockingWait_TheGateAdvancesUnderSuppression_SoOneUnsuppressedSampleDelivers()
+    {
+        /* Suppression is evaluate-but-don't-deliver, for the GATE and not just the send: a suppressed streak
+           counts, so un-acknowledging a server reports the condition it is in rather than starting a fresh
+           K-sample wait — the CPU and tempdb twins' rule. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task BlockingWait_PersistsTheStreakUnderItsOwnMetric_AndResumesAcrossARestart()
+    {
+        /* The persisted record lives under the alert's own metric name in the SAME (server, metric) table the CPU
+           and tempdb gates use — which is why no migration rung was needed — and a partly-built streak survives a
+           restart, so a real event spanning a service restart is not delayed by K samples. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+
+        var at = await DriveBlockingWaitAsync(h.Build(), h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var persisted = Assert.Single(h.StateStore.Persistence);
+        Assert.Equal(Key, persisted.Key.Key);
+        Assert.Equal(AlertEngine.BlockingWaitPersistenceMetric, persisted.Key.Metric);
+        Assert.Equal(AlertEngine.BlockingWaitBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.False(persisted.Value.State.Firing);
+        Assert.Equal(at, persisted.Value.LastObservedSampleUtc);
+
+        /* A brand-new engine over the same state store IS the restart; the very next collection completes the
+           streak. */
+        await DriveBlockingWaitAsync(h.Build(), h, 90_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task BlockingWait_ARestartDoesNotReAnnounceAnAlreadyOpenIncident()
+    {
+        /* The reason the in-memory _activeBlockingWaitAlert flag had to go: it forgot the open incident on every
+           restart, so the first post-restart sweep over standing blocking delivered the same page again. The
+           persisted Firing bit tells the restarted engine the incident is open, and the seed stamps the cooldown
+           clock so the reminder waits its full cooldown — the two-part guard the CPU and tempdb seeds carry. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+
+        var at = await DriveBlockingWaitAsync(h.Build(), h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        var restarted = h.Build();
+        at = await DriveBlockingWaitAsync(restarted, h, 180_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The stamped clock is a COOLDOWN, not a silence: once it elapses the reminder is delivered as usual. */
+        h.Now = h.Now.AddMinutes(6);
+        at = await DriveBlockingWaitAsync(restarted, h, 180_000, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        await DriveBlockingWaitAsync(restarted, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+        Assert.False(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public void BlockingWaitGateConstants_AreTheNumbersErikRuled()
+    {
+        /* Q4 on #3653, verbatim: "fire on a single snapshot at N = 3× the configured Blocking Wait Time threshold;
+           otherwise K = 3 consecutive collections through the shared AlertPersistenceGate." The numbers are a
+           ruling over a measurement (102 episodes, 97 single-snapshot, p99 1,509 s / 145 sessions on one production
+           store class), so they are pinned rather than left to drift. ONE clear keeps the pre-gate resolve, for
+           the tempdb arm's reason. */
+        Assert.Equal(3, AlertEngine.BlockingWaitSingleSnapshotMultiplier);
+        Assert.Equal(3, AlertEngine.BlockingWaitBreachSamples);
+        Assert.Equal(1, AlertEngine.BlockingWaitClearSamples);
+        Assert.Equal(1.5, AlertEngine.BlockingWaitEpisodeGapFactor);
+
+        /* The tokens the fire payload carries are the ones the brief named, derived from the constants so they
+           cannot lie after a change — and pinned to the literals so a change is a visible decision. */
+        Assert.Equal("single_snapshot_3x", AlertEngine.BlockingWaitFiredBySingleSnapshot);
+        Assert.Equal("consecutive_k3", AlertEngine.BlockingWaitFiredByConsecutive);
+        Assert.Equal("Fired By", AlertContextBuilders.BlockingWaitFiredByLabel);
+
+        /* The persisted subject is the metric an operator already knows — the mute context's, the history row's
+           and the resolve's spelling — and distinct from the other two gated metrics' rows. */
+        Assert.Equal("Blocking Wait Time", AlertEngine.BlockingWaitPersistenceMetric);
+        Assert.NotEqual(AlertEngine.CpuPersistenceMetric, AlertEngine.BlockingWaitPersistenceMetric);
+        Assert.NotEqual(AlertEngine.TempDbSpacePersistenceMetric, AlertEngine.BlockingWaitPersistenceMetric);
+    }
+
+    /// <summary>
+    /// The Darling README's knob table describes this arm's firing rule, so the numbers there are pinned to the
+    /// constants rather than left as a prose copy — the same pin the High CPU and tempdb rows carry, for the same
+    /// reason: a doc count that cannot be compared to the thing it describes is a count nobody can check.
+    /// </summary>
+    [Fact]
+    public void TheDarlingReadmeStatesTheBlockingWaitGateItActuallyUses()
+    {
+        var readme = ReadRepoFile("Darling", "README.md");
+
+        var row = readme
+            .Split('\n')
+            .Single(l => l.StartsWith("| `blockingWaitSecondsThreshold`", StringComparison.Ordinal));
+
+        Assert.Contains($"{AlertEngine.BlockingWaitSingleSnapshotMultiplier}× the threshold", row, StringComparison.Ordinal);
+        Assert.Contains($"{AlertEngine.BlockingWaitBreachSamples} consecutive collected snapshots", row, StringComparison.Ordinal);
+
+        /* And it must not still describe the pre-gate rule as the whole story, which is the sentence a reader
+           would act on. */
+        Assert.DoesNotContain("it re-fires every cooldown while the wait stays above the threshold and clears when it drops below |", row, StringComparison.Ordinal);
     }
 
     /* ---------------- deadlocks ---------------- */
@@ -1367,76 +2251,410 @@ public sealed class AlertEngineTests
         Assert.Equal("1", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
     }
 
-    /* ---------------- poison waits ---------------- */
+    /* ---------------- deadlocks: the #3653 (A8e) grade ---------------- */
 
-    [Fact]
-    public async Task PoisonWait_FiresWithWorstWaitNumerics_AndResolvesWhenGone()
+    /// <summary>
+    /// The grade is the band's, over the engine's own one-hour window, and the count knob is not consulted
+    /// for it: with the knob at 1, one deadlock fires WARNING (before #3653 the same row rendered red by
+    /// name), nineteen in the hour is still WARNING, and twenty — <c>DeadlockCriticalPerHourDefault</c>,
+    /// the #3368 measured tier that sits inside the empty [16, 89] interval of 14,448 server-hours — is
+    /// CRITICAL. The tier rides on the context (what the row persists) and the outcome (what Darling's
+    /// deliverer folds), equal by construction.
+    /// </summary>
+    [Theory]
+    [InlineData(1, AlertSeverityLevel.Warning)]
+    [InlineData(19, AlertSeverityLevel.Warning)]
+    [InlineData(20, AlertSeverityLevel.Critical)]
+    [InlineData(100, AlertSeverityLevel.Critical)]
+    public async Task Deadlock_GradesWarningByDefault_AndCriticalAtTheBandsMeasuredRateTier(int deadlocks, AlertSeverityLevel expected)
     {
-        /* Lite AlertEngine.cs:274-333. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        var engine = h.Build();
+
+        for (var i = 0; i < deadlocks; i++)
+        {
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+        }
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Deadlocks Detected", fired.MetricName);
+        Assert.Equal(deadlocks.ToString(), fired.CurrentValue);
+        Assert.Equal(expected, fired.Severity);
+        Assert.NotNull(fired.Context);
+        Assert.Equal(expected, fired.Context!.SeverityOverride);
+        /* The fire's own facts are untouched by the grade: the count and the knob are what they were. */
+        Assert.Equal(deadlocks, fired.NumericCurrentValue);
+        Assert.Equal(1d, fired.NumericThresholdValue);
+    }
+
+    /// <summary>
+    /// The store-tunable pair, not the shipped one: an operator who raised Darling's V120 Critical tier to
+    /// 31/hr (the <c>update_alert_settings</c> fixture value) must see 25 deadlocks grade WARNING on the
+    /// alert exactly as the fleet card bands that hour — the reason the pair is plumbed through the settings
+    /// contract rather than read from <c>DeadlockRateThresholds.Default</c> inside the engine.
+    /// </summary>
+    [Fact]
+    public async Task Deadlock_GradesOnTheOperatorsRateTiers_NotTheShippedPair()
+    {
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DeadlockRateThresholds = new DeadlockRateThresholds(7.0, 31.0);
+        var engine = h.Build();
+
+        for (var i = 0; i < 25; i++)
+        {
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+        }
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(AlertSeverityLevel.Warning, Assert.Single(h.Deliverer.Outcomes).Severity);
+
+        /* Same hour, six more: at the raised tier. The watermark gate lets the larger count through once
+           the cooldown elapses; the grade follows the new count. */
+        for (var i = 0; i < 6; i++)
+        {
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+        }
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Severity);
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Context!.SeverityOverride);
+    }
+
+    /// <summary>The pure grade, at the seams the engine test above cannot drive one row at a time: the
+    /// clamp on the record means a default struct grades on the FLOOR (1/hr), not on zero.</summary>
+    [Fact]
+    public void GradeDeadlockFire_IsTheBandsClassifier_OverTheEnginesOneHourWindow()
+    {
+        Assert.Equal(AlertSeverityLevel.Warning, AlertEngine.GradeDeadlockFire(1, DeadlockRateThresholds.Default));
+        Assert.Equal(AlertSeverityLevel.Warning, AlertEngine.GradeDeadlockFire(19, DeadlockRateThresholds.Default));
+        Assert.Equal(AlertSeverityLevel.Critical, AlertEngine.GradeDeadlockFire(20, DeadlockRateThresholds.Default));
+        Assert.Equal(
+            (int)PerformanceMonitor.Common.ServerHealthThresholds.DeadlockCriticalPerHourDefault,
+            20);
+        /* A default (all-zero) struct clamps to the floor: one deadlock is then "at or above 1/hr", Critical.
+           That is the record's documented reading of a knob parked at zero, not this grade's opinion. */
+        Assert.Equal(AlertSeverityLevel.Critical, AlertEngine.GradeDeadlockFire(1, default));
+        Assert.Equal(1, AlertEngine.RollingCountWindowHours);
+    }
+
+    /* ---------------- CPU: the #3653 (A8e) grade ---------------- */
+
+    /// <summary>
+    /// WARNING at the knob, CRITICAL at the CPU health band's Critical bar (95% of a fixed host — the ONE
+    /// ladder the fleet card and the Performance Calendar band on, #3539 A2), so a 100% fire no longer wears
+    /// the amber an 80% one does while the card beside it is red. The DetailText is byte-identical to the
+    /// pre-#3653 block: the context carries the tier and nothing else.
+    /// </summary>
+    [Theory]
+    [InlineData(80, AlertSeverityLevel.Warning)]
+    [InlineData(94, AlertSeverityLevel.Warning)]
+    [InlineData(95, AlertSeverityLevel.Critical)]
+    [InlineData(100, AlertSeverityLevel.Critical)]
+    public async Task Cpu_GradesWarningAtTheKnob_AndCriticalAtTheBandsCriticalBar(double totalCpu, AlertSeverityLevel expected)
+    {
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: totalCpu, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("High CPU", fired.MetricName);
+        Assert.Equal(expected, fired.Severity);
+        Assert.NotNull(fired.Context);
+        Assert.Equal(expected, fired.Context!.SeverityOverride);
+        Assert.Empty(fired.Context.Details);
+        Assert.Null(fired.Context.Incidents);
+        Assert.Equal($"  Total CPU: {totalCpu:F0}%\n  Threshold: 80%", fired.DetailText);
+
+        Assert.Equal(expected, AlertEngine.GradeCpuFire(totalCpu));
+        Assert.Equal(95d, PerformanceMonitor.Common.ServerHealthThresholds.CpuCriticalPercent);
+    }
+
+    /* ---------------- poison waits (#3539 A4: the accumulation shape) ---------------- */
+
+    private static readonly DateTime PoisonCollected = new(2026, 9, 18, 12, 0, 0, DateTimeKind.Unspecified);
+
+    private static PoisonWaitAccumulation Poison(
+        long accumulatedMs, string waitType = "THREADPOOL", long waits = 1, long observed = 10, DateTime? collected = null)
+        => new(waitType, accumulatedMs, waits, observed, collected ?? PoisonCollected);
+
+    /// <summary>
+    /// The storm the retired shape could not see, in the engine: 300,000 THREADPOOL waits of 2 ms each is
+    /// 600 seconds of worker starvation inside ten minutes — one task continuously starved for the whole
+    /// window — and the old avg-ms-per-wait bar (500) read it as 2 ms and slept. It fires Warning, with the
+    /// PostgreSQL twin's exact numeric pair (accumulated ms against the breached bar in ms), the severity on
+    /// BOTH the outcome and the context override, one detail item carrying the remedy, and no incidents (the
+    /// metric-level cooldown shape IncidentDeliveryFilter documents for this metric).
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_FiresOnAccumulatedStarvation_NotPerWaitAverage()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        h.Settings.PoisonWaitThresholdMs = 500;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(600_000, waits: 300_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(PoisonWaitEvaluator.WindowMinutes, h.Adapter.PoisonWaitWindowMinutesAsked);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Poison Wait", fired.MetricName);
+        Assert.Equal("THREADPOOL (600s in 10m)", fired.CurrentValue);
+        Assert.Equal("600s accumulated over 10m (an average of 1 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal(600_000d, fired.NumericCurrentValue);
+        Assert.Equal(600_000d, fired.NumericThresholdValue);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal(
+            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 task(s) continuously stuck",
+            fired.ShortMessage);
+
+        Assert.NotNull(fired.Context);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context!.SeverityOverride);
+        Assert.Null(fired.Context.Incidents);
+        var detail = Assert.Single(fired.Context.Details);
+        Assert.Equal("THREADPOOL", detail.Heading);
+        Assert.Contains(detail.Fields, f => f.Item1 == "Remedy" && f.Item2 == PoisonWaitEvaluator.SqlServerRemedyFor("THREADPOOL"));
+        Assert.Contains(detail.Fields, f => f.Item1 == "Accumulated wait" && f.Item2 == "600 s over the last 10 min");
+        Assert.NotNull(fired.DetailText);
+        Assert.Contains("Remedy", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The false page the retired shape produced: ONE wait of 600 ms is 600 ms of accumulated wait — 0.001
+    /// average tasks stuck — and the old bar (avg 600 &gt;= 500) paged CRITICAL on it. Silent now, and so is
+    /// every shape the 43-server fleet measurement actually produced: the worst ten-minute bucket anywhere
+    /// (5,795 ms of THREADPOOL), the 703-task 8.2 ms row (5,779 ms), and the daily compile burst just under
+    /// the old bar (8 tasks, 3,154 ms at 394 ms average).
+    /// </summary>
+    [Theory]
+    [InlineData(600, 1)]
+    [InlineData(5_795, 703)]
+    [InlineData(5_779, 703)]
+    [InlineData(3_154, 8)]
+    [InlineData(599_999, 100_000)]
+    public async Task PoisonWait_OneSlowWait_AndEveryMeasuredFleetBucket_StaySilent(long accumulatedMs, long waits)
+    {
         var h = new Harness();
         h.Settings.PoisonWaitEnabled = true;
         var engine = h.Build();
 
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta { WaitType = "THREADPOOL", DeltaMs = 100000, DeltaTasks = 50, AvgMsPerWait = 2000 });
+        h.Adapter.PoisonWaits.Add(Poison(accumulatedMs, waits: waits));
         await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    /// <summary>
+    /// Graded, matching the PostgreSQL twin's boundaries exactly: Critical at ten tasks continuously stuck
+    /// (6,000,000 ms), and the threshold text names the bar that was crossed rather than always the Warning
+    /// one. The map arm for "Poison Wait" is CRITICAL for override-less renders (pre-#3539 history rows,
+    /// which WERE presence-flat critical); a live Critical fire agrees with it, a live Warning fire overrides
+    /// it through the context.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_GradesCritical_AtTenTasksContinuouslyStuck()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(6_000_000, waitType: "RESOURCE_SEMAPHORE", waits: 4_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("Poison Wait", fired.MetricName);
-        Assert.Equal("THREADPOOL (2000ms)", fired.CurrentValue);              /* :286 */
-        Assert.Equal("500ms avg", fired.ThresholdValue);                      /* :314 */
-        Assert.Equal(2000d, fired.NumericCurrentValue);                       /* :317 */
-        Assert.Equal(500d, fired.NumericThresholdValue);                      /* :318 */
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Context!.SeverityOverride);
+        Assert.Equal("6,000s accumulated over 10m (an average of 10 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal(6_000_000d, fired.NumericThresholdValue);
+        Assert.Contains(fired.Context.Details.Single().Fields, f => f.Item1 == "Severity" && f.Item2 == "CRITICAL");
+    }
+
+    /// <summary>
+    /// Per wait type, worst-first: a Critical RESOURCE_SEMAPHORE (10.0 avg tasks stuck) leads a Warning
+    /// THREADPOOL (9.8 — just under the Critical bar), the mute key follows the worst type (Lite's documented
+    /// limitation, unchanged), the alert's severity is the worst type's, and a third type under the Warning
+    /// bar neither fires nor rides along — it is not in CurrentValue and has no detail item.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_JudgesEachWaitTypeIndependently_WorstFirst_MutesOnTheWorst()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        AlertMuteContext? muteAsked = null;
+        h.IsMuted = ctx => { muteAsked = ctx; return false; };
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(5_900_000, waitType: "THREADPOOL", waits: 1_000_000));          /* Warning */
+        h.Adapter.PoisonWaits.Add(Poison(6_000_000, waitType: "RESOURCE_SEMAPHORE", waits: 100));         /* Critical */
+        h.Adapter.PoisonWaits.Add(Poison(5_795, waitType: "RESOURCE_SEMAPHORE_QUERY_COMPILE", waits: 8)); /* under the bar */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("RESOURCE_SEMAPHORE (6,000s in 10m), THREADPOOL (5,900s in 10m)", fired.CurrentValue);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Equal("RESOURCE_SEMAPHORE", muteAsked!.WaitType);
+        Assert.Equal("Poison Wait", muteAsked.MetricName);
+        Assert.Equal(2, fired.Context!.Details.Count);
+        Assert.DoesNotContain("RESOURCE_SEMAPHORE_QUERY_COMPILE", fired.CurrentValue, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The clear arm needs an OBSERVATION. Active, then a sweep whose read returns a row under the bar
+    /// (the window has aged the wait out — "observed and quiet") clears with the windowed message. But
+    /// FIRST, a sweep whose read returns NO rows at all (the collector delivered nothing in ten minutes)
+    /// neither clears nor fires: an absent measurement is not evidence of quiet (#3282's rule for CPU),
+    /// where the retired shape announced "Poison Waits Cleared" on that same silence.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_HoldsOnAnEmptyRead_AndClearsOnlyOnAnObservedQuietWindow()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(900_000, waits: 30_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Collector silent: no wait_stats rows for any poison type inside the window. Hold. */
+        h.Adapter.PoisonWaits.Clear();
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        /* Rows again, summing to zero across ten observed intervals — the window aged the storm out. A
+           zero sum is what a genuinely idle window AND a window of the calculator's (0, 0) "unknowable"
+           markers both read as; the sum treats them identically (nothing added either way), and the
+           observation that lets the flag clear is the collector delivering rows, not the zero itself. */
+        h.Adapter.PoisonWaits.Add(Poison(0, waits: 0, observed: 10, collected: PoisonCollected.AddMinutes(12)));
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        var resolution = Assert.Single(h.Resolutions);
+        Assert.Equal("Poison Waits Cleared", resolution.Title);
+        Assert.Equal("SRV-A: Poison wait accumulated over the last 10 minutes back below threshold", resolution.Message);
+
+        /* Cleared is an edge: the next quiet sweep says nothing more. */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Resolutions);
+    }
+
+    /// <summary>
+    /// A sub-bar row that is not zero also clears — the measured fleet's own worst bucket (5,795 ms) is
+    /// "quiet" by this alert's definition — and the retired knob plays no part in that judgement either:
+    /// a threshold of 1 ms, which under the old shape made every row a poison wait, changes nothing.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_ClearsOnASubBarWindow_RegardlessOfTheRetiredKnob()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        h.Settings.PoisonWaitThresholdMs = 1;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(600_000, waits: 300_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
 
         h.Adapter.PoisonWaits.Clear();
+        h.Adapter.PoisonWaits.Add(Poison(5_795, waits: 703, collected: PoisonCollected.AddMinutes(11)));
+        h.Now = h.Now.AddMinutes(11);
         await engine.EvaluateServerAsync(Harness.Snapshot());
-        var resolution = Assert.Single(h.Resolutions);
-        Assert.Equal("Poison Waits Cleared", resolution.Title);               /* :329 */
-        Assert.Equal("SRV-A: Poison wait avg below threshold", resolution.Message); /* :330 */
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.Resolutions);
     }
 
     [Fact]
     public async Task PoisonWait_DoesNotRefire_OnTheSameCollectionTime_EvenAfterCooldownElapses()
     {
-        /* The read adapter's own "newest row within 10 minutes" window can hand back the SAME
-           wait_stats row across multiple sweeps when the collector's delivered cadence lags the
-           alert cooldown — observed live as byte-identical "Poison Wait" alerts ~5-7 minutes
-           apart on the same server. Cooldown elapsing is not proof a fresh observation exists;
-           re-firing on an unrefreshed collection_time reports the same event twice. */
+        /* #2704, unchanged in substance by the accumulation shape: the read adapter's window can hand
+           back the SAME newest row across multiple sweeps when the collector's delivered cadence lags
+           the alert cooldown — observed live as byte-identical "Poison Wait" alerts ~5-7 minutes apart
+           on the same server. Cooldown elapsing is not proof a fresh observation exists; re-firing on an
+           unrefreshed collection_time reports the same window twice. */
         var h = new Harness();
         h.Settings.PoisonWaitEnabled = true;
         var engine = h.Build();
 
         var firstCollection = new DateTime(2026, 8, 31, 6, 0, 0, DateTimeKind.Utc);
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta
-        {
-            WaitType = "RESOURCE_SEMAPHORE_QUERY_COMPILE",
-            DeltaMs = 113997,
-            DeltaTasks = 134,
-            AvgMsPerWait = 850.7,
-            CollectionTime = firstCollection
-        });
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "RESOURCE_SEMAPHORE_QUERY_COMPILE", waits: 134, collected: firstCollection));
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Cooldown (5 min default) elapses, but the collector has not produced a new row yet —
-           the adapter still hands back the identical collection_time. Must NOT re-fire. */
+           the adapter still hands back the identical newest collection_time. Must NOT re-fire. */
         h.Now = h.Now.AddMinutes(6);
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* A genuinely new collection — even with the identical wait-type/value shape — is a
-           fresh observation of the condition and must fire. */
+        /* A genuinely new collection — even with the identical wait-type/value shape — is a fresh
+           observation of the standing condition and must fire. */
         h.Now = h.Now.AddMinutes(6);
         h.Adapter.PoisonWaits.Clear();
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta
-        {
-            WaitType = "RESOURCE_SEMAPHORE_QUERY_COMPILE",
-            DeltaMs = 113997,
-            DeltaTasks = 134,
-            AvgMsPerWait = 850.7,
-            CollectionTime = firstCollection.AddMinutes(7)
-        });
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "RESOURCE_SEMAPHORE_QUERY_COMPILE", waits: 134, collected: firstCollection.AddMinutes(7)));
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>
+    /// The freshness stamp is taken over the FIRING types only: a quiet type's newer row is not a new
+    /// observation of the type that is over the bar, so it cannot unlock a re-fire on an unrefreshed sum.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_FreshnessFollowsTheFiringTypes_NotAQuietSibling()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "THREADPOOL", collected: PoisonCollected));
+        h.Adapter.PoisonWaits.Add(Poison(100, waitType: "RESOURCE_SEMAPHORE", collected: PoisonCollected));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        h.Adapter.PoisonWaits.Clear();
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "THREADPOOL", collected: PoisonCollected));
+        h.Adapter.PoisonWaits.Add(Poison(100, waitType: "RESOURCE_SEMAPHORE", collected: PoisonCollected.AddMinutes(5)));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    /// <summary>
+    /// Suppression (acknowledged / silenced server) evaluates but does not deliver, and it tracks the
+    /// condition: the active flag still rises, so the later clear is still an edge; and a suppressed clear
+    /// is silent too — exactly the shape every other family in this engine has.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_Suppressed_TracksTheConditionWithoutDelivering()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(700_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot(suppressed: true));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Adapter.PoisonWaits.Clear();
+        h.Adapter.PoisonWaits.Add(Poison(0, waits: 0, collected: PoisonCollected.AddMinutes(11)));
+        await engine.EvaluateServerAsync(Harness.Snapshot(suppressed: true));
+        Assert.Empty(h.Resolutions);
+
+        /* Unsuppressed and still quiet: the flag already fell, so nothing is announced late. */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Resolutions);
+        Assert.Empty(h.Deliverer.Outcomes);
     }
 
     /* ---------------- long-running queries ---------------- */
@@ -1472,6 +2690,394 @@ public sealed class AlertEngineTests
         Assert.Equal(5, args.MaxResults);
         Assert.True(args.Diag && args.WaitFor && args.Backups && args.Misc && args.Cdc);
         Assert.Contains("StageDb", args.Excluded);
+    }
+
+    /* ---------------- long-running queries: the opt-out knob (#3653 A5, ruling Q5) ---------------- */
+
+    private static LongRunningQueryInfo PermanentSession(int sessionId, string programName, string loginName, long elapsedSeconds = 100_000) => new()
+    {
+        SessionId = sessionId,
+        DatabaseName = "StackOverflow",
+        QueryText = "WAITFOR (RECEIVE TOP (1) * FROM dbo.WorkQueue), TIMEOUT 60000",
+        ProgramName = programName,
+        LoginName = loginName,
+        ElapsedSeconds = elapsedSeconds,
+        QueryHash = "0x" + sessionId.ToString("X16")
+    };
+
+    /// <summary>A named human's ad-hoc query — class 4 of the production read, the population the page is for.</summary>
+    private static LongRunningQueryInfo HumanSession(int sessionId = 73, long elapsedSeconds = 2159) => new()
+    {
+        SessionId = sessionId, DatabaseName = "StackOverflow", QueryText = "SELECT COUNT(*) FROM Users",
+        ProgramName = "Microsoft SQL Server Management Studio - Query", LoginName = "erik",
+        ElapsedSeconds = elapsedSeconds, QueryHash = "0x9AAF0129E4E9AD07"
+    };
+
+    [Fact]
+    public async Task LongRunningQuery_TheOptOutKnobTravelsIntoTheRead_Normalised()
+    {
+        /* THE Q5 RULING's mechanism: the two settings lists reach the READ, not a post-read filter, because the
+           sessions they name are the longest-running on the server by construction and would fill the row cap
+           (LongRunningQueryExclusions says why). Normalised on the way — trimmed, blanks dropped, case-insensitive
+           dedupe — so a Settings-window string and an MCP array mean the same thing. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.AddRange(new[] { " HammerDB ", "hammerdb", "", "SQLAgent - TSQL JobStep" });
+        h.Settings.LongRunningQueryExcludedLoginsList.AddRange(new[] { "svc_etl", " ", @"NT AUTHORITY\SYSTEM" });
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var exclusions = h.Adapter.LastLrqExclusions;
+        Assert.NotNull(exclusions);
+        Assert.Equal(new[] { "HammerDB", "SQLAgent - TSQL JobStep" }, exclusions!.ProgramNamePrefixes);
+        Assert.Equal(new[] { "svc_etl", @"NT AUTHORITY\SYSTEM" }, exclusions.Logins);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_TheSeededDefaults_RemoveTheProductionReadsBackground_AndKeepTheHuman()
+    {
+        /* THE ADDENDUM's finding, as the engine sees it. The 7-day read of one large production store split the
+           long-running population into four classes: SQL Agent job steps (program prefix), the two NT AUTHORITY
+           service logins (multi-day CDC-shaped background), the application's admin login (NOT excluded — it carries
+           the job wave but also real ad-hoc long-runners), and named humans (never excluded). With the SEEDED
+           defaults and nothing else, the job step and the two service sessions are gone before the decision, the
+           admin login's ad-hoc query and the human's are evaluated, and the card's split says which default did
+           what — in SESSIONS, with the job step that ALSO runs as SYSTEM counted once, under the prefix. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.AddRange(LongRunningQueryExclusions.DefaultProgramNamePrefixes);
+        h.Settings.LongRunningQueryExcludedLoginsList.AddRange(LongRunningQueryExclusions.DefaultLogins);
+
+        /* Class 1: a job step under the admin login (the usual shape) and one under SYSTEM (matches both arms). */
+        h.Adapter.LongRunning.Add(PermanentSession(61, "SQLAgent - TSQL JobStep (Job 0x1D6B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 3)", "app_admin", elapsedSeconds: 3_600));
+        h.Adapter.LongRunning.Add(PermanentSession(62, "sqlagent - tsql jobstep (Job 0x2A3B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 1)", @"NT AUTHORITY\SYSTEM", elapsedSeconds: 2_400));
+        /* Class 2: the multi-day background under the two service principals, generic driver program names. */
+        h.Adapter.LongRunning.Add(PermanentSession(63, ".Net SqlClient Data Provider", @"nt authority\system", elapsedSeconds: 500_000));
+        h.Adapter.LongRunning.Add(PermanentSession(64, "Replication Log Reader", @"NT AUTHORITY\NETWORK SERVICE", elapsedSeconds: 700_000));
+        /* Class 3: the admin login's OWN ad-hoc query — evaluated, because blinding the login would hide this. */
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 65, DatabaseName = "StackOverflow", QueryText = "UPDATE Posts SET Score = Score + 1",
+            ProgramName = "Microsoft SQL Server Management Studio - Query", LoginName = "app_admin",
+            ElapsedSeconds = 4_000, QueryHash = "0x1111111111111111"
+        });
+        /* Class 4: the human. */
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Query", fired.MetricName);
+        Assert.Equal("2 query(s), longest 66m", fired.CurrentValue);
+        Assert.StartsWith("Session #65 running 66m", fired.ShortMessage, StringComparison.Ordinal);
+        /* The excluded sessions are not on the card as SESSIONS (the knob item lists the prefix itself, by design). */
+        Assert.DoesNotContain("Job 0x", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Replication Log Reader", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #61", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #63", fired.DetailText, StringComparison.Ordinal);
+
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("4 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
+        Assert.Equal("4", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        /* 61 and 62 by prefix (62 also matched SYSTEM — counted here, once); 63 and 64 by login. */
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        Assert.Equal("SQLAgent - TSQL JobStep", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
+        Assert.Equal(@"NT AUTHORITY\SYSTEM, NT AUTHORITY\NETWORK SERVICE", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Logins").Value);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_AnExcludedSessionIsNotEvaluated_AndTheCardCountsIt()
+    {
+        /* Measured on one production store class: 191 distinct sessions over the 30-minute bar in 7 days, the p90
+           seen in 6,192 snapshots — permanent background requests no gate can separate from a runaway query. With
+           the knob set, the permanent session is not read into the decision at all (not counted in "N query(s)",
+           not the longest, not fingerprinted), and the card's knob item says how many the knob removed, by arm, so
+           the operator can see it working. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("QueueWorker");
+        h.Settings.LongRunningQueryExcludedLoginsList.Add("svc_replication");
+
+        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker v2.1 (pool 7)", "app_user", elapsedSeconds: 500_000));   /* prefix */
+        h.Adapter.LongRunning.Add(PermanentSession(72, "Replication Reader", "SVC_Replication", elapsedSeconds: 400_000));  /* exact login, any case */
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Query", fired.MetricName);
+        /* One query, and the longest is the 35-minute one — the two permanent sessions never entered the count. */
+        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);
+        Assert.Equal(35d, fired.NumericCurrentValue);
+        Assert.StartsWith("Session #73 running 35m", fired.ShortMessage, StringComparison.Ordinal);
+
+        /* The knob's receipt: appended after the session items, never in front of them. */
+        Assert.NotNull(fired.Context);
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("2 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        Assert.Equal("1", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("1", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        Assert.Equal("QueueWorker", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
+        Assert.Equal("svc_replication", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Logins").Value);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedCountLabel}: 2", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel}: 1", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedByLoginLabel}: 1", fired.DetailText, StringComparison.Ordinal);
+
+        /* NOT a mute: the excluded sessions were never fingerprinted, so no incident exists for them to hold open. */
+        Assert.NotNull(fired.Context.Incidents);
+        Assert.Single(fired.Context.Incidents!);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_ALoginIsExactAndAProgramIsAPrefix_NeverTheOtherWayRound()
+    {
+        /* The two arms have two rules and the card must not blur them: a login entry does not match a longer
+           login (svc must not swallow svc_owner), and a program entry matches anything that starts with it.
+           A "*" typed by an operator who expects the retired wildcard grammar is a literal character that
+           matches nothing real — the entry is listed on the card so the misspelling is visible. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("SQLAgent - TSQL JobStep*");   /* literal *, matches nothing below */
+        h.Settings.LongRunningQueryExcludedLoginsList.Add("svc");
+
+        h.Adapter.LongRunning.Add(PermanentSession(81, "SQLAgent - TSQL JobStep (Job 0x01 : Step 1)", "svc_owner", elapsedSeconds: 9_000));
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("2 query(s), longest 150m", fired.CurrentValue);
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        Assert.Equal("SQLAgent - TSQL JobStep*", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_WhenEveryCandidateIsExcluded_NothingFires_AndAnOpenIncidentResolves()
+    {
+        /* The knob applied to a standing alert: the operator excludes the program that was paging them, the
+           next evaluation sees no sessions, and the incident RESOLVES — an excluded session is not a silenced
+           one, it is gone from the alert's world, and a resolve is the honest edge for that. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker", "app_user"));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("queue");
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Queries Cleared", Assert.Single(h.Resolutions).Title);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_AnEmptyKnob_LeavesTheCardWithoutTheKnobItem()
+    {
+        /* An operator who cleared BOTH seeded lists has said "evaluate everything"; an "Excluded Count: 0" line
+           on their every card would be a line about nothing, so the item exists only when the knob is set — the
+           pre-#3653 card, byte for byte. (The engine does not re-seed an emptied list: present-and-empty is a
+           decision, and the seeding is the hosts' job on an ABSENT key.) */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker", "app_user"));
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(h.Adapter.LastLrqExclusions!.IsEmpty);
+        Assert.DoesNotContain(fired.Context!.Details, d => d.Fields.Any(f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel));
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_AKnobThatRemovedNothing_StillSaysSo()
+    {
+        /* A set knob that matched no session this evaluation reports 0 on every line — the receipt is the point,
+           and "0" is a receipt too (it is also how an operator learns an entry is misspelled). */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("NotRunningToday");
+        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker", "app_user"));
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("0 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        Assert.DoesNotContain(knobItem.Fields, f => f.Label == "Excluded Logins");
+    }
+
+    /* ---------------- long-running queries: excludedDatabases ahead of the cap (#3742) ---------------- */
+
+    /// <summary>A session in the reporting database an operator has excluded — the ETL that always runs long.</summary>
+    private static LongRunningQueryInfo ReportingEtlSession(int sessionId, long elapsedSeconds) => new()
+    {
+        SessionId = sessionId, DatabaseName = "ReportingDb", QueryText = "INSERT INTO dbo.FactSales SELECT …",
+        ProgramName = ".Net SqlClient Data Provider", LoginName = "svc_etl",
+        ElapsedSeconds = elapsedSeconds, QueryHash = "0x" + sessionId.ToString("X16")
+    };
+
+    [Fact]
+    public async Task LongRunningQuery_ExcludedDatabasesAreRemovedAheadOfTheCap_AndTheCardSaysHowMany()
+    {
+        /* THE #3742 LIE, as the engine sees it: an operator excludes a reporting database because its ETL always
+           runs long; on a server where that ETL holds the SIX longest sessions and the cap is five, the old
+           post-read filter returned an EMPTY page — five excluded rows read, five dropped — and the alert was off
+           for every other database without a word. With the list applied in the read, the human's query is on
+           the page, the fire says "1 query(s)", and the card's new item says six sessions were in excluded
+           databases — so a short page is a page an operator can read. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryMaxResults = 5;
+        h.Settings.ExcludedDatabasesList.Add("reportingdb");   /* the setting's spelling need not match the row's */
+
+        for (var i = 0; i < 6; i++)
+        {
+            h.Adapter.LongRunning.Add(ReportingEtlSession(90 + i, elapsedSeconds: 100_000 - i));
+        }
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Query", fired.MetricName);
+        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);
+        Assert.StartsWith("Session #73 running 35m", fired.ShortMessage, StringComparison.Ordinal);
+        /* None of the six ETL sessions is on the card as a session — not their text, not their ids. */
+        Assert.DoesNotContain("FactSales", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #90", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #95", fired.DetailText, StringComparison.Ordinal);
+
+        /* The list's receipt: its own item, appended last; the knob is empty here so there is no knob item to sit
+           between the sessions and it. */
+        var databaseItem = fired.Context!.Details[^1];
+        Assert.Equal("6 sessions over the threshold were in excluded databases", databaseItem.Heading);
+        Assert.Equal("6", Assert.Single(databaseItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel).Value);
+        Assert.Equal("reportingdb", Assert.Single(databaseItem.Fields, f => f.Label == "Excluded Databases").Value);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel}: 6", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain(fired.Context.Details, d => d.Fields.Any(f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel));
+
+        /* The list still travels to the read as the argument it always was — that is where it is applied now. */
+        Assert.Equal(new[] { "reportingdb" }, h.Adapter.LastLrqArgs!.Value.Excluded);
+        /* And the excluded sessions were never fingerprinted: one incident, the human's. */
+        Assert.Single(fired.Context.Incidents!);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_TheKnobAndTheDatabaseListCompose_ASessionBothRemoveCountsOnceUnderTheKnob()
+    {
+        /* The three arms are three predicates on one candidate set, and the counts must still sum to the sessions
+           removed. The rule, pinned: a session the KNOB would have removed anyway is the knob's, whichever database
+           it ran in — the database arm is LAST (taken AND NOT either knob arm), because the knob is the more specific
+           instrument and lists its entries on the card, while the database list is the blunt shared one. So a job
+           step running in the excluded reporting database is "Excluded By Program Prefix: 1", not a database
+           exclusion; the two ETL sessions the knob does not name are the database list's. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.AddRange(LongRunningQueryExclusions.DefaultProgramNamePrefixes);
+        h.Settings.LongRunningQueryExcludedLoginsList.AddRange(LongRunningQueryExclusions.DefaultLogins);
+        h.Settings.ExcludedDatabasesList.Add("ReportingDb");
+
+        /* A job step IN the excluded database — both the prefix arm and the database arm match. */
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 61, DatabaseName = "ReportingDb", QueryText = "EXEC dbo.NightlyRebuild",
+            ProgramName = "SQLAgent - TSQL JobStep (Job 0x1D6B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 3)", LoginName = "app_admin",
+            ElapsedSeconds = 90_000, QueryHash = "0x6161616161616161"
+        });
+        /* The multi-day background under SYSTEM, in the excluded database too — login arm and database arm. */
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 62, DatabaseName = "reportingdb", QueryText = "sp_replcmds",
+            ProgramName = ".Net SqlClient Data Provider", LoginName = @"NT AUTHORITY\SYSTEM",
+            ElapsedSeconds = 80_000, QueryHash = "0x6262626262626262"
+        });
+        /* Two ETL sessions the knob does not name: the database list's alone. */
+        h.Adapter.LongRunning.Add(ReportingEtlSession(63, elapsedSeconds: 70_000));
+        h.Adapter.LongRunning.Add(ReportingEtlSession(64, elapsedSeconds: 60_000));
+        /* A job step in a database the operator cares about: the knob's, and not the database list's. */
+        h.Adapter.LongRunning.Add(PermanentSession(65, "SQLAgent - TSQL JobStep (Job 0x2A3B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 1)", "app_admin", elapsedSeconds: 50_000));
+        /* And the human, whose page this is. */
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);
+
+        /* Knob item first (61 and 65 by prefix; 62 by login), database item last (63 and 64) — 2 + 1 + 2 = 5, the
+           five sessions the page does not show, each counted exactly once. */
+        var knobItem = fired.Context!.Details[^2];
+        Assert.Equal("3 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("1", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        var databaseItem = fired.Context.Details[^1];
+        Assert.Equal("2 sessions over the threshold were in excluded databases", databaseItem.Heading);
+        Assert.Equal("2", Assert.Single(databaseItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel).Value);
+        Assert.Equal("ReportingDb", Assert.Single(databaseItem.Fields, f => f.Label == "Excluded Databases").Value);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_AnEmptyDatabaseList_LeavesTheCardWithoutTheDatabaseItem()
+    {
+        /* excludedDatabases is empty by default on both SKUs, so a fresh install's card must be byte-identical to
+           the pre-#3742 card: no item, no "Excluded By Database: 0" line about a list nobody set. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Adapter.LastLrqArgs!.Value.Excluded);
+        Assert.DoesNotContain(fired.Context!.Details, d => d.Fields.Any(f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel));
+        Assert.DoesNotContain("Excluded By Database", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_ADatabaseListThatRemovedNothing_StillSaysSo()
+    {
+        /* A set list that matched no over-threshold session this evaluation reports 0 — the same rule as the knob's
+           item: a setting whose only effect is an absence needs a line that says the absence was nothing, and "0" is
+           also how an operator learns a database name is misspelled. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.ExcludedDatabasesList.Add("NotThisOne");
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        var databaseItem = fired.Context!.Details[^1];
+        Assert.Equal("0 sessions over the threshold were in excluded databases", databaseItem.Heading);
+        Assert.Equal("0", Assert.Single(databaseItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel).Value);
+        Assert.Equal("NotThisOne", Assert.Single(databaseItem.Fields, f => f.Label == "Excluded Databases").Value);
+    }
+
+    [Fact]
+    public async Task Cpu_TheMaintenanceProbe_IgnoresTheLongRunningQueryOptOutKnob()
+    {
+        /* The knob is the LONG-RUNNING alert's: a backup run by an excluded service login is still the thing
+           burning this server's CPU, so the High CPU card's maintenance probe reads with the knob OFF — the same
+           reasoning that has it read with every noise filter off. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("RdsAdminService");
+        h.Adapter.LongRunning.Add(BackupSession());
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(h.Adapter.LastLrqExclusions!.IsEmpty);
+        Assert.Contains("BACKUP DATABASE", Assert.Single(h.Deliverer.Outcomes).DetailText, StringComparison.Ordinal);
     }
 
     /* ---------------- the sibling card annotations: #3495 (High CPU names active maintenance)
@@ -1786,12 +3392,39 @@ public sealed class AlertEngineTests
         Assert.Contains("(name unresolved)", h.Deliverer.Outcomes[1].DetailText!, StringComparison.Ordinal);
     }
 
-    /* ---------------- tempdb ---------------- */
+    /* ---------------- tempdb: the #3653 (A5) persistence gate ---------------- */
+
+    /// <summary>
+    /// Drives <paramref name="samples"/> consecutive sweeps, each handing the engine a tempdb row with the
+    /// given shape and a DISTINCT, increasing <c>collection_time</c> — one gate observation per call, which
+    /// is what the gate counts. Returns the instant of the last row so a caller can keep the sequence going;
+    /// the CPU twin is <see cref="DriveCpuAsync"/>. <paramref name="maxSizeMb"/> defaults to 0, the
+    /// "ceiling never measured" spelling every pre-#2515 fixture relies on.
+    /// </summary>
+    private static async Task<DateTime> DriveTempDbAsync(
+        AlertEngine engine, Harness h, double reservedMb, double unallocatedMb, int samples,
+        DateTime from, double maxSizeMb = 0, bool suppressed = false)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(1);
+            h.Adapter.TempDb = new TempDbSpaceInfo
+            {
+                TotalReservedMb = reservedMb, UnallocatedMb = unallocatedMb, MaxSizeMb = maxSizeMb, CollectionTimeUtc = at
+            };
+            await engine.EvaluateServerAsync(Harness.Snapshot(suppressed: suppressed));
+        }
+
+        return at;
+    }
 
     [Fact]
     public async Task TempDb_FiresAtThreshold_AndResolutionCarriesTheCurrentPercent()
     {
-        /* Lite AlertEngine.cs:420-465. */
+        /* Lite AlertEngine.cs:420-465, now behind the gate (#3653 A5): the threshold compare, the delivered
+           shape and the resolve strings are UNCHANGED — only the number of collected samples it takes to get
+           to the fire. */
         var h = new Harness();
         h.Settings.TempDbSpaceEnabled = true;
         var engine = h.Build();
@@ -1802,18 +3435,300 @@ public sealed class AlertEngineTests
            would have to move, and the fact that it does not is the guarantee that no existing on-prem or RDS
            target with an unlimited (or uncollected) tempdb sees its number change. The capped case gets its
            own test below rather than being folded in here. */
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200 }; /* 80% reserved */
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 800, unallocatedMb: 200, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase); /* 80% reserved */
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
         Assert.Equal("80% reserved (800 MB)", fired.CurrentValue);                /* :446 */
         Assert.Equal(80d, fired.NumericCurrentValue!.Value, precision: 3);    /* :450 */
 
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 200, UnallocatedMb = 800 }; /* 20% reserved */
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await DriveTempDbAsync(engine, h, reservedMb: 200, unallocatedMb: 800, samples: AlertEngine.TempDbSpaceClearSamples, from: at); /* 20% reserved */
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("tempdb Space Resolved", resolution.Title);              /* :463 */
         Assert.Equal("SRV-A: tempdb reserved space back to 20%", resolution.Message);  /* :461,:464 */
+        Assert.Equal("tempdb Space", resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task TempDb_OneOrTwoBreachingSamples_DoNotFire_TheThirdFiresExactlyOnce()
+    {
+        /* THE #3653 (A5) defect, stated as a pin: a single collected sample over the bar used to be an incident,
+           and on the measured store class that was 22 pages in 14 days about runs of 1-4 samples. This is the
+           assertion that reddens if TempDbSpaceBreachSamples goes back to 1 — and the K-1 arm is what catches
+           a K that quietly became 2. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("tempdb Space", fired.MetricName);
+        Assert.Equal("90% reserved (900 MB)", fired.CurrentValue);
+        Assert.False(fired.Muted);
+
+        /* Same standing breach one minute later: inside the 5-minute cooldown — no repeat (:423). */
+        h.Now = h.Now.AddMinutes(1);
+        at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* After the cooldown elapses the STANDING breach re-fires as the reminder it always was. The gate
+           changed what counts as an incident, deliberately not how often a standing one repeats — the same
+           line the CPU gate drew. */
+        h.Now = h.Now.AddMinutes(5);
+        await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task TempDb_AStreakBrokenByOneClearSample_NeverFires_UntilThreeRunConsecutively()
+    {
+        /* Breach, clear, breach, breach: three breaching samples in all and never three in a ROW, so nothing
+           fires — the reset is what makes "sustained" mean sustained rather than "often", and it is the shape
+           the measured 1-4 sample flaps take when two of them land close together. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: Harness.SampleBase);
+        at = await DriveTempDbAsync(engine, h, reservedMb: 100, unallocatedMb: 900, samples: 1, from: at);
+        at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 2, from: at);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        /* And the counter was RESET by the clear, not merely left one short: the third consecutive breach
+           after it — the fourth breaching sample overall — is the one that fires. */
+        await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task TempDb_RepeatedCollectionTime_DoesNotAdvanceTheStreak()
+    {
+        /* The reason the gate counts COLLECTIONS and not sweeps, and the pin that matters most on this arm:
+           the sweep is 30 s and tempdb_stats lands a row about once a minute, so the sweep re-reads the same
+           row roughly every other pass. Here the SAME collection_time is offered TempDbSpaceBreachSamples x 3
+           times: one observation, no fire. Without the freshness check this test fires — and the measured
+           1-4 sample flaps come straight back, one row re-counted three times inside 90 seconds. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var stuck = Harness.SampleBase.AddMinutes(1);
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples * 3; i++)
+        {
+            h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 950, UnallocatedMb = 50, CollectionTimeUtc = stuck };
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Two genuinely new collections on top of that one observation reach the bar. */
+        await DriveTempDbAsync(engine, h, reservedMb: 950, unallocatedMb: 50, samples: AlertEngine.TempDbSpaceBreachSamples - 1, from: stuck);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task TempDb_NoCollectionTime_CountsEverySweep()
+    {
+        /* The documented DEGRADATION for a producer that supplies no collection instant (see
+           TempDbSpaceInfo.CollectionTimeUtc): persistence is then per-sweep rather than per-collection —
+           weaker, but the alert still fires, because silence is the one failure a monitoring product cannot
+           tell apart from health. Pinned so the fallback is a decision rather than an accident, and because
+           it is the path every pre-#3653 fixture in this file and in Lite.Tests rides. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 950, UnallocatedMb = 50 };
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples - 1; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task TempDb_AMissingRowFreezesTheGate_AndNeverAnnouncesARecovery()
+    {
+        /* A tempdb_stats row that stops arriving is not a recovery. The pre-gate arm fell through to its
+           resolve branch on a null read and sent "tempdb reserved space back to N/A" — a recovery message
+           about a measurement nobody took. The streak is frozen instead, in both directions: the open
+           incident is neither resolved nor re-announced, and the row that eventually arrives continues
+           where the last real one left off. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.TempDb = null;
+        for (var i = 0; i < 5; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Resolutions);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The frozen state is the OPEN incident: one real clear row resolves it, with the measured number. */
+        await DriveTempDbAsync(engine, h, reservedMb: 100, unallocatedMb: 900, samples: AlertEngine.TempDbSpaceClearSamples, from: at);
+        Assert.Equal("SRV-A: tempdb reserved space back to 10%", Assert.Single(h.Resolutions).Message);
+    }
+
+    [Fact]
+    public async Task TempDb_PersistsTheStreakUnderItsOwnMetric_AndResumesAcrossARestart()
+    {
+        /* The persisted record lives under the tempdb metric name in the SAME (server, metric) table the CPU
+           gate uses — which is why no migration rung was needed — and a partly-built streak survives a
+           restart, so a real event that spans a service restart is not delayed by K samples. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+
+        var at = await DriveTempDbAsync(h.Build(), h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var persisted = Assert.Single(h.StateStore.Persistence);
+        Assert.Equal(Key, persisted.Key.Key);
+        Assert.Equal(AlertEngine.TempDbSpacePersistenceMetric, persisted.Key.Metric);
+        Assert.Equal(AlertEngine.TempDbSpaceBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.False(persisted.Value.State.Firing);
+        Assert.Equal(at, persisted.Value.LastObservedSampleUtc);
+
+        /* A brand-new engine over the same state store IS the restart; the very next collection completes
+           the streak. */
+        await DriveTempDbAsync(h.Build(), h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task TempDb_ARestartDoesNotReAnnounceAnAlreadyOpenIncident()
+    {
+        /* The reason the in-memory _activeTempDbSpaceAlert flag had to go: it forgot the open incident on
+           every restart, so the first post-restart sweep over a standing 90% tempdb delivered the same page
+           again. The persisted Firing bit tells the restarted engine the incident is open, and the seed stamps
+           the cooldown clock so the standing-condition reminder waits its full cooldown rather than firing
+           on the first sweep — the same two-part guard the CPU gate's seed carries, for the same reason. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+
+        var at = await DriveTempDbAsync(h.Build(), h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        var restarted = h.Build();
+        at = await DriveTempDbAsync(restarted, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The stamped clock is a COOLDOWN, not a silence: once it elapses the reminder is delivered as usual. */
+        h.Now = h.Now.AddMinutes(6);
+        at = await DriveTempDbAsync(restarted, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* And it resolves normally rather than being orphaned. */
+        await DriveTempDbAsync(restarted, h, reservedMb: 100, unallocatedMb: 900, samples: AlertEngine.TempDbSpaceClearSamples, from: at);
+        Assert.Single(h.Resolutions);
+        Assert.False(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task TempDb_TheGateAdvancesUnderSuppression_SoOneUnsuppressedSampleDelivers()
+    {
+        /* Suppression is evaluate-but-don't-deliver, and that holds for the GATE and not just the send: a
+           suppressed streak counts, so un-acknowledging a server reports the condition it is actually in
+           rather than starting a fresh K-sample wait. The CPU twin states why this pin lives here rather
+           than in Lite.Tests. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task TempDb_APersistenceSaveFailure_StillFires_AndIsNotCountedAsASwallowedRead()
+    {
+        /* The CPU pin's two claims, held on the second arm through the ONE shared save path: the gate decides
+           from its in-memory record, so a store that cannot be written costs the streak across a restart
+           and never an alert; and the failure is a WRITE, not on #3013's read counter. */
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 9, 5, 8, 0, 0, DateTimeKind.Utc));
+        var store = new ThrowingPersistenceSaveStore();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.TempDbSpaceEnabled = true;
+
+        var engine = new AlertEngine(
+            h.Settings, h.Adapter, store, h.Deliverer, _ => false,
+            resolutionCallback: (r, _) => { h.Resolutions.Add(r); return Task.CompletedTask; },
+            utcNow: () => h.Now, readFailures: counter);
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase);
+
+        Assert.True(store.SaveAttempts > 0, "the engine must have tried to persist, or this pin proves nothing");
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(0, counter.ReadFor(Key).ServerReadFailures);
+        Assert.Equal(0, counter.ReadFor(Key).InstanceReadFailures);
+
+        await DriveTempDbAsync(engine, h, reservedMb: 100, unallocatedMb: 900, samples: AlertEngine.TempDbSpaceClearSamples, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public void TempDbGateDefaults_AreDerivedFromTheMeasuredFlap()
+    {
+        /* The numbers are a real decision, so they are pinned rather than left to drift silently. Three
+           breaching COLLECTIONS: measured on one production store class (43 servers, 14 days), one server
+           fired 22 times and every run was 1-4 samples over at most 206 s; K = 3 keeps 2 of 22. ONE clear:
+           the pre-gate resolve behaviour, kept because the measurement covered breach runs and said nothing
+           about mid-incident dips — the CPU gate's 2 rests on a dip it measured, and this arm has no such
+           measurement to cite. */
+        Assert.Equal(3, AlertEngine.TempDbSpaceBreachSamples);
+        Assert.Equal(1, AlertEngine.TempDbSpaceClearSamples);
+        Assert.True(AlertEngine.TempDbSpaceClearSamples < AlertEngine.TempDbSpaceBreachSamples);
+
+        /* The persisted subject is the metric an operator already knows — the mute context's, the history
+           row's and the resolve's spelling — not a second spelling of it. */
+        Assert.Equal("tempdb Space", AlertEngine.TempDbSpacePersistenceMetric);
+        Assert.NotEqual(AlertEngine.CpuPersistenceMetric, AlertEngine.TempDbSpacePersistenceMetric);
+    }
+
+    /// <summary>
+    /// The README's alert catalog states the sample count for this arm as it does for High CPU, so the number
+    /// is pinned to the constant rather than left as a prose copy of it — the same pin
+    /// <c>BuiltinAlertPersistenceRungTests.TheReadmeAlertCatalogStatesTheSampleCountItActuallyUses</c> holds
+    /// the CPU row to, for the same reason: a doc count that cannot be compared to the thing it describes is a
+    /// count nobody can check.
+    /// </summary>
+    [Fact]
+    public void TheReadmeAlertCatalogStatesTheTempDbSampleCountItActuallyUses()
+    {
+        /* The RAW reader, deliberately: none of the anchors below spans a line break (the row is found by its
+           prefix and searched with Contains, and a trailing '\r' on a CRLF checkout changes neither), so by
+           RepoFileAdoptionTests' own rule this file does not belong in s_lfReaders and must not read as if
+           it did. */
+        var readme = ReadRepoFile("README.md");
+
+        var row = readme
+            .Split('\n')
+            .Single(l => l.StartsWith("| **TempDB space**", StringComparison.Ordinal));
+
+        Assert.Contains($"held for {AlertEngine.TempDbSpaceBreachSamples} samples", row, StringComparison.Ordinal);
+        Assert.Contains($"{AlertEngine.TempDbSpaceBreachSamples} consecutive collected samples", row, StringComparison.Ordinal);
+
+        /* And it must not still describe the pre-gate rule as the whole story, which is the sentence a reader
+           would act on. */
+        Assert.DoesNotContain("when TempDB usage exceeds the percentage threshold. Measured", row, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1833,17 +3748,47 @@ public sealed class AlertEngineTests
         Assert.Equal(80, h.Settings.TempDbSpaceThresholdPercent);
         var engine = h.Build();
 
-        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. */
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69, MaxSizeMb = 65_536 };
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. Held
+           for a full gate's worth of collections (#3653 A5), so the silence below is the ceiling's and not the
+           persistence gate's. The collection instant threads FORWARD into the second arm because both share
+           one engine and one record: a re-used instant is a sample the gate has already counted. */
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 59.75, unallocatedMb: 2.69, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase, maxSizeMb: 65_536);
         Assert.Empty(h.Deliverer.Outcomes);
 
         /* The identical snapshot with the ceiling unmeasured is the pre-#2515 reading, and it pages. */
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69 };
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await DriveTempDbAsync(engine, h, reservedMb: 59.75, unallocatedMb: 2.69, samples: AlertEngine.TempDbSpaceBreachSamples, from: at);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
         Assert.Equal("96% reserved (60 MB)", fired.CurrentValue);
+    }
+
+    /// <summary>
+    /// #3653 (A8e): the fire carries an EXPLICIT Warning tier — on the context the row persists and on the
+    /// outcome — and never Critical, at 80% or at 100% of the ceiling. The product has no measured "tempdb
+    /// nearly full" bar to cite (the fire site lists the candidates it declined), so the only honest grade is
+    /// the one the operator configured; what changes is that the row now SAYS Warning instead of leaving
+    /// the by-name map to imply it.
+    /// </summary>
+    [Theory]
+    [InlineData(800d, 200d, -1d)]      /* 80%, unlimited files */
+    [InlineData(1000d, 0d, -1d)]       /* 100%, unlimited files */
+    [InlineData(1000d, 0d, 1000d)]     /* 100% of a measured ceiling */
+    public async Task TempDb_FiresAnExplicitWarning_AndNeverGradesCritical(double reservedMb, double unallocatedMb, double maxSizeMb)
+    {
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        /* Driven through the #3653 (A5) gate: the grade is a property of the fire, and the fire takes
+           TempDbSpaceBreachSamples collections to earn. */
+        await DriveTempDbAsync(engine, h, reservedMb, unallocatedMb, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase, maxSizeMb: maxSizeMb);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("tempdb Space", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.NotNull(fired.Context);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context!.SeverityOverride);
+        /* The card is the same card: the grade did not displace the detail item the builder renders. */
+        Assert.StartsWith("tempdb — ", Assert.Single(fired.Context.Details).Heading, StringComparison.Ordinal);
     }
 
     /* ---------------- low disk ---------------- */
@@ -1888,6 +3833,388 @@ public sealed class AlertEngineTests
         h.Now = h.Now.AddMinutes(6);
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    /* ---------------- database file growth (#2349; #3539 A8c: the rise is MB per HOUR) ---------------- */
+
+    private static DatabaseFileGrowthInfo GrowingFile(double growthMb, double windowMinutes) => new()
+    {
+        DatabaseName = "tempdb", FileName = "tempdev", PhysicalName = @"D:\data\tempdev.mdf", FileTypeDesc = "ROWS",
+        TotalSizeMb = 90_000, GrowthMb = growthMb, GrowthWindowMinutes = windowMinutes,
+        VolumeMountPoint = @"D:\", VolumeTotalMb = 4_000_000, VolumeFreeMb = 3_000_000,
+    };
+
+    /// <summary>
+    /// Through the ENGINE: the same growth rate pages on a five-minute lookback and on a one-day lookback, and
+    /// the threshold line on what fired names the rate, the window it was averaged over, and the megabytes
+    /// that rate amounts to inside the window — in the unit phrase both Settings windows use. The lookback the
+    /// engine hands the read is the configured one, so the store read and the bar cannot disagree about the
+    /// window.
+    /// </summary>
+    [Theory]
+    [InlineData(5, 853.34, "rise ≥ 10240 MB/hr averaged over 5 min (≥ 853 MB in the window) or file ≥ 60% of volume")]
+    [InlineData(1440, 245_760, "rise ≥ 10240 MB/hr averaged over 1440 min (≥ 245760 MB in the window) or file ≥ 60% of volume")]
+    public async Task FileGrowth_TheRiseIsPerHour_SoTheSameRatePagesOnAnyLookback_AndTheThresholdSaysSo(
+        int lookbackMinutes, double growthMb, string expectedThreshold)
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.FileGrowthLookbackMinutes = lookbackMinutes;
+        Assert.Equal(10_240, h.Settings.FileGrowthRiseMb);
+        var engine = h.Build();
+
+        h.Adapter.Files.Add(GrowingFile(growthMb, lookbackMinutes));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(lookbackMinutes, h.Adapter.FileGrowthLookbackAsked);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Database File Growth", fired.MetricName);
+        Assert.Equal(expectedThreshold, fired.ThresholdValue);
+        Assert.Contains(AlertContextBuilders.FileGrowthRiseUnit, fired.ThresholdValue, StringComparison.Ordinal);
+    }
+
+    /// <summary>An Azure SQL Database file has no volume: the fired headline says so, instead of a made-up
+    /// "0% of" an empty mount point.</summary>
+    [Fact]
+    public async Task FileGrowth_AFileWithAnUnknownVolume_FiresWithoutAMadeUpPercentOfNothing()
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        var engine = h.Build();
+        var f = GrowingFile(20_480, 60);
+        f.VolumeMountPoint = null;
+        f.VolumeTotalMb = null;
+        f.VolumeFreeMb = null;
+        h.Adapter.Files.Add(f);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("volume unknown", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("0% of", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("of )", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The other half of the same property: a rate a tenth under the bar is silent on both lookbacks — including
+    /// the day-long one, where the per-window reading paged on 12 GB in a day because 12,288 is more than 10,240.
+    /// </summary>
+    [Theory]
+    [InlineData(5, 768)]
+    [InlineData(1440, 12_288)]
+    public async Task FileGrowth_ARateUnderTheBar_IsSilentOnAnyLookback(int lookbackMinutes, double growthMb)
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.FileGrowthLookbackMinutes = lookbackMinutes;
+        var engine = h.Build();
+
+        h.Adapter.Files.Add(GrowingFile(growthMb, lookbackMinutes));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /* ---------------- #3636: the rise arm fires once per hourly observation, not once per cooldown ---------------- */
+
+    /// <summary>Two consecutive hourly collections of <c>database_size_stats</c>, so the pins below replay the
+    /// shape the issue describes rather than an invented one: a rise observed at the top of the hour, twelve
+    /// five-minute cooldowns of re-reads against the same two rows, the next collection an hour later.</summary>
+    private static readonly DateTime HourlyCollection0 = new(2026, 9, 18, 6, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime HourlyCollection1 = HourlyCollection0.AddHours(1);
+
+    /// <summary>A rise-only file (2% of a 4 TB volume — the level gate cannot see it) stamped with the collection
+    /// that produced it. 20 GB in the 60-minute window is twice the default 10,240 MB/hr bar.</summary>
+    private static DatabaseFileGrowthInfo RiseOnlyFile(DateTime? observedAt, double growthMb = 20_480, string fileName = "tempdev")
+    {
+        var f = GrowingFile(growthMb, windowMinutes: 60);
+        f.FileName = fileName;
+        f.ObservedAtUtc = observedAt;
+        return f;
+    }
+
+    /// <summary>A level-only file: 80% of a small volume and not growing at all. The standing-level shape that
+    /// re-fires on the cooldown by design.</summary>
+    private static DatabaseFileGrowthInfo LevelOnlyFile(DateTime? observedAt) => new()
+    {
+        DatabaseName = "Sales", FileName = "Sales_log", PhysicalName = @"L:\log\Sales_log.ldf", FileTypeDesc = "LOG",
+        TotalSizeMb = 400_000, GrowthMb = 0, GrowthWindowMinutes = 60,
+        VolumeMountPoint = @"L:\", VolumeTotalMb = 500_000, VolumeFreeMb = 90_000, ObservedAtUtc = observedAt,
+    };
+
+    [Fact]
+    public async Task FileGrowth_SameHourlyObservationAcrossTwelveCooldowns_FiresOnce_ThenResolvesOnTheNextCollection()
+    {
+        /* #3636's shape: the collector landed a 20 GB rise at 06:00 and nothing else until 07:00. Between those
+           two collections the adapter returned the SAME row (newest = 06:00, baseline = the window's far edge)
+           on every ~30 s pass, and the pre-#3636 engine fired on every cooldown expiry — up to twelve cards for
+           one growth event. The cooldown elapsing is not proof a new observation exists. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var first = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Database File Growth", first.MetricName);
+
+        /* Eleven more passes, each past the cooldown, none a new observation — the twelve-card loop. */
+        for (var pass = 1; pass <= 11; pass++)
+        {
+            h.Now = HourlyCollection0.AddMinutes(pass * 5).AddSeconds(40);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);
+        /* And the read still happened on every pass — the guard is on the FIRE, never on the fetch, so the
+           recovery arm keeps seeing fresh evidence. */
+        Assert.Equal(12, h.Adapter.FileGrowthFetches);
+
+        /* 07:00: the next collection. The file did not grow in the new window; the read returns it under the
+           bar, and the recovery is announced exactly as before #3636. */
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, growthMb: 0));
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        var resolution = Assert.Single(h.Resolutions, r => r.MetricName == "Database File Growth");
+        Assert.Contains("no file is growing past the threshold", resolution.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FileGrowth_NewerObservationWithARise_FiresAgain_CarryingItsOwnNumbers()
+    {
+        /* A file that keeps growing across successive hourly collections is still a standing condition: each
+           collection is a NEW observation with a new rise, and it re-fires — the guard removes repeats of one
+           observation, not the second card for a second hour of growth. The card carries the new observation's
+           growth, not the first one's. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0, growthMb: 20_480));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("grew 20.0 GB in 60 min", h.Deliverer.Outcomes[0].ShortMessage, StringComparison.Ordinal);
+
+        /* The next collection: another 30 GB in the new window. Same file key, newer stamp. */
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, growthMb: 30_720));
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Contains("grew 30.0 GB in 60 min", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
+
+        /* And that observation, re-read past another cooldown, is one card too. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task FileGrowth_NewerObservationWithoutARise_DoesNotFire_AndResolves()
+    {
+        /* The third arm: a newer observation in which the file did NOT grow past the bar is not news for the
+           rise gate — it is the falling edge. No second card; the recovery is announced. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, growthMb: 512)); /* a twentieth of the bar */
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.Resolutions, r => r.MetricName == "Database File Growth");
+    }
+
+    [Fact]
+    public async Task FileGrowth_TheLevelArm_StillRefiresEveryCooldown_OnTheSameObservation()
+    {
+        /* The guard is on the RISE gate only. A file at 80% of its volume is at 80% on every pass whether or
+           not a new collection has landed — a standing level, re-fired on the cooldown by design (#2349), and
+           #3636 leaves that alone. Same stamp on every read; it fires on every cooldown regardless. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(LevelOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* And a rise-only file riding on the same server's card does not silence the level file: the card is
+           per server, one file with news is enough, and the level file is always news. */
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(5, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FileGrowth_NewObservationInsideTheCooldown_FiresOnceTheCooldownElapses()
+    {
+        /* The memory is 'last ALERTED observation', not 'last SEEN' (the #3579 lesson): a collection that lands
+           while the cooldown from the previous card is still running has not been reported, so when the
+           cooldown elapses and the row is still that observation, it fires. Folding the two into one 'last
+           seen' stamp would record it as seen on the quiet pass and then never fire it. The hourly collector
+           makes this rare; a shortened cadence or a manual collection makes it real. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        var quickCollection = HourlyCollection0.AddMinutes(2);
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(quickCollection, growthMb: 25_600));
+        h.Now = quickCollection.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes); /* cooldown holds it — rate limiting is still the cooldown's job */
+
+        h.Now = HourlyCollection0.AddMinutes(5).AddSeconds(50);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FileGrowth_MutedFire_StampsTheObservation_SoUnmutingDoesNotReplayIt()
+    {
+        /* A muted fire is still a fire: delivered flagged Muted, it stamps the cooldown, and since #3636 it
+           stamps the observation. A mute rule lifted mid-hour must not turn the same 06:00 rise into a fresh
+           card — the operator muted the server's file growth, not the engine's memory of it. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var muted = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(muted.Muted);
+
+        h.Muted = false;
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task FileGrowth_RecoveryForgetsTheObservation_SoANewEpisodeFires()
+    {
+        /* The falling edge clears the memory with the server (the #2166 lesson, at file grain): a file that
+           recovers and later grows again is a new episode and its first rise fires, whatever the stamp. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.Files.Clear();
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Resolutions, r => r.MetricName == "Database File Growth");
+
+        var laterCollection = HourlyCollection1.AddHours(3);
+        h.Adapter.Files.Add(RiseOnlyFile(laterCollection));
+        h.Now = laterCollection.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FileGrowth_AFileThatLeavesTheBreachedSet_LosesItsMemory_WhileAnotherKeepsTheCardActive()
+    {
+        /* The memory is per FILE, pruned as files leave the breached set, not per server. tempdev fires at
+           06:00; at 07:00 tempdev is quiet and templog has the rise — templog has never fired, so the card goes
+           (no recovery: the server still has a breaching file). At 08:00 tempdev is back with a fresh stamp
+           and templog is quiet: tempdev's 06:00 memory went with it when it left, and it fires as a new
+           episode would anyway — asserted through the card's headline naming the file. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0, fileName: "tempdev"));
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0, growthMb: 0, fileName: "templog"));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.StartsWith("tempdb.tempdev", h.Deliverer.Outcomes[0].ShortMessage, StringComparison.Ordinal);
+
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, growthMb: 0, fileName: "tempdev"));
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, fileName: "templog"));
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.StartsWith("tempdb.templog", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
+        Assert.Empty(h.Resolutions);
+
+        /* Same 07:00 observation re-read past the cooldown: templog was reported; nothing new. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FileGrowth_StamplessRow_KeepsThePre3636CooldownRepeat()
+    {
+        /* The stated fallback for an adapter that supplies no observation stamp (the shipped two always do):
+           a null never matches a remembered stamp, so every read counts as new and the cooldown alone
+           rate-limits it — the pre-#3636 behaviour, degraded towards repetition rather than silence, the same
+           direction IAlertStateStore's no-op fallbacks degrade. Pinned so the fallback is a decision and not
+           an accident of null comparison. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(observedAt: null));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
     /* ---------------- persistent version store (#1984) ---------------- */
@@ -2349,9 +4676,9 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(string serverKey, double thresholdMs, CancellationToken cancellationToken = default) =>
+        public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, CancellationToken cancellationToken = default) =>
+        public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
@@ -2367,7 +4694,7 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
 
         /// <summary>
@@ -2486,6 +4813,210 @@ public sealed class AlertEngineTests
         Assert.Contains("Sales", resolution.Message, StringComparison.Ordinal);
         Assert.Contains("query 11", resolution.Message, StringComparison.Ordinal);
         Assert.Contains("plan 22", resolution.Message, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #3579: one observation, one card ---------------- */
+
+    /// <summary>The production series' collection instants (#3579), so the pins below replay the shape that
+    /// was measured rather than an invented one: the 04:02→04:18 rise, six cooldowns of re-reads, the 04:50
+    /// collection with the counter back at zero.</summary>
+    private static readonly DateTime Collection0402 = new(2026, 9, 18, 4, 2, 0, DateTimeKind.Utc);
+    private static readonly DateTime Collection0418 = new(2026, 9, 18, 4, 18, 0, DateTimeKind.Utc);
+    private static readonly DateTime Collection0450 = new(2026, 9, 18, 4, 50, 0, DateTimeKind.Utc);
+
+    private static ForcePlanFailureInfo ForcePlanRow(DateTime? observedAt, long delta = 1, long total = 1) => new()
+    {
+        DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "AUTO", FailureReason = "NONE",
+        FailureDelta = delta, TotalFailures = total, ObservedAtUtc = observedAt
+    };
+
+    [Fact]
+    public async Task ForcePlanFailure_SameObservationAcrossSixCooldowns_FiresOnce_ThenResolvesOnTheNextCollection()
+    {
+        /* #3579's measured shape: one plan's counter went 0 → 1 at the 04:18 collection and back to 0 at
+           04:50. Between those two collections the adapter returned the SAME row (newest = 04:18, previous =
+           04:02) on every ~30 s pass, and the pre-#3579 engine fired at 04:18:53, 04:24:31, 04:30:04,
+           04:35:33, 04:40:49 and 04:46:03 — six cards, every one reading New 1 / Total 1, for a force that
+           failed once. The cooldown elapsing is not proof a new observation exists. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The five re-reads that each fired before. Every one is past the cooldown; none is a new observation. */
+        foreach (var refire in new[] { "04:24:31", "04:30:04", "04:35:33", "04:40:49", "04:46:03" })
+        {
+            h.Now = DateTime.SpecifyKind(DateTime.Parse("2026-09-18 " + refire, System.Globalization.CultureInfo.InvariantCulture), DateTimeKind.Utc);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);
+        /* And the read still happened on every pass — the guard is on the FIRE, never on the fetch, so the
+           recovery arm keeps seeing fresh evidence. */
+        Assert.Equal(6, h.Adapter.ForcePlanFetches);
+
+        /* 04:50: APC released the forcing and the counter reset. The adapter's '>' filter drops the row, and
+           the recovery is announced exactly as before #3579. */
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Now = Collection0450.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        var resolution = Assert.Single(h.Resolutions, r => r.MetricName == ForcePlanTokens.MetricName);
+        Assert.Contains("plan 22 no longer failing to force", resolution.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_NewerObservationWithARise_FiresAgain_CarryingItsOwnNumbers()
+    {
+        /* A plan that keeps failing across successive collections is still a standing condition: each
+           collection is a NEW observation with a new rise, and it re-fires — the guard removes repeats of
+           one observation, not the second card for a second failure. The card carries the new observation's
+           delta and total, not the first one's. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0402.AddSeconds(30);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0402, delta: 1, total: 1));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The next collection: the counter rose again (1 → 3). Same plan key, newer stamp. */
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418, delta: 2, total: 3));
+        h.Now = Collection0418.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var second = h.Deliverer.Outcomes[1];
+        Assert.Equal(2, second.NumericCurrentValue);
+        Assert.Contains("failed to force 2x", second.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("Total Failures: 3", second.DetailText, StringComparison.Ordinal);
+
+        /* And that observation, re-read past another cooldown, is one card too. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_NewObservationInsideTheCooldown_FiresOnceTheCooldownElapses()
+    {
+        /* The memory is 'last ALERTED observation', not 'last SEEN': a collection that lands while the
+           cooldown from the previous card is still running has not been reported, so when the cooldown
+           elapses and the row is still that observation, it fires. Folding the two memories into one
+           'last seen' stamp would record it as seen on the quiet pass and then never fire it — the guard
+           would have been silencing a real second failure, which is worse than the repeat it replaces. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0402.AddSeconds(30);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0402));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* A fast collection: the next observation lands two minutes later, inside the five-minute cooldown. */
+        var quickCollection = Collection0402.AddMinutes(2);
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(quickCollection, delta: 1, total: 2));
+        h.Now = quickCollection.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes); /* cooldown holds it — rate limiting is still the cooldown's job */
+
+        /* Cooldown elapsed, same not-yet-reported observation: it fires now. */
+        h.Now = Collection0402.AddMinutes(5).AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* And only once. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_MutedFire_StampsTheObservation_SoUnmutingDoesNotReplayIt()
+    {
+        /* A muted fire is still a fire: it is delivered flagged Muted, it stamps the cooldown, and since
+           #3579 it stamps the observation. A mute rule lifted mid-interval must not turn the same 04:18
+           rise into a fresh card — the operator muted the plan, not the engine's memory of it. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var muted = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(muted.Muted);
+
+        h.Muted = false;
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_RecoveryForgetsTheObservation_SoANewEpisodeFires()
+    {
+        /* The falling edge clears the memory with the plan (the #2166 lesson, at plan grain): a plan that
+           recovers and later fails again is a new episode and its first rise fires, whatever the stamp. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Now = Collection0450.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Resolutions, r => r.MetricName == ForcePlanTokens.MetricName);
+
+        /* Hours later, forced again and failing again. */
+        var laterCollection = Collection0450.AddHours(3);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(laterCollection, delta: 1, total: 1));
+        h.Now = laterCollection.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_StamplessRow_KeepsThePre3579CooldownRepeat()
+    {
+        /* The stated fallback for an adapter that supplies no observation stamp (the shipped two always do):
+           a null never matches a remembered stamp, so every read counts as new and the cooldown alone
+           rate-limits it — the pre-#3579 behaviour, degraded towards repetition rather than silence, the
+           same direction IAlertStateStore's no-op fallbacks degrade. Pinned so the fallback is a decision
+           and not an accident of null comparison. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(observedAt: null));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
     [Fact]
@@ -2855,6 +5386,31 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task DatabaseState_NoVerdict_LeavesAnActiveDatabaseActive_FiresNothingAndResolvesNothing()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "OFFLINE", ExpectedState = "ONLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The store cannot judge this pass: null, which is not an empty list. The active database stays
+           active, so nothing fires and nothing resolves, even though the double's own list is now empty. */
+        h.Adapter.DatabaseStatesNoVerdict = true;
+        h.Adapter.DatabaseStates.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        /* A real verdict of "no deviations" does resolve it. */
+        h.Adapter.DatabaseStatesNoVerdict = false;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Contains(h.Resolutions, r => r.MetricName == "Database State" && r.Message.Contains("Payments"));
+    }
+
+    [Fact]
     public async Task DatabaseState_PendingCriticalFirstObservation_FiresCriticalWithNoBaselineMessage()
     {
         /* A critical first observation has no baseline (empty expected) — the store returns it as pending;
@@ -2896,6 +5452,1278 @@ public sealed class AlertEngineTests
 
         Assert.Contains("no baseline", detail, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, CountOccurrences(detail, "baseline"));
+    }
+
+    /* ---------------- #4752: an alert whose every channel failed is tried again ---------------- */
+
+    /// <summary>Email failed with its own error and nothing else went out: the row records channel
+    /// <c>email</c>, <c>Sent</c> false, <c>SendError</c> set.</summary>
+    private static AlertDelivery FailedByEmail() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.Failed, SendError: "SMTP: 535 authentication failed",
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    /// <summary>A webhook-only fan-out whose every post failed (an HTTP 429, say): the row records channel
+    /// <c>failed</c>, <c>Sent</c> false, <c>SendError</c> set.</summary>
+    private static AlertDelivery FailedByWebhook() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.Failed, WebhookSendError: "Slack: 429 Too Many Requests", AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    /// <summary>The webhook delivered.</summary>
+    private static AlertDelivery DeliveredByWebhook() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.Delivered, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    /// <summary>A PARTIAL failure: the email failed with its error, the webhook delivered. <c>Sent</c> is true
+    /// and <c>SendError</c> is set.</summary>
+    private static AlertDelivery FailedByEmailButDeliveredByWebhook() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.Failed, SendError: "SMTP: 535 authentication failed",
+            WebhookOutcome: AlertChannelOutcome.Delivered, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    /// <summary>A muted fire attempts no channel: <c>Sent</c> false, no <c>SendError</c>.</summary>
+    private static AlertDelivery MutedNothingAttempted() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: true, trayChannelPresent: false);
+
+    /// <summary>An email inside its incident cooldown: reported as throttled, so <c>Sent</c> is false and
+    /// there is no <c>SendError</c> (#4822).</summary>
+    private static AlertDelivery ThrottledNothingSent() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.Throttled, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    [Fact]
+    public void TheDeliveryShapes_TheRetryReads_AreWhatTheChannelsProduce()
+    {
+        /* The engine retries on Sent == false with a SendError. This pins that the two failure shapes the
+           channels really produce have it, and that the shapes that must NOT be retried do not. */
+        var email = FailedByEmail();
+        Assert.False(email.Sent);
+        Assert.NotNull(email.SendError);
+
+        var webhook = FailedByWebhook();
+        Assert.False(webhook.Sent);
+        Assert.NotNull(webhook.SendError);
+
+        var partial = FailedByEmailButDeliveredByWebhook();
+        Assert.True(partial.Sent);
+        Assert.NotNull(partial.SendError);
+
+        var delivered = DeliveredByWebhook();
+        Assert.True(delivered.Sent);
+        Assert.Null(delivered.SendError);
+
+        var muted = MutedNothingAttempted();
+        Assert.False(muted.Sent);
+        Assert.Null(muted.SendError);
+    }
+
+    [Theory]
+    [InlineData(1, 5, 1)]
+    [InlineData(2, 5, 2)]
+    [InlineData(3, 5, 4)]
+    [InlineData(4, 5, 5)]
+    [InlineData(5, 5, 5)]
+    [InlineData(1, 3, 1)]
+    [InlineData(2, 3, 2)]
+    [InlineData(3, 3, 3)]
+    [InlineData(4, 3, 3)]
+    [InlineData(6, 60, 32)]
+    [InlineData(7, 60, 60)]
+    [InlineData(0, 5, 1)]
+    [InlineData(-3, 5, 1)]
+    [InlineData(int.MaxValue, 60, 60)]
+    public void ChannelFailureRetryDelay_DoublesFromAMinute_AndNeverPassesTheCooldown(
+        int consecutiveFailures, int cooldownMinutes, int expectedMinutes)
+    {
+        Assert.Equal(
+            TimeSpan.FromMinutes(expectedMinutes),
+            AlertEngine.ChannelFailureRetryDelay(consecutiveFailures, TimeSpan.FromMinutes(cooldownMinutes)));
+    }
+
+    [Fact]
+    public void ChannelFailureRetryDelay_ACooldownUnderAMinute_IsTheCap()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(30), AlertEngine.ChannelFailureRetryDelay(1, TimeSpan.FromSeconds(30)));
+        Assert.Equal(TimeSpan.Zero, AlertEngine.ChannelFailureRetryDelay(1, TimeSpan.Zero));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cpu_EveryChannelFailed_IsTriedAgainAfterAMinute_ThenTwo_AndADeliveryRestoresTheFullCooldown(bool webhookOnly)
+    {
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => webhookOnly ? FailedByWebhook() : FailedByEmail();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        /* First failure: the retry waits a minute, not the five-minute cooldown. */
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers, and that ends the streak. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+
+        /* A delivered fire waits the whole cooldown, as it always did. */
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        h.Deliverer.Report = _ => FailedByEmail();
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+
+        /* ...and the next failure starts over at a minute, not at the four the old streak would have reached. */
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(59)));
+        Assert.Equal(5, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task Cpu_TheRetryWaitStopsGrowingAtTheCooldown()
+    {
+        /* A 3-minute cooldown: the waits are 1, 2, 3, 3 minutes, never longer than the cooldown itself. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 3;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(59)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(2)));   /* 1 minute */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));   /* 2 minutes */
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(179)));
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));   /* 3 minutes (4 capped) */
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(179)));
+        Assert.Equal(5, await SweepAfterAsync(TimeSpan.FromSeconds(2)));   /* 3 minutes again */
+    }
+
+    [Fact]
+    public async Task Cpu_APartialFailure_OneChannelDelivered_GetsNoEarlyRetry()
+    {
+        /* One channel reached an operator, so a retry would send the alert twice down it. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmailButDeliveredByWebhook();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(61);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(4);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_AMutedFire_StillWaitsTheFullCooldown()
+    {
+        /* A muted fire attempts no channel, so there is no failure to retry: it behaves as it always did. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
+
+        h.Now = h.Now.AddSeconds(61);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(4);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task BlockingWait_EveryChannelFailed_IsTriedAgainAfterAMinute()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+
+        h.Now = h.Now.AddSeconds(30);
+        at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+
+        h.Now = h.Now.AddSeconds(31);
+        await DriveBlockingWaitAsync(engine, h, 120_000, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Blocking Wait Time"));
+    }
+
+    [Fact]
+    public async Task TempDb_EveryChannelFailed_IsTriedAgainAfterAMinute()
+    {
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByWebhook();
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 800, unallocatedMb: 200, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        at = await DriveTempDbAsync(engine, h, reservedMb: 800, unallocatedMb: 200, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await DriveTempDbAsync(engine, h, reservedMb: 800, unallocatedMb: 200, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_EveryChannelFailed_IsTriedAgainAfterAMinute()
+    {
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "SELECT COUNT(*) FROM Users",
+            ElapsedSeconds = 2159,
+            CpuTimeMs = 1000,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task PoisonWait_EveryChannelFailed_IsTriedAgainOnTheSameCollection_AfterAMinute()
+    {
+        /* The freshness marker (the newest collection already reported) is written before delivery too. A
+           fire nobody received forgets it, so the retry does not wait for the collector's next row. */
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByWebhook();
+        var engine = h.Build();
+
+        var collected = new DateTime(2026, 8, 31, 6, 0, 0, DateTimeKind.Utc);
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "RESOURCE_SEMAPHORE_QUERY_COMPILE", waits: 134, collected: collected));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Delivered on the next try: from here the same collection is reported, so it stays quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task LowDisk_EveryChannelFailed_IsTriedAgainAtTheSameLevel_AfterAMinute()
+    {
+        /* The worsening gate's last-alerted level is written before delivery. A fire nobody received puts it
+           back, so the retry at the same level is still a fresh breach rather than a standing one. */
+        var h = new Harness();
+        h.Settings.LowDiskEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        h.Adapter.Volumes.Add(new VolumeFreeSpaceInfo { MountPoint = "D:\\", TotalMb = 102400, FreeMb = 8192 });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Delivered: the standing level is now reported and does not repeat (the #754 gate, as before). */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task LowDisk_EveryChannelFailedOnAWorseningFire_PutsBackTheLevelTheOperatorWasLastTold()
+    {
+        var h = new Harness();
+        h.Settings.LowDiskEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build();
+
+        /* 8% free is announced and delivered (null report: unreported reads as delivered). */
+        h.Adapter.Volumes.Add(new VolumeFreeSpaceInfo { MountPoint = "D:\\", TotalMb = 102400, FreeMb = 8192 });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* 1% free is worse, and delivery is down: it retries after a minute. */
+        h.Deliverer.Report = _ => FailedByEmail();
+        h.Adapter.Volumes[0].FreeMb = 1024;
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Delivery works again while the disk recovers a little to 3% free: still worse than the 8% the
+           operator was last told about, so it is announced. Had the failed fire's 1% been kept, 3% would
+           read as an improvement and stay quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Adapter.Volumes[0].FreeMb = 3072;
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Pvs_EveryChannelFailed_IsTriedAgainAtTheSameLevel_AfterAMinute()
+    {
+        var h = new Harness();
+        h.Settings.PvsEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByWebhook();
+        var engine = h.Build();
+
+        h.Adapter.PvsDatabases.Add(new PvsPressureInfo { DatabaseName = "shop", PvsSizeMb = 6144, DatabaseDataSizeMb = 10240 });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Deadlock_EveryChannelFailed_KeepsTheWatermarkAtItsPreFireValue_AndTheRetryFiresAtTheSameCount()
+    {
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var first = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1", first.CurrentValue);
+
+        /* Nothing reached an operator, so nothing is used up: the saved watermark is back at its pre-fire
+           value (the fire's own save of 1 is followed by a save of 0). */
+        Assert.Equal(0, h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+        Assert.Equal((Key, AlertEngine.DeadlockWatermarkMetric, 0), h.StateStore.SavedEdge[^1]);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The retry sweep sees the count above the watermark and fires again at the same count. */
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("1", h.Deliverer.Outcomes[1].CurrentValue);
+
+        /* Delivery works again: the third fire delivers and the watermark advances, as it always did. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal(1, h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Deadlock_EveryChannelFailed_AnEngineStartedAfterwardsStillAnnouncesIt()
+    {
+        /* The saved watermark, not just the in-memory one, went back: an engine that seeds from the store
+           after a restart is not told the deadlock was already announced. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        h.Deliverer.Report = _ => FailedByWebhook();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(1);
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Blocking_EveryChannelFailed_PutsBackThePriorWatermark_AndTheRetryFiresAtTheSameCount()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build();
+
+        /* One blocked session is announced and delivered (null report: unreported reads as delivered). */
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(1, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+
+        /* A second arrives while delivery is down. The fire moves the watermark to 2 and saves it, and
+           the failure puts it back to the 1 the operator was actually told about. */
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.Adapter.Blocking.Add(BlockingRow(77));
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("2", h.Deliverer.Outcomes[1].CurrentValue);
+        Assert.Equal(1, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+        Assert.Contains((Key, AlertEngine.BlockingWatermarkMetric, 2), h.StateStore.SavedEdge);
+        Assert.Equal((Key, AlertEngine.BlockingWatermarkMetric, 1), h.StateStore.SavedEdge[^1]);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal("2", h.Deliverer.Outcomes[2].CurrentValue);
+
+        /* Delivered: the watermark advances to 2 and the lingering count stays quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Blocking_EveryChannelFailed_AnEngineStartedAfterwardsStillAnnouncesIt()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Deliverer.Report = _ => FailedByEmail();
+
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(1);
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /* ---------------- #4752: the five families the first pass left out ---------------- */
+
+    [Fact]
+    public async Task FileGrowth_EveryChannelFailed_IsTriedAgainOnTheSameObservation_AfterAMinute()
+    {
+        /* A rise-only file (2% of a 4 TB volume, under the level gate) fires once per hourly observation, and
+           that observation's stamp is written before delivery. A fire nobody received puts the file's prior
+           memory back (none, the first time), so the retry still reads the observation as news. Left in place,
+           the stamp would make the retry sweep find nothing to send, and the file would stay silent for the
+           whole cooldown. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers... */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+
+        /* ...and a delivered fire waits the whole cooldown: the next hour's observation is held until it is up. */
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task FileGrowth_EveryChannelFailedOnANewerObservation_PutsBackTheObservationTheOperatorWasLastTold()
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        /* The first hour's rise is announced and delivered (null report: unreported reads as delivered). */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The next hour's is news, and delivery is down: it retries a minute later, and the retry is still
+           news because the stamp went back to the first hour's rather than staying on the second's. */
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1));
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* Delivered: now the second hour is reported, and the same observation stays quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task AnomalousJob_EveryChannelFailed_IsTriedAgainForTheSameRun_AfterAMinute()
+    {
+        /* The cooldown is per RUN, and each sweep drops a run's stamp once the cooldown has passed. The
+           back-dated stamp of a fire nobody received reaches that point a minute later, so the retry is the
+           same run's with no second marker to put back. */
+        var h = new Harness();
+        h.Settings.LongRunningJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByWebhook();
+        var engine = h.Build();
+
+        h.Adapter.AnomalousJobs.Add(new AnomalousJobInfo
+        {
+            JobName = "Nightly ETL", JobId = "job-1", StartTime = new DateTime(2026, 7, 1, 11, 0, 0),
+            CurrentDurationSeconds = 3600, AvgDurationSeconds = 900, PercentOfAverage = 400
+        });
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal("Nightly ETL at 400% of avg (60m)", h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers, and that run then waits the whole cooldown. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailed_PutsBackThePriorWatermark_AndTheRetryFiresForTheSameFailure()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        /* One failure is announced and delivered (null report: unreported reads as delivered). */
+        var firstFailure = new DateTime(2026, 7, 1, 6, 55, 0); /* server-local, Kind-Unspecified */
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = firstFailure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(firstFailure, h.StateStore.FailedJobWatermarks[Key]);
+
+        /* A newer one arrives while delivery is down. The fire moves the in-memory watermark to it, and the
+           failure puts back the one the operator was actually told about. The saved watermark is written
+           only after a delivery, so it never held the newer time and the fire made no save call at all. */
+        var secondFailure = firstFailure.AddMinutes(30);
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.FailedJobs.Insert(0, new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = secondFailure });
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.DoesNotContain((Key, secondFailure), h.StateStore.SavedFailedJob);
+        Assert.Equal((Key, firstFailure), Assert.Single(h.StateStore.SavedFailedJob));
+        Assert.Equal(firstFailure, h.StateStore.FailedJobWatermarks[Key]);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* The retry sees the newest failure above the watermark and announces it again. */
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal(h.Deliverer.Outcomes[1].ShortMessage, h.Deliverer.Outcomes[2].ShortMessage);
+
+        /* Second failure in a row: two minutes. */
+        h.Now = h.Now.AddSeconds(119);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* Delivery works again: the fourth fire delivers and the watermark advances, as it always did. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(2);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+        Assert.Equal(secondFailure, h.StateStore.FailedJobWatermarks[Key]);
+
+        /* Only the two delivered fires saved anything: the two that no channel received made no save call. */
+        Assert.Equal(new[] { (Key, firstFailure), (Key, secondFailure) }, h.StateStore.SavedFailedJob);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailedOnTheFirstFire_NeverSavesTheWatermark_AndTheRetryFiresInThisProcess()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+
+        /* There was no prior value to put back, and none is needed: the saved watermark is written only
+           after a delivery, so this fire never sent the failure's time anywhere. The in-memory entry is
+           removed, which is why the retry below still happens in this process. */
+        Assert.Empty(h.StateStore.SavedFailedJob);
+        Assert.False(h.StateStore.FailedJobWatermarks.ContainsKey(Key));
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Empty(h.StateStore.SavedFailedJob);
+
+        /* Delivered on the next try: the same failure is then reported for good, and saved once. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(121)));
+        Assert.Equal((Key, failure), Assert.Single(h.StateStore.SavedFailedJob));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromMinutes(6)));
+    }
+
+    /// <summary>
+    /// #4752: with no earlier watermark a fire nobody received has nothing to put back, and the saved
+    /// watermark used to keep the failure's time anyway. A restart inside the retry delay then read that
+    /// failure as already announced, and no channel ever carried it. The save now follows a delivery, so a
+    /// new engine over the same saved state finds no watermark and fires.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailedOnTheFirstFire_ARestartBeforeTheRetry_StillAnnouncesTheFailure()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The process restarts inside the retry delay: a new engine over the SAME state store, with every
+           in-memory watermark and cooldown clock gone. Its first sweep seeds from what was saved. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(10);
+        var restarted = h.Build(withFailedJobsFetcher: true);
+        await restarted.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Equal((Key, failure), Assert.Single(h.StateStore.SavedFailedJob));
+
+        /* Delivered this time, so the restarted engine does not announce it a third time. */
+        h.Now = h.Now.AddMinutes(6);
+        await restarted.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>
+    /// #4752: a fire that a channel delivered saves the watermark exactly once, and the value is the newest
+    /// failure's run time (the maximum, not whichever row the fetcher listed first). The same failure
+    /// lingering in the lookback window on the next sweep saves nothing more.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_ADeliveredFire_SavesTheWatermarkOnce_WithTheNewestFailuresTime()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var oldest = new DateTime(2026, 7, 1, 6, 10, 0);
+        var newest = new DateTime(2026, 7, 1, 6, 55, 0);
+        var middle = new DateTime(2026, 7, 1, 6, 30, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = oldest, StepId = 2, StepName = "Backup", Message = "disk full" });
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = newest });
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Stats.Update", JobId = "j3", RunDateTime = middle });
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal((Key, newest), Assert.Single(h.StateStore.SavedFailedJob));
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.StateStore.SavedFailedJob);
+    }
+
+    /// <summary>
+    /// #4752: a fire where every channel failed, with a watermark already saved, leaves that watermark
+    /// exactly as it was and makes no save call. The new value never reached the saved state, so there is
+    /// nothing to put back there.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailed_WithAnEarlierWatermark_LeavesTheSavedWatermarkAlone_AndMakesNoSaveCall()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var firstFailure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = firstFailure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal((Key, firstFailure), Assert.Single(h.StateStore.SavedFailedJob));
+
+        h.StateStore.SavedFailedJob.Clear();
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.FailedJobs.Insert(0, new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = firstFailure.AddMinutes(30) });
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.StateStore.SavedFailedJob);
+        Assert.Equal(firstFailure, h.StateStore.FailedJobWatermarks[Key]);
+    }
+
+    /// <summary>
+    /// #4752: the save is gated on a channel failing, not on the mute. A muted fire attempts no channel, so
+    /// it is not "every channel failed" and it saves the watermark, as it did before the save moved after
+    /// the fire.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_AMutedFire_StillSavesTheWatermark()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
+        Assert.Equal((Key, failure), Assert.Single(h.StateStore.SavedFailedJob));
+    }
+
+    [Fact]
+    public async Task FailedJobs_APartialFailure_OneChannelDelivered_KeepsTheWatermark_AndGetsNoEarlyRetry()
+    {
+        /* One channel reached an operator, so a retry would send the alert twice down it. */
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmailButDeliveredByWebhook();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(failure, h.StateStore.FailedJobWatermarks[Key]);
+
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Theory]
+    [InlineData("OFFLINE", true)]
+    [InlineData("SUSPECT", false)]
+    public async Task DatabaseState_EveryChannelFailed_IsTriedAgainAfterAMinute_AndIsNotRecordedAsAnnounced(
+        string state, bool edgeTriggered)
+    {
+        /* An edge-triggered state (a parked OFFLINE) is announced once, and "announced" is what the store
+           remembers. Saving that after a fire nobody received would make the retry read the state as told
+           already, so the memory is written only when a channel delivered. SUSPECT repeats on the cooldown
+           and shows the back-dated clock alone. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var row = new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = state, ExpectedState = "ONLINE", LastAlertedState = "" };
+        h.Adapter.DatabaseStates.Add(row);
+        var engine = h.Build();
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            /* The real round trip: what the store holds is what the read hands back as the last-announced state. */
+            row.LastAlertedState = h.StateStore.Memory.TryGetValue("Archive", out var announced) ? announced : "";
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+        Assert.Empty(h.StateStore.DatabaseStateAlerted);
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Empty(h.StateStore.DatabaseStateAlerted);
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers, and now the state is recorded as announced. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive" && r.State == state);
+
+        /* A delivered fire waits the whole cooldown. An edge-triggered state is then quiet for as long as it
+           lasts; an integrity state repeats once the cooldown is up. */
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        Assert.Equal(edgeTriggered ? 3 : 4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task DatabaseState_APartialFailure_OneChannelDelivered_IsRecordedAsAnnounced_AndGetsNoEarlyRetry()
+    {
+        /* One channel reached an operator, so the state is told and a retry would send it twice down it. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmailButDeliveredByWebhook();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Payments" && r.State == "SUSPECT");
+
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(4);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_EveryChannelFailed_IsTriedAgainOnTheSameObservation_AfterAMinute()
+    {
+        /* The plan's observation memory (#3579) is written before delivery. A fire nobody received puts the
+           prior value back (none, the first time), so the retry reads the same observation as news instead of
+           one the operator already has a card for. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers... */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+
+        /* ...and a delivered fire waits the whole cooldown: a newer observation is held until it is up. */
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0450, delta: 2, total: 3));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_EveryChannelFailedOnANewerObservation_PutsBackTheObservationTheOperatorWasLastTold()
+    {
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0402.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0402));
+        var engine = h.Build();
+
+        /* The 04:02 collection is announced and delivered (null report: unreported reads as delivered). */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The 04:18 one is news, and delivery is down: the retry is a minute later and is still news. */
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418, delta: 2, total: 3));
+        h.Now = Collection0418.AddSeconds(53);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* Delivered: the 04:18 observation is now reported, and the same one stays quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_AFailureLongAfterTheLastOne_StartsTheBackoffOverAtAMinute()
+    {
+        /* A streak used to end only with a delivery, so CPU that failed twice, cleared, and came back much
+           later inherited the count and waited four minutes for its first retry. A failure more than twice the
+           cooldown after the last one is failure one again. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Failure one waits a minute; failure two, now the second in a row, would wait two. */
+        h.Now = h.Now.AddSeconds(61);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* The condition clears... */
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples, from: at);
+        Assert.Single(h.Resolutions);
+
+        /* ...and comes back eleven minutes after the second failure: more than twice the five-minute cooldown. */
+        h.Now = h.Now.AddMinutes(11);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: at);
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* That failure is number one again, so its retry is a minute away, not the four a streak of three waits. */
+        h.Now = h.Now.AddSeconds(61);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public void FailedSendBackoff_DoublesFromAMinute_AndStopsAtTheCap()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        /* Each failure lands just after the previous retry came due, as a sweep would find it. */
+        var failures = 0;
+        foreach (var expectedMinutes in new[] { 1, 2, 4, 5, 5, 5 })
+        {
+            failures++;
+            Assert.Equal(TimeSpan.FromMinutes(expectedMinutes), backoff.RecordFailure("High CPU", "srv", at, cap, out var counted));
+            Assert.Equal(failures, counted);
+            at = at.AddMinutes(expectedMinutes).AddSeconds(1);
+        }
+    }
+
+    [Fact]
+    public void FailedSendBackoff_RecordDelivered_StartsTheStreakOver()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv", at, cap));
+        Assert.Equal(TimeSpan.FromMinutes(2), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(1), cap));
+        Assert.Equal(TimeSpan.FromMinutes(4), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(3), cap));
+
+        backoff.RecordDelivered("High CPU", "srv");
+        Assert.Equal(0, backoff.TrackedCount);
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(7), cap));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_EachFamilyAndKeyIsCountedOnItsOwn()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv-a", at, cap));
+        Assert.Equal(TimeSpan.FromMinutes(2), backoff.RecordFailure("High CPU", "srv-a", at.AddMinutes(1), cap));
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv-b", at.AddMinutes(1), cap));
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("Deadlocks Detected", "srv-a", at.AddMinutes(1), cap));
+
+        /* A delivery ends one pair's streak and leaves the others' alone. */
+        backoff.RecordDelivered("High CPU", "srv-a");
+        Assert.Equal(TimeSpan.FromMinutes(2), backoff.RecordFailure("High CPU", "srv-b", at.AddMinutes(3), cap));
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv-a", at.AddMinutes(3), cap));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_AFailureMoreThanTwiceTheCapAfterTheLastOne_StartsOverAtAMinute()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        backoff.RecordFailure("High CPU", "srv", at, cap);
+        backoff.RecordFailure("High CPU", "srv", at.AddMinutes(1), cap);
+        Assert.Equal(TimeSpan.FromMinutes(4), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(3), cap));
+
+        /* One tick past twice the cap after the last failure: the streak lapsed. */
+        var lapsed = at.AddMinutes(3) + cap + cap + TimeSpan.FromTicks(1);
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv", lapsed, cap, out var failures));
+        Assert.Equal(1, failures);
+        Assert.Equal(TimeSpan.FromMinutes(2), backoff.RecordFailure("High CPU", "srv", lapsed.AddMinutes(1), cap));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_AFailureExactlyTwiceTheCapAfterTheLastOne_ContinuesTheStreak()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        backoff.RecordFailure("High CPU", "srv", at, cap);
+        backoff.RecordFailure("High CPU", "srv", at.AddMinutes(1), cap);
+
+        Assert.Equal(TimeSpan.FromMinutes(4), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(1) + cap + cap, cap, out var failures));
+        Assert.Equal(3, failures);
+    }
+
+    [Fact]
+    public void FailedSendBackoff_DropsStreaksThatCanNoLongerMatter_WhenTheTableGrows()
+    {
+        /* A family keyed per run leaves one streak behind for every run that ended undelivered. A streak more
+           than twice its cap old is the same as none, so dropping it changes no answer. */
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        for (var run = 0; run < 1100; run++)
+        {
+            backoff.RecordFailure("Long-Running Job", $"srv:job-{run}", at, cap);
+        }
+
+        /* All of them are recent enough to matter, so none is dropped. */
+        Assert.Equal(1100, backoff.TrackedCount);
+
+        backoff.RecordFailure("Long-Running Job", "srv:job-new", at.AddHours(1), cap);
+        Assert.Equal(1, backoff.TrackedCount);
+    }
+
+    [Fact]
+    public void FailedSendBackoff_EveryChannelFailed_IsTheRuleTheEngineRetriesOn()
+    {
+        Assert.True(FailedSendBackoff.EveryChannelFailed(FailedByEmail()));
+        Assert.True(FailedSendBackoff.EveryChannelFailed(FailedByWebhook()));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(FailedByEmailButDeliveredByWebhook()));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(DeliveredByWebhook()));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(MutedNothingAttempted()));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(null));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_EverySendFailed_ReportsAFailedOne()
+    {
+        var first = FailedByEmail();
+
+        var report = FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { first, FailedByWebhook(), FailedByEmail() });
+
+        Assert.Same(first, report);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(report));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_OneSendReachedAChannel_ReportsIt_WhereverItSits()
+    {
+        /* The split reached a channel, so the engine must not try it again: a retry would page it a second
+           time down the channel that worked. A partial failure (one channel delivered) counts as reaching one. */
+        var delivered = DeliveredByWebhook();
+        var partial = FailedByEmailButDeliveredByWebhook();
+
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered, FailedByWebhook() }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { delivered, FailedByEmail() }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered }));
+        Assert.Same(partial, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByWebhook(), partial }));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered })));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_NothingAttemptedOrThrottled_ReportsNothing()
+    {
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { MutedNothingAttempted(), ThrottledNothingSent() }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { ThrottledNothingSent() }));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_AFailedSendBesideThrottledOnes_ReportsTheFailure()
+    {
+        var failed = FailedByWebhook();
+
+        var report = FailedSendBackoff.ReportForSplit(
+            new AlertDelivery?[] { ThrottledNothingSent(), failed, MutedNothingAttempted() });
+
+        Assert.Same(failed, report);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(report));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_SkipsNullEntries_AndAnEmptySplitReportsNothing()
+    {
+        var failed = FailedByEmail();
+        var delivered = DeliveredByWebhook();
+
+        Assert.Same(failed, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, failed, null }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, failed, delivered }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, null }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(Array.Empty<AlertDelivery?>()));
     }
 
     private static int CountOccurrences(string haystack, string needle)

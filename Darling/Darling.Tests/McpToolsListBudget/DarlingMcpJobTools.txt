@@ -1,0 +1,3 @@
+# DarlingMcpJobTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_running_jobs 642
+param get_running_jobs.server_name 28

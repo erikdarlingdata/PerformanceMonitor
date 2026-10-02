@@ -20,7 +20,7 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend, noticeStrip, parseUtc } from "./util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc } from "./util.js";
 import { renderLineChart, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer } from "./panels.js";
 import { getCatalog } from "./views-api.js";
@@ -40,13 +40,13 @@ const OTHER_SERIES_LABEL = "(other)";
  * shape (title + span-2 + a body that shows a loading strip, then the chart / a state). `scope` is the view-level
  * run context {server, hours, variables, values}; flipping it and re-rendering re-scopes every panel at once.
  */
-export function renderComposedPanelCard(panelSpec, scope) {
+export function renderComposedPanelCard(panelSpec, scope, onSettled) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (panelSpec.span === 2 ? " span-2" : "") }, [
     el("h3", {}, [panelSpec.title || measureLabel(panelSpec), pinBadge(panelSpec)]),
     body,
   ]);
-  driveComposedPanel(body, panelSpec, scope);
+  driveComposedPanel(body, panelSpec, scope, onSettled);
   return panel;
 }
 
@@ -198,9 +198,11 @@ function pinHoursLabel(hours) {
  * never persisted (the stored definition renders verbatim), and a "clear" chip pops back to the base spec. Each new
  * selection REPLACES the drill (a simple "you are viewing X" model), so drilling never stacks into a dead end.
  */
-function driveComposedPanel(body, panelSpec, scope) {
+function driveComposedPanel(body, panelSpec, scope, onSettled) {
   let drill = null; // { keys: [{dimension, value}] } or null
   let zoom = null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)
+  let firstRun = true; // onSettled (#4222) fires once, for the initial load only — a later drill/zoom re-run is
+                        // user-driven and already past whatever concurrency budget gated the first load.
   function onDrill(next) {
     drill = next && Array.isArray(next.keys) && next.keys.length ? next : null;
     run();
@@ -211,7 +213,11 @@ function driveComposedPanel(body, panelSpec, scope) {
   }
   function run() {
     const spec = drill ? withDrillFilters(panelSpec, drill) : panelSpec;
-    renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange });
+    const done = firstRun ? onSettled : null;
+    firstRun = false;
+    renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange }).finally(() => {
+      if (done) done();
+    });
   }
   run();
 }
@@ -260,9 +266,9 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
   }
 }
 
-/** POST the composed panel to /api/compose/run with the view scope; returns the apiSend result ({sql, rows} on data). */
+/** POST the composed panel to /api/compose/run with the view scope; returns the apiSendRead result ({sql, rows} on data). */
 export function runCompose(panelSpec, scope, zoom = null) {
-  return apiSend("POST", "/api/compose/run", buildRunBody(panelSpec, scope, zoom));
+  return apiSendRead("POST", "/api/compose/run", buildRunBody(panelSpec, scope, zoom));
 }
 
 /** Build the /api/compose/run body from a panel spec + scope (a per-panel `hours` or `range` overrides the
@@ -375,6 +381,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           color: OVERLAY_COLOR,
           formatValue: (v) => formatComposedValue(v, panelSpec.overlay.unit || ""),
           unit: axisUnit(panelSpec.overlay.unit || ""),
+          integerTicks: panelSpec.overlay.unit === "count",
         }
       : null;
 
@@ -397,6 +404,9 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           formatValue: fmt,
           unit: axisUnit(unit),
           clampMax: unit === "percent" ? 100 : null,
+          /* A count measure prints through fmtInt, so its gridlines sit on whole numbers: a fractional step on a
+             small domain would repeat one label down the axis. */
+          integerTicks: unit === "count",
           mode: panelSpec.viz,
           thresholds,
           annotations: annotationLayers(result.annotations, opts.annotationMeta),

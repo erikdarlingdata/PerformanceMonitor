@@ -76,15 +76,8 @@ public partial class ServerTab : UserControl
 
     private (DateTime? fromDate, DateTime? toDate) GetCurrentViewDates()
     {
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-                return (ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode),
-                        ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode));
-        }
-        return (null, null);
+        var (_, fromUtc, toUtc) = GetCurrentWindowUtc();
+        return (fromUtc, toUtc);
     }
 
     /// <summary>
@@ -205,6 +198,7 @@ public partial class ServerTab : UserControl
             {
                 "TotalCpu" or "AvgCpu" => p => p.CpuMs,
                 "TotalReads" or "AvgReads" => p => p.Reads,
+                "TotalPhysReads" => p => p.PhysicalReads,
                 _ => p => p.ElapsedMs,
             };
 
@@ -227,7 +221,7 @@ public partial class ServerTab : UserControl
         if (string.IsNullOrEmpty(item.DatabaseName) || string.IsNullOrEmpty(item.QueryHash)) return;
 
         var connStr = _credentialResolver.GetConnectionString(_server);
-        var window = new Windows.QueryStatsHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryHash, GetHoursBack(), item.QueryText, connStr);
+        var window = new Windows.QueryStatsHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryHash, GetHoursBack(), item.QueryText, connStr, GetPickerZone, () => _serverClock);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }
@@ -238,7 +232,7 @@ public partial class ServerTab : UserControl
         if (string.IsNullOrEmpty(item.DatabaseName) || string.IsNullOrEmpty(item.ObjectName)) return;
 
         var connStr = _credentialResolver.GetConnectionString(_server);
-        var window = new Windows.ProcedureHistoryWindow(_dataService, _serverId, item.DatabaseName, item.SchemaName, item.ObjectName, GetHoursBack(), connStr);
+        var window = new Windows.ProcedureHistoryWindow(_dataService, _serverId, item.DatabaseName, item.SchemaName, item.ObjectName, GetHoursBack(), connStr, GetPickerZone, () => _serverClock);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }
@@ -249,7 +243,7 @@ public partial class ServerTab : UserControl
         if (string.IsNullOrEmpty(item.DatabaseName) || item.QueryId == 0) return;
 
         var connStr = _credentialResolver.GetConnectionString(_server);
-        var window = new Windows.QueryStoreHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryId, item.PlanId, item.QueryText, GetHoursBack(), connStr);
+        var window = new Windows.QueryStoreHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryId, item.PlanId, item.QueryText, GetHoursBack(), connStr, GetPickerZone);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }
@@ -259,7 +253,7 @@ public partial class ServerTab : UserControl
     {
         if (CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
 
-        var window = new Windows.CollectionLogWindow(_dataService, _serverId, item.CollectorName);
+        var window = new Windows.CollectionLogWindow(_dataService, _serverId, item.CollectorName, _serverClock);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }
@@ -366,9 +360,13 @@ public partial class ServerTab : UserControl
             "AvgCpuTimeMs" => ("AvgCpu", "Avg CPU (ms)"),
             "TotalDurationMs" => ("TotalElapsed", "Total Duration (ms)"),
             "AvgDurationMs" => ("AvgElapsed", "Avg Duration (ms)"),
-            "AvgLogicalReads" => ("TotalReads", "Avg Reads"),
-            "AvgLogicalWrites" => ("TotalWrites", "Avg Writes"),
-            "AvgPhysicalReads" => ("TotalReads", "Avg Physical Reads"),
+            /* #3556: the plotted bucket values are execution-weighted slice TOTALS, so the old "Avg"
+               labels under-claimed what the bars showed. Total labels, matching the physical arm below. */
+            "AvgLogicalReads" => ("TotalReads", "Total Reads"),
+            "AvgLogicalWrites" => ("TotalWrites", "Total Writes"),
+            /* #3547: this arm mapped physical to the LOGICAL series while the reader dropped the physical
+               column; #3530 populates TotalPhysicalReads, so the label and the series finally agree. */
+            "AvgPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
             "TotalExecutions" => ("Sessions", "Executions"),
             _ => ("TotalCpu", "Total CPU (ms)"),
         };
@@ -387,6 +385,7 @@ public partial class ServerTab : UserControl
                 "AvgElapsed" => bucket.TotalElapsed / n,
                 "TotalReads" => bucket.TotalReads,
                 "TotalWrites" => bucket.TotalWrites,
+                "TotalPhysReads" => bucket.TotalPhysicalReads,
                 "Sessions" => bucket.SessionCount,
                 _ => bucket.TotalCpu,
             };
@@ -414,7 +413,10 @@ public partial class ServerTab : UserControl
             "AvgElapsedMs" => ("AvgElapsed", "Avg Duration (ms)"),
             "TotalLogicalReads" or "AvgReads" => ("TotalReads", "Total Reads"),
             "TotalLogicalWrites" => ("TotalWrites", "Total Writes"),
-            "TotalPhysicalReads" => ("TotalReads", "Total Physical Reads"),
+            /* #3556: the #3547 bug one grid over — this arm mapped the physical sort to the LOGICAL
+               series while the slicer reader dropped its SELECT's total_physical_reads column on the
+               floor. The reader maps ordinal 6 now, so the label and the series agree here too. */
+            "TotalPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
             _ => ("TotalCpu", "Total CPU (ms)"),
         };
 
@@ -432,6 +434,7 @@ public partial class ServerTab : UserControl
                 "AvgElapsed" => bucket.TotalElapsed / n,
                 "TotalReads" => bucket.TotalReads,
                 "TotalWrites" => bucket.TotalWrites,
+                "TotalPhysReads" => bucket.TotalPhysicalReads,
                 _ => bucket.TotalCpu,
             };
         }

@@ -182,8 +182,10 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         /* replica_role is a grouping key: an AG's shared Query Store (2022+) would otherwise report
-           primary and secondary workload blended into one row. */
-        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, replica_role", sql, StringComparison.Ordinal);
+           primary and secondary workload blended into one row. execution_type_desc is one for the same
+           reason: Regular, Aborted and Exception executions of one plan are separate runtime-stats rows. */
+        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(execution_type_desc)", sql, StringComparison.Ordinal);
         /* Rank by total duration = executions * avg duration, over-fetch 5, cap at top (Lite's shape). */
         Assert.Contains("ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal);
@@ -317,6 +319,15 @@ public sealed class ViewerQueriesSqlTests
         /* The bucket key and the window filter agree, stated as the invariant rather than left implicit in
            two InlineData columns that a future edit could change one of. */
         Assert.Contains(windowFilter, bucketExpression, StringComparison.Ordinal);
+
+        /* #3556: ReadQueryStatsSlicerAsync maps the IO columns by ORDINAL (4 reads, 5 writes, 6 physical)
+           for all three slicers, so every SELECT must keep the three aliases in that relative order — a
+           reorder would silently swap series under the sort-driven metric labels. */
+        var reads = sql.IndexOf("AS total_reads", StringComparison.Ordinal);
+        var writes = sql.IndexOf("AS total_writes", StringComparison.Ordinal);
+        var physical = sql.IndexOf("AS total_physical_reads", StringComparison.Ordinal);
+        Assert.True(reads >= 0 && writes > reads && physical > writes,
+            $"{sqlName}: expected total_reads, then total_writes, then total_physical_reads in the SELECT.");
     }
 
     /// <summary>
@@ -328,15 +339,16 @@ public sealed class ViewerQueriesSqlTests
     /// <para>Both are pinned in their SLACKENED form, which is the whole point: a bare
     /// <c>collection_time &gt;= $2</c> / <c>&lt;= $3</c> pair would silently be the window filter again and
     /// re-introduce exactly the edge bug this fixed. The floor is provably implied by the COALESCE
-    /// predicate; the ceiling is a month, being Query Store's 1-day maximum interval plus 29 days of
-    /// collector-outage allowance.</para>
+    /// predicate, so its slack is pure clock-skew margin, narrowed from a day to an hour (#3953); the ceiling
+    /// is unrelated to that margin and stays a month, being Query Store's 1-day maximum interval plus 29 days
+    /// of collector-outage allowance.</para>
     /// </summary>
     [Fact]
     public void QueryStoreSlicerSql_KeepsSlackenedCollectionTimeBoundsForChunkExclusion()
     {
         var sql = SqlByName(nameof(ViewerDataService.QueryStoreSlicerSql));
 
-        Assert.Contains("collection_time >= $2 - interval '1 day'", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2 - interval '1 hour'", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3 + interval '30 days'", sql, StringComparison.Ordinal);
 
         /* The tight forms, asserted absent: either one would be a window filter wearing a pruning bound's
@@ -493,7 +505,7 @@ public sealed class ViewerQueriesDisplayTests
 
 /// <summary>
 /// Pins the Query Store Regressions read (the Dashboard's <c>report.query_store_regressions</c> TVF ported
-/// to Postgres): the baseline-before-window vs. recent-in-window split ON <c>collection_time</c> (not the
+/// to Postgres): the fixed-7-day-baseline vs. recent-in-window split ON <c>collection_time</c> (not the
 /// TVF's <c>server_last_execution_time</c>), the CPU-regression &gt; 25% gate, the added-duration ranking +
 /// TOP (50) cap, the duration-driven severity bands, the summed/counted CASTs, and the #1319 database
 /// filter — plus the row model's stored-UTC display conversion. String + pure-logic pins only (no live
@@ -507,13 +519,26 @@ public sealed class ViewerQueryStoreRegressionsTests
         var sql = ViewerDataService.QueryStoreRegressionsSql;
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal); /* viewer reads base tables */
-        Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);   /* baseline: everything before the window */
+        /* #4217: the baseline is a fixed BaselineLookbackDays window ending at the window start, not
+           "everything before the window" — this is the assertion that fails against the pre-#4217 shape,
+           which had no lower bound on the baseline arm at all. */
+        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
+        Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);   /* baseline: up to the window start */
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);  /* recent: window start */
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);  /* recent: window end */
         Assert.Contains("GROUP BY database_name, query_id", sql, StringComparison.Ordinal);
         /* Darling windows the split on collection_time — the Dashboard TVF's server_last_execution_time is
            the server's LOCAL wall clock in Darling's store and must not be windowed against UTC bounds. */
         Assert.DoesNotContain("server_last_execution_time", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BaselineLookbackDays_IsSevenDays_SameAsTheMcpReaderAndLite()
+    {
+        /* #4217: the viewer keeps its own copy of the same constant DarlingQueryStoreRegressionReader and
+           Lite's LocalDataService each keep, because it cannot reference either project. Pinned so the three
+           cannot silently drift apart. */
+        Assert.Equal(7, ViewerDataService.BaselineLookbackDays);
     }
 
     [Fact]
@@ -902,6 +927,12 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(13.0, bucket.TotalCpu, 3);
             Assert.Equal(282.0, bucket.TotalElapsed, 3);
 
+            /* #3556: the insert helper's fixed per-execution averages (logical 100, physical 10) make the
+               two IO series distinct, so the QS slicer feeding physical from the logical ordinal — or vice
+               versa — goes red. 41 deduped executions x 100 / x 10. */
+            Assert.Equal(4100.0, bucket.TotalReads, 3);
+            Assert.Equal(410.0, bucket.TotalPhysicalReads, 3);
+
             /* ── the comparison ── this read groups by (database, query_hash), which is COARSER than the
                   interval grain, and the seed gives both queries the same hash — so it is also the pin that
                   dedup happens at the INTERVAL grain FIRST and only then re-aggregates up to the hash.
@@ -921,10 +952,16 @@ public sealed class ViewerQueriesLivePostgresTests
             /* ── the duration trend, LEGACY arm ── this whole seed is pre-tier-2 (no interval identity),
                   so it exercises the fallback: un-deduped, one point per COLLECTION, still overstating.
                   That is deliberate and it is what a store holding pre-upgrade history must keep doing —
-                  nothing can reconstruct an interval start for these rows. Four points, exactly as before
-                  tier 2. The corrected arm has its own live test below. */
+                  nothing can reconstruct an interval start for these rows. Four collections, exactly as
+                  before tier 2 — three plotted, because the first has no predecessor to rate against and is
+                  no longer drawn as a fabricated 0 (#3653). The corrected arm has its own live test below. */
             var trend = await viewer.GetQueryStoreDurationTrendAsync(DedupServerId, start, end);
-            Assert.Equal(4, trend.Count);
+            Assert.Equal(3, trend.Points.Count);
+            /* #3653: the series says what served it. The fixture has no corrected rollup materialized, so the
+               route is raw-only, the word is the payload's, and there is no unserved head to disclose. */
+            Assert.False(trend.Route.UseRollup);
+            Assert.Equal("raw", trend.Source);
+            Assert.False(trend.HeadUnserved);
 
             /* ── the slicer overlay ── one point for the one interval, at its final values, so the overlay
                   agrees with the deduped bars it is drawn over instead of showing a rising staircase. */
@@ -933,6 +970,10 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(bucketStart.AddMinutes(15), point.PointTime);
             Assert.Equal(280.0, point.ElapsedMs, 3);       /* 40 x 7,000us; un-deduped this is 3 points, 50/150/280 */
             Assert.Equal(12.0, point.CpuMs, 3);            /* 40 x 300us */
+            /* #3556's overlay half: the physical-sorted bars now draw under a physical overlay, so the
+               timeline's logical/physical split gets the same distinct-value pin as the bars'. */
+            Assert.Equal(4000.0, point.Reads, 3);          /* 40 x 100 logical */
+            Assert.Equal(400.0, point.PhysicalReads, 3);   /* 40 x 10 physical */
 
             /* ── the MCP / REST surface ── the same dedup, so an agent and the web dashboard see the grid's
                   numbers rather than the inflated ones. */
@@ -1029,9 +1070,9 @@ public sealed class ViewerQueriesLivePostgresTests
 
             /* The duration trend carries the identical mismatch, and the two charts share a screen. */
             var trend = await viewer.GetQueryStoreDurationTrendAsync(WindowEdgeServerId, start, end);
-            Assert.DoesNotContain(trend, p => p.CollectionTime < start || p.CollectionTime > end);
-            Assert.Contains(trend, p => p.CollectionTime == h3);
-            Assert.DoesNotContain(trend, p => p.CollectionTime == h0);
+            Assert.DoesNotContain(trend.Points, p => p.CollectionTime < start || p.CollectionTime > end);
+            Assert.Contains(trend.Points, p => p.CollectionTime == h3);
+            Assert.DoesNotContain(trend.Points, p => p.CollectionTime == h0);
 
             bodySucceeded = true;
         }
@@ -1098,15 +1139,16 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(12.0, buckets[0].TotalCpu, 3);
             Assert.Equal(1.0, buckets[1].TotalCpu, 3);     /* 5 x 200us */
 
-            /* ── the duration trend ── one point per interval, at its start. The first has no predecessor
-                  so its rate is 0 (the same convention the delta trends use); the second divides interval
+            /* ── the duration trend ── one point per interval, at its start. The first has no predecessor,
+                  so its rate is UNKNOWABLE and it is not plotted (#3653; the fabricated 0 it used to carry is
+                  #3642's class) — the same convention the delta trends now use; the second divides interval
                   2's true total (5 x 2,000us = 10 ms) by the 3,600s between interval starts. */
             var trend = await viewer.GetQueryStoreDurationTrendAsync(IntervalIdentityServerId, start, end);
-            Assert.Equal(2, trend.Count);
-            Assert.Equal(h0, trend[0].CollectionTime);
-            Assert.Equal(h1, trend[1].CollectionTime);
-            Assert.Equal(0d, trend[0].Value);
-            Assert.Equal(10.0 / 3600.0, trend[1].Value, 9);
+            var placed = Assert.Single(trend.Points);
+            Assert.Equal(h1, placed.CollectionTime);
+            Assert.Equal(10.0 / 3600.0, placed.Value, 9);
+            /* #3653: effective_start is the first SERVED point, the MCP payload's rule (DescribeCoverage). */
+            Assert.Equal(h1, trend.EffectiveStartUtc);
 
             /* ── the slicer OVERLAY (#1921, Erik's option 1) ── the point sits at the hour the work RAN, the
                   same h0 the bar above is drawn at, NOT at h1+10m where the collector observed it. That is
@@ -1200,9 +1242,19 @@ public sealed class ViewerQueriesLivePostgresTests
             await InsertQueryStoreAsync(connection, RegressionsServerId, recent, "StackOverflow", queryId: 300, planId: 1,
                 execCount: 9, avgDurationUs: 9000, avgCpuUs: 9000, forced: false, maxMemPages: 0, queryText: "SELECT new");
 
+            /* Query 400 (#4217): its ONLY baseline snapshot is 8 days before the window start — outside the
+               fixed 7-day baseline bound. Before #4217 (unbounded baseline) this row would have joined and
+               cleared the CPU gate (1ms → 5ms = 400%); after #4217 the baseline arm never reaches 8 days
+               back, so query 400 has no baseline row post-bound and the INNER JOIN drops it, same as query
+               300. This is the runtime pin that the bound is actually applied, not just present in the SQL. */
+            await InsertQueryStoreAsync(connection, RegressionsServerId, start.AddDays(-8), "StackOverflow", queryId: 400, planId: 1,
+                execCount: 3, avgDurationUs: 1000, avgCpuUs: 1000, forced: false, maxMemPages: 0, queryText: "SELECT stale baseline");
+            await InsertQueryStoreAsync(connection, RegressionsServerId, recent, "StackOverflow", queryId: 400, planId: 1,
+                execCount: 3, avgDurationUs: 5000, avgCpuUs: 5000, forced: false, maxMemPages: 0, queryText: "SELECT stale baseline");
+
             var rows = await viewer.GetQueryStoreRegressionsAsync(RegressionsServerId, start, end);
 
-            var r = Assert.Single(rows);                    /* only query 100 clears the CPU gate + INNER JOIN */
+            var r = Assert.Single(rows);                    /* only query 100: 200 below gate, 300 no baseline ever, 400 baseline outside the 7-day bound */
             Assert.Equal(100, r.QueryId);
             Assert.Equal("CRITICAL", r.Severity);
             Assert.Equal(2.0, r.BaselineDurationMs, 3);
@@ -1289,9 +1341,11 @@ public sealed class ViewerQueriesLivePostgresTests
         try
         {
             await InsertQueryStatsAsync(connection, SlicerServerId, hour1.AddMinutes(5), "DB", "0xA",
-                deltaExec: 1, deltaWorker: 60_000, deltaElapsed: 120_000, deltaReads: 10, queryText: "a");
+                deltaExec: 1, deltaWorker: 60_000, deltaElapsed: 120_000, deltaReads: 60, queryText: "a",
+                deltaWrites: 20, deltaPhysicalReads: 30);
             await InsertQueryStatsAsync(connection, SlicerServerId, hour1.AddMinutes(35), "DB", "0xB",
-                deltaExec: 1, deltaWorker: 60_000, deltaElapsed: 120_000, deltaReads: 10, queryText: "b");
+                deltaExec: 1, deltaWorker: 60_000, deltaElapsed: 120_000, deltaReads: 50, queryText: "b",
+                deltaWrites: 10, deltaPhysicalReads: 20);
             await InsertQueryStatsAsync(connection, SlicerServerId, hour2.AddMinutes(5), "DB", "0xA",
                 deltaExec: 1, deltaWorker: 30_000, deltaElapsed: 60_000, deltaReads: 10, queryText: "a");
 
@@ -1302,6 +1356,15 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(hour1, first.BucketTime);
             Assert.Equal(2, first.SessionCount);        /* two distinct query hashes in hour1 */
             Assert.Equal(120.0, first.TotalCpu, 3);     /* (60000 + 60000) us / 1000 -> ms */
+
+            /* #3556's distinct-per-column pin (Lite's ProcStatsSlicerReadTests twin, same 110/30/50
+               signature): the three slicers share ReadQueryStatsSlicerAsync, so mapping any IO ordinal to
+               the wrong bucket field goes red here — equal fixture values are exactly how a swap would stay
+               invisible. TotalReads and TotalLogicalReads are deliberate aliases of the LOGICAL aggregate. */
+            Assert.Equal(110.0, first.TotalReads, 3);
+            Assert.Equal(110.0, first.TotalLogicalReads, 3);
+            Assert.Equal(30.0, first.TotalWrites, 3);
+            Assert.Equal(50.0, first.TotalPhysicalReads, 3);
 
             bodySucceeded = true;
         }
@@ -1316,7 +1379,8 @@ public sealed class ViewerQueriesLivePostgresTests
 
     private static async Task InsertQueryStatsAsync(
         NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, string databaseName, string queryHash,
-        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string queryText, string sqlHandle = "0xSQLHANDLE")
+        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string queryText, string sqlHandle = "0xSQLHANDLE",
+        long deltaWrites = 0, long deltaPhysicalReads = 0)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO query_stats
@@ -1344,8 +1408,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         command.Parameters.AddWithValue(deltaElapsed);
         command.Parameters.AddWithValue(deltaReads);
         command.Parameters.AddWithValue(0L);
-        command.Parameters.AddWithValue(0L);
-        command.Parameters.AddWithValue(0L);
+        command.Parameters.AddWithValue(deltaWrites);
+        command.Parameters.AddWithValue(deltaPhysicalReads);
         command.Parameters.AddWithValue(0L);
         command.Parameters.AddWithValue(0L);
         command.Parameters.AddWithValue(1L);

@@ -16,6 +16,14 @@ namespace PerformanceMonitor.Common
     /// <see cref="IsWarning"/>) are used by ALL THREE Alert History grids — Lite's, the Darling
     /// Viewer's and the deprecated Dashboard's — and by the Dashboard sidebar's Alert badge count.
     ///
+    /// <para><b>Since #3539 A8e the two SKU grids reach <see cref="IsCritical"/> / <see cref="IsWarning"/>
+    /// only as a FALLBACK</b>, through <c>AlertHistoryRowSeverity</c> (Alerting): a row that persisted
+    /// the tier the alert fired at (the serializer's <c>Severity</c> member) is styled by that tier, and
+    /// the name decides only for rows that carry none — written before the member existed, fired with no
+    /// runtime grade, or a resolution. <see cref="IsResolution"/> stays the primary arm it always was: a
+    /// resolution is a naming convention, not a tier. The Dashboard still calls the name predicates
+    /// directly; its own engine fires presence-flat, so for its rows the name IS the tier.</para>
+    ///
     /// Alert classification across this codebase is metric-name based — there is no structural "kind"
     /// field on a row — so this centralizes a string convention that was previously duplicated inline
     /// in Dashboard's AlertsHistoryContent and Lite's AlertHistoryRow, and had drifted: both copies
@@ -79,6 +87,12 @@ namespace PerformanceMonitor.Common
         /// <summary>
         /// True when the metric name denotes a critical-severity alert (deadlock or poison wait),
         /// used for row emphasis in the history grids. Mirrors the long-standing inline convention.
+        ///
+        /// <para>"Poison" stays here although Poison Wait is GRADED at both engines' fire sites now (#2711,
+        /// #3539 A4), because this predicate is what a row with NO persisted tier is styled by, and every
+        /// SQL Server Poison Wait row written before #3539 A4 was a presence-flat CRITICAL fire — so red is
+        /// the faithful replay for exactly the rows that still reach this by name. A graded row never
+        /// does: <c>AlertHistoryRowSeverity</c> reads its tier first (#3539 A8e).</para>
         /// </summary>
         public static bool IsCritical(string? metricName)
         {
@@ -109,9 +123,18 @@ namespace PerformanceMonitor.Common
         /// declared there fails the census even when both this list and the behavior theory's
         /// InlineData rows were forgotten, the both-forgotten hole an InlineData theory structurally
         /// cannot close (#3476 review).</para>
+        ///
+        /// <para>#3783 adds the first two CONDITIONS to the list — the store's own TOAST slack and checkpointer
+        /// pressure. They are entered and left (each writes a resolution row) but are INFO by design all the
+        /// same: a maintenance-window reclaim and a WAL-sizing decision are the maintainer's to weigh, not the
+        /// on-call's to act on tonight, and a history grid that highlighted them amber would tell the operator
+        /// otherwise.</para>
         /// </summary>
         public static bool IsInformational(string? metricName) =>
-            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup";
+            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest"
+                or "Store TOAST Slack" or "Store Checkpointer Pressure"
+                /* #3816: a policy job that fails and retries is alive — INFO at its fire site, INFO here. */
+                or "Store Job Failing";
 
         /// <summary>
         /// True for an ordinary (warning-severity) alert: actionable, neither a resolution notice nor
@@ -155,10 +178,16 @@ namespace PerformanceMonitor.Common
                commit accepted "historical alert-history rows keep the old name", so archived rows still
                carry it — and matching here is ordinal, so those rows were falling through to the bare
                :F2 default and rendering a percentage with no unit. Nothing writes the old name any
-               more; it is kept solely so already-stored rows format like the new ones. */
-            "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
+               more; it is kept solely so already-stored rows format like the new ones.
+               "Collection Falling Behind" (#4732) stores the share of due collector slots that were skipped, and the
+               share that fires it (5): both are percentages, and the grid showed them as a bare 97.30 and 5.00. */
+            "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job"
+                or "Collection Falling Behind" => $"{value:F1}%",
 
-            /* Poison wait carries an average ms/wait; long-running query carries elapsed minutes. */
+            /* Poison wait carries milliseconds — since #3539 A4 the wait ACCUMULATED over the ten-minute
+               window on both engines (before that, SQL Server's average ms per wait; rows from then still
+               render in the same unit, which is why the arm did not change). Long-running query carries
+               elapsed minutes. */
             "Poison Wait" => $"{value:F0} ms",
             "Long-Running Query" => $"{value:F0} m",
 
@@ -170,15 +199,20 @@ namespace PerformanceMonitor.Common
                a whole number like its siblings, not a state, so it renders here rather than joining
                IsStateOnly (its "Custom Alert Rules Recovered" resolution is state-only via IsResolution).
                "Stale Mute Rules" (#3306) is the same shape: the count of mute rules still suppressing alerts
-               with no expiry, past every expiry the product offers. "Collector Cost Digest" (#3443) counts
+               with no expiry, past every expiry the product offers. "Store Settings Need Attention" (#4215)
+               is the same shape again: the count of conditions in force (a last-good fallback, a kept hand
+               edit, a rejected value) on a managed store's darling-managed.conf. "Collector Cost Digest" (#3443) counts
                the (server, collector) pairs the digest listed; its threshold column is the 0 sentinel the
                NOT NULL column demands, because a report has no threshold, and the alert's own threshold
                STRING says so. "Fleet Sweep Rollup" (#3466) is the digest's shape again: its value is the
                count of sweeps the rollup covered, its threshold column the same 0 sentinel for the same
-               stated reason. */
+               stated reason. "Analysis Singles Digest" (#3712) is the third document of that shape: its value
+               is the count of distinct uncorroborated findings the digest named. "Notification Channel
+               Failing" (#4750) counts a webhook channel's failures in a row. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
-                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules"
-                or "Collector Cost Digest" or "Fleet Sweep Rollup" => $"{value:F0}",
+                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" or "Store Settings Need Attention"
+                or "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest"
+                or "Notification Channel Failing" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection
                state, a version or the literal "resolved", and the stored double is the 0 sentinel the
@@ -291,7 +325,17 @@ namespace PerformanceMonitor.Common
                     or "Collection Stopped"
                     or "Compression Job Stuck"
                     or "Store Runtime Upgrade"
-                    or "Web TLS Certificate Expiring" => true,
+                    or "Web TLS Certificate Expiring"
+
+                    /* #3816, the same split as "Compression Job Stuck" one family over: a refresh or
+                       retention policy's stuck reason is elapsed minutes when a run HUNG and a scheduler
+                       state with no duration at all when next_start is -infinity, and both fire sites pass
+                       the 0 sentinel for each numeric column. "Store Job Failing" is deliberately NOT here —
+                       its current value is how many MORE failures were recorded since the previous sample,
+                       which is a real measurement, and a genuine 0 there cannot occur because the arm does
+                       not fire without a positive delta. */
+                    or "Refresh Job Stuck"
+                    or "Retention Job Stuck" => true,
                 _ => false,
             };
         }

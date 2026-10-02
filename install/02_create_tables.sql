@@ -912,10 +912,25 @@ BEGIN
         /*Delta column calculated by framework for cumulative counters*/
         cntr_value_delta bigint NULL,
         sample_interval_seconds integer NULL,
-        /*Analysis helper - per-second rate*/
+        /*
+        Analysis helper - per-second rate.
+
+        #3653 (#3540 A11): this column shipped as cntr_value_delta / NULLIF(sample_interval_seconds, 0),
+        which is bigint / integer, and T-SQL integer division truncates toward zero. Seven batch requests
+        over a 60-second interval read as 0 per second; every counter running under one event per second
+        rendered as a flat zero, and report.daily_summary_v2 averaged those zeros as throughput. The
+        Dashboard's readers stopped selecting the column in #3658 and recompute the rate on the read;
+        this is the schema-side half, so the column itself tells the truth to anything that still reads it.
+
+        * 1.0 promotes the numerator to numeric before the division (the same idiom the memory_stats
+        percentage columns above use). Resulting type: bigint * numeric(2,1) is numeric(22,1);
+        numeric(22,1) / integer is numeric(33,12) under the T-SQL precision/scale rules. Non-persisted, so
+        the redefinition is metadata-only and costs nothing on disk. Existing installs are converged to
+        this shape by install/06's guarded upgrade block (sys.computed_columns, integer-typed -> drop/re-add).
+        */
         cntr_value_per_second AS
         (
-            cntr_value_delta /
+            cntr_value_delta * 1.0 /
               NULLIF(sample_interval_seconds, 0)
         ),
         CONSTRAINT 

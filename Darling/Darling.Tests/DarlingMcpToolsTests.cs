@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -42,7 +43,8 @@ namespace Darling.Tests;
 /// directly (not over the wire) — get_analysis_findings round-trips the finding through Lite's
 /// envelope, the empty server returns the #1224 "empty" Status envelope, partial-name and
 /// unknown-name resolution behave, mute_analysis_finding writes the mute row and returns the
-/// muted envelope, and the mute registry then filters the same story from a subsequent
+/// muted envelope (with #3541 A14's registered / matched_now disclosure, and the muted_unmatched
+/// status for a hash no stored finding carries), and the mute registry then filters the same story from a subsequent
 /// analysis-run save (the exact mechanism analyze_server runs through).
 /// </summary>
 [Collection("live-postgres")]
@@ -83,6 +85,112 @@ public sealed class DarlingMcpToolsTests
         Assert.NotNull(typeof(DarlingMcpTools).GetCustomAttribute<McpServerToolTypeAttribute>());
         Assert.All(toolMethods, m => Assert.True(m.IsStatic, $"{m.Name} must be static for WithGeminiCompatibleTools"));
         Assert.All(toolMethods, m => Assert.Equal(typeof(Task<string>), m.ReturnType));
+    }
+
+    /// <summary>
+    /// #3653 A15/A16: <c>audit_config</c> claimed to account for edition with zero edition branches (the MAXDOP
+    /// rule is topology-based, the rest resource-based; the edition is REPORTED in the payload, never consulted),
+    /// and its description said nothing about the PostgreSQL arm the body has carried since #3542. The
+    /// description says both, and the instruction table stops calling it "edition-aware".
+    ///
+    /// <para>#3691 line 70 (Erik's ruling, 2026-09-22) replaced that arm's honest refusal with a PROJECTION of
+    /// the pass's <c>CONFIG_PG_*</c> facts into the same recommendations shape, so the sentence a PostgreSQL
+    /// caller reads before spending a call changed with it — and the whole point of changing the description
+    /// ONCE is that the four things a projected row does NOT look like are stated up front: the shape is the
+    /// SQL Server one, the setting's value carries its unit, <c>engine</c> stands where <c>edition</c> does,
+    /// there is no <c>suggested_value</c>, and two knobs read <c>not_applicable</c> on Aurora. A description
+    /// that promised the refusal would now be a lie of the same class as the one #3542 removed.</para>
+    /// </summary>
+    [Fact]
+    public void AuditConfig_Description_DoesNotClaimEditionAwareness_AndNamesThePostgresProjection()
+    {
+        var method = typeof(DarlingMcpTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "audit_config");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.DoesNotContain("accounting for edition", description, StringComparison.Ordinal);
+        Assert.Contains("NO check branches on it", description, StringComparison.Ordinal);
+
+        /* The projection's four stated differences, each in the words the tool uses. */
+        Assert.Contains("CONFIG_PG_*", description, StringComparison.Ordinal);
+        Assert.Contains("engine in place of edition", description, StringComparison.Ordinal);
+        Assert.Contains("not_applicable on Aurora", description, StringComparison.Ordinal);
+        Assert.Contains("no suggested_value", description, StringComparison.Ordinal);
+        Assert.Contains("current_value with unit", description, StringComparison.Ordinal);
+        Assert.Contains("get_pg_server_config", description, StringComparison.Ordinal);
+        Assert.Contains("get_analysis_facts", description, StringComparison.Ordinal);
+
+        /* And it no longer promises the refusal the body stopped answering. */
+        Assert.DoesNotContain("not_collected", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("SQL Server only", description, StringComparison.Ordinal);
+
+        /* And the claim is true of the body: the only edition reads are the fact lookup and the payload echo. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
+        var start = source.IndexOf("Name = \"audit_config\"", StringComparison.Ordinal);
+        var body = source[start..source.IndexOf("FormatError(\"audit_config\"", StringComparison.Ordinal)];
+        Assert.Contains("edition = editionName", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (edition", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("edition ==", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("edition switch", body.Replace("var editionName = edition switch", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+
+        Assert.DoesNotContain("Edition-aware", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("edition-aware", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3541 A14: the mute verb's description promises the disclosure the payload now carries — on Darling in
+    /// the same words as Lite (its twin pin is <c>McpMuteReportsWhatItMatchedTests</c>). #3898 Phase 2 (D5)
+    /// retired the instruction table row that used to duplicate this; the description is now the only surface.
+    /// The live round-trip below is what proves the numbers; this is what a caller reads before deciding to
+    /// trust them.
+    /// </summary>
+    [Fact]
+    public void MuteAnalysisFinding_Description_NamesRegistered_MatchedNow_AndTheUnmatchedStatus()
+    {
+        var method = typeof(DarlingMcpTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "mute_analysis_finding");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        /* #3653 A15/A16 added the idempotence vocabulary (already_muted, both as key and status) and the
+           resolved story_path with its placeholder rule. */
+        foreach (var token in new[] { "registered", "matched_now", "\"muted_unmatched\"", "mistyped hash", "\"error\"", "already_muted", "\"already_muted\"", "story_path is", "placeholder" })
+        {
+            Assert.Contains(token, description, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #3538 A3: <c>compare_analysis</c>'s description promises the verdict shape the payload now carries —
+    /// value-banded rows with <c>band_source</c> / <c>delta_sigma</c>, the rules in <c>band_rules</c>,
+    /// physical-cause <c>families</c>, <c>plan_cache_churn</c>, <c>coverage_caveat</c> — and says what "worse" does
+    /// NOT mean (one window against one window is not an experiment). Same words as Lite (its twin pin is
+    /// <c>CompareAnalysisDispersionTests</c>; the shared sentences are in <c>McpMissMessageParityPinTests</c>).
+    /// #3898 Phase 2 (D5) retired the instruction table row that used to duplicate this; the description is
+    /// now the only surface. The banding arithmetic is pinned on the shared <c>ComparisonBanding</c> in
+    /// Lite.Tests; this is what a caller reads before trusting a verdict.
+    /// </summary>
+    [Fact]
+    public void CompareAnalysis_Description_SaysWhatWorseMeans_AndWhatItDoesNot()
+    {
+        /* #3898: tools/list serves the head and get_tool_guide serves the tail. The five tokens a caller needs before
+           trusting a verdict are pinned to the head; the other three to the tail, where the original text lives. */
+        var served = McpToolGuideTests.Served("compare_analysis");
+        foreach (var token in new[] { "band_source", "band_rules", "plan_cache_churn", "coverage_caveat", "N=1 vs N=1" })
+        {
+            Assert.Contains(token, served.Served, StringComparison.Ordinal);
+        }
+
+        foreach (var token in new[] { "delta_sigma", "families", "cannot show that a change CAUSED anything" })
+        {
+            Assert.Contains(token, served.Tail!, StringComparison.Ordinal);
+        }
+
+        /* The tool's ComparePeriodsAsync seam returns the dispersion the banding needs — a 5-tuple whose
+           last item is the per-metric BaselineBucket map. Pinned so a twin that forgot the item would fail
+           here rather than silently band everything by the absolute rule. */
+        var compare = typeof(DarlingAnalysisService).GetMethod(nameof(DarlingAnalysisService.ComparePeriodsAsync))!;
+        var tuple = compare.ReturnType.GetGenericArguments()[0];
+        Assert.Contains(typeof(IReadOnlyDictionary<string, PerformanceMonitor.Analysis.Baselines.BaselineBucket>), tuple.GetGenericArguments());
     }
 
     /* ---------------- ungated: config + hosting pins ---------------- */
@@ -148,9 +256,11 @@ public sealed class DarlingMcpToolsTests
 
         Assert.Equal(default, resolved);
         Assert.NotNull(error);
-        Assert.StartsWith("Could not resolve server.", error, StringComparison.Ordinal);
-        Assert.Contains("SQL2022", error, StringComparison.Ordinal);
-        Assert.Contains("Production (PROD1)", error, StringComparison.Ordinal);
+        Assert.True(McpHelpers.IsRefusalEnvelope(error), error);
+        var sentence = McpHelpers.ErrorMessageOf(error!);
+        Assert.StartsWith("Could not resolve server.", sentence, StringComparison.Ordinal);
+        Assert.Contains("SQL2022", sentence, StringComparison.Ordinal);
+        Assert.Contains("Production (PROD1)", sentence, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -325,7 +435,7 @@ public sealed class DarlingMcpToolsTests
                    including the #2000 occurrence stats. */
                 foreach (var field in new[]
                 {
-                    "finding_id", "analysis_time", "severity", "confidence", "category",
+                    "finding_id", "analysis_time", "severity", "confidence", "confidence_basis", "category",
                     "root_fact", "leaf_fact", "story_path", "story_path_hash", "fact_count",
                     "incident_id", "occurrences", "first_seen", "last_seen", "peak_severity",
                     "co_fired", "time_range", "advice", "remediation_command", "structured_remediation"
@@ -343,6 +453,9 @@ public sealed class DarlingMcpToolsTests
                 Assert.Equal(TestStoryHash, finding.GetProperty("story_path_hash").GetString());
                 Assert.Equal(2.5, finding.GetProperty("severity").GetDouble());
                 Assert.Equal(0.9, finding.GetProperty("confidence").GetDouble());
+                /* #3538 A6: 0.9 on a two-node path is not the legacy (n-1)/n = 0.5, so the basis reads as
+                   corroboration-derived; the legacy label is pinned on Lite's twin with a real 1.0/1 row. */
+                Assert.StartsWith("corroboration (#3538)", finding.GetProperty("confidence_basis").GetString(), StringComparison.Ordinal);
                 Assert.Equal("cpu", finding.GetProperty("category").GetString());
                 Assert.Equal("an4-incident-1", finding.GetProperty("incident_id").GetString());
                 Assert.Equal("SOS_SCHEDULER_YIELD", finding.GetProperty("root_fact").GetProperty("key").GetString());
@@ -489,11 +602,14 @@ public sealed class DarlingMcpToolsTests
 
             var unknown = await DarlingMcpTools.GetAnalysisFindings(
                 analysisService, postgres, "darling-mcp-no-such-server", 24);
-            Assert.StartsWith("Could not resolve server.", unknown, StringComparison.Ordinal);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(unknown), StringComparison.Ordinal);
             Assert.Contains(TestServerName, unknown, StringComparison.Ordinal);
 
             /* ---- mute via the tool: the muted envelope comes back and the row lands in
-                    analysis_muted under the resolved server id. */
+                    analysis_muted under the resolved server id. #3541 A14: the envelope now says what the
+                    write DID — registered, and matched_now counted in the mute's scope. TestStoryHash sits on
+                    exactly two persisted rows for this server (the planted chain and its second cycle), so
+                    the number is a fact of the rows above, not of the analyser. */
             var muteJson = await DarlingMcpTools.MuteAnalysisFinding(
                 analysisService, postgres, TestStoryHash, TestServerName, "an4 e2e mute");
 
@@ -503,6 +619,65 @@ public sealed class DarlingMcpToolsTests
                 Assert.Equal(TestStoryHash, doc.RootElement.GetProperty("story_path_hash").GetString());
                 Assert.Equal(TestServerName, doc.RootElement.GetProperty("server").GetString());
                 Assert.Equal("an4 e2e mute", doc.RootElement.GetProperty("reason").GetString());
+                Assert.True(doc.RootElement.GetProperty("registered").GetBoolean());
+                Assert.False(doc.RootElement.GetProperty("already_muted").GetBoolean());
+                Assert.Equal(2, doc.RootElement.GetProperty("matched_now").GetInt64());
+                /* #3653 A15/A16: the registry row names the CHAIN, resolved from the retained finding that
+                   carries the hash — not the hash echoed into the path column, which is what this entry point
+                   wrote before. */
+                Assert.Equal("SOS_SCHEDULER_YIELD → CPU_SQL_PERCENT", doc.RootElement.GetProperty("story_path").GetString());
+            }
+
+            using (var storedPath = new NpgsqlCommand(
+                "SELECT story_path FROM analysis_muted WHERE server_id = $1 AND story_path_hash = $2", connection))
+            {
+                storedPath.Parameters.AddWithValue(TestServerId);
+                storedPath.Parameters.AddWithValue(TestStoryHash);
+                Assert.Equal("SOS_SCHEDULER_YIELD → CPU_SQL_PERCENT", await storedPath.ExecuteScalarAsync(ct));
+            }
+
+            /* ---- #3653 A15/A16, THE idempotence case: the same hash in the same scope a second time. Before,
+                    a second row landed and the envelope said "muted" twice; now nothing is written, the envelope
+                    says so (registered false, already_muted true, status already_muted), matched_now is still
+                    read, and the row count below stays at one. */
+            var secondMuteJson = await DarlingMcpTools.MuteAnalysisFinding(
+                analysisService, postgres, TestStoryHash, TestServerName, "an4 e2e mute, again");
+
+            using (var doc = JsonDocument.Parse(secondMuteJson))
+            {
+                Assert.Equal("already_muted", doc.RootElement.GetProperty("status").GetString());
+                Assert.False(doc.RootElement.GetProperty("registered").GetBoolean());
+                Assert.True(doc.RootElement.GetProperty("already_muted").GetBoolean());
+                Assert.Equal(2, doc.RootElement.GetProperty("matched_now").GetInt64());
+                Assert.Contains("nothing was written", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
+            }
+
+            /* ---- #3541 A14, THE case: a hash no stored finding carries. Registered (pattern registry — it
+                    bites if the pattern ever appears) but reported as muted_unmatched with matched_now 0,
+                    where the old envelope said "muted" and nothing else. */
+            var unmatchedJson = await DarlingMcpTools.MuteAnalysisFinding(
+                analysisService, postgres, "an4-mcp-e2e-never-seen-hash", TestServerName, "an4 e2e unmatched mute");
+
+            using (var doc = JsonDocument.Parse(unmatchedJson))
+            {
+                Assert.Equal("muted_unmatched", doc.RootElement.GetProperty("status").GetString());
+                Assert.True(doc.RootElement.GetProperty("registered").GetBoolean());
+                Assert.Equal(0, doc.RootElement.GetProperty("matched_now").GetInt64());
+                Assert.Contains("no stored finding", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
+                /* #3653 A15/A16: no retained finding carries the hash, so the path is UNKNOWN and said so —
+                   the row below holds the hash as the NOT NULL placeholder, never reported as a path. */
+                Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("story_path").ValueKind);
+            }
+
+            using (var unmatchedCount = new NpgsqlCommand(
+                "SELECT COUNT(*), MIN(story_path) FROM analysis_muted WHERE server_id = $1 AND story_path_hash = $2", connection))
+            {
+                unmatchedCount.Parameters.AddWithValue(TestServerId);
+                unmatchedCount.Parameters.AddWithValue("an4-mcp-e2e-never-seen-hash");
+                await using var unmatchedReader = await unmatchedCount.ExecuteReaderAsync(ct);
+                Assert.True(await unmatchedReader.ReadAsync(ct));
+                Assert.Equal(1L, unmatchedReader.GetInt64(0));
+                Assert.Equal("an4-mcp-e2e-never-seen-hash", unmatchedReader.GetString(1));
             }
 
             using (var muteCount = new NpgsqlCommand(
@@ -521,8 +696,12 @@ public sealed class DarlingMcpToolsTests
 
             using (var doc = JsonDocument.Parse(allServersJson))
             {
-                Assert.Equal("muted", doc.RootElement.GetProperty("status").GetString());
+                /* No persisted row carries AllServersStoryHash anywhere in the store, so fleet-wide it is
+                   unmatched too — the scope of the count follows the scope of the mute. */
+                Assert.Equal("muted_unmatched", doc.RootElement.GetProperty("status").GetString());
                 Assert.Equal("(all servers)", doc.RootElement.GetProperty("server").GetString());
+                Assert.True(doc.RootElement.GetProperty("registered").GetBoolean());
+                Assert.Equal(0, doc.RootElement.GetProperty("matched_now").GetInt64());
             }
 
             using (var nullCount = new NpgsqlCommand(

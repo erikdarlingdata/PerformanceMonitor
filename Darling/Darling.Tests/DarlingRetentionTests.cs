@@ -40,7 +40,7 @@ public sealed class DarlingRetentionTests
     [Fact]
     public void PurgeSummary_TotalPurged_SumsDeletedRowsAndDroppedChunks()
     {
-        /* The single headline count the daily log + the purge_now result_json ("rowsPurged") report. */
+        /* The single headline count the daily log + the purge_now log line report. */
         var summary = new PurgeSummary(TablesPurged: 31, RowsDeleted: 1200, ChunksDropped: 42);
         Assert.Equal(1242, summary.TotalPurged);
         Assert.Equal(0, new PurgeSummary(0, 0, 0).TotalPurged);
@@ -85,7 +85,9 @@ public sealed class DarlingRetentionTests
             "DELETE FROM collection_log WHERE collection_time < $1 AND collection_time >= (SELECT min(collection_time) FROM collection_log WHERE collection_time < $1) AND collection_time < (SELECT min(collection_time) FROM collection_log WHERE collection_time < $1) + INTERVAL '1 days'",
             DarlingRetention.TimeSlicedDeleteSql("collection_log", "collection_time"));
 
-        /* The slice width IS the hypertable chunk width — the fallback's unit of work stays one chunk. */
+        /* The slice width matches ChunkIntervalDays, the ladder's CEILING since #4211 (RawChunkIntervalPlanner
+           can narrow a raw table's actual chunk_time_interval below a day) — the fallback's unit of work stays
+           bounded to at most one day's worth even where it is no longer exactly one chunk. */
         Assert.Equal(1, TimescaleSupport.ChunkIntervalDays);
     }
 
@@ -211,7 +213,7 @@ public sealed class DarlingRetentionTests
         var batches = new Queue<int>(new[] { 10000, 10000, 3 });
         var calls = 0;
         var total = await DarlingRetention.DrainBatchesAsync(
-            _ => { calls++; return Task.FromResult(batches.Dequeue()); }, batchSize: 10000, CancellationToken.None);
+            _ => { calls++; return Task.FromResult((batches.Dequeue(), 10000)); }, CancellationToken.None);
 
         Assert.Equal(20003, total);
         Assert.Equal(3, calls);
@@ -222,7 +224,7 @@ public sealed class DarlingRetentionTests
     {
         var calls = 0;
         var total = await DarlingRetention.DrainBatchesAsync(
-            _ => { calls++; return Task.FromResult(5); }, batchSize: 10000, CancellationToken.None);
+            _ => { calls++; return Task.FromResult((5, 10000)); }, CancellationToken.None);
 
         Assert.Equal(5, total);
         Assert.Equal(1, calls);
@@ -235,10 +237,191 @@ public sealed class DarlingRetentionTests
         var batches = new Queue<int>(new[] { 10000, 0 });
         var calls = 0;
         var total = await DarlingRetention.DrainBatchesAsync(
-            _ => { calls++; return Task.FromResult(batches.Dequeue()); }, batchSize: 10000, CancellationToken.None);
+            _ => { calls++; return Task.FromResult((batches.Dequeue(), 10000)); }, CancellationToken.None);
 
         Assert.Equal(10000, total);
         Assert.Equal(2, calls);
+    }
+
+    /// <summary>
+    /// The regression #4130 exists to fix: a batch that SHRUNK mid-drain (the adaptive plan-dim cap) must be
+    /// compared against ITS OWN cap, not the drain's starting one. Batch 1 is full at the starting cap
+    /// (10000); batch 2 shrinks to 4000 and is ALSO full there — under the old "compare against the starting
+    /// cap" rule, 4000 &lt; 10000 would have stopped the drain right here, even though the table was not
+    /// drained. Batch 3, at the still-shrunk cap, comes back short and legitimately ends it.
+    /// </summary>
+    [Fact]
+    public async Task DrainBatches_ComparesEachBatchAgainstItsOwnCap_NotTheStartingOne()
+    {
+        var plan = new Queue<(int Deleted, int Cap)>(new[] { (10000, 10000), (4000, 4000), (1500, 4000) });
+        var calls = 0;
+        var total = await DarlingRetention.DrainBatchesAsync(
+            _ => { calls++; return Task.FromResult(plan.Dequeue()); }, CancellationToken.None);
+
+        Assert.Equal(15500, total);
+        Assert.Equal(3, calls);
+    }
+
+    /* ---------------- plan-dim adaptive batch sizing (pure) (#4130) ---------------- */
+
+    [Theory]
+    [InlineData(50_000, 152.7, 25_000)]  // slow (field average) -> halves
+    [InlineData(50_000, 300.0, 25_000)]  // slow (at the wall) -> halves
+    [InlineData(20_000, 45.0, 20_000)]   // inside the band -> holds
+    [InlineData(20_000, 60.0, 20_000)]   // exactly the target boundary -> holds (not STRICTLY over)
+    [InlineData(1_000, 5.0, 2_000)]      // fast -> doubles
+    public void NextPlanDimBatchCap_ShrinksSlowHoldsMiddleGrowsFast(int lastCap, double seconds, int expected)
+    {
+        Assert.Equal(
+            expected, DarlingRetention.NextPlanDimBatchCap(lastCap, seconds, floorCap: 1_000, ceilingCap: 50_000));
+    }
+
+    [Fact]
+    public void NextPlanDimBatchCap_ASlowBatch_NeverShrinksBelowTheFloor()
+    {
+        Assert.Equal(
+            1_000, DarlingRetention.NextPlanDimBatchCap(1_000, 200.0, floorCap: 1_000, ceilingCap: 50_000));
+    }
+
+    [Fact]
+    public void NextPlanDimBatchCap_AFastBatch_NeverGrowsPastTheCeiling()
+    {
+        Assert.Equal(
+            50_000, DarlingRetention.NextPlanDimBatchCap(40_000, 2.0, floorCap: 1_000, ceilingCap: 50_000));
+    }
+
+    /// <summary>
+    /// The timeout-retry safety net (#4130's field failure: the sixth 50k-row batch passed the 300 s command
+    /// timeout under first-start load and failed the whole table for the day). A fake attempt throws the
+    /// exact exception shape the field failure logged — <see cref="NpgsqlException"/> over
+    /// <see cref="TimeoutException"/> — once, then succeeds; the retry must land at HALF the starting cap,
+    /// and the second attempt must actually run (the fake only succeeds on its second call, so a passing
+    /// assertion proves the retry happened, not just that the exception was swallowed).
+    /// </summary>
+    [Fact]
+    public async Task RunPlanDimBatch_RetriesACommandTimeout_AtHalfTheCap()
+    {
+        var attemptCaps = new List<int>();
+        var (deleted, cap, _) = await DarlingRetention.RunPlanDimBatchAsync(
+            (attemptCap, ct) =>
+            {
+                attemptCaps.Add(attemptCap);
+                if (attemptCaps.Count == 1)
+                {
+                    throw new NpgsqlException("Exception while reading from stream", new TimeoutException());
+                }
+
+                return Task.FromResult(12_500);
+            },
+            cap: 25_000,
+            floorCap: 1_000,
+            CancellationToken.None);
+
+        Assert.Equal(new[] { 25_000, 12_500 }, attemptCaps);
+        Assert.Equal(12_500, cap);
+        Assert.Equal(12_500, deleted);
+    }
+
+    /// <summary>
+    /// The OTHER shape the field evidence named: the server's cancel acknowledgement winning the race, so
+    /// the client sees a structured <see cref="PostgresException"/> at SQLSTATE 57014 instead of a bare
+    /// stream-read <see cref="TimeoutException"/>. Also retried, on the same terms.
+    /// </summary>
+    [Fact]
+    public async Task RunPlanDimBatch_RetriesA57014Cancel_WhenNoShutdownIsPending()
+    {
+        var attempts = 0;
+        var (deleted, cap, _) = await DarlingRetention.RunPlanDimBatchAsync(
+            (attemptCap, ct) =>
+            {
+                attempts++;
+                if (attempts == 1)
+                {
+                    throw new PostgresException("canceling statement due to user request", "ERROR", "ERROR", "57014");
+                }
+
+                return Task.FromResult(500);
+            },
+            cap: 1_000,
+            floorCap: 100,
+            CancellationToken.None);
+
+        Assert.Equal(2, attempts);
+        Assert.Equal(500, cap);
+        Assert.Equal(500, deleted);
+    }
+
+    /// <summary>
+    /// A batch that STILL times out at the floor is not retried further (#4130): the failure propagates
+    /// unchanged, so <c>PurgeOneAsync</c>'s outer catch fails the table for the day exactly as every batch
+    /// did before this fix. Proven by the exception reaching the caller and by the fake never being asked
+    /// for a third attempt.
+    /// </summary>
+    [Fact]
+    public async Task RunPlanDimBatch_ATimeoutAtTheFloor_IsNotRetriedFurther()
+    {
+        var attempts = 0;
+
+        await Assert.ThrowsAsync<NpgsqlException>(() => DarlingRetention.RunPlanDimBatchAsync(
+            (attemptCap, ct) =>
+            {
+                attempts++;
+                throw new NpgsqlException("Exception while reading from stream", new TimeoutException());
+            },
+            cap: 1_000,
+            floorCap: 1_000,
+            CancellationToken.None));
+
+        Assert.Equal(1, attempts);
+    }
+
+    /// <summary>
+    /// A service SHUTDOWN's cancel must never be read as "shrink and retry" (#4130) — a stop would sit
+    /// shrinking batches instead of exiting. Modeled on the shape a shutdown cancel actually takes: the
+    /// SAME 57014 a client CommandTimeout produces, but with the purge's own cancellation token already
+    /// signaled. <see cref="OperationCanceledException"/> itself is covered by
+    /// <see cref="IsPlanDimBatchTimeout_NeverTreatsAnOperationCanceledExceptionAsRetryable"/> below.
+    /// </summary>
+    [Fact]
+    public async Task RunPlanDimBatch_A57014DuringShutdown_IsNotRetried()
+    {
+        using var shutdown = new CancellationTokenSource();
+        await shutdown.CancelAsync();
+        var attempts = 0;
+
+        await Assert.ThrowsAsync<PostgresException>(() => DarlingRetention.RunPlanDimBatchAsync(
+            (attemptCap, ct) =>
+            {
+                attempts++;
+                throw new PostgresException("canceling statement due to user request", "ERROR", "ERROR", "57014");
+            },
+            cap: 25_000,
+            floorCap: 1_000,
+            shutdown.Token));
+
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
+    public void IsPlanDimBatchTimeout_NeverTreatsAnOperationCanceledExceptionAsRetryable()
+    {
+        Assert.False(DarlingRetention.IsPlanDimBatchTimeout(new OperationCanceledException(), CancellationToken.None));
+    }
+
+    [Fact]
+    public void IsPlanDimBatchTimeout_TrueForAnNpgsqlExceptionOverATimeoutException()
+    {
+        Assert.True(DarlingRetention.IsPlanDimBatchTimeout(
+            new NpgsqlException("Exception while reading from stream", new TimeoutException()),
+            CancellationToken.None));
+    }
+
+    [Fact]
+    public void IsPlanDimBatchTimeout_FalseForAnUnrelatedFault()
+    {
+        Assert.False(DarlingRetention.IsPlanDimBatchTimeout(
+            new PostgresException("relation \"x\" does not exist", "ERROR", "ERROR", "42P01"), CancellationToken.None));
+        Assert.False(DarlingRetention.IsPlanDimBatchTimeout(new InvalidOperationException("broken"), CancellationToken.None));
     }
 
     /// <summary>
@@ -257,10 +440,17 @@ public sealed class DarlingRetentionTests
     public void TheRowCappedDrain_LogsItsBatchCountAndResolvedCutoff()
     {
         var source = ReadRetentionSource();
-        var at = source.IndexOf("await DrainBatchesAsync(", StringComparison.Ordinal);
-        Assert.True(at >= 0, "the drain call site moved (#2386)");
-        var body = source[Math.Max(0, at - 2000)..Math.Min(source.Length, at + 2500)];
 
+        /* Anchored on PurgeOneAsync's own declaration and brace-matched, rather than on ONE
+           "await DrainBatchesAsync(" text offset (#4130 review catch): the adaptive plan-dim branch added
+           a SECOND call site inside the same method, so a single IndexOf could land on either one and miss
+           context that sits near the other. The method body is the right unit — both branches, and the
+           shared log statement after them, live inside it. */
+        var at = source.IndexOf("private static async Task<int?> PurgeOneAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "PurgeOneAsync moved (#2386)");
+        var body = MethodBodyFrom(source, at);
+
+        Assert.Contains("await DrainBatchesAsync(", body, StringComparison.Ordinal);
         Assert.Contains("batches++", body, StringComparison.Ordinal);
         Assert.Contains("{Batches} batch(es)", body, StringComparison.Ordinal);
 
@@ -860,6 +1050,95 @@ WHERE hypertable_name = 'wait_stats'
             worstCaseSeconds < 120,
             $"cap would take {worstCaseSeconds:F0}s at the worst measured rate; the timeout is 300s and "
             + "the margin is deliberate");
+    }
+
+    /* ---------------- #4250 item 3: the unordered row-capped prune for the liveness-touched tables ---------------- */
+
+    /// <summary>
+    /// The sibling builder's shape: row-capped like <see cref="DarlingRetention.RowCappedDeleteSql"/>, but
+    /// with NO <c>ORDER BY</c> — since V149 (#4250) dropped both tables' <c>last_seen</c> btree, an ORDER BY
+    /// would force a sort of every under-cutoff row before the LIMIT could apply, a second full pass over
+    /// data the seq scan already read. No <c>min()</c> subquery and no <c>INTERVAL</c> either: this is a
+    /// single bound against a FIXED cutoff, not a time slice.
+    /// </summary>
+    [Fact]
+    public void UnorderedRowCappedDelete_HasNoOrderByAndNoMinSubquery()
+    {
+        var sql = DarlingRetention.UnorderedRowCappedDeleteSql("collect.query_store_text", "last_seen", 300_000);
+
+        Assert.Equal(
+            "DELETE FROM collect.query_store_text WHERE ctid IN ("
+            + "SELECT ctid FROM collect.query_store_text WHERE last_seen < $1 "
+            + "LIMIT 300000)",
+            sql);
+
+        Assert.DoesNotContain("ORDER BY", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("min(", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("INTERVAL", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ctid IN", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 300000", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both liveness-touched tables' purge calls use the unordered builder, carry the shared cap as their
+    /// batch size (so the drain loop's "a full-cap batch means there may be more" contract applies), and
+    /// leave <c>adaptiveRowCapTimeColumn</c> unset — that parameter exists only for the plan dimension's
+    /// #4130 retry-at-half-cap behavior, which neither of these tables has been measured to need: both
+    /// clear their whole steady-state backlog in ONE batch at the sized cap (see
+    /// <see cref="DarlingRetention.LivenessTouchedTablePruneRowCap"/>'s remarks), so there is nothing here
+    /// for a shrinking retry to protect against. Both call sites read the cap from the LOCAL parameter
+    /// <c>livenessTouchedTablePruneRowCap</c> rather than the constant directly, since #4250 item 3's live
+    /// loop test needs a seam to run the same call sites at a small cap; the parameter itself defaults to
+    /// the constant (pinned separately, below), so production is unchanged.
+    /// </summary>
+    [Fact]
+    public void MapAndTextPurges_UseTheUnorderedCap_WithoutTheAdaptiveRetry()
+    {
+        var source = ReadRetentionSource();
+
+        var mapAt = source.IndexOf("var mapCutoff = ComputeMapCutoff(", StringComparison.Ordinal);
+        Assert.True(mapAt >= 0, "the map purge call moved");
+        var mapBody = source[mapAt..Math.Min(source.Length, mapAt + 500)];
+        Assert.Contains("UnorderedRowCappedDeleteSql(", mapBody, StringComparison.Ordinal);
+        Assert.Contains("livenessTouchedTablePruneRowCap", mapBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("adaptiveRowCapTimeColumn", mapBody, StringComparison.Ordinal);
+
+        var textAt = source.IndexOf("var queryTextCutoff = utcNow.AddDays(", StringComparison.Ordinal);
+        Assert.True(textAt >= 0, "the query text purge call moved");
+        var textBody = source[textAt..Math.Min(source.Length, textAt + 500)];
+        Assert.Contains("UnorderedRowCappedDeleteSql(", textBody, StringComparison.Ordinal);
+        Assert.Contains("livenessTouchedTablePruneRowCap", textBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("adaptiveRowCapTimeColumn", textBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The #4250 item 3 test seam's default: every real caller (the daily sweep, the on-demand
+    /// <c>purge_now</c> command) omits <c>livenessTouchedTablePruneRowCap</c>, so production must always
+    /// run the shipped 300,000-row constant, never a silently different value.
+    /// </summary>
+    [Fact]
+    public void LivenessTouchedTablePruneRowCapSeam_DefaultsToTheShippedConstant()
+    {
+        var method = typeof(DarlingRetention).GetMethod(
+            nameof(DarlingRetention.PurgeAsync), System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
+        var parameter = Array.Find(method.GetParameters(), p => p.Name == "livenessTouchedTablePruneRowCap")!;
+        Assert.NotNull(parameter);
+        Assert.Equal(DarlingRetention.LivenessTouchedTablePruneRowCap, (int)parameter.DefaultValue!);
+    }
+
+    /// <summary>
+    /// The cap clears the busiest single day observed in the field's <c>last_seen</c> age histogram (map
+    /// 255k rows at its oldest surviving day, text 220k) in ONE batch — a steady-state run never issues a
+    /// second, empty-batch statement.
+    /// </summary>
+    [Fact]
+    public void LivenessTouchedTablePruneRowCap_ClearsTheBusiestObservedDayInOneBatch()
+    {
+        const int busiestMapDay = 255_000;
+        const int busiestTextDay = 220_000;
+
+        Assert.True(DarlingRetention.LivenessTouchedTablePruneRowCap > busiestMapDay);
+        Assert.True(DarlingRetention.LivenessTouchedTablePruneRowCap > busiestTextDay);
     }
 
     /// <summary>

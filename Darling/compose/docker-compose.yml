@@ -19,7 +19,57 @@ services:
   store:
     image: timescale/timescaledb:latest-pg17
     restart: unless-stopped
+    # #3899: pg_stat_statements, for the store's OWN statement statistics (get_store_query_stats: which of
+    # the store's queries cost the most). The service collects as the darling login, and the web dashboard and
+    # MCP connect as the viewer and mcp roles it provisions here (#3914), so the ranking splits by surface as it
+    # does on a managed store. On the command line so it takes effect on an existing volume too, with timescaledb kept in the
+    # list. The command line outranks the image's postgresql.conf AND any ALTER SYSTEM, so this line IS the
+    # store's preload list: to preload another library, add it here (an ALTER SYSTEM or conf edit of
+    # shared_preload_libraries is silently ignored while this line is present). track_utility=off keeps
+    # utility statements, role DDL's password literals among them, out of the view. The service creates the
+    # extension and its reader functions itself.
+    #
+    # Worker sizing and work_mem, below, are the two settings `timescaledb-tune` (which the image runs on
+    # every start) gets WRONG for this product, measured against timescaledb/timescaledb:latest-pg17 under
+    # `docker run --memory` (#4322; the managed-Windows-store rule table is
+    # `DarlingManagedPostgres.DeriveMemorySettings`/`BuildWorkerSizingConfAppend`). Everything ELSE tune
+    # picks (shared_buffers, effective_cache_size, maintenance_work_mem, max_connections) is left to it: the
+    # service doesn't manage this container (#4215 review M7 — don't read the service container's own
+    # limit), and tune already sizes those from the container's cgroup limit the way the managed store
+    # sizes them from host RAM. Path B (#4322): explicit flags ONLY where tune's choice is a known miss,
+    # each with the floor/cap and the reason below. The cgroup-in-service alternative was considered and
+    # dropped — see the PR body's closing note.
+    #
+    # timescaledb.max_background_workers / max_worker_processes: tune sizes these from CPU count, not from
+    # the hypertable count, and measured at 2 GB / 8 GB it gives 16 / 34 — PostgreSQL's own default shape,
+    # which is exactly what the managed Windows store exists to avoid (build.yml ~936-952: TimescaleDB's
+    # per-hypertable compression/retention/CAGG policy jobs launch background workers, and at 16 slots most
+    # policy runs never happen). The values below are the SAME formula the managed store writes
+    # (BuildWorkerSizingConfAppend): max_background_workers = HypertableCount + 2, max_worker_processes =
+    # 3 + max_background_workers + 8. HypertableCount is 72 today (TimescaleSupport.HypertableCount) — 74
+    # and 85. CiComposeWorkerSizingTests pins these two numbers against that same live formula, so an added
+    # collector fails this file's test instead of drifting silently.
+    #
+    # work_mem: tune measured 4 MB at 2/4 GB and ~3.9 MB at 8 GB (#4322 lane-4322m) — below the managed
+    # store's own floor at EVERY size in this range: DeriveMemorySettings' clamp(RAM/512, 16 MB, 64 MB)
+    # already floors to 16 MB for any host at or under 8 GB (8 GB / 512 = 16 MB exactly), and the spill
+    # evidence (#4310 lane-4310m, ~4 MB work_mem) shows the cost of staying at tune's number: a 7-day
+    # QueryStoreTopSql read spilled ~38 MB per worker across 5 workers. 16 MB is the fixed floor, not a
+    # host-scaled number, so it needs no TS_TUNE_MAX_CONNS companion (fewer hard-coded numbers than
+    # deriving a second one to make tune's OWN work_mem come out right). Safety at the smallest supported
+    # container: tune gives max_connections = 25 at 2 GB (measured), so worst case (all connections running
+    # a worker's ~3 concurrent sort/hash nodes at once, the same bound DeriveMemorySettings documents) is
+    # 25 x 3 x 16 MB = 1200 MB, plus shared_buffers' 512 MB = 1712 MB — under the 2 GB limit with headroom
+    # for the rest of the server. cc #4310.
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=74", "-c", "max_worker_processes=85", "-c", "work_mem=16MB"]
+    # Uncomment and set to the host's own budget if this container should be capped — left commented
+    # because a host's memory varies and a wrong default could starve a big store (#4322). Example for an
+    # 8 GB host:
+    #   mem_limit: 8g
     environment:
+      # darling is this store's bootstrap superuser, which is how the service knows the store is its own and
+      # provisions the least-privilege admin/viewer/mcp roles on it (#3914). The service's connection string in
+      # secrets/store_connection must log in as this user.
       POSTGRES_USER: darling
       POSTGRES_DB: darling
       POSTGRES_PASSWORD_FILE: /run/secrets/store_password
@@ -44,8 +94,27 @@ services:
     depends_on:
       store:
         condition: service_healthy
+    environment:
+      # #4733: where the service leaves a marker file when a startup failure has stopped collection for good (a
+      # rejected config, a migration step that can never apply, a refused login). The healthcheck below tests
+      # for this same path, so change the two together.
+      DARLING_STOPPED_MARKER: /tmp/darling-stopped
     volumes:
       - ./darling.json:/config/darling.json:ro
+      # #3914: the generated passwords of the admin/viewer/mcp roles the service provisions on the store above,
+      # one owner-only file each. The volume keeps them across a recreated container; without it they are
+      # regenerated and re-applied to the roles on every recreation, which works but re-keys them each time.
+      # `docker compose exec darling cat /var/lib/darling/credentials/pg-admin-credential` shows the admin
+      # password, for connecting a Darling Viewer or psql to the store as admin rather than as the owner.
+      # #4004: it also holds log-hash-key, the secret the stored log events' identities are keyed with. The service
+      # replaces it only when it finds the directory open to other users' writes (then every file in it could have
+      # been planted, so it removes them all and logs an error); keep the volume owner-only. Without the volume a
+      # recreated container generates a new one. A new key gives every log event stored after it a new identity
+      # (one repeat of each entry still in the log tail, and new fingerprints).
+      # Run ONE darling service per credentials volume: no `--scale`, and on Kubernetes one replica with
+      # `strategy: Recreate`. The start's check of this directory is not locked across processes, so a second
+      # service starting beside the first could read planted files between the first one's chmod and its removal.
+      - darling-credentials:/var/lib/darling/credentials
     secrets:
       # One file per secret; darling.json references them as file:/run/secrets/<name> (#1804) —
       # including the whole store connection string, since its password lives inside it.
@@ -61,9 +130,22 @@ services:
     ports:
       - "5153:5153"   # web dashboard (token → cookie gate; plain HTTP unless web.network.tls is set)
       - "5152:5152"   # MCP (bearer token)
+    # #4733: reports unhealthy once a startup failure has stopped collection for good. The process stays up after
+    # such a failure on purpose (exiting would restart a plain config error in a loop), so without this the
+    # container shows as running although it never collects. `restart: unless-stopped` does not act on health,
+    # so a stopped service stays up and shows unhealthy (`docker compose ps`) instead of restarting; its logs say
+    # why, and /api/ping too when the web dashboard is enabled. It tests for the marker file DARLING_STOPPED_MARKER
+    # names, not /api/ping, because this image has /bin/sh and no curl.
+    healthcheck:
+      test: ["CMD-SHELL", "test ! -e /tmp/darling-stopped"]
+      interval: 30s
+      timeout: 5s
+      retries: 1
+      start_period: 30s
 
 volumes:
   darling-store:
+  darling-credentials:
 
 secrets:
   store_password:

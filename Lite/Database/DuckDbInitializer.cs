@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -13,10 +14,85 @@ namespace PerformanceMonitorLite.Database;
 /// <summary>
 /// Initializes the DuckDB database and creates tables on first run.
 /// </summary>
-public class DuckDbInitializer
+public partial class DuckDbInitializer : IDisposable
 {
     private readonly string _databasePath;
     private readonly ILogger<DuckDbInitializer>? _logger;
+
+    /// <summary>
+    /// The sentinel connection (#4262): one <see cref="DuckDBConnection"/> held open on
+    /// <see cref="ConnectionString"/> for the life of this instance. DuckDB.NET's connection manager
+    /// dedups by connection string onto one native handle per string, so every other caller's
+    /// <see cref="CreateConnection"/> (an identical string) attaches to the handle this field pins open
+    /// instead of paying DuckDB's full open/close cost on every call — that cost, not any query, was the
+    /// bulk of an Overview tick's latency. No caller other than this class changes: they keep creating
+    /// their own <see cref="DuckDBConnection"/> exactly as before.
+    ///
+    /// <para><b>The hazard this trades in: with the sentinel open, a fresh connection cannot see a file
+    /// deleted out from under it.</b> DuckDB.NET hands the fresh connection the SAME cached native handle
+    /// rather than reopening the path, so <see cref="ResetDatabaseAsync"/> deleting <c>_databasePath</c>
+    /// became a silent no-op — a "new" connection kept reading the deleted file's rows. Every path that
+    /// deletes, moves or replaces the database file or its <c>.wal</c> MUST call <see cref="ReleaseSentinel"/>
+    /// before doing so and <see cref="ReopenSentinel"/> after, both while still holding the write lock, so
+    /// no caller can open in the gap between the file coming down and the sentinel reflecting it.</para>
+    /// </summary>
+    private DuckDBConnection? _sentinel;
+
+    /// <summary>
+    /// Trims the sentinel's memory back down periodically (#4262 round 1 finding 1). The sentinel keeps
+    /// DuckDB's buffer pool resident for the app's life — up to <c>memory_limit</c> in <see cref="ConnectionString"/>
+    /// — where a pre-sentinel <see cref="CreateConnection"/> released it back to the OS on every close.
+    /// Measured on a 1,049 MB store: one full-width 7-day read left the process at 1,074 MB, still 1,067 MB
+    /// after 60s idle, versus 56 MB with no sentinel. Self-rescheduling (<c>Change</c> at the end of each
+    /// tick, not a repeating period) so a slow cycle can never overlap the next one and touch the shared
+    /// <see cref="_sentinel"/> connection from two threads at once. Created in the constructor so
+    /// <see cref="Dispose"/> can always stop it, whether or not <see cref="InitializeAsync"/> ever ran.
+    /// </summary>
+    private readonly Timer _trimTimer;
+
+    /// <summary>
+    /// The sentinel's memory usage, in bytes, above which the trim timer takes the write lock and cycles
+    /// <c>memory_limit</c> down and back up (#4262 round 1 finding 1). Not const — a test lowers this so a
+    /// database with only a few MB of real data still crosses it, instead of needing to manufacture 256 MB
+    /// of actual buffer-pool pressure. Mutable, process-wide state: a test that lowers it must restore the
+    /// original value when done.
+    /// </summary>
+    internal static long TrimThresholdBytes = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// What the trim cycle sets <c>memory_limit</c> to before setting it back to the value parsed out of
+    /// <see cref="ConnectionString"/> (#4262 round 1 finding 1) — low enough that DuckDB's buffer manager
+    /// actually evicts pages rather than merely capping future growth. The review's own repro used 32MB and
+    /// measured 169ms round-trip; 64MB is used here to leave more headroom for a database with genuinely
+    /// large working metadata.
+    /// </summary>
+    internal const string TrimTargetMemoryLimit = "64MB";
+
+    /// <summary>
+    /// Count of trim cycles whose SET-based reset actually ran to completion (#4262 round 3). Instance
+    /// state, not static — each test constructs its own <see cref="DuckDbInitializer"/>, so there is
+    /// nothing to restore afterward, unlike <see cref="TrimThresholdBytes"/>. Internal so a test can read
+    /// it directly instead of inferring "did the cycle run" from a side effect that holds either way.
+    /// </summary>
+    internal int CompletedTrimCycleCount;
+
+    /// <summary>
+    /// How often the trim timer checks the sentinel's memory usage (#4262 round 1 finding 1). Not const —
+    /// read fresh by the constructor, so a test can lower it before constructing a
+    /// <see cref="DuckDbInitializer"/>; most tests instead call <see cref="RunMemoryTrimCycle"/> directly
+    /// rather than waiting on the real timer.
+    /// </summary>
+    internal static TimeSpan TrimInterval = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Test-only hooks for holding a trim tick "in flight" past <see cref="Dispose"/>'s 1s wait (#4262
+    /// round 4), so a test can force that exact race deterministically instead of needing real timing luck.
+    /// Both null in production. <see cref="TestTrimTickEntered"/> is set the moment a tick starts, so a test
+    /// knows it is safe to call <see cref="Dispose"/>; <see cref="TestTrimTickHoldGate"/> is waited on before
+    /// the tick returns, so a test controls exactly when the tick finishes.
+    /// </summary>
+    internal static ManualResetEventSlim? TestTrimTickEntered;
+    internal static ManualResetEventSlim? TestTrimTickHoldGate;
 
     /// <summary>
     /// Coordinates every DuckDB caller in the process against MAINTENANCE — CHECKPOINT, the archive
@@ -92,6 +168,14 @@ public class DuckDbInitializer
     /// </summary>
     private static readonly ReaderWriterLockSlim s_dbLock = new(LockRecursionPolicy.NoRecursion);
 
+    /* Test seam (#4720): whether the calling thread holds the write lock. It is per thread, so a test reads it
+       from inside the code under test (see OnArchiveViewRebuildForTests), not from a thread of its own. */
+    internal static bool IsWriteLockHeldForTests => s_dbLock.IsWriteLockHeld;
+
+    /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
+       recreated: a test throws from it to stand in for a process kill with no database file on disk. */
+    internal static Action? AfterDatabaseFilesDeletedForTests { get; set; }
+
     /// <summary>
     /// Acquires a read lock on the database. Multiple readers can hold this concurrently.
     /// Dispose the returned object to release the lock.
@@ -133,9 +217,11 @@ public class DuckDbInitializer
         }
         catch (LockRecursionException)
         {
-            /* The current thread already owns a read lock — likely leaked by an unhandled
-               exception that prevented Dispose(). Since we're already protected by a read lock,
-               return a no-op disposable so the caller can proceed normally. */
+            /* The current thread already owns a read lock — likely leaked by an unhandled exception
+               that prevented Dispose() — OR already owns the write lock (#4262 round 1 finding 3): a
+               writer already has every guarantee a reader would get, so this is the same "already
+               protected" case, not a bug to surface. Either way, return a no-op disposable so the caller
+               proceeds normally. */
             return NoOpDisposable.Instance;
         }
         return new LockReleaser(s_dbLock, write: false);
@@ -271,15 +357,346 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 59;
+    internal const int CurrentSchemaVersion = 67;
 
     private readonly string _archivePath;
+
+    /// <summary>The archive folder; the restore marker lives at its top level.</summary>
+    internal string ArchivePath => _archivePath;
 
     public DuckDbInitializer(string databasePath, ILogger<DuckDbInitializer>? logger = null)
     {
         _databasePath = databasePath;
         _logger = logger;
         _archivePath = Path.Combine(Path.GetDirectoryName(databasePath) ?? ".", "archive");
+
+        /* #4262 round 1 finding 1. The callback no-ops while _sentinel is null (before InitializeAsync,
+           or after Dispose), so starting this here rather than in ReopenSentinel costs nothing and keeps
+           Dispose's "stop the timer" guarantee unconditional. */
+        _trimTimer = new Timer(OnTrimTimerTick, null, TrimInterval, Timeout.InfiniteTimeSpan);
+    }
+
+    private void OnTrimTimerTick(object? state)
+    {
+        TestTrimTickEntered?.Set();
+        try
+        {
+            RunMemoryTrimCycle();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Trim cycle failed");
+        }
+        finally
+        {
+            /* Test-only (#4262 round 4): block here until a test releases the gate, so Dispose's 1s wait
+               can be made to time out on a real, still-running tick on demand. No-op in production. */
+            TestTrimTickHoldGate?.Wait();
+
+            /* Self-reschedule rather than a repeating period — see _trimTimer's doc comment. Dispose may
+               have already disposed the timer from another thread while this tick was running. */
+            try
+            {
+                _trimTimer.Change(TrimInterval, Timeout.InfiniteTimeSpan);
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks the sentinel's current memory usage and, if it is over <see cref="TrimThresholdBytes"/>,
+    /// cycles <c>memory_limit</c> down to <see cref="TrimTargetMemoryLimit"/> and back up to force DuckDB's
+    /// buffer manager to release cached pages (#4262 round 1 finding 1). Internal so a test can call this
+    /// directly instead of waiting on <see cref="_trimTimer"/>'s real interval.
+    /// </summary>
+    internal void RunMemoryTrimCycle()
+    {
+        /* Snapshot rather than repeated field reads: a concurrent ResetDatabaseAsync/Dispose can set
+           _sentinel to null (or a new instance) between any two reads here, and ObjectDisposedException
+           from a torn read is expected, not a bug — this cycle just skips and tries again in
+           TrimInterval. */
+        var sentinel = _sentinel;
+        if (sentinel is null)
+            return;
+
+        /* #4262 round 3 finding 3: take the read lock around the memory read, unlike round 1's unlocked
+           read. Unlocked, this call could run on the sentinel at the exact moment a reset or Dispose
+           (both under the write lock) closes it out from under it — a native call on a disposed DuckDB
+           connection can take the whole process down, not just throw a catchable exception. Never wait
+           (same "a trim cycle must never block a real caller" rule as the write lock below): if the read
+           lock is busy, skip this cycle and try again in TrimInterval. Released before the write-lock
+           attempt below so the trim never holds both locks at once. */
+        if (!s_dbLock.TryEnterReadLock(0))
+            return;
+
+        double? beforeBytes;
+        try
+        {
+            beforeBytes = ReadSentinelMemoryUsageBytes(sentinel);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Trim cycle: could not read sentinel memory usage");
+            return;
+        }
+        finally
+        {
+            s_dbLock.ExitReadLock();
+        }
+
+        if (beforeBytes is null || beforeBytes < TrimThresholdBytes)
+            return;
+
+        /* Never wait — a reader must never block behind the trim (#4262 round 1 finding 1). If the write
+           lock is busy, skip this cycle; the next one TrimInterval later gets another try. */
+        if (!s_dbLock.TryEnterWriteLock(0))
+        {
+            _logger?.LogDebug(
+                "Trim cycle: skipped, write lock unavailable ({BeforeMb:F0} MB in use)",
+                beforeBytes.Value / (1024.0 * 1024.0));
+            return;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            /* Re-read under the lock: _sentinel can't change underneath us now (s_dbLock is exclusive),
+               but Dispose could have released it between the unlocked read above and taking this lock. */
+            var lockedSentinel = _sentinel;
+            if (lockedSentinel is null)
+                return;
+
+            var configuredMemoryLimit = ConfiguredMemoryLimit;
+
+            using (var cmd = lockedSentinel.CreateCommand())
+            {
+                cmd.CommandText = $"SET memory_limit='{TrimTargetMemoryLimit}'";
+                cmd.ExecuteNonQuery();
+            }
+            using (var cmd = lockedSentinel.CreateCommand())
+            {
+                cmd.CommandText = $"SET memory_limit='{configuredMemoryLimit}'";
+                cmd.ExecuteNonQuery();
+            }
+
+            /* #4262 round 3: only incremented once both SET statements above actually ran, so a test can
+               assert the cycle really executed instead of asserting side effects that hold whether or not
+               it did (memory_limit round-trips either way if nothing touched it; process working set
+               drifts down from GC noise alone around a bare GC.Collect()). Plain increment, not
+               Interlocked: only reachable while this thread holds s_dbLock's write lock, which already
+               serializes every writer against this field. */
+            CompletedTrimCycleCount++;
+
+            stopwatch.Stop();
+            var afterBytes = ReadSentinelMemoryUsageBytes(lockedSentinel);
+            _logger?.LogDebug(
+                "Trim cycle: {BeforeMb:F0} MB -> {AfterMb:F0} MB in {ElapsedMs}ms (memory_limit {Target} -> {Configured})",
+                beforeBytes.Value / (1024.0 * 1024.0),
+                (afterBytes ?? 0) / (1024.0 * 1024.0),
+                stopwatch.ElapsedMilliseconds,
+                TrimTargetMemoryLimit,
+                configuredMemoryLimit);
+        }
+        finally
+        {
+            s_dbLock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
+    /// Reads the sentinel's current memory usage in bytes (#4262 round 1 finding 1). Returns null if the
+    /// read fails — a busy or torn connection is a "skip this cycle", not an error.
+    ///
+    /// <para><b>Casts the sum to BIGINT in SQL rather than converting in C# (#4262 round 3, my ruling).</b>
+    /// <c>sum(memory_usage_bytes)</c> is a DuckDB <c>SUM</c> over a <c>BIGINT</c> column, which DuckDB
+    /// always promotes to <c>HUGEINT</c> — regardless of the summed magnitude, not just on overflow — and
+    /// DuckDB.NET maps <c>HUGEINT</c> to <see cref="System.Numerics.BigInteger"/>, which does not implement
+    /// <see cref="IConvertible"/>. <c>Convert.ToDouble(object)</c> requires that interface and threw
+    /// <see cref="InvalidCastException"/> on every call before this fix, confirmed empirically (a 3.2MB
+    /// sentinel: "Unable to cast object of type 'System.Numerics.BigInteger' to type
+    /// 'System.IConvertible'") — always caught by the try/catch below and logged at Debug, so
+    /// <see cref="RunMemoryTrimCycle"/> always saw <c>beforeBytes is null</c> and returned before ever
+    /// taking the write lock. The <c>CAST(... AS BIGINT)</c> here keeps the result a plain <c>long</c>,
+    /// which <see cref="Convert.ToDouble(object)"/> handles directly. <c>duckdb_memory()</c> exists on the
+    /// DuckDB version Lite ships, so there is no fallback to an older, table-function-less build.</para>
+    ///
+    /// <para>Internal so a test can drive it against a real connection instead of unit-testing a
+    /// conversion helper in isolation — the isolated version passed while the real read always failed,
+    /// which is exactly how the original bug went unnoticed.</para>
+    /// </summary>
+    internal double? ReadSentinelMemoryUsageBytes(DuckDBConnection connection)
+    {
+        try
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT CAST(sum(memory_usage_bytes) AS BIGINT) FROM duckdb_memory()";
+            var result = cmd.ExecuteScalar();
+            if (result != null && result != DBNull.Value)
+                return Convert.ToDouble(result);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Trim cycle: could not read sentinel memory usage");
+
+            /* The backstop for a fatal error that no collector reports (every server paused, say): this read
+               runs on the sentinel every TrimInterval, and on an invalidated database it fails like any other. */
+            ReportFailure(ex);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The <c>memory_limit</c> the trim cycle restores after trimming — parsed out of
+    /// <see cref="ConnectionString"/> rather than repeated as a second "1GB" literal, so the two can never
+    /// drift apart (#4262 round 1 finding 1).
+    /// </summary>
+    private string ConfiguredMemoryLimit
+    {
+        get
+        {
+            foreach (var part in ConnectionString.Split(';'))
+            {
+                var eq = part.IndexOf('=');
+                if (eq > 0 && part[..eq].Trim().Equals("memory_limit", StringComparison.OrdinalIgnoreCase))
+                    return part[(eq + 1)..].Trim();
+            }
+            return "1GB"; // unreachable — ConnectionString always sets memory_limit
+        }
+    }
+
+    /// <summary>
+    /// Closes the sentinel (#4262) so the next open genuinely re-reads <c>_databasePath</c> from disk
+    /// instead of reattaching to DuckDB.NET's cached handle for the file that is about to come down.
+    /// Only safe under the write lock — a live reader could otherwise still be attached when the caller
+    /// deletes the file right after this returns. A no-op if the sentinel was never opened (a fresh
+    /// install's first <see cref="InitializeAsync"/>) or is already closed (a repeat call).
+    /// </summary>
+    private void ReleaseSentinel()
+    {
+        _sentinel?.Dispose();
+        _sentinel = null;
+    }
+
+    /// <summary>
+    /// Opens the sentinel (#4262) once the on-disk file reflects what callers should now see — after
+    /// <see cref="InitializeCoreAsync"/> has finished creating tables (including any storage-version
+    /// migration) or rebuilding them for a reset. Must run before the write lock guarding that rebuild is
+    /// released, or a caller could open in the gap between the file landing and the sentinel pinning it.
+    /// </summary>
+    private void ReopenSentinel()
+    {
+        var connection = new DuckDBConnection(ConnectionString);
+        connection.Open();
+        _sentinel = connection;
+    }
+
+    /// <summary>
+    /// Closes the sentinel connection so the database file is free to move or delete once the app is
+    /// shutting down (#4262). Safe to call more than once and safe to call before the sentinel was ever
+    /// opened — both collapse to <see cref="ReleaseSentinel"/>'s existing no-op cases.
+    ///
+    /// <para><b>Never throws, and never waits unboundedly (#4262 round 1 finding 2).</b> This runs on the
+    /// UI thread from <c>MainWindow_Closing</c>, so the old unbounded <c>AcquireWriteLock()</c> could hang
+    /// the window close behind an in-flight archival or compaction. Bounded to
+    /// <see cref="DisposeWriteLockTimeout"/>, and on a timeout the sentinel is released anyway — a closing
+    /// app has nobody left to protect from a torn read, and a leaked handle would block the file from ever
+    /// being deleted or moved. Calls <see cref="s_dbLock"/> directly rather than <see cref="AcquireWriteLock"/>,
+    /// which throws <see cref="TimeoutException"/> on its own timeout path — exactly what Dispose must not do.</para>
+    /// </summary>
+    public void Dispose()
+    {
+        /* A reopen after a fatal error must not leave a sentinel open for an app that is closing: no new reopen
+           starts once this is set, a waiting attempt gives up, and an attempt that was running when it was set closes
+           the sentinel it opened (MarkReopened). */
+        MarkDisposed();
+
+        /* Stop the trim timer (#4262 round 1) and wait briefly for an in-flight tick to finish, before
+           the lock attempt below (#4262 round 3 finding 3). Timer.Dispose() alone only stops FUTURE
+           callbacks — a callback already running on a thread pool thread keeps running after this call
+           returns, so without waiting here an in-flight tick could still be reading through, or writing
+           through, the sentinel while ReleaseSentinel(WithoutLock) below closes it out from under it. A
+           tick's own read- or write-lock-held section is a handful of quick queries — milliseconds — so
+           1s is generous, not a real wait in the common case; never unbounded, same "Dispose must never
+           hang" reasoning as DisposeWriteLockTimeout below. Its own try/catch: this must never throw
+           either, same reason as the rest of Dispose. */
+        try
+        {
+            var trimTimerStopped = new ManualResetEvent(false);
+            if (_trimTimer.Dispose(trimTimerStopped) && trimTimerStopped.WaitOne(TimeSpan.FromSeconds(1)))
+            {
+                trimTimerStopped.Dispose();
+            }
+            /* else: a tick outlived the wait (or the timer was already disposed) - the runtime still signals
+               this handle when the tick ends, so it must stay open; the finalizer reclaims it (#4262). */
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Dispose failed while stopping the trim timer");
+        }
+
+        try
+        {
+            /* If this thread already holds a read lock, TryEnterWriteLock does not return false — it
+               throws LockRecursionException immediately, since s_dbLock is NoRecursion. Check first and
+               release without the lock in that case: nothing else can be reorganizing the file while this
+               thread holds a read lock, because a write can't be in flight at the same time. */
+            if (s_dbLock.IsReadLockHeld)
+            {
+                ReleaseSentinelWithoutLock();
+                return;
+            }
+
+            if (s_dbLock.TryEnterWriteLock(DisposeWriteLockTimeout))
+            {
+                try
+                {
+                    ReleaseSentinel();
+                }
+                finally
+                {
+                    s_dbLock.ExitWriteLock();
+                }
+            }
+            else
+            {
+                _logger?.LogWarning(
+                    "Dispose timed out after {Timeout} waiting for the write lock; releasing the sentinel without it",
+                    DisposeWriteLockTimeout);
+                ReleaseSentinelWithoutLock();
+            }
+        }
+        catch (Exception ex)
+        {
+            /* Dispose must never throw — this runs on the UI thread's Closing handler, where an exception
+               would abort shutdown (#4262 round 1 finding 2). */
+            _logger?.LogError(ex, "Dispose failed while releasing the DuckDB sentinel");
+        }
+    }
+
+    /// <summary>
+    /// How long <see cref="Dispose"/> waits for the write lock before giving up and releasing the sentinel
+    /// unprotected (#4262 round 1 finding 2). Short and fixed: unlike <see cref="LocalDataService"/>'s
+    /// configurable write-lock budget, there is no host to declare a different number for — this is the
+    /// one caller that runs on a UI thread during shutdown, where the app is going away either way.
+    /// </summary>
+    private static readonly TimeSpan DisposeWriteLockTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Releases the sentinel without the write lock (#4262 round 1 finding 2) — used when this thread
+    /// already holds the read lock, or when the write lock wait timed out. <see cref="Interlocked"/> rather
+    /// than the plain null-then-dispose <see cref="ReleaseSentinel"/> uses, because without the write lock
+    /// excluding other threads, a plain check-then-dispose could race a concurrent <see cref="ReopenSentinel"/>
+    /// and dispose the wrong connection. This path only runs at shutdown or on a rare read-lock-held
+    /// re-entry, so the residual race (this thread and a reset both touching <see cref="_sentinel"/>
+    /// without a shared lock) is accepted rather than engineered away.
+    /// </summary>
+    private void ReleaseSentinelWithoutLock()
+    {
+        var connection = Interlocked.Exchange(ref _sentinel, null);
+        connection?.Dispose();
     }
 
     /* Tables that have parquet archives — views are created to UNION hot data with archived parquet files.
@@ -301,12 +718,26 @@ public class DuckDbInitializer
        parquet tier still holds it — the plain UNION ALL would then show each re-collected event twice.
        The local surrogate prefix id (job_history_id / default_trace_event_id) is a per-process counter
        (CollectionIdGenerator), so it is NOT stable across re-collection and cannot be the key — only the
-       SQL-Server-side identity is. Other archivable tables can't double up this way (normal archival keeps
-       hot and parquet disjoint, and their rows aren't re-collected after a reset), so they keep the plain
-       union. Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
+       SQL-Server-side identity is. Normal archival keeps hot and parquet disjoint, and the watermark reads
+       take the greater of the live and the archived maximum (see RemoteCollectorService.GetLastCollectedTimeAsync
+       and its siblings), so a reset does not send a collector back to its fallback window. Builds before that
+       read stored the fallback window's events again after a reset, and those copies stay in the archive; a
+       watermark read that fails still takes the fallback window. Tables with no entry keep the plain union.
+       Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
     private static readonly Dictionary<string, string> ArchiveViewDedupKeys =
         new(StringComparer.Ordinal)
         {
+            /* No key for blocked_process_reports, long_query_completions or system_health_events, though copies
+               that a cycle after a reset stored again stay in their archives: a rule in the view would run over
+               the whole archive on every read, because collection_time, which some of their readers filter on, is
+               not part of an event's identity and cannot run below it. Their readers drop those copies after their
+               own filter instead (StoredEventCopies). */
+            /* No key for memory_pressure_events: no later batch stored any of its rows again. Its identical rows
+               come from one batch: distinct events whose ring-buffer time lost its milliseconds before #2751. */
+            /* No key for cpu_utilization_stats: an exact copy of a sample changes no average, maximum or chart
+               line, and a window over the largest table would cost every read of it. */
+            /* No key for query_store_stats: its rows are cumulative snapshots of an interval, the open interval is
+               read again every cycle by design, and every reader takes the latest snapshot per interval or plan. */
             /* sysjobhistory.instance_id: a unique monotonic IDENTITY per server that survives
                sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark. */
             ["job_history"] = "server_id, instance_id",
@@ -314,7 +745,15 @@ public class DuckDbInitializer
                (the StartTime watermark) keeps events distinct across the server restarts that reset
                EventSequence, and groups identical re-collected rows (NULLs included) for dedup. */
             ["default_trace_events"] = "server_id, event_time, event_sequence",
+            /* No key for deadlocks: a window over the archive carries every row's graph, which averages tens of
+               kilobytes, through the operator on every read, and a read that filters on collection_time cannot run
+               its filter below it. Their readers hide a stored copy after their own filter instead, keeping the
+               copy the startup cleanup keeps (StoredEventCopies.Deadlocks). */
         };
+
+    /* Tables whose dedup keeps the EARLIEST collected copy instead of the newest (the default). No table needs it
+       now that deadlocks are hidden per read, but the rule stays for a table that does. */
+    private static readonly HashSet<string> ArchiveViewDedupKeepsEarliest = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Gets the connection string for the DuckDB database.
@@ -331,10 +770,274 @@ public class DuckDbInitializer
     public string ConnectionString => $"Data Source={_databasePath};memory_limit=1GB;checkpoint_threshold=1GB";
 
     /// <summary>
-    /// Ensures the database exists and all tables are created.
+    /// Ensures the database exists and all tables are created, then opens the sentinel (#4262).
     /// Handles DuckDB version mismatches by exporting data to Parquet, recreating the database, and importing.
+    ///
+    /// <para>Takes the write lock for its whole body — including <see cref="ResetDatabaseAsync"/>'s
+    /// destructive path calling the lock-free <see cref="InitializeCoreAsync"/> directly instead of this
+    /// method, since <see cref="s_dbLock"/> is <see cref="LockRecursionPolicy.NoRecursion"/> and a second
+    /// <c>AcquireWriteLock</c> on the same (already-holding) thread would throw rather than nest.</para>
     /// </summary>
     public async Task InitializeAsync()
+    {
+        using var writeLock = AcquireWriteLock();
+
+        /* A repeat call (a test re-initializing the same instance, say) must not leak the previous
+           sentinel — ReleaseSentinel is a no-op the first time, when there is nothing to release yet. */
+        ReleaseSentinel();
+
+        await InitializeCoreAsync();
+
+        /* An interrupted reset's preserved rows go back before the sentinel opens, so no caller can read or
+           write the preserved tables while they are still missing rows. */
+        await RecoverPendingPreservedRestoreCoreAsync();
+
+        /* Only now, with tables created (or migrated) and archive views/analysis schema in place, is the
+           on-disk file what callers should see. Opening here — still under the write lock — means no
+           caller can attach to a partially-initialized file. */
+        ReopenSentinel();
+    }
+
+    private bool _identityReadFailed;
+
+    /// <summary>
+    /// The exact C2 branch of the interrupted-reset recovery. The marker's identity equals the database file's
+    /// own, so the file is the one the preserved copy was taken from and holds every row, the promoted archive
+    /// files included. Deletes the promoted files, rebuilds the archive views (the Core form: the caller holds
+    /// the write lock), then the marker and the directory, in that order, so a crash part-way repeats safely.
+    /// Returns false, having changed nothing, when the identities differ; sets <c>_identityReadFailed</c> when
+    /// the identity could not be read.
+    /// </summary>
+    private async Task<bool> TryFinishUnchangedDatabaseResetAsync(
+        string markerIdentity, IReadOnlyList<string> promotedNames, string restoreMarkerPath, string dirPath)
+    {
+        _identityReadFailed = false;
+        string? currentIdentity;
+        try
+        {
+            using var connection = new DuckDBConnection(ConnectionString);
+            await connection.OpenAsync();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT id FROM store_identity LIMIT 1";
+            currentIdentity = (await cmd.ExecuteScalarAsync()) as string;
+        }
+        catch (Exception ex)
+        {
+            _identityReadFailed = true;
+            _logger?.LogError(ex, "Could not read the database identity to finish an interrupted reset; nothing was changed. The next start retries.");
+            return false;
+        }
+
+        if (!string.Equals(currentIdentity, markerIdentity, StringComparison.Ordinal)) return false;
+
+        foreach (var name in promotedNames)
+        {
+            if (name != Path.GetFileName(name) || !name.EndsWith(".parquet", StringComparison.OrdinalIgnoreCase)) continue;
+            var file = Path.Combine(_archivePath, name);
+            if (File.Exists(file)) File.Delete(file);
+        }
+
+        await CreateArchiveViewsCoreAsync();
+        File.Delete(restoreMarkerPath);
+        if (Directory.Exists(dirPath)) Directory.Delete(dirPath, recursive: true);
+        _logger?.LogInformation(
+            "Finished an interrupted reset: the database file was never replaced, so {Count} promoted archive files were removed and nothing was restored",
+            promotedNames.Count);
+        return true;
+    }
+
+    /// <summary>
+    /// Finishes a reset restore that a crash interrupted, and removes the leftovers of one that did not need
+    /// finishing. Runs inside <see cref="InitializeAsync"/>, after the schema exists and before the sentinel
+    /// opens, because every reader and writer of the preserved tables needs <see cref="InitializeAsync"/> first:
+    /// <c>MainWindow.xaml.cs</c> awaits it before the collectors start, and the alert engine's seeding, the mute
+    /// rules and the MCP server all sit behind that same call. It takes no lock of its own; the caller holds the
+    /// write lock (<see cref="s_dbLock"/> does not allow recursion). <see cref="InitializeCoreAsync"/> does not
+    /// call it, since the reset path runs that method and does its own restore.
+    ///
+    /// <para>It is idempotent: the restore inserts with conflict-ignoring SQL, and the marker is deleted before
+    /// its directory, so a crash at any point leaves a state the next start handles the same way.</para>
+    ///
+    /// <para>It only READS the reset export marker. The archive service's removal of unfinished reset exports
+    /// runs in the archival path, about an hour after start, so it has not run yet at this point; the export
+    /// marker's presence is what tells this method that the reset never started.</para>
+    ///
+    /// <para>The crash points: C0 and C6 leave no restore marker (orphan sweep); C1 leaves both markers (drop the
+    /// copy, restore nothing); C2 is a marker whose identity equals the database file's own (the file was never
+    /// replaced: remove the promoted files, restore nothing); C3-C5 and the legacy marker with no identity line
+    /// restore and keep the promoted files. A marker file that is unreadable (empty, garbage, or naming a
+    /// directory that is not a preserve directory) is its own case: it is logged as an error and nothing is
+    /// restored or deleted. While a marker file is still there after the pass (a failed restore, an unreadable
+    /// identity or an unreadable marker), the orphan sweep is skipped.</para>
+    ///
+    /// <para>It never throws. Any failure is logged with the marker and directory paths and startup continues;
+    /// the next start tries again.</para>
+    /// </summary>
+    private async Task RecoverPendingPreservedRestoreCoreAsync()
+    {
+        string? markerDir = null;
+        try
+        {
+            if (!Directory.Exists(_archivePath)) return;
+
+            var resetMarkerPath = Path.Combine(_archivePath, PreservedTableRestore.ResetExportMarkerFileName);
+            var restoreMarkerPath = Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerFileName);
+            var writingPath = Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerWritingFileName);
+
+            /* A leftover .writing file means the crash came before the marker was complete. It is never
+               trusted: the marker only appears through the atomic rename. */
+            if (File.Exists(writingPath)) File.Delete(writingPath);
+
+            var hasMarker = PreservedTableRestore.TryReadMarker(
+                _archivePath, out var dirName, out var tables, out var markerIdentity, out var promotedNames);
+
+            if (!hasMarker && File.Exists(restoreMarkerPath))
+            {
+                /* The marker file is there but holds nothing usable (empty or garbage). It is a pending
+                   restore this start cannot read, so nothing is restored, nothing is deleted and the orphan
+                   sweep is skipped: every preserve directory may be the only copy of the saved settings. */
+                var preserved = Directory.EnumerateDirectories(_archivePath, PreservedTableRestore.PreserveDirectoryPrefix + "*").ToList();
+                _logger?.LogError(
+                    "Restore marker {Marker} is unreadable; nothing was restored or deleted. Preserved copies: {Directories}. Deleting the marker discards the saved settings and unlocks them.",
+                    restoreMarkerPath, preserved.Count == 0 ? "(none)" : string.Join(", ", preserved));
+                return;
+            }
+
+            if (hasMarker)
+            {
+                var dirPath = Path.Combine(_archivePath, dirName);
+                var dirIsValid = dirName == Path.GetFileName(dirName)
+                    && dirName.StartsWith(PreservedTableRestore.PreserveDirectoryPrefix, StringComparison.Ordinal);
+                markerDir = dirIsValid ? dirName : null;
+
+                if (!dirIsValid)
+                {
+                    /* The marker names a directory that is not a preserve directory: nothing is restored, and
+                       the sweep below is skipped so no preserved copy is deleted. */
+                    var preserved = Directory.EnumerateDirectories(_archivePath, PreservedTableRestore.PreserveDirectoryPrefix + "*").ToList();
+                    _logger?.LogError(
+                        "Restore marker {Marker} names {Directory}, which is not a preserve directory; nothing was restored or deleted. Preserved copies: {Directories}. Deleting the marker discards the saved settings and unlocks them.",
+                        restoreMarkerPath, dirName, preserved.Count == 0 ? "(none)" : string.Join(", ", preserved));
+                    return;
+                }
+                else if (File.Exists(resetMarkerPath))
+                {
+                    /* C1: the reset export marker is present, so the reset never started and the live tables
+                       were never emptied. The copy is stale; drop it without restoring. */
+                    File.Delete(restoreMarkerPath);
+                    if (Directory.Exists(dirPath)) Directory.Delete(dirPath, recursive: true);
+                    markerDir = null;
+                }
+                else if (markerIdentity != null && await TryFinishUnchangedDatabaseResetAsync(
+                    markerIdentity, promotedNames, restoreMarkerPath, dirPath))
+                {
+                    /* C2 (exact): the database file is the one the copy was taken from, so it holds every row
+                       and the promoted files were removed, with no restore. */
+                    markerDir = null;
+                }
+                else if (markerIdentity != null && _identityReadFailed)
+                {
+                    /* The identity could not be read: nothing was touched, and the next start retries. */
+                }
+                else
+                {
+                    /* C3-C5, and a marker with no identity line (the legacy format, whose C2 cannot be told
+                       from the others): the copy is complete and the reset's export marker is gone, so the
+                       reset started or finished. Put every listed table back and keep the promoted files; rows
+                       already present win. */
+                    var restored = 0;
+                    var failed = false;
+                    var connection = new DuckDBConnection(ConnectionString);
+                    try
+                    {
+                        await connection.OpenAsync();
+                        foreach (var table in tables)
+                        {
+                            var parquet = Path.Combine(dirPath, table + ".parquet");
+                            if (!File.Exists(parquet))
+                            {
+                                failed = true;
+                                _logger?.LogError("Preserved table {Table} is listed in the restore marker but its copy {File} is missing", table, parquet);
+                                continue;
+                            }
+                            try
+                            {
+                                if (!IsPlainIdentifier(table)) throw new InvalidDataException($"Not a table name: {table}");
+                                await PreservedTableRestore.RestoreTableAsync(connection, table, parquet);
+                                restored++;
+                            }
+                            catch (Exception ex)
+                            {
+                                failed = true;
+                                _logger?.LogError(ex, "Could not restore preserved table {Table} from {File}", table, parquet);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        failed = true;
+                        _logger?.LogError(ex, "Could not open the database to restore the preserved tables from {Directory}", dirPath);
+                    }
+                    finally
+                    {
+                        connection.Dispose();
+                    }
+
+                    if (failed)
+                    {
+                        _logger?.LogError(
+                            "Interrupted reset restore did not finish. The preserved copy is kept for manual recovery: marker {Marker}, directory {Directory}. The next start retries. Deleting the marker discards the saved settings and unlocks them.",
+                            restoreMarkerPath, dirPath);
+                    }
+                    else
+                    {
+                        /* C6 after a restore: marker first, so a crash between the two deletes leaves an
+                           orphan directory for the sweep below rather than a marker with no data. */
+                        File.Delete(restoreMarkerPath);
+                        if (Directory.Exists(dirPath)) Directory.Delete(dirPath, recursive: true);
+                        markerDir = null;
+                        _logger?.LogInformation(
+                            "Finished an interrupted reset: restored {Count} preserved tables from {Directory}",
+                            restored, dirPath);
+                    }
+                }
+            }
+
+            /* C0/C6: any preserve directory the marker does not name is an orphan (a crash before the marker
+               was written, or between the marker delete and the directory delete). The reset export marker is
+               left alone; the first archival run handles it. */
+            if (File.Exists(restoreMarkerPath)) return; /* a pending restore: every preserve directory may be its only copy */
+
+            foreach (var orphan in Directory.EnumerateDirectories(_archivePath, PreservedTableRestore.PreserveDirectoryPrefix + "*"))
+            {
+                if (markerDir != null && string.Equals(Path.GetFileName(orphan), markerDir, StringComparison.Ordinal)) continue;
+                try
+                {
+                    Directory.Delete(orphan, recursive: true);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "Could not remove the orphan preserve directory {Directory}", orphan);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex,
+                "Startup recovery of the reset's preserved tables failed. Marker {Marker}, archive folder {Directory}. The next start retries.",
+                Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerFileName), _archivePath);
+        }
+    }
+
+    private static bool IsPlainIdentifier(string name) =>
+        name.Length > 0 && name.All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
+
+    /// <summary>
+    /// The body of <see cref="InitializeAsync"/>, split out so <see cref="ResetDatabaseAsync"/> can run it
+    /// while it is already holding the write lock itself. Takes no lock of its own — every caller must
+    /// already hold the write lock before calling this.
+    /// </summary>
+    private async Task InitializeCoreAsync()
     {
         _logger?.LogInformation("Initializing DuckDB database at {Path}", _databasePath);
 
@@ -352,16 +1055,46 @@ public class DuckDbInitializer
             _logger?.LogInformation("Created archive directory: {ArchivePath}", archivePath);
         }
 
+        /* Whether the file was there before this open creates it, for the declared index statements below
+           (CreateDeclaredIndexAsync). Not the schema version: GetSchemaVersionAsync reads any failure as 0, which
+           would treat an existing file as a fresh one. */
+        _openedExistingFile = File.Exists(_databasePath);
+
         /* Open the database. Only a genuine storage-version mismatch triggers the
            destructive Parquet rebuild; transient lock contention is retried instead. */
         DuckDBConnection connection = await OpenDatabaseAsync(archivePath);
 
         using (connection)
         {
+            /* #4727: read the stamp BEFORE anything is created, and refuse a file stamped newer than this build
+               (an older Lite on the shared data root after a rollback). Versions 60 to 66 added columns to 14
+               tables, so carrying on would fail every batch for them with only a log line to show for it. A
+               missing schema_version table reads as version 0 here, so a fresh file still takes the create path. */
+            var existingVersion = await GetSchemaVersionAsync(connection);
+            if (existingVersion > CurrentSchemaVersion)
+            {
+                _logger?.LogError(
+                    "Refusing to open {Path}: schema v{FileVersion} is newer than this build's v{AppVersion}",
+                    _databasePath, existingVersion, CurrentSchemaVersion);
+                throw new SchemaVersionTooNewException(_databasePath, existingVersion, CurrentSchemaVersion);
+            }
+
+            /* Before anything can delete or update an indexed row: the open may have replayed a WAL, and the
+               indexes must hold every replayed row first (duckdb#26106, see the method). It stays above the
+               schema's index statements, which try again for a declared index it dropped and could not create. */
+            await CheckpointAndRebuildIndexesAsync(connection);
+
             await ExecuteNonQueryAsync(connection,
                 "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
 
-            var existingVersion = await GetSchemaVersionAsync(connection);
+            /* A per-FILE identity. A reset deletes the file, so the re-init writes a new GUID; an existing file
+               gets one on its first start and keeps it, and an EXPORT/IMPORT migration copies the row. The
+               interrupted-reset recovery compares it with the one the restore marker recorded. Not part of the
+               schema statements, and neither archived nor preserved. */
+            await ExecuteNonQueryAsync(connection,
+                "CREATE TABLE IF NOT EXISTS store_identity (id VARCHAR NOT NULL)");
+            await ExecuteNonQueryAsync(connection,
+                "INSERT INTO store_identity SELECT CAST(uuid() AS VARCHAR) WHERE NOT EXISTS (SELECT 1 FROM store_identity)");
 
             /* On a fresh/reset database (v0), skip migrations entirely — they DROP tables
                expecting CREATE TABLE to follow, which is destructive on a blank DB.
@@ -377,15 +1110,34 @@ public class DuckDbInitializer
                 await ExecuteNonQueryAsync(connection, tableStatement);
             }
 
+            /* On an existing file, an index that cannot be created logs an Error and the start continues: the
+               index repair above can drop an index that then cannot be built again (see CreateDeclaredIndexAsync). */
             foreach (var indexStatement in Schema.GetAllIndexStatements())
             {
-                await ExecuteNonQueryAsync(connection, indexStatement);
+                await CreateDeclaredIndexAsync(connection, indexStatement, existingFile: _openedExistingFile);
+            }
+
+            /* #4727: re-apply the columns versions 60 to 66 added on EVERY start of an existing file, after the
+               table and index statements. A step whose ALTER failed (a transient fault during the one start that
+               ran it) is stamped done all the same, and a file can also carry the stamp without the column; without
+               this the table's batches fail on every start from then on. The stamp is not held back: the pass
+               below heals a stamped file, and a column that still cannot be added logs an Error and lets the
+               start continue, so the next start retries it. A fresh file gets the columns from the table
+               statements above. */
+            if (existingVersion > 0)
+            {
+                await AddMissingColumnsAsync(connection, AddedColumns);
             }
 
             if (existingVersion < CurrentSchemaVersion)
             {
                 await SetSchemaVersionAsync(connection, CurrentSchemaVersion);
             }
+
+            /* Exact duplicate deadlock rows an older build stored twice (a master-registered Azure database's own
+               session and the server's telemetry): removed on every start, keeping the earliest of each. A no-op
+               when there are none, and it never fails the start. */
+            await DeadlockDuplicateCleanup.RemoveAsync(connection, _logger);
 
             /* Table count on the init connection — makes a failed reset (schema not persisting to the
                file for the next connection to see) diagnosable from the log alone. */
@@ -399,7 +1151,10 @@ public class DuckDbInitializer
             _logger?.LogInformation("Database initialization complete. Schema version: {Version}", CurrentSchemaVersion);
         }
 
-        await CreateArchiveViewsAsync();
+        /* CreateArchiveViewsCoreAsync, not CreateArchiveViewsAsync: this thread already holds the write
+           lock (#4262 round 1 finding 3), and s_dbLock's NoRecursion policy makes a nested read lock
+           throw. */
+        await CreateArchiveViewsCoreAsync();
 
         await InitializeAnalysisSchemaAsync();
     }
@@ -441,7 +1196,16 @@ public class DuckDbInitializer
                 _logger?.LogWarning(
                     "DuckDB database is locked (attempt {Attempt}/{Max}); retrying in {Delay}ms. {Error}",
                     attempt, maxLockRetries, lockRetryDelayMs, ex.Message);
-                await Task.Delay(lockRetryDelayMs);
+                /* Thread.Sleep, not await Task.Delay (#4262 round 1 finding 4): this loop runs inside
+                   InitializeCoreAsync while the caller's write lock is held, and that lock is thread-affine
+                   (ReaderWriterLockSlim). On a thread with no SynchronizationContext — the archive reset
+                   path is one — an awaited Task.Delay is free to resume on a different pool thread, and
+                   ExitWriteLock from a thread that never entered throws SynchronizationLockException,
+                   leaking the lock for the rest of the process's life. This was already true before #4262;
+                   the sentinel didn't create it. A blocking sleep keeps the same thread the whole way
+                   through, at the cost of tying up one pool thread for the retry delay — affordable for a
+                   five-retry, one-second-apart file-lock retry. */
+                Thread.Sleep(lockRetryDelayMs);
             }
             catch
             {
@@ -1606,6 +2370,395 @@ public class DuckDbInitializer
                 }
             }
         }
+
+        if (fromVersion < 60)
+        {
+            /* v60 (#3540): wait_stats, file_io_stats, latch_stats and spinlock_stats gain sample_interval_seconds
+               — the measured seconds each row's deltas accrued over, twinning Darling's V127. The shared delta
+               calculator reports (delta 0, interval 0) when no delta is knowable (first sighting, counter
+               reset, a gap past the 3600 s policy) and (0, n) when the interval was genuinely idle, and the
+               interval is the ONLY thing that tells those apart. These four collectors discarded it at the
+               write, so a restart's fabricated zero survived as a measured one and every per-second reader
+               LAG-divided it into a confident 0.00 ms/sec. perfmon_stats and query_stats have carried the
+               column from the start; this gives the other four the same column in the same type.
+
+               Appended at the end of each PayloadColumns list, so the positional appender and old parquet
+               are unaffected. Nothing to backfill and nothing that COULD be: a row collected before the
+               upgrade never recorded its interval, so NULL is the honest value — the readers treat NULL as
+               "pre-v60, derive the interval from the previous collection_time" (exactly what they always
+               did) and 0 as "unknowable, render nothing". A backfilled 0 would stamp all of history as
+               unknowable and blank every rate chart for 30 days.
+
+               REQUIRED on this side even though Lite collects the same DMVs Darling does: the appender writes
+               one value per declared payload column, so a database without the column fails EndRow() on the
+               first batch of any of these four collectors — the whole batch, not the column. Fresh installs
+               get it from DuckDbSchemaGenerator; this ALTER is for an existing database and is idempotent.
+               The v_ passthrough views need no work here: Lite rebuilds every v_ view on start
+               (CreateArchiveViewsAsync, called after this), which is the difference from Darling, where the
+               view's SELECT * column list is frozen at CREATE and the rung has to refresh it.
+
+               Non-fatal per table, matching v59's posture. */
+            _logger?.LogInformation("Running migration to v60: the four naked delta families gain sample_interval_seconds");
+
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(60));
+        }
+
+        if (fromVersion < 61)
+        {
+            /* v61 (#3540): the completion of v60, twinning Darling's V128. procedure_stats and
+               memory_grant_stats gain sample_interval_seconds — the measured seconds each row's deltas
+               accrued over — so EVERY delta family Lite stores now carries the interval, and the shared
+               calculator's (delta 0, interval 0) "no delta knowable" marker survives every family's write.
+               These two took the calculator's bare long and discarded the interval, so a restart's
+               fabricated zero read as a measured idle one: the procedure duration trend LAG-divided it into
+               a confident 0.00 ms/sec, and a memory-grant row's 0 timeouts over a restart read as a quiet
+               semaphore. Darling's V128 also dresses pg_wait_stats and pg_statement_stats; Lite stores no
+               pg_* tables (DuckDbSchemaGenerator.StoredCollectors), so this side has only the two.
+
+               query_stats gains statement_start_offset and statement_end_offset — the two halves of its
+               delta key (sql_handle:start:end:plan_handle) the store never persisted, so the restart seed
+               could restore this family's pass window but not one baseline (#3614 named it as the residual).
+               Their semantics, stated here because this is where the next reader will look: they are
+               sys.dm_exec_query_stats' own columns, the statement's position inside its batch text in BYTES
+               of the nvarchar text, not characters — a character slice divides by two, which is the
+               collector's SUBSTRING(st.text, (statement_start_offset / 2) + 1, ...) — and
+               statement_end_offset = -1 means "to the end of the batch" ((0, -1) is the whole batch). They
+               are stored VERBATIM as the DMV reports them, -1 included and never normalized to a length,
+               because the collector's key is built over the raw ints and the seed has to spell the same
+               string byte for byte (DeltaCalculator.QueryStatsSeedSql).
+
+               All three appended at the end of their PayloadColumns lists, so the positional appender and
+               old parquet are unaffected. Nothing to backfill and nothing that COULD be: a row collected
+               before the upgrade never recorded its interval or its offsets, so NULL is the honest value —
+               the readers treat a NULL interval as "pre-v61, derive from the previous collection_time"
+               (exactly what they always did) and 0 as "unknowable, render nothing"; the seed treats NULL
+               offsets as "no key can be rebuilt from this row" and still takes its collection time for the
+               pass window. A backfilled 0 interval would stamp all of history unknowable and blank every
+               procedure rate chart for 30 days; a backfilled 0/-1 offset pair would seed baselines under a
+               key nothing will ever present.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without these columns fails EndRow() on the first batch of either
+               collector — the whole batch, not the column. Fresh installs get them from
+               DuckDbSchemaGenerator; these ALTERs are for an existing database and are idempotent. The v_
+               passthrough views need no work here: Lite rebuilds every v_ view on start
+               (CreateArchiveViewsAsync, called after this). Non-fatal per statement, matching v59/v60. */
+            _logger?.LogInformation("Running migration to v61: every delta family stores its interval, and query_stats stores the statement offsets its delta key is made of");
+
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(61));
+        }
+
+        if (fromVersion < 62)
+        {
+            /* v62 (#3653 A7): perfmon_stats gains cntr_type — the Windows performance-counter type id
+               sys.dm_os_performance_counters reports for every row, twinning Darling's V132. Until now the
+               store could not say which of its perfmon rows were COUNTS and which were LEVELS, so the
+               collector differenced every counter it read: Total Server Memory (KB) exactly like Batch
+               Requests/sec, and a target that released memory — a falling level — read to the shared delta
+               calculator as a counter reset, storing the (0, 0) "no delta knowable" marker at exactly the
+               moment the drop mattered. With the type stored the collector writes a gauge (65792,
+               PERF_COUNTER_LARGE_RAWCOUNT) as its raw value with NULL delta and NULL interval — NULL, not
+               (0, 0), because 0 is a claim about a delta and a gauge has none — and a rate (272696576,
+               PERF_COUNTER_BULK_COUNT) exactly as before; the readers classify by the stored type through
+               PerformanceMonitor.Common.PerfmonCounterTypes and fall back to #3702's name-suffix proxy only
+               for a NULL type.
+
+               Appended at the end of the PayloadColumns list, so the positional appender and old parquet are
+               unaffected. Nothing to backfill and nothing that COULD be: a row collected before the upgrade
+               never recorded its type, the store holds no way to recover one from a name, and NULL is the
+               honest value — the readers treat it as "classify as you did before the rung", so history
+               renders as the operator last saw it. Because a counter's type does not change, the viewers take
+               any row's non-null type as the series' type, so a gauge's whole history plots as a level the
+               morning after the upgrade (its pre-rung rows stored cntr_value all along).
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the column fails EndRow() on the first perfmon batch — the
+               whole batch, not the column. Fresh installs get it from DuckDbSchemaGenerator; this ALTER is
+               for an existing database and is idempotent. The v_ passthrough view needs no work here: Lite
+               rebuilds every v_ view on start (CreateArchiveViewsAsync, called after this). Non-fatal,
+               matching v59/v60/v61. */
+            _logger?.LogInformation("Running migration to v62: perfmon_stats stores each counter's type, so gauges are no longer differenced");
+
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(62));
+        }
+
+        if (fromVersion < 63)
+        {
+            /* v63 (#3653 item 13, rulings Q7 + Q8 — the "time honesty" rung, twinning Darling's V134): two
+               nullable columns that let the store say WHICH clock two of its values are in.
+
+               cpu_utilization_stats gains sample_time_utc. sample_time is, and stays, the MONITORED SERVER'S
+               LOCAL wall clock (SYSDATETIME() minus each ring-buffer entry's age) — the one column in this
+               store that is not naive UTC, by a documented convention: the CPU chart plots it in the
+               server's own frame, and it is the collector's watermark. Every read that windows it against a
+               UTC instant therefore had to DERIVE the UTC value, and this side derived it by shifting the
+               whole window by the single utc_offset_minutes the store holds NOW (GetTimeRangeServerLocal):
+               exact while every sample and the collected offset sit on the same side of a DST transition,
+               an hour wrong for every sample on the far side, silently and in the plausible direction. The
+               collector now writes sample_time_utc beside it — the SAME instant, the same DATEADD arithmetic
+               anchored on SYSUTCDATETIME() (on Azure SQL DB it is end_time, which is UTC and which
+               sample_time already reads, because Azure's clock IS UTC) — and GetCpuUtilizationAsync windowed
+               on COALESCE(sample_time_utc, sample_time - the offset) against UTC bounds, so a post-rung row
+               was selected by a stored UTC instant and a pre-rung row exactly as before. Since #4766 a
+               pre-rung row is compared on its local sample_time against the window's server-local bounds
+               instead, so no single offset applies to a window that spans a DST change. The projected value
+               stays sample_time: the chart wants the server's frame, and the local stamp IS that frame with
+               no offset applied at all.
+
+               server_properties gains time_zone_id beside utc_offset_minutes (v42). The offset is
+               DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) — the one IN FORCE at collection — and #3231
+               documented that subtracting it from a stored instant that can outlive a DST transition
+               (get_index_usage's last_user_access, the PVS cleaner stamps) is exact on one side and an hour
+               wrong on the other, with nothing in the store able to say which. A ZONE can, because AT TIME
+               ZONE applies the rule in force at the instant. CURRENT_TIMEZONE_ID() exists on SQL Server
+               2022+ and Azure SQL only, and on an older engine it is a missing BUILT-IN rather than a missing
+               object — the batch fails to compile — so the collector reads it in its own gated sp_executesql
+               batch inside TRY/CATCH and writes NULL where the engine cannot say. NULL is a real and common
+               value: "pre-2022 engine, only the offset is known", and get_server_properties says so. The
+               offset stays alongside rather than being replaced, because every de-skew in the tree still
+               runs on it and the zone is NULL on most of today's fleet.
+
+               Both appended at the end of their PayloadColumns lists, so the positional appender and old
+               parquet are unaffected (v_ views UNION ALL BY NAME the parquet with union_by_name, so an
+               archived file without the column reads NULL through the view). Nothing to backfill and nothing
+               that COULD be: a pre-rung sample_time could be converted only by the offset its server had AT
+               THAT INSTANT, which is exactly what the store never recorded — the collected offset and the
+               derivation are the DST-blind instruments this column replaces, so a backfilled value would be
+               the old lie written into the new column where a reader could no longer tell it from a
+               measurement; and no zone can be recovered from an offset, since several zones share every one.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the column fails EndRow() on the first CPU batch and the first
+               server_properties batch — the whole batch, not the column. Fresh installs get both from
+               DuckDbSchemaGenerator; these ALTERs are for an existing database and are idempotent. The v_
+               passthrough views need no work here: Lite rebuilds every v_ view on start
+               (CreateArchiveViewsAsync, called after this). Non-fatal per statement, matching v59–v62. */
+            _logger?.LogInformation("Running migration to v63: cpu_utilization_stats stores each sample's UTC instant beside the server-local one, and server_properties stores the engine's time-zone id beside its offset");
+
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(63));
+        }
+
+        if (fromVersion < 64)
+        {
+            /* v64 (#3796, twinning Darling's V137): query_store_health gains the two Query Store CAPTURE modes,
+               query_capture_mode and wait_stats_capture_mode — the sys.database_query_store_options columns
+               the shared collector read around. The health row stored every option that says whether Query
+               Store WORKS (actual vs desired state, the cap, the cleanup thresholds) and none that says what it
+               CAPTURES, and QUERY_CAPTURE_MODE = ALL on an ad-hoc workload is the one setting that turns Query
+               Store into a plan-churn factory: measured on one production store class, ~755 k new distinct
+               plans a day from 42 servers, with the other three knobs uniform across the fleet. The row could
+               not say whether ALL was the cause because it never asked. Both are stored as the DMV's *_desc
+               spelling verbatim (ALL / AUTO / CUSTOM / NONE; ON / OFF).
+
+               ONE of the two is version-gated on the collector side, and this store must expect the NULL it
+               produces: query_capture_mode_desc shipped with the view in 2016 and is always selected, but
+               wait_stats_capture_mode_desc arrived in SQL Server 2017 (v14), and on a 2016 engine a body that
+               names it fails to compile for the whole database. QueryStoreHealthCollector.HasWaitStatsCaptureMode
+               (the DatabaseConfigCollector idiom) leaves the column out of the SELECT there and the row stores
+               NULL, which a reader publishes as "engine predates the option" — never as OFF. NULL on every
+               pre-v64 row means "never asked", for both columns.
+
+               Appended at the end of the PayloadColumns list, so the positional appender and old parquet are
+               unaffected (v_ views UNION ALL BY NAME the parquet with union_by_name, so an archived file
+               without the columns reads NULL through the view). Nothing to backfill and nothing that COULD
+               be: a row collected before the upgrade never asked the engine, and the store holds no way to
+               recover a capture mode from the other nine options.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the columns fails EndRow() on the first query_store_health batch
+               — the whole batch, not the column. Fresh installs get both from DuckDbSchemaGenerator; these
+               ALTERs are for an existing database and are idempotent. The v_ passthrough view needs no work
+               here: Lite rebuilds every v_ view on start (CreateArchiveViewsAsync, called after this).
+               Non-fatal per statement, matching v59–v63. Nothing on this side reads either column yet; the
+               Query Store clutter view (#3797) is the consumer. */
+            _logger?.LogInformation("Running migration to v64: query_store_health stores each database's Query Store capture modes, so plan churn can be told apart from configuration");
+
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(64));
+        }
+
+        if (fromVersion < 65)
+        {
+            /* v65 (#4475, twinning Darling's V151): ag_replica_states and ag_database_replica_states gain
+               group_id — the GUID sys.availability_groups.group_id the engine stamps identically on every
+               replica of one Availability Group, stored as text (the collector column vocabulary has no uuid
+               type; AgDatabaseReplicaStatesCollector's last_hardened_lsn/last_commit_lsn already store a wide
+               identifier the same way). AgTopology.CountDistinctGroups uses it to close the one gap the
+               name-plus-replica-overlap rule (#4475) could not: two monitored SECONDARIES of one AG, with its
+               primary unmonitored, share no replica name with each other and so counted as two groups. A row
+               carrying group_id groups by it exactly; a row from before this rung carries none and falls back
+               to the pre-#4475 name + overlap rule.
+
+               Appended at the end of each PayloadColumns list, so the positional appender and old parquet are
+               unaffected. Nothing to backfill and nothing that COULD be: a row collected before the upgrade
+               never asked the engine for its AG's group_id, and NULL is the honest value — a reader treats it
+               as "fall back to the pre-#4475 rule", exactly today's behavior.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the column fails EndRow() on the first AG-collector batch — the
+               whole batch, not the column. Fresh installs get both from DuckDbSchemaGenerator (the AG tables
+               are generated from the shared collector catalog, not hand-written here); these ALTERs are for
+               an existing database and are idempotent. Neither AG table has ever had a v_ passthrough view
+               (view-less since Darling's V34 twin), so this rung is two ALTERs and nothing else. Non-fatal
+               per statement, matching v59–v64. */
+            _logger?.LogInformation("Running migration to v65: ag_replica_states and ag_database_replica_states store each Availability Group's engine-assigned id, closing a replica-name-overlap gap in the distinct-group count");
+
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(65));
+        }
+
+        if (fromVersion < 66)
+        {
+            /* v66 (#4765, twinning Darling's V155): query_store_stats gains interval_end_time_utc — when the
+               Query Store interval a row belongs to ENDED, the counterpart of v49's interval_start_time_utc.
+               A rate divides an interval's totals by the interval's length, and until now the only length
+               available was the time since the previous STORED interval; Query Store stores no row for an
+               interval with no executions, so an interval that follows a quiet one divided by the gap plus its
+               own length and read too low. End minus start is the interval's own length. This step only stores
+               the end; the reads that turn it into a rate change separately.
+
+               Appended at the end of QueryStoreCollector.PayloadColumns, so the positional appender and old
+               parquet are unaffected. Nothing to backfill and nothing that COULD be: a row collected before
+               the upgrade never asked the engine for the end, and NULL is the honest value — a reader treats
+               it as "fall back to the previous-interval gap", exactly what it did before.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the column fails EndRow() on the first Query Store batch — the
+               whole batch, not the column. Fresh installs get it from DuckDbSchemaGenerator; this ALTER is
+               for an existing database and is idempotent. The v_ passthrough view needs no work here: Lite
+               rebuilds every v_ view on start (CreateArchiveViewsAsync, called after this). Non-fatal per
+               statement, matching v59–v65. */
+            _logger?.LogInformation("Running migration to v66: query_store_stats stores when each Query Store interval ended, so a rate can divide by the interval's own length");
+
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(66));
+        }
+
+        if (fromVersion < 67)
+        {
+            /* v67: drop NOT NULL from database_size_stats.total_size_mb. On Azure SQL Database Hyperscale the
+                    LOG file lives in the log service: sys.database_files sizes it at about 1 TB, which is not
+                    storage the database holds or pays for (Hyperscale bills allocated DATA storage). The
+                    collector now stores NULL for that one row, every reader shows it as n/a (log service), and
+                    it stays out of every allocated total. An existing database has to have the constraint
+                    dropped or the appender fails that row and the whole batch with it. New databases get it
+                    from the generator; Darling's Postgres store always held the column nullable. Column type
+                    and ordinal are unchanged, so the positional appender and old parquet are unaffected.
+                    Nothing to backfill: rows collected before the upgrade keep the size the engine reported,
+                    and NULL is the honest value only for rows collected from here on. */
+            _logger?.LogInformation("Running migration to v67: database_size_stats.total_size_mb becomes nullable (Hyperscale log file)");
+
+            /* Same trap as v48 (#2748) and v57: DuckDB's ALTER COLUMN refuses on a table with ANY index, even
+               one naming none of the altered columns. Drop it first; Schema.GetAllIndexStatements()'s loop
+               (called unconditionally right after migrations, inside this same InitializeAsync) recreates it. */
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "DROP INDEX IF EXISTS idx_database_size_stats_time");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v67 could not drop idx_database_size_stats_time ahead of the ALTER (non-fatal, the ALTER below may still fail): {Error}", ex.Message);
+            }
+
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE database_size_stats ALTER COLUMN total_size_mb DROP NOT NULL");
+            }
+            catch (Exception ex)
+            {
+                /* Already nullable, or the table does not exist yet (a fresh install creates it correctly
+                   from the generator) - neither is fatal. */
+                _logger?.LogWarning("Migration to v67 on total_size_mb encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #4727: the 16 columns that schema versions 60 to 66 add to existing tables, in ONE list. Each migration
+    /// step adds its own version's entries (<see cref="AddedColumnsForVersion"/>), and every start of an existing
+    /// file runs the whole list once more after the table and index statements, so a column whose add failed
+    /// during the one start that ran its step, or a file stamped without it, gets it back on the next start.
+    /// A fresh file gets all of them from the table statements. A later version that adds a column to an
+    /// existing table adds its entries here.
+    /// </summary>
+    internal static readonly (int Version, string Table, string Column, string Type)[] AddedColumns =
+    {
+        (60, "wait_stats", "sample_interval_seconds", "INTEGER"),
+        (60, "file_io_stats", "sample_interval_seconds", "INTEGER"),
+        (60, "latch_stats", "sample_interval_seconds", "INTEGER"),
+        (60, "spinlock_stats", "sample_interval_seconds", "INTEGER"),
+        (61, "procedure_stats", "sample_interval_seconds", "INTEGER"),
+        (61, "memory_grant_stats", "sample_interval_seconds", "INTEGER"),
+        (61, "query_stats", "statement_start_offset", "INTEGER"),
+        (61, "query_stats", "statement_end_offset", "INTEGER"),
+        (62, "perfmon_stats", "cntr_type", "INTEGER"),
+        (63, "cpu_utilization_stats", "sample_time_utc", "TIMESTAMP"),
+        (63, "server_properties", "time_zone_id", "VARCHAR"),
+        (64, "query_store_health", "query_capture_mode", "VARCHAR"),
+        (64, "query_store_health", "wait_stats_capture_mode", "VARCHAR"),
+        (65, "ag_replica_states", "group_id", "VARCHAR"),
+        (65, "ag_database_replica_states", "group_id", "VARCHAR"),
+        (66, "query_store_stats", "interval_end_time_utc", "TIMESTAMP"),
+    };
+
+    internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>
+        AddedColumns.Where(c => c.Version == version);
+
+    /// <summary>
+    /// #4727: adds each listed column its table lacks, one idempotent <c>ADD COLUMN IF NOT EXISTS</c> per
+    /// missing column. The migration steps for versions 60 to 66 call it over their own entries, and
+    /// <see cref="InitializeCoreAsync"/> calls it over <see cref="AddedColumns"/> on every start of an existing
+    /// file. One read finds which tables and columns exist, so a start where nothing is missing runs no ALTER,
+    /// and a table that does not exist yet (a file older than the table: the table statements that follow
+    /// create it with the column) is skipped rather than reported as a failure. ADD COLUMN goes through on a
+    /// table that has an index or a v_ view over it (checked against the bundled DuckDB); only DROP COLUMN and
+    /// ALTER COLUMN hit the Dependency Error, so no index has to be dropped first. A column that still cannot be
+    /// added logs one Error naming the table and column and the loop moves on, so the start continues and the
+    /// next start retries it.
+    /// </summary>
+    internal async Task AddMissingColumnsAsync(DuckDBConnection connection, IEnumerable<(int Version, string Table, string Column, string Type)> columns)
+    {
+        var wanted = columns.ToList();
+        if (wanted.Count == 0)
+            return;
+
+        var tablesPresent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var columnsPresent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var probe = connection.CreateCommand();
+            probe.CommandText = "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'main' AND table_name IN ("
+                + string.Join(", ", wanted.Select(c => $"'{c.Table}'").Distinct()) + ")";
+            using var reader = await probe.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                tablesPresent.Add(reader.GetString(0));
+                columnsPresent.Add(reader.GetString(0) + "." + reader.GetString(1));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not read which columns exist, so the check for missing schema columns was skipped; the next start retries it: {Error}", ex.Message);
+            return;
+        }
+
+        foreach (var (version, table, column, type) in wanted)
+        {
+            if (!tablesPresent.Contains(table) || columnsPresent.Contains(table + "." + column))
+                continue;
+
+            try
+            {
+                /* Not ExecuteNonQueryAsync: that helper logs its own Error with the whole statement before it
+                   rethrows, and a failed add must log exactly ONE Error, the one below that names the column. */
+                using var alter = connection.CreateCommand();
+                alter.CommandText = $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}";
+                await alter.ExecuteNonQueryAsync();
+                _logger?.LogInformation("Added missing column {Table}.{Column} {Type} (schema v{Version})", table, column, type, version);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Adding column {Table}.{Column} {Type} (schema v{Version}) failed; the start continues and the next start retries it: {Error}",
+                    table, column, type, version, ex.Message);
+            }
+        }
     }
 
     /// <summary>
@@ -1674,9 +2827,66 @@ public class DuckDbInitializer
     /// <summary>
     /// Creates or refreshes views that UNION hot DuckDB tables with archived parquet files.
     /// Call at startup and after each archive cycle so newly archived data is queryable.
+    ///
+    /// <para>Takes the READ lock (#4262 round 1 finding 3). <c>ArchiveService</c> and
+    /// <c>DataImportService</c> call this with no lock of their own, and now that the sentinel pins one
+    /// native handle open per connection string, a connection this method opened could outlive a
+    /// concurrent <see cref="ResetDatabaseAsync"/> — keeping the pre-reset instance alive so the reopened
+    /// sentinel attached to the OLD handle instead of the fresh file. The read lock makes
+    /// <see cref="ResetDatabaseAsync"/>'s write lock wait for this connection to close first, same as
+    /// every other reader. A caller that already holds the write lock (<see cref="InitializeCoreAsync"/>,
+    /// and <c>QueryStoreSliceRepairService.PromoteRewrittenFileAsync</c>) must call
+    /// <see cref="CreateArchiveViewsCoreAsync"/> directly instead — <see cref="s_dbLock"/> is
+    /// <see cref="LockRecursionPolicy.NoRecursion"/>, so entering the read lock here would throw for
+    /// them; <see cref="AcquireReadLock()"/>'s recursion catch backstops any caller that does not.</para>
     /// </summary>
     public async Task CreateArchiveViewsAsync()
     {
+        using var readLock = AcquireReadLock();
+        await CreateArchiveViewsCoreAsync();
+    }
+
+    /* Test seam (#4720): invoked at the start of every archive-view rebuild, before the connection opens.
+       A test records IsWriteLockHeldForTests in it to see whether the rebuild holds the write lock, or throws
+       from it to stand in for a rebuild that fails. */
+    internal Action? OnArchiveViewRebuildForTests { get; set; }
+
+    /// <summary>
+    /// The lock-free body of <see cref="CreateArchiveViewsAsync"/> (#4262 round 1 finding 3), split out so
+    /// a caller that already holds the write lock can call it directly rather than nesting a read lock —
+    /// <see cref="InitializeCoreAsync"/> (already under the write lock via <see cref="InitializeAsync"/> or
+    /// <see cref="ResetDatabaseAsync"/>) and <c>QueryStoreSliceRepairService.PromoteRewrittenFileAsync</c>
+    /// (already under the write lock its caller takes for the file swap) both do.
+    /// </summary>
+    internal async Task CreateArchiveViewsCoreAsync()
+    {
+        await CreateArchiveViewsBodyAsync();
+
+        /* Bumped only after every view is (re)built without an exception escaping, so a watermark cached
+           from the previous view definitions is never reused against the new ones. */
+        BumpArchiveViewGeneration();
+    }
+
+    /// <summary>Invalidates every cached archive watermark: callers that remove rows from a live table bump this inside the write lock.</summary>
+    internal void BumpArchiveViewGeneration() => Interlocked.Increment(ref _archiveViewGeneration);
+
+    private long _archiveViewGeneration;
+
+    /// <summary>
+    /// A counter that goes up by one each time <see cref="CreateArchiveViewsCoreAsync"/> finishes, which
+    /// runs after the 512 MB archive-and-reset and after periodic archival. The watermark reads in
+    /// <c>RemoteCollectorService</c> cache what the <c>v_{table}</c> archive views return, and a cached
+    /// value is valid only for the generation it was read in: parquet files move and views are rebuilt
+    /// exactly when this number changes.
+    /// </summary>
+    internal long ArchiveViewGeneration => Interlocked.Read(ref _archiveViewGeneration);
+
+    private async Task CreateArchiveViewsBodyAsync()
+    {
+        /* Runs before anything else, on the caller's thread: a test reads the lock state here, or throws to
+           stand in for a rebuild that fails (#4720). Production leaves it null. */
+        OnArchiveViewRebuildForTests?.Invoke();
+
         using var connection = CreateConnection();
         await connection.OpenAsync();
 
@@ -1694,22 +2904,22 @@ public class DuckDbInitializer
 
         foreach (var table in ArchivableTables)
         {
+            var hasParquetFiles = false;
             try
             {
-                var parquetGlob = Path.Combine(_archivePath, $"*_{table}.parquet");
-                var hasParquetFiles = Directory.Exists(_archivePath)
-                    && Directory.GetFiles(_archivePath, $"*_{table}.parquet").Length > 0;
+                var parquetGlobs = ArchiveParquetGlobs(table);
+                hasParquetFiles = parquetGlobs.Count > 0;
 
                 string viewSql;
                 if (hasParquetFiles)
                 {
-                    var globPath = EscapeSqlPath(parquetGlob.Replace("\\", "/"));
+                    var parquetSource = ParquetSourceSql(parquetGlobs);
                     if (table == "config_alert_log")
                     {
                         viewSql = $@"CREATE OR REPLACE VIEW v_{table} AS
 SELECT *, 'live' AS source FROM {table}
 UNION ALL BY NAME
-SELECT *, 'archive' AS source FROM read_parquet('{globPath}', union_by_name=true) p
+SELECT *, 'archive' AS source FROM read_parquet({parquetSource}, union_by_name=true) p
 WHERE NOT EXISTS (
     SELECT 1 FROM dismissed_archive_alerts d
     WHERE d.alert_time = p.alert_time
@@ -1729,13 +2939,13 @@ FROM
 (
     SELECT * FROM {table}
     UNION ALL BY NAME
-    SELECT * FROM read_parquet('{globPath}', union_by_name=true)
+    SELECT * FROM read_parquet({parquetSource}, union_by_name=true)
 )
-QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC) = 1";
+QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(ArchiveViewDedupKeepsEarliest.Contains(table) ? "ASC" : "DESC")}) = 1";
                     }
                     else
                     {
-                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet('{globPath}', union_by_name=true)";
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet({parquetSource}, union_by_name=true)";
                     }
                 }
                 else
@@ -1762,6 +2972,13 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
                     else
                         fallbackCmd.CommandText = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
                     await fallbackCmd.ExecuteNonQueryAsync();
+
+                    if (hasParquetFiles)
+                    {
+                        _logger?.LogWarning(
+                            "Archive view v_{Table} was built table-only while parquet files exist for it: archived rows are invisible to queries and to the collectors' watermark fallback until the view is rebuilt",
+                            table);
+                    }
                 }
                 catch (Exception fallbackEx)
                 {
@@ -1801,9 +3018,11 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
             await ExecuteNonQueryAsync(connection, tableStatement);
         }
 
+        /* On an existing file, an index that cannot be created logs an Error and the start continues: the index
+           repair at the open can drop an index that then cannot be built again (see CreateDeclaredIndexAsync). */
         foreach (var indexStatement in AnalysisSchema.GetAllIndexStatements())
         {
-            await ExecuteNonQueryAsync(connection, indexStatement);
+            await CreateDeclaredIndexAsync(connection, indexStatement, existingFile: _openedExistingFile);
         }
 
         if (existingVersion < AnalysisSchema.CurrentVersion)
@@ -1903,21 +3122,54 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
     /// <summary>
     /// Deletes the database and WAL files, then reinitializes with fresh empty tables
     /// and archive views pointing at the parquet files.
-    /// Acquires its own write lock — caller must NOT already hold the lock.
+    /// Acquires its own write lock — caller must NOT already hold the lock. A caller that has to promote
+    /// archive files, clear the tables and restore the preserved config rows under one lock (#4824) holds the
+    /// write lock itself and calls <see cref="ResetDatabaseCoreAsync"/>.
     /// </summary>
     public async Task ResetDatabaseAsync()
     {
         using var writeLock = AcquireWriteLock();
+        await ResetDatabaseCoreAsync();
+    }
 
-        if (File.Exists(_databasePath))
-            File.Delete(_databasePath);
+    /// <summary>
+    /// The lock-free body of <see cref="ResetDatabaseAsync"/> (#4824), split out the way
+    /// <see cref="CreateArchiveViewsCoreAsync"/> is: <see cref="ArchiveService"/> promotes the archive files of a
+    /// reset, clears the tables and puts the preserved config rows back under one write lock. An archive view
+    /// reads a promoted file through its glob at once, so a reader between the promote and the clearing would
+    /// count every row in the table and in the file; and the tables are empty from the clearing until their
+    /// rows are back, so a reader in that gap would read no config. Takes no lock of its own — every caller must
+    /// already hold the write lock, and <see cref="s_dbLock"/> does not nest.
+    /// </summary>
+    internal async Task ResetDatabaseCoreAsync()
+    {
+        /* Close the sentinel BEFORE deleting the file (#4262). Left open, DuckDB.NET would hand the
+           reinitialized database's own connections — and every other caller's CreateConnection() after
+           this returns — the SAME cached native handle this held, so the delete below would be invisible
+           to them: a "fresh" connection would keep reading the rows this was about to remove. */
+        ReleaseSentinel();
 
+        /* The WAL goes first. The caller ran a CHECKPOINT before this, so the WAL holds nothing the database
+           file lacks; a crash between the two deletes leaves a complete database file with its identity
+           unchanged, which startup recovery handles exactly. Database first would leave a WAL beside a
+           missing file. */
         var walPath = _databasePath + ".wal";
         if (File.Exists(walPath))
             File.Delete(walPath);
 
+        if (File.Exists(_databasePath))
+            File.Delete(_databasePath);
+
+        AfterDatabaseFilesDeletedForTests?.Invoke();
         _logger?.LogInformation("Database files deleted, reinitializing");
-        await InitializeAsync();
+
+        /* InitializeCoreAsync, not InitializeAsync: this thread already holds the write lock (the caller's), and
+           InitializeAsync would try to take it again and throw (NoRecursion). */
+        await InitializeCoreAsync();
+
+        /* Reopen only once the fresh tables exist and archive views/analysis schema are rebuilt, and
+           still under the caller's write lock — the same ordering InitializeAsync uses. */
+        ReopenSentinel();
     }
 
     /// <summary>
@@ -1925,4 +3177,42 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
     /// DuckDB does not support parameterized paths in read_parquet() or COPY TO.
     /// </summary>
     internal static string EscapeSqlPath(string path) => path.Replace("'", "''");
+
+    /// <summary>
+    /// The globs an archive view reads a table's parquet files through, in DuckDB path form, limited to the
+    /// ones that match a file right now. Two shapes exist on disk: <c>{prefix}_{table}.parquet</c> (per-cycle,
+    /// monthly and imported files) and <c>{month}_{table}_ptNNN.parquet</c>, the part files compaction writes
+    /// when a month is too large for one merge; the first glob does not match the second shape. A glob that
+    /// matches nothing fails <c>read_parquet</c> at bind, which is why each is included only while it matches.
+    /// Views keep globs rather than a file list so files that arrive (hourly archival, an import) or leave
+    /// (retention) between refreshes are seen without one.
+    /// </summary>
+    internal List<string> ArchiveParquetGlobs(string table)
+    {
+        var globs = new List<string>();
+        if (!Directory.Exists(_archivePath))
+        {
+            return globs;
+        }
+
+        /* MatchType.Simple: '?' is exactly one character, as it is in DuckDB's glob. The default Win32
+           matching lets a run of '?' match fewer characters before the extension, which would include the
+           part glob for a name DuckDB's glob then does not match. */
+        var exact = new EnumerationOptions { MatchType = MatchType.Simple, MatchCasing = MatchCasing.CaseInsensitive, AttributesToSkip = 0 };
+        foreach (var pattern in new[] { $"*_{table}.parquet", $"*_{table}_pt???.parquet" })
+        {
+            if (Directory.EnumerateFiles(_archivePath, pattern, exact).Any())
+            {
+                globs.Add(Path.Combine(_archivePath, pattern).Replace("\\", "/"));
+            }
+        }
+
+        return globs;
+    }
+
+    /* The read_parquet source argument for one or more globs: a quoted string for one, a list for several. */
+    private static string ParquetSourceSql(List<string> globs) =>
+        globs.Count == 1
+            ? $"'{EscapeSqlPath(globs[0])}'"
+            : "[" + string.Join(", ", globs.Select(g => $"'{EscapeSqlPath(g)}'")) + "]";
 }

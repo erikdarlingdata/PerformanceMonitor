@@ -56,6 +56,7 @@ public partial class MainWindow : Window
 
     private ViewerDataService? _dataService;
     private DispatcherTimer? _refreshTimer;
+    private bool _storeUnavailable;
     private DispatcherTimer? _overviewTimer;
     private bool _refreshInFlight;
     private bool _refreshRequested;
@@ -120,6 +121,20 @@ public partial class MainWindow : Window
     /// </summary>
     private AlertToastCoordinator? _toastCoordinator;
     private bool _alertPollInFlight;
+
+    /// <summary>
+    /// The mute rules as THIS viewer knows them (#3570): the enabled, unexpired rules from its latest read of
+    /// <c>config_mute_rules</c> (<see cref="UpdateServerSilencedAsync"/>, once per alert poll — the same read
+    /// that drives the sidebar's muted-bell), plus any rule this viewer has itself just written and not yet
+    /// re-read (a tray Snooze, a server Silence). Fed to <see cref="AlertToastCoordinator.SelectToasts"/> so
+    /// the tray honors a rule the moment the viewer holds it, instead of waiting for the service to reload its
+    /// own cache and stamp the next row <c>muted</c>.
+    ///
+    /// <para>Keep-last-known on a failed read, deliberately: a store blip must not un-mute the tray for a tick
+    /// any more than <see cref="MuteRuleService.LoadAsync"/> lets one un-mute the service (#3354). Only the UI
+    /// thread touches it (the poll and the click handlers both run there), so it is a plain list.</para>
+    /// </summary>
+    private List<MuteRule> _viewerMuteRules = new();
 
     /// <summary>
     /// Restores the window from the tray if a sleep-/lock-driven minimize hid it (Lite #1050). Reachable now
@@ -192,8 +207,9 @@ public partial class MainWindow : Window
         /* Seed the persisted app settings the viewer honors at runtime BEFORE any tab/chart renders: the CSV
            export separator (grid exports) and the Server/Local/UTC time-display mode (every timestamp render
            routes through ViewerTimeHelper, which reads CurrentDisplayMode). UiTimeContext is deliberately left
-           at its identity default — Darling charts pre-convert their X through ForDisplay, so wiring it would
-           double-convert on hover/crosshair. */
+           at its identity default — Darling charts plot the naive-UTC instant as X and hand their hover, crosshair
+           and tick labels ViewerTimeHelper.CurrentDisplayZone (#4766), so those labels never take the UiTimeContext
+           path, and wiring it would put a second conversion on any label that did. */
         var appSettings = _appSettingsStore.Load();
         NoteUnreadableSettingsFile(_appSettingsStore.FilePath, _appSettingsStore.LastLoadState, _appSettingsStore.LastLoadProblem,
             _appSettingsStore.LastLoadUnreadableMembers);
@@ -455,16 +471,23 @@ public partial class MainWindow : Window
 
         /* --open-server <name>: deep-link straight into a server's per-server tab on startup —
            the same tab a double-click opens. Case-insensitive on the registered server name;
-           an unknown name is ignored (the window still opens normally). */
+           an unknown name is ignored (the window still opens normally). A name that several servers
+           answer to opens none of them and says so: databases on one Azure SQL Database server share
+           a host name until the service first connects to each, so the first of them is not the one
+           the caller meant. */
         var openServer = OpenServerNameFromArgs();
         if (openServer is not null)
         {
             /* Against the whole fleet: a deep link must open a server the current filter is hiding. */
-            var match = _fleet.All.FirstOrDefault(s =>
-                string.Equals(s.ServerName, openServer, StringComparison.OrdinalIgnoreCase));
-            if (match is not null)
+            var choice = ViewerArgs.ChooseServerToOpen(ViewerArgs.ServersNamed(_fleet.All, openServer));
+            if (choice.Open is { } toOpen)
             {
-                OpenServerTab(match);
+                OpenServerTab(toOpen);
+            }
+            else if (choice.Ambiguous.Count > 0)
+            {
+                StatusText.Text = $"--open-server '{openServer}' names {choice.Ambiguous.Count} servers "
+                    + $"({string.Join(", ", choice.Ambiguous.Select(ViewerArgs.DescribeServer))}); none was opened.";
             }
         }
 
@@ -518,53 +541,31 @@ public partial class MainWindow : Window
         _overviewTimer.Start();
     }
 
-    /// <summary>
-    /// First non-option command-line argument = explicit config path, mirroring the service
-    /// (option pairs like --open-server &lt;name&gt; are skipped).
-    /// </summary>
+    /// <summary>The explicit config path from the process arguments, by the shared <see cref="ViewerArgs"/> rule.</summary>
     private static string? ExplicitConfigPathFromArgs()
-    {
-        var args = Environment.GetCommandLineArgs();
-        for (var i = 1; i < args.Length; i++)
-        {
-            if (string.Equals(args[i], "--open-server", StringComparison.OrdinalIgnoreCase))
-            {
-                i++; /* Skip the option's value too. */
-                continue;
-            }
-
-            return args[i];
-        }
-
-        return null;
-    }
+        => ViewerArgs.ExplicitConfigPath(Environment.GetCommandLineArgs().Skip(1).ToArray());
 
     /// <summary>The value following --open-server, or null when absent/dangling.</summary>
     private static string? OpenServerNameFromArgs()
-    {
-        var args = Environment.GetCommandLineArgs();
-        for (var i = 1; i < args.Length - 1; i++)
-        {
-            if (string.Equals(args[i], "--open-server", StringComparison.OrdinalIgnoreCase))
-            {
-                return args[i + 1];
-            }
-        }
-
-        return null;
-    }
+        => ViewerArgs.OpenServerName(Environment.GetCommandLineArgs().Skip(1).ToArray());
 
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
+        if (_storeUnavailable)
+        {
+            return;
+        }
+
         /* Refresh the sidebar status dots + the status bar every cycle regardless of the visible tab, so
            freshness stays current even while a per-server tab is up.
 
-           NOT the "cheap pair of single-query reads" this comment used to claim, which is why all three of
+           NOT the "cheap pair of single-query reads" this comment used to claim, which is why all four of
            these are single-flight: RefreshServerStatusAsync is a pair BY ITSELF (the freshness query, then
-           UpdateCollectorHealthTextAsync's collector-health read) and PollAlertsAsync is another (history,
-           then UpdateServerSilencedAsync's mute rules), so this fan-out is FIVE store reads before
-           RefreshVisibleAsync starts — six on the fleets that ship with the AG tab hidden, which is most of
-           them. They run TOGETHER, so each one's deadline has to cover contending with the other five for
+           UpdateCollectorHealthTextAsync's collector-health read), PollAlertsAsync is another (history, then
+           UpdateServerSilencedAsync's mute rules) and SyncServerSetAsync is a third (the config list
+           read's seeded check, then the list), so this fan-out is SEVEN store reads before
+           RefreshVisibleAsync starts — eight on the fleets that ship with the AG tab hidden, which is most of
+           them. They run TOGETHER, so each one's deadline has to cover contending with the other seven for
            the ten-connection pool rather than a solo read's — hence the declared width, on an interval an
            operator can set to 10s. The deadline bounds how long one of them holds a permit and the guards are
            what stop ticks from stacking.
@@ -573,11 +574,11 @@ public partial class MainWindow : Window
            once. ViewerCommandTimeoutTests can only scan the WhenAll shape, so this site and the connect-path
            pair below are the two the width is declared on by hand.
 
-           The scope deliberately runs to the end of the tick rather than closing after the three starts: the
+           The scope deliberately runs to the end of the tick rather than closing after the four starts: the
            visible-tab load below begins while these are still in flight, so it really is contending with
            them, and a tab load that declares its own fan-out nests to the pool ceiling — which is the width
            the concurrent measurement actually covers. */
-        using var readFanOut = ViewerReadFanOut.Of(6);
+        using var readFanOut = ViewerReadFanOut.Of(8);
 
         _ = RefreshServerStatusAsync();
         _ = RefreshStoreSizeAsync();
@@ -585,6 +586,11 @@ public partial class MainWindow : Window
         /* Poll alert history once, regardless of the visible tab: refresh the per-server "needs attention"
            badges (sidebar + open tabs) and surface genuinely-new rows as tray toasts. */
         _ = PollAlertsAsync();
+
+        /* Pick up servers added or removed outside this window — another viewer, the web viewer, the MCP add
+           and remove tools — regardless of the visible tab. Reloads the server list only when the registry's
+           set of server ids differs from the one loaded here; an unchanged set does nothing. */
+        _ = SyncServerSetAsync();
 
         /* Probe for Availability Groups while the tab is still hidden, so standing an AG up reveals it without
            a restart. Converge-then-stop: once revealed this does nothing and the tab refreshes through the
@@ -594,12 +600,21 @@ public partial class MainWindow : Window
             _ = RefreshAvailabilityGroupsAsync();
         }
 
-        /* Two tabs opt out of this timer: Recommendations refreshes on tab-activation only (matching Lite —
+        /* Four tabs opt out of this timer: Recommendations refreshes on tab-activation only (matching Lite —
            analysis findings change on the service's 30-minute cadence, so an interval auto-refresh is pointless
-           churn and would reset the incident expanders' state under the reader), and the Overview has its OWN
-           timer, so this one skips it (they'd otherwise double-refresh the same grid). Every other aggregate tab
-           still auto-refreshes. */
+           churn and would reset the incident expanders' state under the reader); Job History (#4229) refreshes
+           on tab-activation and its own Refresh button ONLY — job history changes at job-run cadence, not every
+           NocRefreshIntervalSeconds, and polling the whole fleet tab re-ran its costliest read (the per-job
+           success average/max join over the window's newest 2,000 rows) for a grid that had not moved since the
+           last poll; FinOps (#4227) refreshes on tab-activation, its own sub-tab switch and its own Refresh
+           button ONLY — every figure on it moves hourly at the fastest (utilization) or daily (sizes, inventory,
+           growth), so polling the whole aggregate tab every NocRefreshIntervalSeconds re-ran its costliest reads
+           (including the raw query_stats top-consumer grids and the object-growth bounds scan) for numbers that
+           had not moved since the last poll; and the Overview has its OWN timer, so this one skips it (they'd
+           otherwise double-refresh the same grid). Every other aggregate tab still auto-refreshes. */
         if (ReferenceEquals(MainTabs.SelectedItem, RecommendationsTab)
+            || ReferenceEquals(MainTabs.SelectedItem, JobHistoryTabItem)
+            || ReferenceEquals(MainTabs.SelectedItem, FinOpsTab)
             || ReferenceEquals(MainTabs.SelectedItem, OverviewTab))
         {
             return;
@@ -699,14 +714,18 @@ public partial class MainWindow : Window
             /* Per-server badges: always, independent of the toast master switch. */
             UpdateServerAttention(rows);
 
-            /* The sidebar's muted-bell (#2031): same cadence, its own small read (mute rules, not history). */
+            /* The sidebar's muted-bell (#2031): same cadence, its own small read (mute rules, not history). The
+               same read refreshes _viewerMuteRules for the toast filter below (#3570), so it MUST run before
+               SelectToasts: a rule written from another seat, over MCP, or by this viewer's own dialogs reaches
+               the tray on the poll that reads it. */
             await UpdateServerSilencedAsync();
 
-            /* Tray toasts: only when notifications are enabled and the tray exists. */
+            /* Tray toasts: only when notifications are enabled and the tray exists. The viewer's own rule set
+               rides along so a snoozed/silenced condition stops toasting NOW, not after the service's reload. */
             if (_alertsEnabled && _trayService is not null)
             {
                 var cooldown = TimeSpan.FromMinutes(Math.Max(0, _alertCooldownMinutes));
-                foreach (var row in _toastCoordinator.SelectToasts(rows, DateTime.UtcNow, cooldown))
+                foreach (var row in _toastCoordinator.SelectToasts(rows, DateTime.UtcNow, cooldown, _viewerMuteRules))
                 {
                     ShowAlertToast(row);
                 }
@@ -747,10 +766,12 @@ public partial class MainWindow : Window
             : Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning;
 
         /* Capture the identity so the snooze callback scopes the mute rule to THIS alert's server + metric. */
-        var serverName = row.ServerName;
+        /* The stored spelling, as ToMuteContext uses, so the rule matches the producer's own context. */
+        var serverName = row.StoredServerName.Length > 0 ? row.StoredServerName : row.ServerName;
+        var serverId = row.ServerId;
         var metricName = row.MetricName;
         _trayService.ShowSnoozableNotification(
-            row.MetricName, body, icon, duration => SnoozeAlertAsync(serverName, metricName, duration));
+            row.MetricName, body, icon, duration => SnoozeAlertAsync(serverName, serverId, metricName, duration));
     }
 
     /// <summary>
@@ -776,30 +797,51 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Persists a snooze from a tray toast: a temporary mute rule scoped to the alert's server + metric
-    /// (Lite's SnoozeBalloon semantics), written straight to <c>config_mute_rules</c>. The running Darling
-    /// service re-reads it on its next config load, so the condition stops re-alerting until it expires.
+    /// (Lite's SnoozeBalloon semantics, <see cref="ViewerDataService.BuildTraySnoozeRule"/>), written straight
+    /// to <c>config_mute_rules</c> with the reload beacon bumped, then — persist-then-cache, the
+    /// <see cref="MuteRuleService.AddRuleAsync"/> ordering — added to <see cref="_viewerMuteRules"/> so the
+    /// very next poll's toast filter honors it (#3570).
+    ///
+    /// <para>Two channels, two clocks, and the status line says both. The TRAY stops now: the rule is in this
+    /// viewer's hand and <see cref="AlertToastCoordinator"/> judges every polled row against it. The SERVICE's
+    /// channels (email/webhook) stop once it notices the beacon on its next sweep tick — within
+    /// <see cref="ViewerDataService.ServiceReloadTickSeconds"/> — and from then on it stamps the condition's
+    /// rows <c>muted</c>. Before this change the line said only "Snoozed …", and the toast's suppression
+    /// depended entirely on that second clock plus a reload the viewer could not see succeed or fail; when it
+    /// did not, the operator had been told "snoozed" and was toasted again five minutes later (the report).</para>
+    ///
+    /// <para>A failed write is REPORTED, not just logged: the balloon has already closed by the time the
+    /// callback returns, so the status line is the only place the operator can learn the snooze did not
+    /// happen. A read-only seat's <see cref="ViewerReadOnlyException"/> carries its own friendly text. The
+    /// local set is touched only on success — a snooze that did not persist must not suppress toasts on this
+    /// seat while every other surface says no such rule exists.</para>
     /// </summary>
-    private async Task SnoozeAlertAsync(string serverName, string metricName, TimeSpan duration)
+    private async Task SnoozeAlertAsync(string serverName, int serverId, string metricName, TimeSpan duration)
     {
         if (_dataService is null)
         {
             return;
         }
 
-        var rule = new MuteRule
+        var rule = ViewerDataService.BuildTraySnoozeRule(serverName, metricName, duration, DateTime.UtcNow, serverId);
+        var label = ViewerDataService.FormatSnoozeDuration(duration);
+
+        try
         {
-            ServerName = string.IsNullOrEmpty(serverName) ? null : serverName,
-            MetricName = metricName,
-            ExpiresAtUtc = DateTime.UtcNow + duration,
-            Reason = $"Snoozed from tray ({FormatSnoozeDuration(duration)})",
-        };
+            await _dataService.InsertMuteRuleAsync(rule);
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("AlertToasts", $"Snooze of {metricName} on {serverName} was not saved: {ex.Message}");
+            StatusText.Text = $"Snooze not saved — {metricName} on {serverName} will keep alerting: {ex.Message}";
+            return;
+        }
 
-        await _dataService.InsertMuteRuleAsync(rule);
-        StatusText.Text = $"Snoozed {metricName} on {serverName} for {FormatSnoozeDuration(duration)} — {DateTime.Now:HH:mm:ss}";
+        _viewerMuteRules.Add(rule);
+        StatusText.Text =
+            $"Snoozed {metricName} on {serverName} for {label} — tray toasts stop now; the service applies it within "
+            + $"{ViewerDataService.ServiceReloadTickSeconds} s — {DateTime.Now:HH:mm:ss}";
     }
-
-    private static string FormatSnoozeDuration(TimeSpan d) =>
-        d.TotalHours >= 1 ? $"{(int)d.TotalHours}h" : $"{(int)d.TotalMinutes}m";
 
     /// <summary>
     /// Single-clicking a sidebar server drives the server-scoped aggregate tabs to it: it syncs the
@@ -904,6 +946,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_storeUnavailable)
+        {
+            ApplyStoreUnavailableShell();
+            return;
+        }
+
         await RefreshVisibleAsync();
         /* The status bar's collector-health scope flips with the active tab (a per-server tab shows that
            server; an aggregate tab shows the fleet-cumulative total), so refresh it now rather than waiting
@@ -982,7 +1030,7 @@ public partial class MainWindow : Window
 
             /* The DESIRED-state managed set (config_monitored_servers), enriched with the observed
                collect.servers facts by the shared server_id, so a viewer add/remove/enable is reflected at
-               once. Stamp the viewer's favorite pins (matched by server name) and sort favorites-first. */
+               once. Stamp the viewer's favorite pins (matched by server id) and sort favorites-first. */
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
             _fleet.SetAll(servers);
             ServerList.ItemsSource = _fleet.Visible;
@@ -1132,6 +1180,20 @@ public partial class MainWindow : Window
                     await RefreshAvailabilityGroupsAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
+                    /* The picker lists the servers known when LoadServersAsync last ran; a server added since
+                       (by another client) is picked up here, keeping the current selection. */
+                    if (_dataService is not null)
+                    {
+                        try
+                        {
+                            FinOpsContent.SetServers(ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync()));
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            /* A failed re-read keeps the current picker; the refresh below still loads the data. */
+                            ViewerLogger.Warn("App", $"FinOps picker re-read failed: {ex.Message}");
+                        }
+                    }
                     await FinOpsContent.RefreshActiveSubTabAsync();
                     break;
             }
@@ -1246,16 +1308,16 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// "Apply to All" from one server tab's toolbar: copy its selected range (and, for a custom range, the
-    /// From/To in the current display-mode wall clock) to every OTHER open server tab so they window on the
-    /// same period. The source tab is skipped — it already holds the range.
+    /// held From/To as naive-UTC instants, which each tab draws in its own server's zone) to every OTHER open
+    /// server tab so they window on the same period. The source tab is skipped — it already holds the range.
     /// </summary>
-    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, int index, DateTime? customFromLocal, DateTime? customToLocal)
+    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, int index, DateTime? customFromUtc, DateTime? customToUtc)
     {
         foreach (var tab in _openServerTabs.Values)
         {
             if (tab.Content is ViewerServerTab serverTab && !ReferenceEquals(serverTab, source))
             {
-                serverTab.ApplyExternalTimeRange(index, customFromLocal, customToLocal);
+                serverTab.ApplyExternalTimeRange(index, customFromUtc, customToUtc);
             }
         }
     }
@@ -1463,14 +1525,19 @@ public partial class MainWindow : Window
                     summary.ServerName = server.ServerName;
                     /* #3029: the engine discriminator comes from the REGISTRY row, which already carries it
                        (servers.engine_kind, via ManagedServersSql / ServersSql) — the per-server summary
-                       reads have no engine column and need none. It is what tells the fleet deadlock total's
-                       coverage apart from a quiet SQL Server fleet: v_deadlocks holds the SQL Server
-                       extended-event capture and nothing else. */
+                       reads have no engine column and need none. It is what selects which deadlock-source
+                       collector's band the fleet deadlock total's coverage reads for this card (#3539):
+                       v_deadlocks holds the SQL Server extended-event capture, pg_database_stats the
+                       PostgreSQL counter, and the summary read carries both bands because it cannot pick. */
                     summary.IsPostgres = server.IsPostgres;
                     /* #3267: and the Aurora half of the same discriminator, for the CPU row. Both are
                        stamped from the one registry row, so a card cannot end up claiming Aurora-ness the
                        engine token does not support. */
                     summary.IsAurora = server.IsAurora;
+                    /* #3967: and the registration, for the same reason — it is a registry fact, and it is what
+                       tells a server whose history retention has dropped (Offline) from one that has never
+                       collected. The sidebar dot reads the same field off the same row. */
+                    summary.RegisteredAt = server.RegisteredAt;
                     summary.ApplyFreshness(nowUtc);
                     found.Add(summary);
                 }
@@ -1656,8 +1723,10 @@ public partial class MainWindow : Window
     /// Recommendations tab's OWN selected server, and renders Lite's advise-only, incident-grouped cards.
     /// Advise-only: no Apply, and no mute (mute lives on the Alert History surface per the re-skin). The
     /// marker lets a zero-finding read on a young deployment show "still collecting" (the engine skipped
-    /// for its 24h data-span gate) instead of a false all-clear; a server with findings shows them, and a
-    /// server with enough data and zero findings shows the genuine all-clear. The tab's status line
+    /// for its 24h data-span gate) instead of a false all-clear, and a window-empty pass (#3524/#3551 —
+    /// the span gate passed but the window itself collected nothing, a dead-collector shape) show
+    /// "collection appears broken"; a server with findings shows them, and a server with enough data,
+    /// measured facts, and zero findings shows the genuine all-clear. The tab's status line
     /// surfaces the last analysis time; "Generate now" forces an immediate pass via the analyze_now command.
     /// </summary>
     private async Task LoadRecommendationsAsync()
@@ -1681,18 +1750,37 @@ public partial class MainWindow : Window
 
         /* Read the per-server analysis-state marker (V19) the Darling service persists after each pass, so
            a zero-finding read on a young deployment renders "still collecting" (the engine skipped for its
-           24h data-span gate) instead of a false all-clear. The marker only decides the ZERO-finding case;
-           a server with findings shows them regardless. Null (no pass yet / pre-V19 store) = not insufficient. */
+           24h data-span gate) instead of a false all-clear, and a window-empty pass (#3524/#3551 — the
+           marker's false-with-a-message shape) renders "collection appears broken". The marker only decides
+           the ZERO-finding case; a server with findings shows them regardless. Null (no pass yet / pre-V19
+           store) = neither. */
         var analysisState = await _dataService.GetAnalysisStateAsync(server.ServerId);
+
+        /* #4766: the Ask-AI prompt names each finding's window in the SELECTED server's local time, so the cards
+           take that server's own clock (its time zone where SQL Server reported one, else its offset), from the
+           per-server source the viewer's other reads use, and convert each end of the window at its own instant.
+           This used to be the viewer machine's offset in force now, added to every window: another zone's clock
+           for a server elsewhere, and an hour off for a finding from before a daylight saving change. A server
+           with no collected clock yet gets the machine's offset, which is what Server mode shows for it, not UTC. */
+        var serverClock = ViewerTimeHelper.ClockForServerOrMachine(
+            await _dataService.GetServerClocksAsync(server.ServerId, System.Threading.CancellationToken.None),
+            server.ServerId, TimeZoneInfo.Local, DateTime.UtcNow);
 
         ApplyRecommendationsViewModel(
             RecommendationsViewModel.FromFindings(
-                rows, server.DisplayName, LocalUtcOffsetMinutes(),
+                rows, server.DisplayName, serverClock,
                 insufficientData: analysisState?.InsufficientData == true,
-                insufficientDataMessage: analysisState?.Message));
+                insufficientDataMessage: analysisState?.Message,
+                windowEmpty: analysisState?.WindowEmpty == true,
+                windowEmptyMessage: analysisState?.Message));
 
+        /* #4766: the status line's time and the zone named after it both come from the selected server's clock in
+           the display mode now in force. It used to end in a fixed "(local)" on a time that follows the display
+           mode, so it was wrong in Server and UTC modes; and its time went through the process-wide clock the
+           last server tab set, which may be another server's. */
         RecommendationsStatusText.Text = rows.Count > 0
-            ? $"Last analyzed {rows[0].AnalysisTimeLocal:yyyy-MM-dd HH:mm:ss} (local)"
+            ? RecommendationsViewModel.FormatLastAnalyzed(
+                rows[0].Finding.AnalysisTime, ViewerTimeHelper.CurrentDisplayMode, serverClock)
             : string.Empty;
         StatusText.Text = $"{server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}";
     }
@@ -1707,6 +1795,7 @@ public partial class MainWindow : Window
                 RecommendationsScroll.Visibility = Visibility.Collapsed;
                 RecommendationsEmptyText.Visibility = Visibility.Collapsed;
                 RecommendationsInsufficientText.Visibility = Visibility.Collapsed;
+                RecommendationsWindowEmptyText.Visibility = Visibility.Collapsed;
                 break;
 
             case RecommendationsState.InsufficientData:
@@ -1714,8 +1803,19 @@ public partial class MainWindow : Window
                 RecommendationsSectionsList.ItemsSource = null;
                 RecommendationsScroll.Visibility = Visibility.Collapsed;
                 RecommendationsEmptyText.Visibility = Visibility.Collapsed;
+                RecommendationsWindowEmptyText.Visibility = Visibility.Collapsed;
                 RecommendationsInsufficientText.Text = vm.InsufficientDataMessage;
                 RecommendationsInsufficientText.Visibility = Visibility.Visible;
+                break;
+
+            case RecommendationsState.WindowEmpty:
+                RecommendationsLoadingText.Visibility = Visibility.Collapsed;
+                RecommendationsSectionsList.ItemsSource = null;
+                RecommendationsScroll.Visibility = Visibility.Collapsed;
+                RecommendationsEmptyText.Visibility = Visibility.Collapsed;
+                RecommendationsInsufficientText.Visibility = Visibility.Collapsed;
+                RecommendationsWindowEmptyText.Text = vm.WindowEmptyMessage;
+                RecommendationsWindowEmptyText.Visibility = Visibility.Visible;
                 break;
 
             case RecommendationsState.Empty:
@@ -1723,6 +1823,7 @@ public partial class MainWindow : Window
                 RecommendationsSectionsList.ItemsSource = null;
                 RecommendationsScroll.Visibility = Visibility.Collapsed;
                 RecommendationsInsufficientText.Visibility = Visibility.Collapsed;
+                RecommendationsWindowEmptyText.Visibility = Visibility.Collapsed;
                 RecommendationsEmptyText.Visibility = Visibility.Visible;
                 break;
 
@@ -1731,15 +1832,12 @@ public partial class MainWindow : Window
                 RecommendationsLoadingText.Visibility = Visibility.Collapsed;
                 RecommendationsEmptyText.Visibility = Visibility.Collapsed;
                 RecommendationsInsufficientText.Visibility = Visibility.Collapsed;
+                RecommendationsWindowEmptyText.Visibility = Visibility.Collapsed;
                 RecommendationsSectionsList.ItemsSource = vm.Sections;
                 RecommendationsScroll.Visibility = Visibility.Visible;
                 break;
         }
     }
-
-    /// <summary>The viewer machine's current UTC offset in minutes, for the Ask-AI prompt's local-time window.</summary>
-    private static int LocalUtcOffsetMinutes()
-        => (int)Math.Round(TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes);
 
     /// <summary>The tab's own server selector drives it (independent of the sidebar); reload on change.</summary>
     private async void RecommendationsServerSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1823,8 +1921,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        Clipboard.SetDataObject(card.CopyPasteSql, false);
-        RecommendationsStatusText.Text = "Fix copied to clipboard.";
+        if (ClipboardText.TrySetDataObject(card.CopyPasteSql))
+        {
+            RecommendationsStatusText.Text = "Fix copied to clipboard.";
+        }
+        else
+        {
+            RecommendationsStatusText.Text = "Couldn't copy: the clipboard is in use.";
+        }
     }
 
     /// <summary>Copies a card's MCP investigation prompt to the clipboard (mirrors Lite's Ask AI).</summary>
@@ -1835,8 +1939,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        Clipboard.SetDataObject(card.AskAiPrompt, false);
-        RecommendationsStatusText.Text = "AI prompt copied to clipboard.";
+        if (ClipboardText.TrySetDataObject(card.AskAiPrompt))
+        {
+            RecommendationsStatusText.Text = "AI prompt copied to clipboard.";
+        }
+        else
+        {
+            RecommendationsStatusText.Text = "Couldn't copy: the clipboard is in use.";
+        }
     }
 
     /// <summary>
@@ -2021,8 +2131,32 @@ public partial class MainWindow : Window
         MessageText.Text = message;
         MessageDetailsText.Text = details ?? "";
         MessageDetailsPanel.Visibility = string.IsNullOrWhiteSpace(details) ? Visibility.Collapsed : Visibility.Visible;
-        MessageOverlay.Visibility = Visibility.Visible;
+        _storeUnavailable = true;
+        ApplyStoreUnavailableShell();
         StatusText.Text = "";
+    }
+
+    /// <summary>
+    /// Applies <see cref="StoreUnavailableShell"/>: the failure message over the content column unless the Plan
+    /// Viewer is showing, and the store-dependent sidebar entries disabled (#4648).
+    /// </summary>
+    private void ApplyStoreUnavailableShell()
+    {
+        bool planViewerShowing = MainTabs.Visibility == Visibility.Visible
+            && MainWindowPlanViewerTab.Visibility == Visibility.Visible
+            && MainWindowPlanViewerTab.IsSelected;
+        MessageOverlay.Visibility = StoreUnavailableShell.OverlayVisible(_storeUnavailable, planViewerShowing)
+            ? Visibility.Visible : Visibility.Collapsed;
+        bool enabled = !_storeUnavailable;
+        foreach (UIElement entry in new UIElement[]
+                 {
+                     AddServerSidebarButton, AddMultipleServersSidebarButton, ManageServersSidebarButton,
+                     ManageTagsSidebarButton, ImportSettingsSidebarButton, SettingsSidebarButton,
+                     ServerSearchRow, ServerList,
+                 })
+        {
+            entry.IsEnabled = enabled;
+        }
     }
 
     /// <summary>
@@ -2107,7 +2241,10 @@ public partial class MainWindow : Window
     {
         try
         {
-            Clipboard.SetText(string.Join(Environment.NewLine + Environment.NewLine, MessageText.Text, MessageDetailsText.Text));
+            if (!ClipboardText.TrySetText(string.Join(Environment.NewLine + Environment.NewLine, MessageText.Text, MessageDetailsText.Text)))
+            {
+                ViewerLogger.Warn(ViewerConfigDiagnostics.LogSource, "Copying the diagnostics failed: the clipboard is in use.");
+            }
         }
         catch (Exception ex)
         {

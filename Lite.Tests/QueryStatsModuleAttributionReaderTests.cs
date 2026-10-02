@@ -18,7 +18,7 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// Real-DuckDB round-trip pins for the #1568 module attribution in Top Queries by Duration
+/// Real-DuckDB round-trip pins for the #1568 module attribution in Top Queries by CPU
 /// (<see cref="LocalDataService.GetTopQueriesByCpuAsync"/>): the read-time LEFT JOIN of
 /// <c>query_stats.sql_handle</c> to <c>procedure_stats.sql_handle</c> (both stores persist the SAME
 /// normalized <c>CONVERT(varchar(130), ..., 1)</c> handle text). A statement whose handle matches a cached
@@ -69,7 +69,8 @@ public sealed class QueryStatsModuleAttributionReaderTests : IClassFixture<Share
     {
         var service = new LocalDataService(_duckDb);
 
-        /* Attributed query: sql_handle matches a cached procedure — bigger elapsed so it ranks first. */
+        /* Attributed query: sql_handle matches a cached procedure. (Lookups below are by hash — the
+           #3523 CPU ranking never matters here, and these seeds carry no worker time.) */
         await SeedQueryStatsAsync("TestDb", "0xATTRIB", "0xMOD", deltaExec: 5, deltaElapsedUs: 300_000, "SELECT attributed");
         await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Thing", "PROCEDURE", "0xMOD");
 

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -45,9 +46,10 @@ public sealed class DarlingMcpConfigHistoryTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -57,13 +59,13 @@ public sealed class DarlingMcpConfigHistoryTools
         {
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
-            var snapshots = await DarlingConfigHistoryReader.GetServerConfigSnapshotsAsync(postgres, resolved.ServerId);
+            var snapshots = await DarlingConfigHistoryReader.GetServerConfigSnapshotsAsync(postgres, resolved.ServerId, cancellationToken);
             /* Unanchored, the tool still reads the full history and only lower-bounds — see UpperEdge, which
                keeps DateTime.MaxValue as the (no-op) upper edge so the shared both-edges diff reproduces the
                prior behaviour exactly. An as_of anchor is what closes the upper edge. */
             var changes = ConfigChangeDiff.DiffServerConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_config")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_config", cancellationToken)
                     ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
             var result = changes.Select(c => new
@@ -86,7 +88,7 @@ public sealed class DarlingMcpConfigHistoryTools
                 changes = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_server_config_changes", ex);
         }
@@ -97,9 +99,10 @@ public sealed class DarlingMcpConfigHistoryTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -109,10 +112,10 @@ public sealed class DarlingMcpConfigHistoryTools
         {
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
-            var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId);
+            var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId, cancellationToken);
             var changes = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config", cancellationToken)
                     ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
             var result = changes.Select(c => new
@@ -132,7 +135,7 @@ public sealed class DarlingMcpConfigHistoryTools
                 changes = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_database_config_changes", ex);
         }
@@ -143,9 +146,10 @@ public sealed class DarlingMcpConfigHistoryTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -155,10 +159,10 @@ public sealed class DarlingMcpConfigHistoryTools
         {
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
-            var snapshots = await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(postgres, resolved.ServerId);
+            var snapshots = await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(postgres, resolved.ServerId, cancellationToken);
             var changes = ConfigChangeDiff.DiffTraceFlagChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "trace_flags")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "trace_flags", cancellationToken)
                     ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
             var result = changes.Select(c => new
@@ -181,31 +185,32 @@ public sealed class DarlingMcpConfigHistoryTools
                 changes = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_trace_flag_changes", ex);
         }
     }
 
-    [McpServerTool(Name = "get_database_scoped_config"), Description("Gets database-scoped configuration settings (sys.database_scoped_configurations). Shows MAXDOP, legacy CE, parameter sniffing, and other per-database settings.")]
+    [McpServerTool(Name = "get_database_scoped_config"), Description("Gets database-scoped configuration settings (sys.database_scoped_configurations). Shows MAXDOP, legacy CE, parameter sniffing, and other per-database settings. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of.")]
     public static async Task<string> GetDatabaseScopedConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null)
+        [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var rows = await DarlingConfigHistoryReader.GetLatestDatabaseScopedConfigAsync(postgres, resolved.ServerId);
-            if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_scoped_config")
+            var snapshot = await DarlingConfigHistoryReader.GetLatestDatabaseScopedConfigAsync(postgres, resolved.ServerId, cancellationToken);
+            if (snapshot.IsEmpty)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_scoped_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database-scoped configuration data available. The config collector may not have run yet.");
 
-            IEnumerable<DarlingConfigHistoryReader.DatabaseScopedConfigReadRow> filtered = rows;
+            IEnumerable<DarlingConfigHistoryReader.DatabaseScopedConfigReadRow> filtered = snapshot.Rows;
             if (!string.IsNullOrEmpty(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
@@ -225,35 +230,38 @@ public sealed class DarlingMcpConfigHistoryTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3541 A10: the connect-time capture these settings are as of. */
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 database_count = grouped.Count,
                 databases = grouped
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_database_scoped_config", ex);
         }
     }
 
-    [McpServerTool(Name = "get_query_store_health"), Description("Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, and the runtime-stats interval length. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off).")]
+    [McpServerTool(Name = "get_query_store_health"), Description("Per-database Query Store health: actual/desired state (desired READ_WRITE, actual READ_ONLY = the storage-cap failure). query_capture_mode (churn knob): ALL (2016/17 default) churns most; AUTO (2019+ default) skips minor ones; CUSTOM tunes AUTO; NONE stops new capture. wait_stats_capture_mode: ON default, OFF empties per-query waits. null on either: pre-rung row, or pre-2017 engine for wait_stats - never OFF. No verdict rendered. No rows = unavailable or not_collected; an unmatched database_name gives database_count 0. LATEST IS A TIME: captured_at is the newest hourly capture. <<GUIDE>> Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, the runtime-stats interval length, and — the two trailing fields on every row since V137 / Lite v64 — query_capture_mode and wait_stats_capture_mode. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. CAPTURE MODE IS THE PLAN-CHURN KNOB: query_capture_mode is the one option on this row that names a plan-churn factory. ALL captures every query the engine compiles, one-off ad hoc statements included — on an ad hoc workload each distinct text is a new query with a new plan, so the store fills toward max_storage_size_mb, size-based cleanup cycles, and the READ_ONLY cap hit that readonly_reason decodes follows; ALL was the engine default on SQL Server 2016 and 2017. AUTO skips insignificant queries (the engine's own thresholds over a day: fewer than 30 executions, under 1 s of compile CPU and under 100 ms of execution CPU) and has been the default since SQL Server 2019 and on Azure SQL Database. CUSTOM (2019+) is AUTO with operator-set thresholds — the capture_policy_* knobs, which this row does not collect, so CUSTOM here says the thresholds were tuned, not to what. NONE stops capturing NEW queries while the store keeps collecting compile and runtime statistics for the ones it already holds. wait_stats_capture_mode ON (the default) records per-plan wait statistics into every runtime-stats interval, at a per-execution bookkeeping cost and more store bytes per interval; OFF saves both and leaves the store's per-query wait view empty. Both are the DMV's *_desc spelling verbatim. null means the row predates the V137 rung or, for wait_stats_capture_mode, the engine is older than SQL Server 2017 (the column does not exist there) — never OFF. Consumed by the Viewer's Query Store grid and, next, by get_query_store_clutter as its churn × ALL 'switch to AUTO' arm; this tool reports the modes and renders no verdict on them. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off). LATEST IS A TIME: this is the newest hourly capture, and captured_at is its instant.")]
     public static async Task<string> GetQueryStoreHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null)
+        [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var rows = await DarlingConfigHistoryReader.GetLatestQueryStoreHealthAsync(postgres, resolved.ServerId);
-            if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store_health")
+            var snapshot = await DarlingConfigHistoryReader.GetLatestQueryStoreHealthAsync(postgres, resolved.ServerId, cancellationToken);
+            if (snapshot.IsEmpty)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store_health", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
 
-            IEnumerable<DarlingConfigHistoryReader.QueryStoreHealthReadRow> filtered = rows;
+            IEnumerable<DarlingConfigHistoryReader.QueryStoreHealthReadRow> filtered = snapshot.Rows;
             if (!string.IsNullOrEmpty(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
@@ -273,16 +281,24 @@ public sealed class DarlingMcpConfigHistoryTools
                 stale_query_threshold_days = r.StaleQueryThresholdDays,
                 max_plans_per_query = r.MaxPlansPerQuery,
                 interval_length_minutes = r.IntervalLengthMinutes,
+                /* V137 (#3796): the two capture modes, TRAILING and in the collector's order, so a client that
+                   indexed the row by position before the rung still finds its ten fields where they were. The
+                   DMV's *_desc spelling verbatim, and null is published as null rather than coalesced: it is
+                   the pre-rung row or the 2016 engine (wait stats), a real state the description spells out,
+                   and the same key shape both SKUs emit. No verdict on the value — that is #3797's. */
+                query_capture_mode = r.QueryCaptureMode,
+                wait_stats_capture_mode = r.WaitStatsCaptureMode,
             }).ToList();
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 database_count = result.Count,
                 databases = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_query_store_health", ex);
         }

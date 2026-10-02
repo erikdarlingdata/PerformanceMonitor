@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Darling.Tests;
@@ -95,7 +96,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
 
     public static void AssertEnvelope(string json, string serverName, string expectedKey)
     {
-        Assert.False(json.StartsWith("Error during", StringComparison.Ordinal), $"tool returned an error: {json}");
+        Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
         using var doc = JsonDocument.Parse(json);
         Assert.Equal(serverName, doc.RootElement.GetProperty("server").GetString());
         Assert.True(json.Contains(expectedKey, StringComparison.Ordinal), $"expected '{expectedKey}' in: {json}");

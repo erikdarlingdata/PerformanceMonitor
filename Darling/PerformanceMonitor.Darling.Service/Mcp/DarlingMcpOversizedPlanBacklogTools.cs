@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -49,12 +50,13 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
     public const int DefaultLimit = 50;
 
     [McpServerTool(Name = "get_oversized_plan_backlog"), Description(
-        "Gets the backlog of cached execution plans this tool measured as TOO LARGE to capture inline, and what the out-of-band sweep has since done about each one. Plan XML over 512 KB (524288 bytes) for a single query_stats or procedure_stats row is deliberately not captured with the row - the client-side cost of materializing it stalls unrelated collectors - so that row lands in the store with a measured plan size and NO plan content anywhere. This table is the record of those plans, and this is the only read that reports it: every other path to it requires already knowing a specific plan identity. Per server it returns total rows, the three verdict buckets (pending = the sweep's own claim predicate, captured = content is held, expired = a fetch established the handle no longer renders a plan), the attempt figures on still-pending rows, the newest capture and expiry instants, the oldest sighting, and observed_bytes min/median/max. Read last_captured_at and last_expired_at FIRST if the question is whether the sweep's fetch half is alive: the sweep stamps them and nothing else does, so a backlog full of pending rows with a null last_captured_at is a fetch half that has never once succeeded on that server - which is indistinguishable from a healthy backlog on every other surface. The three buckets are a strict partition, so pending + captured + expired always equals total. rows_with_content sits beside captured on purpose and is NOT redundant: the fallback plan reads key on the content column rather than the stamp, so a row counted as captured with no content is a plan get_plan_xml still cannot serve. observed_bytes is the size the MONITORED SERVER measured, in UTF-16 bytes - the same unit as the 512 KB cap, so it is directly comparable to it; the median is a discrete percentile, so it is a size some plan really had rather than an interpolation, and no size here is ever derived from the stored content (a character count would read as half the real byte figure, and computing one would detoast every captured plan). The per-collector census is always returned beside the per-server rollup because the two collectors' shares are not predictable from each other: measured the day after the fleet install, procedure_stats held the larger half of one production store and 3.6% of another. Pass server_name with include_rows to get the capped row listing - the claim key, database_name, query_hash, the measured size and all four stamps - which is how a query_hash gets from here into get_plan_xml to pull the plan the cap declined; it is ordered largest plan first, which is deliberately NOT the sweep's claim order, so it is not a prediction of what gets fetched next. Read-only, unbanded, and it takes no time window: this is a worklist whose rows are updated in place, not a series. Permanently empty on a store below schema V121, and on a deployment whose plans have never exceeded the cap - which is the healthy state and has no knob, because there is nothing to turn off.")]
+        "Backlog of cached plans too large to capture inline (over 512 KB/524288 bytes); the only read of this table. No time window: a worklist updated in place, not a series. Read last_captured_at/last_expired_at FIRST: null with pending rows means the sweep's fetch half has never succeeded - indistinguishable from healthy elsewhere. pending+captured+expired=total_rows. observed_bytes is UTF-16 bytes, comparable to the cap. include_rows requires server_name (refused otherwise). Permanently empty below schema V121, or when no plan ever exceeded the cap - a healthy, knob-free state. <<GUIDE>> Gets the backlog of cached execution plans this tool measured as TOO LARGE to capture inline, and what the out-of-band sweep has since done about each one. Plan XML over 512 KB (524288 bytes) for a single query_stats or procedure_stats row is deliberately not captured with the row - the client-side cost of materializing it stalls unrelated collectors - so that row lands in the store with a measured plan size and NO plan content anywhere. This table is the record of those plans, and this is the only read that reports it: every other path to it requires already knowing a specific plan identity. Per server it returns total rows, the three verdict buckets (pending = the sweep's own claim predicate, captured = content is held, expired = a fetch established the handle no longer renders a plan), the attempt figures on still-pending rows, the newest capture and expiry instants, the oldest sighting, and observed_bytes min/median/max. Read last_captured_at and last_expired_at FIRST if the question is whether the sweep's fetch half is alive: the sweep stamps them and nothing else does, so a backlog full of pending rows with a null last_captured_at is a fetch half that has never once succeeded on that server - which is indistinguishable from a healthy backlog on every other surface. The three buckets are a strict partition, so pending + captured + expired always equals total. rows_with_content sits beside captured on purpose and is NOT redundant: the fallback plan reads key on the content column rather than the stamp, so a row counted as captured with no content is a plan get_plan_xml still cannot serve. observed_bytes is the size the MONITORED SERVER measured, in UTF-16 bytes - the same unit as the 512 KB cap, so it is directly comparable to it; the median is a discrete percentile, so it is a size some plan really had rather than an interpolation, and no size here is ever derived from the stored content (a character count would read as half the real byte figure, and computing one would detoast every captured plan). The per-collector census is always returned beside the per-server rollup because the two collectors' shares are not predictable from each other: measured the day after the fleet install, procedure_stats held the larger half of one production store and 3.6% of another. Pass server_name with include_rows to get the capped row listing - the claim key, database_name, query_hash, the measured size and all four stamps - which is how a query_hash gets from here into get_plan_xml to pull the plan the cap declined; it is ordered largest plan first, which is deliberately NOT the sweep's claim order, so it is not a prediction of what gets fetched next. Read-only, unbanded, and it takes no time window: this is a worklist whose rows are updated in place, not a series. Permanently empty on a store below schema V121, and on a deployment whose plans have never exceeded the cap - which is the healthy state and has no knob, because there is nothing to turn off.")]
     public static async Task<string> GetOversizedPlanBacklog(
         NpgsqlDataSource postgres,
         [Description("Optional: server name or display name. Omit for the whole fleet.")] string? server_name = null,
         [Description("If true, also return the per-row listing for the named server. Requires server_name - the claim key is only meaningful within one server. Default false.")] bool include_rows = false,
-        [Description("Maximum backlog rows to return when include_rows is true. Default 50.")] int limit = DefaultLimit)
+        [Description("Maximum backlog rows to return when include_rows is true. Default 50.")] int limit = DefaultLimit,
+        CancellationToken cancellationToken = default)
     {
         var validation = McpHelpers.ValidateTop(limit);
         if (validation != null)
@@ -67,7 +69,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
 
         if (!string.IsNullOrWhiteSpace(server_name))
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
             if (error != null)
             {
                 return error;
@@ -95,7 +97,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
         {
             /* The census FIRST, because it is what makes an empty answer honest — get_collector_stall_probes'
                ordering, for its reason. */
-            var census = await DarlingOversizedPlanBacklogReader.GetCollectorCensusAsync(postgres, serverId);
+            var census = await DarlingOversizedPlanBacklogReader.GetCollectorCensusAsync(postgres, serverId, cancellationToken);
 
             if (census.Count == 0)
             {
@@ -112,10 +114,10 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                     + "store you have not confirmed the rung of.");
             }
 
-            var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, serverId);
+            var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, serverId, cancellationToken);
 
             var rows = include_rows && serverId is { } id
-                ? await DarlingOversizedPlanBacklogReader.GetRowsAsync(postgres, id, limit)
+                ? await DarlingOversizedPlanBacklogReader.GetRowsAsync(postgres, id, limit, cancellationToken)
                 : null;
 
             return JsonSerializer.Serialize(
@@ -203,7 +205,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                 },
                 McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_oversized_plan_backlog", ex);
         }

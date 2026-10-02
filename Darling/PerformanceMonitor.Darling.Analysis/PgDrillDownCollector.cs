@@ -25,11 +25,12 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// dictionary keys and row shapes, the same per-finding catch-and-keep error posture, and the
 /// same partial-file split (Blocking / Config / Plans / Queries / Storage). Lite's analysis SQL
 /// was deliberately written in the PG-shared dialect and the V4 passthrough <c>v_&lt;table&gt;</c>
-/// views exist precisely so these queries run VERBATIM — every query string here is
-/// byte-identical to Lite's.
+/// views exist so these queries can run VERBATIM, and most do. Where a query differs from Lite's, its own
+/// comment says why (for example, the parameter-sensitivity drill-down resolves statement text in a second
+/// read by digest).
 ///
 /// <para>
-/// The documented PG-port deviations, none of which touch a query's text (the PgFactCollector
+/// The documented PG-port deviations that do not touch a query's text (the PgFactCollector
 /// AN2a conventions):
 /// <list type="bullet">
 /// <item><description>/* PG port: Lite wraps every read in <c>_duckDb.AcquireReadLock()</c> —
@@ -55,18 +56,31 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// since 16 (the product's minimum PG is 17) — all pinned by the AN3 tests.
 /// </para>
 /// </summary>
-public sealed partial class PgDrillDownCollector
+public sealed partial class PgDrillDownCollector : IDrillDownCollector
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly IPlanFetcher? _planFetcher;
     private readonly ILogger? _logger;
     private const int TextLimit = 500;
 
-    public PgDrillDownCollector(NpgsqlDataSource postgres, IPlanFetcher? planFetcher = null, ILogger? logger = null)
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule config (darling.json's optional "analyzer" section).
+    /// Same optional-and-defaulted pattern as <see cref="_planFetcher"/>/<see cref="_logger"/>: a
+    /// caller that constructs this collector without one gets <c>AnalyzerConfig.Default</c> —
+    /// today's behavior, byte-for-byte.
+    /// </summary>
+    private readonly PerformanceMonitor.PlanAnalysis.AnalyzerConfig _analyzerConfig;
+
+    public PgDrillDownCollector(
+        NpgsqlDataSource postgres,
+        IPlanFetcher? planFetcher = null,
+        ILogger? logger = null,
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _planFetcher = planFetcher;
         _logger = logger;
+        _analyzerConfig = analyzerConfig ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
     }
 
     /// <summary>
@@ -91,7 +105,9 @@ public sealed partial class PgDrillDownCollector
         TopCpuQueriesSql,
         TopSpillingQueriesSql,
         ParameterSensitiveSql,
+        ParameterSensitiveTextSql,
         RegressedQueriesSql,
+        RegressedQueriesTableSql,
         BadActorDetailSql,
         PendingGrantsSql,
         FileLatencyBreakdownSql,
@@ -114,7 +130,10 @@ public sealed partial class PgDrillDownCollector
             try
             {
                 finding.DrillDown = new Dictionary<string, object>();
-                var pathKeys = finding.StoryPath.Split(" → ", StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+                /* #3859: the finding's OWN typed keys, not a re-parse of its display string — see
+                   DrillDownCollector's twin of this line and AnalysisFinding.PathKeys for the six-site
+                   corruption surface this retired. Same keys, same order. */
+                var pathKeys = finding.PathKeys.ToHashSet(StringComparer.Ordinal);
 
                 /* D7: the config drill-down is a single cheap config-table read and is
                    required to build config/RCSI/db-config advice, which legitimately scores

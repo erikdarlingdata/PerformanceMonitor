@@ -170,6 +170,35 @@ public class DarlingPgDatabaseReaderTests
     }
 
     /// <summary>
+    /// <c>numbackends</c> (V133) is the one LEVEL in a row of cumulative counters, read since the third
+    /// between-waves batch of #3691 after #3791 reported the tool did not surface it. Pinned three ways: the
+    /// read projects it as the window's PEAK and never as a <c>LAG</c> difference (a differenced level is a
+    /// nonsense that goes negative on every disconnect); the row and the payload carry it NULLABLE (a pre-V133
+    /// history is "not sampled", which zero would misreport as idle); and the tool's description names it —
+    /// the description is the agent's only view of what the row holds.
+    /// </summary>
+    [Fact]
+    public void NumbackendsIsProjectedAsAPeakLevel_NullableAndNamedInTheDescription()
+    {
+        Assert.Contains("MAX(numbackends)                                  AS peak_numbackends", Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LAG(numbackends)", Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(numbackends)", Sql, StringComparison.Ordinal);
+
+        var member = typeof(DarlingPgDatabaseReader.PgDatabaseRow).GetProperty(nameof(DarlingPgDatabaseReader.PgDatabaseRow.PeakNumbackends));
+        Assert.NotNull(member);
+        Assert.Equal(typeof(int?), member!.PropertyType);
+
+        var description = typeof(DarlingMcpPgDatabaseTools).GetMethod("GetPgDatabaseStats")!
+            .GetCustomAttributes(typeof(System.ComponentModel.DescriptionAttribute), inherit: false)
+            .Cast<System.ComponentModel.DescriptionAttribute>()
+            .Single()
+            .Description;
+        Assert.Contains("peak_numbackends", description, StringComparison.Ordinal);
+        Assert.Contains("never differenced", description, StringComparison.Ordinal);
+        Assert.Contains("not summed", description, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The empty-answer denominator is the DATA, on the same relation the read walks — pg_stat_database is a
     /// PERIODIC surface, so any stored sample proves somebody looked. It must NOT carry the read's own
     /// HAVING filter, or a genuinely quiet server would be reported as never collected: the #2508 false

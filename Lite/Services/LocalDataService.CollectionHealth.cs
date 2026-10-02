@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
@@ -17,6 +18,16 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>Re-probe at most this often per server (#4226 lane V1b): measured 46-58 ms on a seeded
+    /// 20-collector/7-day/1-minute-cadence DuckDB (Lite's realistic scale for one server), against a 30 s
+    /// floor on the auto-refresh timer (<c>ServerTab.AutoRefreshSecondsForIndex</c>) — over the ~50 ms bar
+    /// worth memoizing, even though Lite has no fleet fan-out to amortize across. The same "benignly racy"
+    /// TTL shape Darling's <c>GetFleetCollectionHealthByServerAsync</c> uses, not a lock: a refresh racing a
+    /// cold per-server entry may run the scan twice, which is still far cheaper than never caching.</summary>
+    private static readonly TimeSpan PermissionDeniedCountMemoLifetime = TimeSpan.FromSeconds(20);
+
+    private readonly Dictionary<int, (int Count, DateTime AtUtc)> _permissionDeniedCountByServer = new();
+
     /// <summary>
     /// #1591: how many DISTINCT collectors were permission-denied in the last 7 days — the badge count for the
     /// Collection Health tab header.
@@ -29,6 +40,12 @@ public partial class LocalDataService
     /// </summary>
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId)
     {
+        if (_permissionDeniedCountByServer.TryGetValue(serverId, out var cached) &&
+            DateTime.UtcNow - cached.AtUtc < PermissionDeniedCountMemoLifetime)
+        {
+            return cached.Count;
+        }
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
@@ -42,7 +59,9 @@ AND   status = 'PERMISSIONS'";
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
 
         var scalar = await command.ExecuteScalarAsync();
-        return scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+        var count = scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+        _permissionDeniedCountByServer[serverId] = (count, DateTime.UtcNow);
+        return count;
     }
 
     /// <summary>
@@ -194,7 +213,65 @@ SELECT
     -- EXTENSION_MISSING status Darling's fault mapper split out of PERMISSIONS. Lite's SQL Server
     -- collectors never write it, so this counts 0 on this SKU; selected anyway because the two health
     -- reads are ordinal twins and the shared classifier takes the count. APPENDED, read positionally.
-    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
+    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+    -- #3754: runs whose XE session was missing or could not be created - Darling's SESSION_MISSING
+    -- status. Lite never writes it: its long-query XE reader swallows a permission-denied session read to
+    -- zero rows, and an ensure failure (and, since #4731, a blocked-process or deadlock read failure)
+    -- classifies PERMISSIONS / ERROR through XeSessionEnsureException,
+    -- so this counts 0 on this SKU; selected anyway because the two health reads are ordinal twins and
+    -- the shared output finding takes the count beside error_count as the runs that could not read.
+    -- Counted apart from error_count on purpose - it is not fed to the band. APPENDED, read positionally.
+    SUM(CASE WHEN status = 'SESSION_MISSING' THEN 1 ELSE 0 END) AS session_missing_count,
+    -- #3819: the three columns that tell a collector which STOPPED producing apart from one that never
+    -- produced here. Darling's twin carries the same three at the same ordinals; both MCP surfaces read
+    -- this result set positionally. Lite's SQL Server collectors write PERMISSIONS but neither of the
+    -- other two skip words, so on this SKU the streak this detects is a permission that was granted and
+    -- has been revoked since -- a narrower population than Darling's, and the same regression.
+    --
+    -- current_status is what the collector is reporting NOW, for the finding's prose. Taken at
+    -- recency_rank = 1 rather than as a MAX over the skip rows: MAX is lexicographic, so on a streak whose
+    -- status changed it would name whichever word sorts highest instead of the one being reported.
+    MAX(CASE WHEN recency_rank = 1 THEN status END) AS current_status,
+    -- The instant the current skip streak began AFTER: the newest run that was NOT a named skip. The
+    -- vocabulary is interpolated from CollectorRuntimePrecondition, which is where each of those statuses
+    -- is declared, so this cannot ask about three of four after a fourth is split out. A NULL status
+    -- counts as non-skip: it is not one of the declared skip words, and reading it as one would let an
+    -- unwritten status manufacture a streak.
+    MAX(CASE WHEN status IS NULL
+              OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+             THEN collection_time END) AS last_non_skip_time,
+    -- The newest run that stored anything. Off the same rows_collected > 0 test as runs_with_rows above,
+    -- so productive means one thing on this row. Compared against last_non_skip_time it says the
+    -- productivity sits BEFORE the streak rather than inside it, which is the ORDER that makes this a
+    -- regression rather than two unrelated facts.
+    MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+    -- #3885: how many runs, counting back from the NEWEST, were SUCCESS with zero rows and nothing else.
+    -- The second regression class, and the one #3819 could not see: it keys on a skip STATUS, and a
+    -- collector whose source went away while its query stayed VALID records the most reassuring word the
+    -- vocabulary has. Darling's twin carries this at the same ordinal; both MCP surfaces read this result
+    -- set positionally. The class is not Darling-specific -- Lite dedups on the same watermarks and its
+    -- collectors read the same sources -- so this SKU detects it identically rather than counting 0.
+    --
+    -- Exact, and free: recency_rank already exists in the subquery below (#3819 added it for
+    -- current_status), so this buys the streak's true width with no new window function and no new sort.
+    -- MIN of the rank of the newest run that BREAKS the streak, minus one, is the count of runs ahead of
+    -- it; NULL (nothing breaks it -- every run in the window is a zero-row success) falls back to COUNT(*),
+    -- which is that same count. The abandonment exclusion is success_count's own (#2926): a pre-#2803
+    -- abandoned cycle is stored as SUCCESS with zero rows plus the budget note, which is data LOSS rather
+    -- than a source that went quiet. APPENDED, read positionally.
+    COALESCE(
+        MIN(CASE WHEN NOT (status = 'SUCCESS'
+                           AND COALESCE(rows_collected, 0) = 0
+                           AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+                 THEN recency_rank END) - 1,
+        COUNT(*)) AS trailing_zero_row_success_runs,
+    -- #4748: the note the collector's NEWEST run left, which is not last_note above. last_note is the newest
+    -- run that CARRIED a note (note_rank), so a clean run after a partial-failure cycle still shows the
+    -- older cycle's note there; the band must not read that, because the loss it names is not the
+    -- collector's current state. recency_rank = 1 is the newest run of any status, and the SUCCESS gate
+    -- matches last_note's (only the SUCCESS write carries a note). APPENDED, read positionally; Darling's
+    -- twin carries it at the same ordinal.
+    MAX(CASE WHEN recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note
 FROM
 (
     -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
@@ -244,7 +321,16 @@ FROM
             ORDER BY slowest_item_ms IS NULL,
                      slowest_item_ms DESC,
                      collection_time DESC
-        ) AS slowest_rank
+        ) AS slowest_rank,
+        -- #3819: newest run first, so current_status above can take the status the collector is reporting
+        -- NOW. status DESC only breaks an exact-timestamp tie, and breaks it identically on DuckDB and
+        -- Postgres -- the same reason the ranks above tie-break on error_message.
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY collector_name
+            ORDER BY collection_time DESC,
+                     status DESC
+        ) AS recency_rank
     FROM v_collection_log
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -302,7 +388,19 @@ ORDER BY collector_name";
                 RunsWithRows = reader.IsDBNull(23) ? 0 : ToInt64(reader.GetValue(23)),
                 /* Appended (#3240), for the same reason every column before it was. Always 0 on this
                    SKU — SQL Server collectors never write EXTENSION_MISSING. */
-                ExtensionMissingCount = reader.IsDBNull(24) ? 0 : ToInt64(reader.GetValue(24))
+                ExtensionMissingCount = reader.IsDBNull(24) ? 0 : ToInt64(reader.GetValue(24)),
+                /* Appended (#3754), for the same reason every column before it was. */
+                SessionMissingCount = reader.IsDBNull(25) ? 0 : ToInt64(reader.GetValue(25)),
+                /* Appended (#3819), for the same reason every column before it was. */
+                CurrentStatus = reader.IsDBNull(26) ? null : reader.GetString(26),
+                LastNonSkipTime = reader.IsDBNull(27) ? null : reader.GetDateTime(27),
+                LastProductiveTime = reader.IsDBNull(28) ? null : reader.GetDateTime(28),
+                /* Appended (#3885), for the same reason every column before it was. ToInt64 rather than
+                   Convert, like RowsStored above: DuckDB widens the COUNT(*) fallback to HUGEINT, which
+                   arrives as a BigInteger that Convert.ToInt64 cannot take. */
+                TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : ToInt64(reader.GetValue(29)),
+                /* Appended (#4748), for the same reason every column before it was. */
+                LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30)
             });
         }
 
@@ -335,7 +433,7 @@ LIMIT 1";
     /// <summary>
     /// Gets recent collection log entries for a server, most recent first, bounded to the tab's
     /// settable window. A preset ends "now" (<paramref name="hoursBack"/> from now); a custom range
-    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both already server-time) bounds
+    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both naive UTC as the tab holds them, #4766) bounds
     /// <c>collection_time</c> on BOTH sides EXACTLY via <see cref="GetTimeRange"/> — mirroring how
     /// <see cref="GetWaitStatsAsync"/> windows its read. The old single now-relative lower bound ignored
     /// the custom To, rounding a custom range to a hours-back-from-now span.
@@ -347,6 +445,12 @@ LIMIT 1";
     /// predicates against always-bound parameters, which keeps every parameter at a fixed position — the same
     /// shape Darling's twin uses, and the same shape <c>ThrowIfDuplicateNameAsync</c> already uses here.</para>
     ///
+    /// <para><paramref name="status"/> is #3869's third filter, applied here for the same reason and matched
+    /// case-insensitively against the log's own stored vocabulary via <c>UPPER($7)</c>. The MCP tool validates
+    /// the value against <c>EnumeratedCollectorDriver.CollectionLogStatuses</c> before calling, so an unknown
+    /// status is refused by name up there rather than filtered to an empty page down here — which on the
+    /// failure-hunting filter would read as "no failures", the worst false negative this read can produce.</para>
+    ///
     /// <para>Supplying <paramref name="minDurationMs"/> also switches the ordering to SLOWEST FIRST. A floor
     /// under newest-first ordering cannot reach the tail — the cap keeps the most recent matches, and the slow
     /// runs being hunted are the ones that are not recent. The two are one decision, so the ordering is
@@ -354,12 +458,12 @@ LIMIT 1";
     ///
     /// <para>The desktop Collection Log tab passes neither and is unaffected: no filter, newest first.</para>
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null)
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         /* NULLS LAST is belt-and-braces on the ranked arm: a NULL duration_ms cannot satisfy the floor, so no
            unmeasured run reaches it. Written anyway because DESC sorts NULLs first, so decoupling the filter
@@ -385,6 +489,7 @@ AND   collection_time >= $2
 AND   collection_time <= $3
 AND   ($5 IS NULL OR collector_name = $5)
 AND   ($6 IS NULL OR duration_ms >= $6)
+AND   ($7 IS NULL OR status = UPPER($7))
 " + ordering + @"
 LIMIT $4";
 
@@ -394,6 +499,105 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
         command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(collectorName) ? DBNull.Value : collectorName.Trim() });
         command.Parameters.Add(new DuckDBParameter { Value = (object?)minDurationMs ?? DBNull.Value });
+        command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(status) ? DBNull.Value : status.Trim() });
+
+        var items = new List<CollectionLogRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CollectionLogRow
+            {
+                CollectorName = reader.GetString(0),
+                CollectionTime = reader.GetDateTime(1),
+                DurationMs = reader.IsDBNull(2) ? null : (int?)Convert.ToInt32(reader.GetValue(2)),
+                SqlDurationMs = reader.IsDBNull(3) ? null : (int?)Convert.ToInt32(reader.GetValue(3)),
+                DuckDbDurationMs = reader.IsDBNull(4) ? null : (int?)Convert.ToInt32(reader.GetValue(4)),
+                RowsCollected = reader.IsDBNull(5) ? null : (int?)Convert.ToInt32(reader.GetValue(5)),
+                Status = reader.GetString(6),
+                ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
+                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8)
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// Whether ANY of the given (enabled) servers has EVER recorded a collector run — the fleet-wide twin of
+    /// <see cref="HasAnyCollectionLogAsync"/> (#4199), used the same way: to tell a genuinely quiet fleet-wide
+    /// window from a fleet that has never once collected.
+    /// </summary>
+    public async Task<bool> HasAnyCollectionLogFleetAsync(IReadOnlyList<int> serverIds)
+    {
+        if (serverIds.Count == 0)
+        {
+            return false;
+        }
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        /* server_id is a deterministic hash of the storage name (ServerResolver / RemoteCollectorService),
+           never caller-supplied text, so inlining the list is safe -- DuckDB's ADO driver has no array
+           parameter binding to hand these to as one $-placeholder instead. */
+        command.CommandText = $@"
+SELECT 1
+FROM v_collection_log
+WHERE server_id IN ({string.Join(",", serverIds)})
+LIMIT 1";
+
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>
+    /// The FLEET-WIDE form of <see cref="GetRecentCollectionLogAsync"/> (#4199): the same per-run log, across
+    /// every id in <paramref name="serverIds"/> (the caller's enabled servers) at once, ranked and capped
+    /// together rather than one server at a time. Same filters, same newest-first/slowest-first coupling; the
+    /// row shape already carries <see cref="CollectionLogRow.ServerName"/>, so no new row type is needed.
+    /// </summary>
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogFleetAsync(IReadOnlyList<int> serverIds, int hoursBack = 24, DateTime? asOfUtc = null, int maxRows = 200, string? collectorName = null, double? minDurationMs = null, string? status = null)
+    {
+        if (serverIds.Count == 0)
+        {
+            return new List<CollectionLogRow>();
+        }
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+
+        var ordering = minDurationMs is null
+            ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"
+            : "ORDER BY duration_ms DESC NULLS LAST, collection_time DESC";
+
+        command.CommandText = $@"
+SELECT
+    collector_name,
+    collection_time,
+    duration_ms,
+    sql_duration_ms,
+    duckdb_duration_ms,
+    rows_collected,
+    status,
+    error_message,
+    server_name
+FROM v_collection_log
+WHERE server_id IN ({string.Join(",", serverIds)})
+AND   collection_time >= $1
+AND   collection_time <= $2
+AND   ($4 IS NULL OR collector_name = $4)
+AND   ($5 IS NULL OR duration_ms >= $5)
+AND   ($6 IS NULL OR status = UPPER($6))
+" + ordering + @"
+LIMIT $3";
+
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = maxRows });
+        command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(collectorName) ? DBNull.Value : collectorName.Trim() });
+        command.Parameters.Add(new DuckDBParameter { Value = (object?)minDurationMs ?? DBNull.Value });
+        command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(status) ? DBNull.Value : status.Trim() });
 
         var items = new List<CollectionLogRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -466,6 +670,19 @@ ORDER BY collection_time DESC";
     }
 }
 
+/// <summary>
+/// The one place the Collection Health rows word a collector-written UTC instant (#4766): "g" in the zone the display
+/// mode names for the row's own server (<paramref name="rowClock"/>, else the active tab's), then a space and the UTC
+/// offset when that wall time is one of the two of a repeated autumn hour
+/// (<see cref="ServerTimeHelper.FormatInstant"/>).
+/// </summary>
+internal static class CollectionHealthTime
+{
+    internal static string Format(DateTime utc, ServerClock? rowClock) =>
+        ServerTimeHelper.FormatInstant(
+            utc, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, rowClock ?? ServerTimeHelper.ActiveServerClock), "g");
+}
+
 public class CollectionLogRow
 {
     public string CollectorName { get; set; } = "";
@@ -478,7 +695,21 @@ public class CollectionLogRow
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
 
-    public string CollectionTimeFormatted => CollectionTime.ToLocalTime().ToString("g");
+    /// <summary>
+    /// The clock of the server this run belongs to (#4766), stamped by the tab or window that lists it; null (a row
+    /// built without one, such as the fleet-wide log the MCP tool serializes on its own) falls back to the active
+    /// tab's. The Collection Health grids sit in a server's own tab, and the run-history window is opened from it, but
+    /// a row that carries its clock reads its own server's wall time whichever tab is active when it renders.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// <see cref="CollectionTime"/> (a collector-written UTC instant) in the selected display mode (#4766): UTC as stored,
+    /// this machine's zone, or the row's server's own clock, with a space and its UTC offset when the wall time is one
+    /// of the two of a repeated autumn hour ("11/1/2026 1:30 AM -05:00" in a US locale; the "g" pattern is the
+    /// current culture's). This used to be the machine's local time in every mode.
+    /// </summary>
+    public string CollectionTimeFormatted => CollectionHealthTime.Format(CollectionTime, Clock);
 
     public string DurationFormatted => DurationMs.HasValue
         ? (DurationMs.Value < 1000 ? $"{DurationMs.Value} ms" : $"{DurationMs.Value / 1000.0:F1} s")
@@ -533,6 +764,106 @@ public class CollectorHealthRow
     public long ExtensionMissingCount { get; set; }
 
     /// <summary>
+    /// Runs recorded <c>SESSION_MISSING</c> (#3754): the XE session the collector reads was missing or could
+    /// not be created, so nothing was read. Counted apart from <see cref="ErrorCount"/> because it is not
+    /// an input to <see cref="HealthStatus"/> - the capture-down story belongs to the self-alert - and
+    /// apart from <see cref="PermissionDeniedCount"/> because a missing session is not a grant. Fed with
+    /// the error count to <see cref="OutputFinding"/> as the runs that could not read; before this the
+    /// status reached this surface as <see cref="TotalRuns"/> and nothing else. Always 0 for a collector
+    /// that reads no XE session.
+    /// </summary>
+    public long SessionMissingCount { get; set; }
+
+    /* ── Regressed from productive (#3819) ────────────────────────────────────────────────────────
+       A named skip on a collector that had been producing is a different fact from the same status on
+       one that never has. These three columns are what tells them apart; the predicate and the
+       sentence below are composed from the shared classifier so no surface can answer differently. */
+
+    /// <summary>
+    /// The status the collector is reporting NOW — its newest run's (<c>current_status</c>). Display
+    /// text for <see cref="RegressedFinding"/> and nothing else: <see cref="HealthStatus"/> reads the
+    /// window's COUNTS, never one row's word. Null on a surface that does not project it, which makes
+    /// the finding null rather than a sentence with a hole in it.
+    /// </summary>
+    public string? CurrentStatus { get; set; }
+
+    /// <summary>
+    /// The newest run whose status was NOT one of <c>CollectorRuntimePrecondition.NamedSkipStatuses</c>
+    /// (<c>last_non_skip_time</c>) — the instant the current skip streak began after. Null when every
+    /// run in the window was a skip, which is the never-produced-here case the benign band already
+    /// describes correctly.
+    /// </summary>
+    public DateTime? LastNonSkipTime { get; set; }
+
+    /// <summary>
+    /// The newest run that stored anything (<c>last_productive_time</c>) — off the same
+    /// <c>rows_collected > 0</c> test as <see cref="RunsWithRows"/>, so productive means one thing on
+    /// this row. Its ORDER against <see cref="LastNonSkipTime"/> is what makes a regression a
+    /// regression rather than two unrelated facts.
+    /// </summary>
+    public DateTime? LastProductiveTime { get; set; }
+
+    /// <summary>
+    /// Whether this collector WAS producing rows and now reports a named skip every cycle (#3819) — the
+    /// distinction <see cref="HealthStatus"/> could not make on its own, because the benign skip bands
+    /// are gated on the window holding no success and a regressed collector's window holds its
+    /// productive days. Its own member rather than an expression at the call site for the reason
+    /// <see cref="DeniedSinceLastSuccess"/> is one: every surface derives it from the one shared
+    /// predicate instead of each writing the comparison out.
+    /// </summary>
+    public bool RegressedFromProductive => CollectorHealthClassifier.RegressedFromProductive(
+        LastRunTime, LastNonSkipTime, LastProductiveTime);
+
+    /// <summary>
+    /// The sentence a regressed collector carries, or null when it is not one (#3819). Composed from
+    /// the shared formatter, like <see cref="OutputFinding"/> above, so no consumer re-derives it
+    /// differently. <see cref="RowsStored"/> is the count it reports: on a regressed row that figure is
+    /// entirely pre-regression, because a named skip stores nothing.
+    /// </summary>
+    public string? RegressedFinding => RegressedFromProductive
+        ? CollectorHealthClassifier.FormatRegressedFromProductiveFinding(
+            RowsStored, LastNonSkipTime, CurrentStatus)
+        : null;
+
+    /* ── Produced then stopped (#3885) ────────────────────────────────────────────────────────────
+       The Darling twin's members, at parity: a SUCCESS storing nothing, run after run, on a collector
+       that had been productive. Unlike #3819's skip streak -- which on this SKU is the narrower
+       revoked-permission population -- this class is the same on both SKUs, because both dedup on
+       watermarks and a watermark whose source identity regressed starves the filter on either. */
+
+    /// <summary>
+    /// How many runs, counting back from the newest, were SUCCESS with zero rows and nothing else
+    /// (<c>trailing_zero_row_success_runs</c>) — exact, off the ranked subquery #3819 already added.
+    /// </summary>
+    public long TrailingZeroRowSuccessRuns { get; set; }
+
+    /// <summary>
+    /// Whether this collector WAS producing rows and is now recording SUCCESS with zero rows every cycle
+    /// (#3885). Event collectors and on-load collectors are excluded inside the shared predicate, so a
+    /// fortnight of zeros from a deadlock capture at rest stays HEALTHY.
+    /// </summary>
+    public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+
+    /// <summary>The sentence a produced-then-stopped collector carries, or null when it is not one
+    /// (#3885) — composed from the shared formatter, like <see cref="RegressedFinding"/>.</summary>
+    public string? ProducedThenStoppedFinding => ProducedThenStopped
+        ? CollectorHealthClassifier.FormatProducedThenStoppedFinding(
+            RowsStored, LastProductiveTime, TrailingZeroRowSuccessRuns)
+        : null;
+
+    /// <summary>
+    /// EITHER regression class — stopped skipping (#3819) or stopped producing (#3885). What the band
+    /// floor and the <c>regressed_from_productive</c> field both read, so widening the definition did not
+    /// fork either. Disjoint populations: one needs the newest run to be a named skip, the other needs
+    /// the newest runs to be successes.
+    /// </summary>
+    public bool AnyRegression => RegressedFromProductive || ProducedThenStopped;
+
+    /// <summary>Whichever regression sentence applies, or null on a row that is neither (#3885).</summary>
+    public string? AnyRegressionFinding => RegressedFinding ?? ProducedThenStoppedFinding;
+
+    /// <summary>
     /// The newest PERMISSIONS instant in the window (#3010) - what dates <see cref="LastError"/>.
     /// Distinct from <see cref="LastErrorTime"/>, a MAX over ERROR and PERMISSIONS together, which
     /// therefore cannot answer whether the last thing that happened here was a refusal.
@@ -555,6 +886,15 @@ public class CollectorHealthRow
 
     /// <summary>How many of <see cref="TotalRuns"/> carried a <see cref="LastNote"/>.</summary>
     public long NoteCount { get; set; }
+
+    /// <summary>
+    /// The note the collector's NEWEST run left (#4748), or null when that run left none. Unlike
+    /// <see cref="LastNote"/>, which is the newest note in the window whatever run wrote it, this is the
+    /// newest RUN's, so a clean run after a partial-failure cycle clears it. It is the one note the band reads
+    /// (<see cref="CollectorHealthClassifier.Classify"/>): a cycle that lost half or more of its databases
+    /// still records SUCCESS, and the note is the only record of the loss.
+    /// </summary>
+    public string? LatestRunNote { get; set; }
 
     /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
@@ -641,15 +981,23 @@ public class CollectorHealthRow
     /// <see cref="DeniedSinceLastSuccess"/> is one: both SKUs' tools compose it from the one shared
     /// formatter instead of each writing the branch out, so the two cannot answer differently.
     ///
-    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term and
-    /// <see cref="NoteCount"/> the fourth. Zero output with a current denial is a collector that could not
-    /// read; zero output whose runs recorded a note is one that already said why, and the finding defers to
-    /// <see cref="LastNote"/> rather than asserting the event-collector reading over it (#3160); zero output
-    /// with neither is the event collector at rest. Both predicates are READ here and still not banded —
-    /// <c>HealthStatus</c> does not call this, and this returns display text.</para>
+    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term,
+    /// <see cref="NoteCount"/> the fourth, and (#3754) the faulted-run count and the collector's category
+    /// the fifth and sixth. Zero output with a current denial is a collector that could not read; zero
+    /// output with faulted runs (<see cref="ErrorCount"/> plus <see cref="SessionMissingCount"/>) is one
+    /// that could not read on those runs and the finding says so instead of offering the resting-state
+    /// reading; zero output whose runs recorded a note is one that already said why, and the finding defers
+    /// to <see cref="LastNote"/> rather than asserting the event-collector reading over it (#3160); zero
+    /// output with none of those is the event collector at rest - if it IS an event collector
+    /// (<see cref="CollectorHealthClassifier.IsEventCollector"/>), and a snapshot whose source came back
+    /// empty if it is not. Every predicate is READ here and still not banded — <c>HealthStatus</c> does not
+    /// call this, and this returns display text.</para>
     /// </summary>
     public string? OutputFinding =>
-        CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount)
+        CollectorHealthClassifier.FormatOutputFinding(
+                RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount,
+                faultedRuns: ErrorCount + SessionMissingCount,
+                isEventCollector: CollectorHealthClassifier.IsEventCollector(CollectorName))
             is { Length: > 0 } finding
             ? finding
             : null;
@@ -673,32 +1021,68 @@ public class CollectorHealthRow
         ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
         : HoursSinceLastSuccess;
 
-    /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
-    /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
-    /// shipped default, not the per-install ScheduleManager override, so all three surfaces stay in parity.
-    /// Internal since #2296: the tool's sweep-pressure roll-up amortizes each collector's average
-    /// duration by this same cadence, so both readers of it share one resolution.</summary>
+    /// <summary>The collector's cadence, routed through <c>EffectiveRecurringIntervalMinutes</c> (#4000) so an
+    /// on-load collector's catalog 0 reads as the daily recapture interval. This is the same substitution the
+    /// scheduler and the analysis pass already make for every other consumer of a resolved cadence, and it is
+    /// what lets <see cref="CollectorHealthClassifier.Classify"/> band an on-load collector on the SAME ladder
+    /// as any other. A name the catalog doesn't know keeps 0 and the classifier's floor thresholds, as before
+    /// #4000: resolving it to daily too would leave a collector that went dark HEALTHY for a day and a half.
+    /// The banding uses the shipped default, not the per-install ScheduleManager override, so all three
+    /// surfaces stay in parity. Internal since #2296: the tool's sweep-pressure roll-up amortizes each
+    /// collector's average duration by this same cadence, so both readers of it share one resolution.</summary>
     internal int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
+        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+            ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
+            : 0;
 
-    public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
+    /// <summary>
+    /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
+    /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
+    /// answer everywhere else.
+    ///
+    /// <para>The floor is applied outside <c>Classify</c> rather than as an eleventh parameter, and
+    /// deliberately: that signature takes RUN-CLASS COUNTS (plus, since #4748, the newest run's
+    /// partial-failure note - the run's own outcome, still a run-class fact) and nothing about output or
+    /// currency, a discipline both SKUs' suites pin off the type. A regression is a fact about rows stored and the
+    /// order of two instants, so feeding it in would be exactly the leak those pins refuse. The ladder
+    /// stays a function of the counts; the floor is a separate, strictly-louder decision composed on
+    /// top of it.</para>
+    /// </summary>
+    public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
+        CollectorHealthClassifier.Classify(
+            TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
+        /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
+           that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
+           would return HEALTHY forever. */
+        AnyRegression);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"
         : $"{AvgDurationMs / 1000:F1} s";
 
+    /// <summary>
+    /// The clock of the server this row belongs to (#4766), stamped by the tab that lists it; null (a row built without
+    /// one) falls back to the active tab's. The three time columns below read on it, so a row shows its own server's
+    /// wall time in Server mode whichever tab is active when it renders.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// The last success, run and error (collector-written UTC instants) in the selected display mode (#4766): UTC as
+    /// stored, this machine's zone, or the row's server's own clock, with a space and the UTC offset when the wall
+    /// time is one of the two of a repeated autumn hour. They used to be the machine's local time in every mode.
+    /// </summary>
     public string LastSuccessFormatted => LastSuccessTime.HasValue
-        ? LastSuccessTime.Value.ToLocalTime().ToString("g")
+        ? CollectionHealthTime.Format(LastSuccessTime.Value, Clock)
         : "Never";
 
     public string LastRunFormatted => LastRunTime.HasValue
-        ? LastRunTime.Value.ToLocalTime().ToString("g")
+        ? CollectionHealthTime.Format(LastRunTime.Value, Clock)
         : "Never";
 
     public string LastErrorFormatted => LastErrorTime.HasValue
-        ? LastErrorTime.Value.ToLocalTime().ToString("g")
+        ? CollectionHealthTime.Format(LastErrorTime.Value, Clock)
         : "";
 
     /// <summary>

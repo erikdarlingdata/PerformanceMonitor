@@ -17,6 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using System.Windows.Threading;
 using PerformanceMonitorLite.Services;
@@ -88,6 +89,15 @@ public partial class App : Application
     public static string ArchiveDirectory { get; private set; } = string.Empty;
 
     /// <summary>
+    /// #4535: the plan analyzer's per-rule config, read from settings.json's optional "analyzer" key
+    /// (the same shape darling.json's "analyzer" section takes) alongside the other UI defaults
+    /// <see cref="LoadDefaultTimeRange"/> reads. Never null; a missing key or malformed settings.json
+    /// is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>.
+    /// </summary>
+    public static PerformanceMonitor.PlanAnalysis.AnalyzerConfig AnalyzerConfig { get; set; } =
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
+
+    /// <summary>
     /// Gets the default time range in hours for new server tabs.
     /// </summary>
     public static int DefaultTimeRangeHours { get; set; } = 4;
@@ -108,6 +118,14 @@ public partial class App : Application
     /// to the XAML default, so a hand-edited 45 cannot pick a fourth interval into existence.
     /// </summary>
     public static int AutoRefreshIntervalSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// How far a plan operator's actual row count may diverge from its estimate before the plan viewer
+    /// colors the edge feeding it (#4579), matching PerformanceStudio's <c>AccuracyRatioDivergenceLimit</c>
+    /// setting. The viewer floors this at <see cref="PerformanceMonitor.PlanAnalysis.PlanEdgeColour.MinDivergenceLimit"/>
+    /// when it renders, so a hand-edited settings.json value below that has no effect.
+    /// </summary>
+    public static double AccuracyRatioDivergenceLimit { get; set; } = PerformanceMonitor.PlanAnalysis.PlanEdgeColour.DefaultDivergenceLimit;
 
     /* Alert settings */
     public static bool AlertsEnabled { get; set; } = true;
@@ -171,6 +189,17 @@ public partial class App : Application
     public static bool AlertLongRunningQueryExcludeBackups { get; set; } = true;
     public static bool AlertLongRunningQueryExcludeMiscWaits { get; set; } = true;
     public static bool AlertLongRunningQueryExcludeCdc { get; set; } = true;
+    /* #3653 (A5, Q5): the Long-Running Query opt-out knob — program_name PREFIXES and exact login_names whose
+       sessions the alert does not evaluate (case-insensitive; LongRunningQueryExclusions is the rule and names
+       the four classes the production read found). SEEDED: these initial values are the defaults an install
+       that has never written the key evaluates with — the SQL Agent job-step program prefix and the two
+       NT AUTHORITY service logins. The settings.json reader below REPLACES a list when its key is PRESENT,
+       even with an empty array, so an operator who clears a list in the Settings window (which always writes
+       both keys) has cleared it for good; a key that is ABSENT leaves the seed standing. Persisted as two JSON
+       arrays beside alert_excluded_databases, edited on the Settings window's Alerts tab as comma-separated
+       text. */
+    public static List<string> AlertLongRunningQueryExcludedProgramNamePrefixes { get; set; } = LongRunningQueryExclusions.DefaultProgramNamePrefixes.ToList();
+    public static List<string> AlertLongRunningQueryExcludedLogins { get; set; } = LongRunningQueryExclusions.DefaultLogins.ToList();
     public static List<string> AlertExcludedDatabases { get; set; } = new();
     public static bool AlertTempDbSpaceEnabled { get; set; } = true;
     public static int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
@@ -183,9 +212,9 @@ public partial class App : Application
     public static int AlertPvsThresholdPercent { get; set; } = 40;      // Alert when an ADR database's PVS >= X% of its data files (0 disables this check)
     public static int AlertPvsFloorGb { get; set; } = 1;                // AND-qualifier: the PVS must also be >= X GB (0 removes the floor)
     public static bool AlertFileGrowthEnabled { get; set; }             // #2349 database file growth -- OFF by default
-    public static int AlertFileGrowthRiseMb { get; set; } = 10240;      // RISE gate: a file grew >= X MB in the window (0 disables this gate)
+    public static int AlertFileGrowthRiseMb { get; set; } = 10240;      // RISE gate: a file growing >= X MB per HOUR, averaged over the lookback (#3539 A8c; 0 disables this gate)
     public static int AlertFileGrowthVolumePercent { get; set; } = 60;  // LEVEL gate: a file is >= X% of its volume (0 disables this gate)
-    public static int AlertFileGrowthLookbackMinutes { get; set; } = 60;// how far back the rise is measured
+    public static int AlertFileGrowthLookbackMinutes { get; set; } = 60;// the window the rise rate is averaged over
     public static bool AlertLongRunningJobEnabled { get; set; } = true;
     public static int AlertLongRunningJobMultiplier { get; set; } = 3;
     public static bool AlertFailedJobEnabled { get; set; } = true;
@@ -214,6 +243,15 @@ public partial class App : Application
     public static double AnalysisNotifySeverity { get; set; } = 1.5;        // Minimum finding severity (0.0-2.0) to notify on
     public static int AnalysisNotifyCooldownMinutes { get; set; } = 360;    // Re-notify gap per finding (keyed by StoryPathHash)
     public static int AnalysisTimeoutSeconds { get; set; } = 120;           // Per-server analysis timeout
+
+    /* #3712: where a notify-worthy but UNCORROBORATED finding goes — a lone fact, no second fact in its chain and
+       no matched co-fire check. Digest (shipped) keeps it off email, the webhooks and the tray: it is persisted,
+       shown in Recommendations with a not-paged marker, and recorded in the alert log as notification_type
+       'digest' with the reason. Page restores the pre-#3712 behaviour where every finding at or above
+       AnalysisNotifySeverity is delivered. A corroborated finding is delivered under either value. Stored in
+       the settings file as analysis_uncorroborated_route ('digest' / 'page') — the same spelling Darling's
+       darling.json analysis.uncorroboratedRoute and both MCP surfaces use. */
+    public static FindingRoute AnalysisUncorroboratedRoute { get; set; } = FindingRoute.Digest;
 
     /* Connection settings */
     public static int ConnectionTimeoutSeconds { get; set; } = 5;
@@ -461,16 +499,26 @@ public partial class App : Application
             ConfigDirectory,
             new[] { "ignored_wait_types.json", "collection_schedule.json" });
 
+        // An install upgraded from an earlier release keeps its per-user ignored_wait_types.json, which the
+        // seeder above never touches. Merge the bundled defaults that file has not seen yet (a no-op once merged), before
+        // anything calls IgnoredWaitTypes.Load.
+        Services.IgnoredWaitTypes.MergeNewDefaults(
+            Path.Combine(AppContext.BaseDirectory, "config", "ignored_wait_types.json"),
+            Path.Combine(ConfigDirectory, "ignored_wait_types.json"));
+
         // Load settings. The log level goes first so it governs every line the loaders below buffer.
         LoadLogMinimumLevel();
         LoadDefaultTimeRange();
         LoadAlertSettings();
 
-        // Wire the shared-UI time conversion hook before any chart/crosshair can
-        // render. The lambda reads CurrentDisplayMode at call time, so later
-        // display-mode switches are honored. Must precede the first window/chart.
-        PerformanceMonitor.Ui.UiTimeContext.ConvertForDisplay =
-            t => Services.ServerTimeHelper.ConvertForDisplay(t, Services.ServerTimeHelper.CurrentDisplayMode);
+        /* #3577: the operator's per-theme color overrides live beside settings.json, in the same per-user
+           config directory, and are read by ThemeManager on every Apply — so the path and the log hooks
+           go in BEFORE the first Apply, or the first paint is the stock palette and the second is theirs.
+           AppLogger buffers until Initialize (a few statements below), so a warning about a broken file
+           still lands in the log. The watcher that re-applies an outside edit starts after the logger. */
+        ThemeManager.OverridesFilePath = Path.Combine(ConfigDirectory, ThemeColorOverrides.FileName);
+        ThemeManager.LogWarning = message => AppLogger.Warn("Theme", message);
+        ThemeManager.LogInfo = message => AppLogger.Info("Theme", message);
 
         // Apply saved color theme before the main window is shown
         ThemeManager.Apply(ColorTheme);
@@ -478,6 +526,9 @@ public partial class App : Application
         // Initialize logging
         var logDirectory = Path.Combine(appDataRoot, "logs");
         AppLogger.Initialize(logDirectory);
+
+        // #3577: re-apply the current theme when theme-overrides.json is edited outside the app.
+        ThemeManager.WatchOverridesFile();
 
         // Resolve shared (machine-wide) config directory AFTER logger init so migration/ACL events are logged
         SharedConfigDirectory = ResolveSharedConfigDirectory(ConfigDirectory);
@@ -954,6 +1005,19 @@ public partial class App : Application
                 AutoRefreshIntervalSeconds = refreshSeconds.WholeNumber(AutoRefreshIntervalSeconds);
             }
 
+            /* #4535: "analyzer" is a JSON OBJECT, not a scalar the SettingsReader's Bool/WholeNumber
+               helpers handle — read its raw text (when present) through ConfigLoader.Parse, which already
+               falls back to AnalyzerConfig.Default on anything malformed. */
+            if (read.TryGetProperty("analyzer", out var analyzerValue))
+            {
+                AnalyzerConfig = PerformanceMonitor.PlanAnalysis.ConfigLoader.Parse(analyzerValue.Element.GetRawText());
+            }
+
+            if (read.TryGetProperty("accuracy_ratio_divergence_limit", out var divergenceLimit))
+            {
+                AccuracyRatioDivergenceLimit = divergenceLimit.Number(AccuracyRatioDivergenceLimit, 2.0, 1000000.0);
+            }
+
             /* #2444: this loader named its keys even when it had only one, which is the behaviour
                LoadAlertSettings could not manage across eighty-seven. It says so through the shared
                reporter instead of its own log line, so the startup dialog can name these keys beside
@@ -1148,6 +1212,21 @@ public partial class App : Application
                     if (!string.IsNullOrWhiteSpace(db)) AlertExcludedDatabases.Add(db);
                 }
             }
+            /* #3653 (A5, Q5): the two opt-out lists, read with the same element-kind filter as the database list
+               above and normalised through the shared rule so a hand-edited file and the Settings window agree.
+               PRESENT replaces (an empty array is the operator clearing the default — honoured); ABSENT leaves
+               the seeded default in the static initialiser standing. That is the same absent/present rule the
+               database list follows; the only difference is that its default is empty and this one's is not. */
+            if (read.TryGetProperty("alert_long_running_query_excluded_program_name_prefixes", out v) && v.IsArray())
+            {
+                AlertLongRunningQueryExcludedProgramNamePrefixes = LongRunningQueryExclusions.Normalize(
+                    v.Element.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)).ToList();
+            }
+            if (read.TryGetProperty("alert_long_running_query_excluded_logins", out v) && v.IsArray())
+            {
+                AlertLongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(
+                    v.Element.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)).ToList();
+            }
             if (read.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.Bool(AlertTempDbSpaceEnabled);
             if (read.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.WholeNumber(AlertTempDbSpaceThresholdPercent);
             if (read.TryGetProperty("alert_low_disk_enabled", out v)) AlertLowDiskEnabled = v.Bool(AlertLowDiskEnabled);
@@ -1292,6 +1371,10 @@ public partial class App : Application
             if (read.TryGetProperty("analysis_notify_severity", out v)) AnalysisNotifySeverity = v.Number(AnalysisNotifySeverity, 0.0, 2.0);
             if (read.TryGetProperty("analysis_notify_cooldown_minutes", out v)) AnalysisNotifyCooldownMinutes = v.WholeNumber(AnalysisNotifyCooldownMinutes, 30, 10080);
             if (read.TryGetProperty("analysis_timeout_seconds", out v)) AnalysisTimeoutSeconds = v.WholeNumber(AnalysisTimeoutSeconds, 30, 600);
+            /* #3712: a value that is neither 'digest' nor 'page' keeps the current setting rather than becoming
+               either — the same keep-the-default posture every reader above takes on a malformed value. */
+            if (read.TryGetProperty("analysis_uncorroborated_route", out v))
+                AnalysisUncorroboratedRoute = FindingRouting.TryParseRoute(v.Text(FindingRouting.RouteText(AnalysisUncorroboratedRoute))) ?? AnalysisUncorroboratedRoute;
 
             /* #2444: reported AFTER every read, which is the point — the whole set, named, and every key that
                was fine applied. Empty on a healthy file, so this costs nothing on the normal path. */

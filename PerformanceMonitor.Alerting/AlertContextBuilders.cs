@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using PerformanceMonitor.Notifications;
@@ -338,29 +339,80 @@ public static class AlertContextBuilders
     }
 
     /// <summary>
+    /// The unit phrase every surface that shows the file-growth rise threshold uses (#3539 A8c). Both Settings
+    /// windows, the alert body's threshold line and the card spell the knob's unit with THIS string (the MCP tool
+    /// descriptions, which are prose, write it out as "megabytes per HOUR"), and a census test holds each of
+    /// them to it — the knob meant "per lookback" from the day it shipped because nothing held the surfaces to
+    /// one phrase.
+    /// </summary>
+    public const string FileGrowthRiseUnit = "MB/hr";
+
+    /// <summary>
+    /// The rise bar, in megabytes over the lookback window, for a threshold expressed in MB per HOUR (#3539 A8c).
+    ///
+    /// <para><b>What the knob means.</b> <see cref="IAlertEngineSettings.FileGrowthRiseMb"/> is a RATE — megabytes
+    /// per hour — and <see cref="IAlertEngineSettings.FileGrowthLookbackMinutes"/> is the window that rate is
+    /// averaged over. Before this, the stored number was compared against the raw growth inside the window, so
+    /// the same 10,240 meant "10 GB in five minutes" on a store whose operator had shortened the lookback and
+    /// "10 GB in a day" on one who had lengthened it: two knobs, one of which silently rescaled the other by up
+    /// to 288×. Now 10,240 is 10 GB/hr everywhere; a 5-minute window asks for 853 MB inside it, a 24-hour
+    /// window for 240 GB, and both are the same sustained rate.</para>
+    ///
+    /// <para><b>Why the bar is scaled to the CONFIGURED window rather than the rate read off the MEASURED one.</b>
+    /// <see cref="DatabaseFileGrowthInfo.GrowthMbPerHour"/> divides by the width the samples actually span,
+    /// which on a server that started collecting five minutes ago — or just came out of a collection gap — is
+    /// five minutes: one 1 GB autogrowth in that span reads as 12 GB/hr, fires the default bar, and resolves at
+    /// the next sample when the span widens. Holding the growth to <c>rate × configured window</c> instead counts
+    /// unobserved time as no growth, the same conservative reading a single-sample window already gets ("no rise
+    /// observed", not "the whole file appeared"). It also makes the change byte-identical for every store on the
+    /// shipped 60-minute lookback: <c>rate × 60 / 60</c> is the number that was always compared.</para>
+    /// </summary>
+    public static double FileGrowthRiseBarMb(int riseMbPerHour, int lookbackMinutes) =>
+        /* Product first, one division: the product of two ints is exact in a double for any value the knobs'
+           clamps allow (the write bound is int.MaxValue on the rate, so it is widened before multiplying), and
+           dividing once keeps "rate × 60 / 60" equal to the rate to the last bit on the shipped lookback. */
+        (double)riseMbPerHour * Math.Max(1, lookbackMinutes) / 60.0;
+
+    /// <summary>
     /// #2349: the files breaching either gate, worst first. Both gates are applied HERE rather than in the
     /// engine so the render path, the observation path and the decision can never disagree about which files
     /// are involved.
+    ///
+    /// <para>The rise gate compares the growth inside the window against <see cref="FileGrowthRiseBarMb"/> — the
+    /// MB-per-hour threshold scaled to the window it is averaged over (#3539 A8c), so the same rate gives the
+    /// same verdict whatever the lookback is set to.</para>
     ///
     /// <para>Ordered by how much of its volume the file occupies, because that is the one number that says how
     /// close this is to becoming a <c>Volume Free Space</c> page — a 40 GB rise on a 4 TB volume is less urgent
     /// than a 10 GB file that is now 80% of a small one.</para>
     /// </summary>
     public static List<DatabaseFileGrowthInfo> GetBreachedFiles(
-        IReadOnlyList<DatabaseFileGrowthInfo>? files, int riseMb, int volumePercent)
+        IReadOnlyList<DatabaseFileGrowthInfo>? files, int riseMbPerHour, int volumePercent, int lookbackMinutes)
     {
         if (files is null || files.Count == 0) return new List<DatabaseFileGrowthInfo>();
 
         var breached = files
-            .Where(f =>
-                (riseMb > 0 && f.GrowthMb >= riseMb)
-                || (volumePercent > 0 && f.VolumeTotalMb > 0 && f.VolumePercent >= volumePercent))
+            .Where(f => BreachesRiseGate(f, riseMbPerHour, lookbackMinutes) || BreachesLevelGate(f, volumePercent))
             .OrderByDescending(f => f.VolumePercent)
             .ThenByDescending(f => f.GrowthMb)
             .ToList();
 
         return breached;
     }
+
+    /// <summary>The RISE gate on its own: grew at least <see cref="FileGrowthRiseBarMb"/> — the MB-per-hour
+    /// threshold scaled to the configured window (#3539 A8c) — inside the lookback window. Zero disables it.
+    /// Split out of <see cref="GetBreachedFiles"/> at #3636 because the engine's once-per-observation guard
+    /// applies to THIS gate only, and it has to ask the same question the breach list asked rather than a
+    /// re-typed copy of it.</summary>
+    public static bool BreachesRiseGate(DatabaseFileGrowthInfo f, int riseMbPerHour, int lookbackMinutes) =>
+        riseMbPerHour > 0 && f.GrowthMb >= FileGrowthRiseBarMb(riseMbPerHour, lookbackMinutes);
+
+    /// <summary>The LEVEL gate on its own: the file is at least <paramref name="volumePercent"/> of its volume.
+    /// Zero disables it; a file with no volume stats (Azure SQL DB) is never level-gated. A standing level that
+    /// re-fires on the cooldown by design — the #3636 guard never consults it.</summary>
+    public static bool BreachesLevelGate(DatabaseFileGrowthInfo f, int volumePercent) =>
+        volumePercent > 0 && f.VolumeTotalMb > 0 && f.VolumePercent >= volumePercent;
 
     /// <summary>#2349: the alert card. Renders the top few by the same order <see cref="GetBreachedFiles"/>
     /// produced, and names the fields an operator needs to act without opening the Viewer — including
@@ -382,10 +434,13 @@ public static class AlertContextBuilders
                 ("File", f.FileName),
                 ("Physical Name", f.PhysicalName),
                 ("Size", $"{f.TotalSizeGb:F1} GB"),
-                ("Growth", $"{f.GrowthGb:F1} GB in {f.GrowthWindowMinutes:F0} min ({f.GrowthMbPerHour:F0} MB/hr)"),
+                /* The rate here is over the MEASURED span (what the samples actually show); the threshold line
+                   on the alert says what bar it was held to and over what window. Same unit phrase as the
+                   threshold, so the two numbers read as comparable (#3539 A8c). */
+                ("Growth", $"{f.GrowthGb:F1} GB in {f.GrowthWindowMinutes:F0} min ({f.GrowthMbPerHour:F0} {FileGrowthRiseUnit})"),
                 ("Volume", string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint),
-                ("Volume Free", $"{f.VolumeFreeMb / 1024.0:F1} GB"),
-                ("File % of Volume", $"{f.VolumePercent:F0}%"),
+                ("Volume Free", f.VolumeFreeMb is double freeMb ? $"{freeMb / 1024.0:F1} GB" : "n/a"),
+                ("File % of Volume", f.VolumeTotalMb is double volTotal && volTotal > 0 ? $"{f.VolumePercent:F0}%" : "n/a"),
                 /* A percent autogrowth on a large file is its own finding: each growth is bigger than the last,
                    which is exactly how a file gets away from someone. WS3 knows about the pattern and does not
                    alert on it. */
@@ -401,7 +456,7 @@ public static class AlertContextBuilders
 
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"{f.DatabaseName}.{f.FileName} — {f.TotalSizeGb:F1} GB ({f.VolumePercent:F0}% of {f.VolumeMountPoint})",
+                Heading = $"{f.DatabaseName}.{f.FileName} — {f.TotalSizeGb:F1} GB ({(f.VolumeTotalMb is double headTotal && headTotal > 0 ? $"{f.VolumePercent:F0}% of {(string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint)}" : "volume unknown")})",
                 Fields = fields
             });
         }
@@ -539,20 +594,7 @@ public static class AlertContextBuilders
     /// </summary>
     public static bool IsDeadlockExcluded(DeadlockAlertRow row, IReadOnlyList<string> excludedDatabases)
     {
-        if (string.IsNullOrEmpty(row.DeadlockGraphXml)) return false;
-        try
-        {
-            var doc = System.Xml.Linq.XElement.Parse(row.DeadlockGraphXml);
-            var dbNames = doc.Descendants("process")
-                .Select(p => p.Attribute("currentdbname")?.Value)
-                .Where(n => !string.IsNullOrEmpty(n))
-                .Cast<string>()
-                .ToList();
-            if (dbNames.Count == 0) return false;
-            return dbNames.All(db => excludedDatabases.Any(e =>
-                string.Equals(e, db, StringComparison.OrdinalIgnoreCase)));
-        }
-        catch { return false; }
+        return PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(row.DeadlockGraphXml, excludedDatabases);
     }
     public static AlertContext? BuildPoisonWaitContext(List<PoisonWaitDelta> triggeredWaits)
     {
@@ -648,6 +690,122 @@ public static class AlertContextBuilders
         /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident. */
         AlertIncidentRenderer.Apply(context, Decorate(LongRunningQueryIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
+    }
+
+    /// <summary>The <c>Excluded Count</c> label on the Long-Running Query card's knob item (#3653 A5, Q5) — the
+    /// one field a reader of the card or of <c>get_alert_history</c>'s <c>context_json</c> looks up to see the
+    /// opt-out knob working. A constant so the engine, the tests and any reader spell it once.</summary>
+    public const string LongRunningQueryExcludedCountLabel = "Excluded Count";
+
+    /// <summary>The knob item's per-arm split (#3653 A5, Q5 addendum): sessions the <c>program_name</c> PREFIX arm
+    /// removed. A session matching both arms is counted here and not under the login arm, so the two labels sum
+    /// to <see cref="LongRunningQueryExcludedCountLabel"/>.</summary>
+    public const string LongRunningQueryExcludedByProgramPrefixLabel = "Excluded By Program Prefix";
+
+    /// <summary>The knob item's per-arm split: sessions the exact <c>login_name</c> arm removed and the program
+    /// arm did not.</summary>
+    public const string LongRunningQueryExcludedByLoginLabel = "Excluded By Login";
+
+    /// <summary>
+    /// The Long-Running Query card's OPT-OUT KNOB item (#3653 A5, ruling Q5): how many over-threshold sessions
+    /// the <see cref="LongRunningQueryExclusions"/> knob removed from this evaluation, split by the arm that
+    /// removed them, and the entries that did it. Appended by the engine after the session items, and only when
+    /// the knob is set — it is set by default (the seeded job-step prefix and the two NT AUTHORITY logins), so
+    /// the item is absent only for an operator who cleared both lists, to whom "Excluded Count: 0" on every
+    /// card would be a line about nothing.
+    ///
+    /// <para>Why the count is on the card at all: the knob's only effect is a page NOT arriving, and a setting
+    /// whose effect is an absence is one an operator cannot verify from the outside. The count is the knob's
+    /// receipt — "I removed 4 sessions before deciding this" — which is also how an entry that is too broad
+    /// shows itself (a count that equals the whole snapshot). The SPLIT says which default did the work: a
+    /// fleet whose login arm removes seventy sessions and whose prefix arm removes none has learned something
+    /// about its background. The counts are SESSIONS, not snapshot rows, and a session matching both arms is
+    /// counted once, under the program prefix. The entries are listed so the card is self-describing to
+    /// whoever reads it in six months without the Settings window open.</para>
+    /// </summary>
+    /// <param name="exclusions">The knob as the engine applied it (normalised).</param>
+    /// <param name="excludedByProgramPrefix">The read's count of sessions the program-prefix arm removed (including any that also matched a login).</param>
+    /// <param name="excludedByLogin">The read's count of sessions the login arm removed and the program arm did not.</param>
+    public static AlertDetailItem BuildLongRunningQueryExclusionItem(LongRunningQueryExclusions exclusions, int excludedByProgramPrefix, int excludedByLogin)
+    {
+        if (exclusions is null) throw new ArgumentNullException(nameof(exclusions));
+
+        var excludedCount = excludedByProgramPrefix + excludedByLogin;
+        var fields = new List<(string Label, string Value)>
+        {
+            (LongRunningQueryExcludedCountLabel, excludedCount.ToString(CultureInfo.InvariantCulture)),
+            (LongRunningQueryExcludedByProgramPrefixLabel, excludedByProgramPrefix.ToString(CultureInfo.InvariantCulture)),
+            (LongRunningQueryExcludedByLoginLabel, excludedByLogin.ToString(CultureInfo.InvariantCulture))
+        };
+        if (exclusions.ProgramNamePrefixes.Count > 0)
+        {
+            fields.Add(("Excluded Program Prefixes", string.Join(", ", exclusions.ProgramNamePrefixes)));
+        }
+
+        if (exclusions.Logins.Count > 0)
+        {
+            fields.Add(("Excluded Logins", string.Join(", ", exclusions.Logins)));
+        }
+
+        return new AlertDetailItem
+        {
+            Heading = excludedCount == 1
+                ? "1 session over the threshold was excluded by the opt-out knob"
+                : $"{excludedCount} sessions over the threshold were excluded by the opt-out knob",
+            Fields = fields
+        };
+    }
+
+    /// <summary>The <c>Excluded By Database</c> label on the Long-Running Query card's excluded-databases item
+    /// (#3742) — the one field a reader of the card or of <c>get_alert_history</c>'s <c>context_json</c> looks up
+    /// to see how many over-threshold sessions the shared <c>excludedDatabases</c> list removed ahead of the page.
+    /// A constant so the engine, the tests and any reader spell it once, beside the knob's three.</summary>
+    public const string LongRunningQueryExcludedByDatabaseLabel = "Excluded By Database";
+
+    /// <summary>
+    /// The Long-Running Query card's EXCLUDED-DATABASES item (#3742): how many over-threshold sessions the shared
+    /// <c>excludedDatabases</c> list removed from this evaluation ahead of the row cap, and the databases that
+    /// did it. Appended by the engine after the sessions and after the knob's own item, and only when the list is
+    /// SET — it is empty by default on both SKUs, so a fresh install's card is byte-identical to the pre-#3742
+    /// one; an operator who has named a database gets the receipt on every card, including a "0", exactly as the
+    /// knob's item reads 0/0/0 on a sweep where it removed nothing.
+    ///
+    /// <para>Why this is its own item and not three more fields on the knob's: the two settings are different
+    /// instruments with different owners. The knob names programs and principals, ships seeded, and is the
+    /// Long-Running Query alert's alone; <c>excludedDatabases</c> is the blunt, empty-by-default list the
+    /// blocking and deadlock arms also honour. The knob item's heading says "excluded by the opt-out knob" and
+    /// its <c>Excluded Count</c> has always been the knob's two arms; folding a database count into it would
+    /// make that heading false and that count ambiguous. The count here is SESSIONS the database list removed
+    /// that neither knob arm had already removed (the read counts the database arm last), so this item's number
+    /// and the knob item's sum to the sessions the page does not show.</para>
+    ///
+    /// <para>Why the count is on the card at all is #3742's whole finding: before it, the list was applied after
+    /// the cap, so an excluded reporting database whose ETL held the five longest sessions consumed the page and
+    /// the alert came back short or empty — and NOTHING on the card said so. Now the rows are removed ahead of
+    /// the cap AND the card states how many, so a page of two with "Excluded By Database: 6" beside it is a
+    /// page an operator can read. ANNOTATION, NEVER SUPPRESSION, like the knob's item: the fire is decided
+    /// before this exists and it can only add a line.</para>
+    /// </summary>
+    /// <param name="excludedDatabases">The shared list as the engine holds it (the settings value, not re-normalised —
+    /// the card lists what the operator typed).</param>
+    /// <param name="excludedByDatabase">The read's count of sessions the database list removed and neither knob arm did.</param>
+    public static AlertDetailItem BuildLongRunningQueryExcludedDatabasesItem(IReadOnlyList<string> excludedDatabases, int excludedByDatabase)
+    {
+        if (excludedDatabases is null) throw new ArgumentNullException(nameof(excludedDatabases));
+
+        var fields = new List<(string Label, string Value)>
+        {
+            (LongRunningQueryExcludedByDatabaseLabel, excludedByDatabase.ToString(CultureInfo.InvariantCulture)),
+            ("Excluded Databases", string.Join(", ", excludedDatabases))
+        };
+
+        return new AlertDetailItem
+        {
+            Heading = excludedByDatabase == 1
+                ? "1 session over the threshold was in an excluded database"
+                : $"{excludedByDatabase} sessions over the threshold were in excluded databases",
+            Fields = fields
+        };
     }
 
     /* ---------------- High CPU: the active-maintenance annotation (#3495) ---------------- */
@@ -889,6 +1047,48 @@ public static class AlertContextBuilders
             }
         });
         return context;
+    }
+
+    /// <summary>The <c>Fired By</c> label on the Blocking Wait Time gate item (#3653 A5) — the one field a
+    /// renderer or an MCP reader of <c>get_alert_history</c>'s <c>context_json</c> looks up to learn which arm
+    /// admitted the delivery. A constant so the engine, the tests and any reader spell it once.</summary>
+    public const string BlockingWaitFiredByLabel = "Fired By";
+
+    /// <summary>
+    /// The Blocking Wait Time fire's GATE item (#3653 A5, ruling Q4): the arm that admitted this delivery and
+    /// the numbers it was judged on, prepended by the engine ahead of the blocked-process detail. The
+    /// blocked-process rows are the count gate's evidence and may be absent altogether for a DMV-only
+    /// episode; this item is the wait gate's own evidence and is present on every fire from that arm.
+    ///
+    /// <para><c>Fired By</c> carries the machine token (<c>AlertEngine.BlockingWaitFiredBySingleSnapshot</c>
+    /// / <c>BlockingWaitFiredByConsecutive</c>) rather than prose, because its reader is as likely to be a
+    /// tool as a person: a Slack card renders it as-is and still reads, and <c>get_alert_history</c> hands it
+    /// through <c>context_json</c> untouched. The single-snapshot bar is stated beside the configured one so a
+    /// reader can see WHY a one-snapshot page was admitted without knowing the multiplier — the same reason
+    /// the tempdb item states its denominator.</para>
+    /// </summary>
+    /// <param name="current">The fresh snapshot the fire was judged on.</param>
+    /// <param name="thresholdSeconds">The configured <c>BlockingWaitSecondsThreshold</c>.</param>
+    /// <param name="firedBy">The arm token — see the engine's two <c>BlockingWaitFiredBy*</c> members.</param>
+    public static AlertDetailItem BuildBlockingWaitGateItem(CurrentBlockingWaitResult current, int thresholdSeconds, string firedBy)
+    {
+        if (current is null) throw new ArgumentNullException(nameof(current));
+
+        return new AlertDetailItem
+        {
+            Heading = $"Blocking Wait Time — {current.TotalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked session(s)",
+            Fields = new()
+            {
+                (BlockingWaitFiredByLabel, firedBy),
+                ("Total Blocked Wait", $"{current.TotalWaitSeconds:F0}s"),
+                ("Threshold", $"{thresholdSeconds}s"),
+                ("Single-Snapshot Bar", $"{thresholdSeconds * AlertEngine.BlockingWaitSingleSnapshotMultiplier}s ({AlertEngine.BlockingWaitSingleSnapshotMultiplier}× threshold; below it, {AlertEngine.BlockingWaitBreachSamples} consecutive collections)"),
+                /* The snapshot's collection_time is stored naive-UTC (both adapters compare it against
+                   DateTime.UtcNow for freshness), so it renders through the UTC marker — #3422's rule that
+                   every timestamp an alert body carries declares its clock. */
+                ("Snapshot", AlertTimestamp.Utc(current.SnapshotTime))
+            }
+        };
     }
 
     public static AlertContext? BuildAnomalousJobContext(

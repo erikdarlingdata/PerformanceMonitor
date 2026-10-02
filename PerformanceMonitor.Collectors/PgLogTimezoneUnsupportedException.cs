@@ -14,6 +14,12 @@ namespace PerformanceMonitor.Collectors;
 /// The PostgreSQL server log is timestamped in a zone that is not UTC, so the deadlock reports in it cannot
 /// be stored (#2993).
 ///
+/// <para><b>Log events throw it too, not only deadlocks.</b> <see cref="PgLogEntryAssembler"/> is the one
+/// throw site, and both <see cref="PgDeadlockLogParser"/> (pg_deadlocks) and <see cref="PgLogEventClassifier"/>
+/// (pg_log_events) read through it, so the message names the log rather than either reader's rows. It said
+/// "deadlock reports" and "NOT 'no deadlocks were detected'" until 2026-09-23, when DARLING01 showed that
+/// sentence on a pg_log_events row.</para>
+///
 /// <para><b>Why this refuses rather than converting.</b> The log prefix carries the zone as an
 /// ABBREVIATION, and abbreviations are ambiguous: <c>CST</c> is US Central, China Standard and Cuba
 /// Standard — three offsets and two hemispheres of daylight saving. There is no correct conversion to make
@@ -55,14 +61,15 @@ public sealed class PgLogTimezoneUnsupportedException : Exception
     {
         var zone = string.IsNullOrWhiteSpace(observedZone) ? "(none)" : observedZone.Trim();
 
-        return $"The PostgreSQL server log on this target is timestamped '{zone}', which is not a "
-            + $"zero-offset zone: {SettingName} is not UTC, so every timestamp in its deadlock reports is "
-            + "local time. Nothing was stored this cycle, and this is NOT 'no deadlocks were detected'. "
-            + "The reports are refused rather than shifted because a log-prefix zone is an ABBREVIATION "
-            + "and abbreviations are ambiguous — CST alone is three different zones — so there is no "
-            + "conversion to apply that would not be a guess, and a guess here produces plausible rows "
-            + $"stamped at the wrong moment. Set {SettingName} = 'UTC' on the target (on managed "
-            + "PostgreSQL that is a parameter-group change, and it takes effect on reload rather than "
-            + "needing a restart); the next collection cycle stores normally.";
+        return "The collector stored nothing from the PostgreSQL server log on this target this cycle, "
+            + "and this is NOT an empty log. "
+            + $"The log is timestamped '{zone}', which is not a zero-offset zone. So {SettingName} is not "
+            + "UTC, and every timestamp in the log is local time. "
+            + "The collector refuses these lines instead of converting them. The zone in a log prefix is an "
+            + "abbreviation, and one abbreviation can name several zones. For example, CST names three. "
+            + "A conversion is a guess, and a guess stores rows that look correct but have the wrong time. "
+            + $"Set {SettingName} = 'UTC' on the target. On managed PostgreSQL, change it in the parameter "
+            + "group. The change takes effect on a reload, so no restart is necessary. The next collection "
+            + "cycle then stores normally.";
     }
 }

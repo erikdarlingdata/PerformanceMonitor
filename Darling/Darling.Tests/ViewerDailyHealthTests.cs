@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -42,8 +43,9 @@ public sealed class ViewerDailySummarySqlTests
         Assert.Contains("DISTINCT ON (d)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY d, ms DESC", sql, StringComparison.Ordinal);
 
-        /* Distinct query count, deadlock count. */
-        Assert.Contains("COUNT(DISTINCT query_hash)", sql, StringComparison.Ordinal);
+        /* Distinct query count (the distinct day/hash pairs counted, #3905's hashable spelling), deadlock count. */
+        Assert.Contains("SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT x.d, COUNT(x.query_hash) AS c", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_deadlocks", sql, StringComparison.Ordinal);
 
@@ -58,14 +60,26 @@ public sealed class ViewerDailySummarySqlTests
         Assert.Contains("MAX(wait_time_ms) AS max_wait_ms", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END", sql, StringComparison.Ordinal);
 
-        /* High-CPU count uses total host CPU = SQL + other-process (Linux NULL → 0), threshold 80, via FILTER. */
+        /* High-CPU count uses total host CPU = SQL + other-process (Linux NULL → 0), threshold 80, via FILTER.
+           The 80 is the card band's Warning bar restated as a SQL literal (#3539 A2) — pinned against the
+           constant so the day cell and the card cannot drift on what "high CPU" means, and NOT against the
+           alert engine's knob, which would recolour every past day when retuned. */
         Assert.Contains("(sqlserver_cpu_utilization + COALESCE(other_process_cpu_utilization, 0)) >= 80", sql, StringComparison.Ordinal);
+        Assert.Equal(80.0, ServerHealthThresholds.CpuWarningPercent);
+        Assert.Contains(
+            ">= " + ServerHealthThresholds.CpuWarningPercent.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + ")",
+            sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_cpu_utilization_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FILTER (WHERE", sql, StringComparison.Ordinal);
 
-        /* Collect errors off the collection_log ERROR rows; all-status runs mark the day collected. */
+        /* Collect errors off the collection_log ERROR rows; all-status runs mark the day collected AND are
+           projected as the error share's denominator (#3539 A2), appended last so no ordinal moved. */
         Assert.Contains("status = 'ERROR'", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(cl.runs, 0) AS collection_runs", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("AS peak_block_wait_ms", StringComparison.Ordinal) < sql.IndexOf("AS collection_runs", StringComparison.Ordinal),
+            "collection_runs must be the trailing column so the eleven positional reads before it stay put");
 
         /* Memory pressure (process OR system indicator >= 2) and the severe escalation (process >= 3). */
         Assert.Contains("FROM v_memory_pressure_events", sql, StringComparison.Ordinal);
@@ -337,32 +351,59 @@ public sealed class ViewerDailyHealthRowTests
     }
 
     [Fact]
-    public void CollectorHealthRow_OnLoadCollector_IsExemptFromStaleness()
+    public void CollectorHealthRow_OnLoadCollector_BandsOnItsDailyCadence()
     {
-        /* server_config runs once per tab open, not on the loop — a 100-hour-old last success is NOT
-           stale/failing for it (would be FAILING for a scheduled collector). */
-        var row = new CollectorHealthRow
+        /* #4000: server_config recaptures daily, so it bands on the same ladder as any collector at a
+           1440-minute cadence. It is no longer exempt: a 2-hour-old success is well inside a day, and a
+           100-hour-old one means the daily recapture has stopped. */
+        var fresh = new CollectorHealthRow
+        {
+            CollectorName = "server_config",
+            TotalRuns = 3,
+            SuccessCount = 3,
+            LastSuccessTime = DateTime.UtcNow.AddHours(-2),
+        };
+        Assert.Equal("HEALTHY", fresh.HealthStatus);
+
+        var dark = new CollectorHealthRow
         {
             CollectorName = "server_config",
             TotalRuns = 3,
             SuccessCount = 3,
             LastSuccessTime = DateTime.UtcNow.AddHours(-100),
         };
-        Assert.Equal("HEALTHY", row.HealthStatus);
+        Assert.Equal("STOPPED", dark.HealthStatus);
     }
 
     [Fact]
     public void CollectorHealthRow_OnLoadCollector_StillWarnsOnHighFailureRate()
     {
+        /* A recent success, so the daily cadence has nothing to say and the failure rate decides. */
         var row = new CollectorHealthRow
         {
             CollectorName = "server_config",
             TotalRuns = 10,
             SuccessCount = 7,
             ErrorCount = 3,   // 30% > 20%
-            LastSuccessTime = DateTime.UtcNow.AddHours(-100),
+            LastSuccessTime = DateTime.UtcNow.AddHours(-2),
         };
         Assert.Equal("WARNING", row.HealthStatus);
+    }
+
+    [Fact]
+    public void CollectorHealthRow_AnUncatalogedCollector_KeepsTheFloorLadder()
+    {
+        /* #4000 resolves only a CATALOG on-load entry to daily. A name the catalog doesn't know keeps the
+           floor thresholds it always had, so 30 hours without a run is STOPPED, not a day-and-a-half grace. */
+        var row = new CollectorHealthRow
+        {
+            CollectorName = "not_a_catalog_collector",
+            TotalRuns = 1,
+            SuccessCount = 1,
+            LastSuccessTime = DateTime.UtcNow.AddHours(-30),
+            LastRunTime = DateTime.UtcNow.AddHours(-30),
+        };
+        Assert.Equal("STOPPED", row.HealthStatus);
     }
 
     [Theory]
@@ -482,7 +523,12 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.Equal(1, summary.BlockingEvents);               // XE report count (fallback not used)
             Assert.Equal(1, summary.HighCpuEvents);                // only the 90% sample
             Assert.Equal(1, summary.CollectionErrors);
-            Assert.Equal("Critical", summary.OverallHealth);       // deadlocks -> Critical composite band
+            Assert.Equal(1, summary.CollectionRuns);               // #3539 A2: the trailing collection_runs column
+            /* The composite band, on a finished 24-hour day (#3525, #3539 A2): one deadlock is 0.04/hr and
+               one blocking event 0.04/hr (both Healthy by rate), one hot sample is under the day's six, and
+               the one collector run that ERRORED is a 100% error share — past the 20% bar, which is the
+               Warning arm and never Critical. */
+            Assert.Equal("Warning", summary.OverallHealth);
 
             bodySucceeded = true;
         }
@@ -514,8 +560,10 @@ public sealed class ViewerDailyHealthLivePostgresTests
             var inDay = day.AddHours(9);
 
             /* No XE blocked-process reports; two DMV snapshots → the COALESCE(NULLIF(...)) falls back to
-               the DMV count. No deadlocks / sustained CPU / heavy blocking, but 2 blocking events is
-               "some blocking" → the composite band is Warning. */
+               the DMV count. Two snapshots over a finished 24-hour day is 0.08/hr — under the 5/hr Warning
+               tier (#3539 A2/A3) — and the rows carry no wait time for the wait arm, so the day bands
+               Healthy with the blocking still counted; "any blocking is a Warning day" was the count
+               trigger this replaced. */
             await InsertDmvBlockingAsync(connection, SummaryServerId, inDay);
             await InsertDmvBlockingAsync(connection, SummaryServerId, inDay);
 
@@ -524,7 +572,8 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.NotNull(summary);
             Assert.Equal(2, summary!.BlockingEvents);
             Assert.Equal(0, summary.DeadlockCount);
-            Assert.Equal("Warning", summary.OverallHealth);
+            Assert.Equal("Healthy", summary.OverallHealth);
+            Assert.Contains("2 blocking events (0.1/hr)", summary.SignalsTooltip, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -778,7 +827,7 @@ public sealed class ViewerDailyHealthLivePostgresTests
     private static async Task InsertDeadlockAsync(NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time) VALUES ($1, $2, $3, $4, $2)",
             connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
@@ -790,7 +839,7 @@ public sealed class ViewerDailyHealthLivePostgresTests
     private static async Task InsertBlockedProcessAsync(NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time) VALUES ($1, $2, $3, $4, $2)",
             connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));

@@ -1171,10 +1171,13 @@ public class EntraDeviceCodeTests
             /* The discriminating read. The hops above are the SHAPE the driver uses; this is the
                one that can tell an async-local apart from a thread-local, because a dedicated
                thread has never held either. The thread id is asserted to differ as well, or a
-               scheduler that inlined the delegate would make the check vacuous. */
+               scheduler that inlined the delegate would make the check vacuous. The caller's id is
+               taken BEFORE the await: the continuation may resume on the dedicated thread itself,
+               so reading it afterwards compared that thread with itself and failed CI. */
+            var callerThread = Environment.CurrentManagedThreadId;
             var (elsewhere, elsewhereThread) = await AcquisitionTargetOnItsOwnThreadAsync();
 
-            Assert.NotEqual(Environment.CurrentManagedThreadId, elsewhereThread);
+            Assert.NotEqual(callerThread, elsewhereThread);
             Assert.Equal("scoped.example.invalid (db)", elsewhere);
         }
 

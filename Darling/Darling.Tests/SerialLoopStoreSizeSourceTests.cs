@@ -82,6 +82,32 @@ public sealed class SerialLoopStoreSizeSourceTests
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ServerStatus.cs"), 1,
             "the Viewer status bar's Database field — interactive, user-initiated, on the viewer's own "
             + "fan-out deadline, and nothing waits behind it but the operator who asked"),
+
+        /* V136 (#3691): a THIRD regime, and a different store — the MONITORED TARGET's, not this product's.
+           The per-database size collector runs pg_database_size(oid) over the target's pg_database once an
+           hour, on the collector's own cadence and command timeout, through the same three-outcome degrade
+           every collector gets; the walk it pays for is the target's files, on the target's disk, and
+           nothing on the serial loop waits behind it. It is exactly the SQL Server side's database_size_stats
+           read, in PostgreSQL. One occurrence, inside the query literal. */
+        (Path.Combine("PerformanceMonitor.Collectors", "PgDatabaseSizeStatsCollector.cs"), 1,
+            "the hourly per-database size collector — runs against the MONITORED TARGET, not the store, "
+            + "under the collector's own cadence and command timeout, off the serial loop"),
+
+        /* #4214: a FOURTH regime — DarlingStoreHostProfile.GatherStoreFactsAsync's live store-size read.
+           Its only caller is DarlingCliCommands.CheckSettingsAsync (--check-settings), a user-invoked,
+           one-shot verb; its CommandTimeout is ServiceCommandDeadlines.CliStoreReadSeconds (10s), not
+           SerialLoopSeconds, and it never runs on the collection loop's serial thread. Ruling 9 (#4214)
+           kept it out of the once-per-start profile log too: DarlingWorker's startup step calls
+           GatherStartupProfileAsync, which gathers host facts and settings only and never reaches
+           GatherStoreFactsAsync, so a store-size-scaling read still never runs on a serial-loop deadline
+           or from the collection loop. One occurrence, inside the StoreSizeSql query literal. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingStoreHostProfile.cs"), 1,
+            "the --check-settings CLI verb's live store-size read (GatherStoreFactsAsync) — user-invoked, "
+            + "one-shot, under ServiceCommandDeadlines.CliStoreReadSeconds (10s) rather than the serial "
+            + "loop's 5s bound, and never called from the collection loop or at service startup: ruling 9 "
+            + "keeps every store fact that scales with the store out of the startup profile log, so "
+            + "GatherStoreFactsAsync's only TWO callers are --check-settings and the get_store_host MCP "
+            + "read below, neither of them the collection loop"),
     };
 
     /// <summary>
@@ -312,7 +338,7 @@ public sealed class SerialLoopStoreSizeSourceTests
         Assert.True(
             unexpected.Count == 0,
             $"{unexpected.Count} file(s) run pg_database_size, which walks every file in the store "
-            + "(measured 3,177ms on a 225GiB store, and it tracks file count rather than bytes). The two "
+            + "(measured 3,177ms on a 225GiB store, and it tracks file count rather than bytes). The "
             + "places that may pay for it, and why, are: "
             + string.Join("; ", s_pgDatabaseSizeOwners.Select(o => $"{o.Relative} — {o.Why}"))
             + ". Say which regime yours is in, or read the recorded value from "
@@ -376,17 +402,18 @@ public sealed class SerialLoopStoreSizeSourceTests
         Assert.True(
             literal.Count == 0,
             $"{literal.Count} ObjectKind comparison(s) in DarlingMcpStoreMetricsTools.cs compare against "
-            + "something other than StoreSelfMetrics.StoreObjectKind. The kind is one const with six "
+            + "something other than a StoreSelfMetrics.*ObjectKind const. Every kind is one const with several "
             + "consumers because a reader filtering on a kind the writer stopped writing returns zero "
             + $"rows rather than erroring: {string.Join(", ", literal)}");
     }
 
     /// <summary>
     /// Every <c>.ObjectKind ==</c> / <c>!=</c> comparison in <paramref name="source"/>: how many there are,
-    /// and the ones whose right-hand side is not
-    /// <see cref="StoreSelfMetrics.StoreObjectKind"/>. Read over STRIPPED source, where a literal
-    /// right-hand side survives as blanks — so the next code token after the operator is not the const,
-    /// and the site is reported.
+    /// and the ones whose right-hand side is not one of the <c>StoreSelfMetrics.*ObjectKind</c> constants
+    /// (<see cref="StoreSelfMetrics.StoreObjectKind"/> and, since #3582, its siblings for every other kind
+    /// the sweep writes — the invariant is "no retyped literal", not "only the store kind"). Read over
+    /// STRIPPED source, where a literal right-hand side survives as blanks — so the next code token after
+    /// the operator is not a const of that shape, and the site is reported.
     /// </summary>
     private static (int Compared, List<string> NotTheConst) ObjectKindComparisons(string source)
     {
@@ -400,7 +427,7 @@ public sealed class SerialLoopStoreSizeSourceTests
             compared++;
             var rest = code[(m.Index + m.Length)..];
 
-            if (!rest.TrimStart().StartsWith("StoreSelfMetrics.StoreObjectKind", StringComparison.Ordinal))
+            if (!Regex.IsMatch(rest.TrimStart(), @"^StoreSelfMetrics\.[A-Za-z]+ObjectKind\b", RegexOptions.CultureInvariant))
             {
                 var line = code.Take(m.Index).Count(c => c == '\n') + 1;
                 offenders.Add($"line {line}");
@@ -484,6 +511,10 @@ public sealed class SerialLoopStoreSizeSourceTests
     [Theory]
     [InlineData("if (r.ObjectKind == StoreSelfMetrics.StoreObjectKind) { }\n", 1, 0)]
     [InlineData("if (p.ObjectKind != StoreSelfMetrics.StoreObjectKind) { }\n", 1, 0)]
+    /* #3582: the sibling kind consts pass; a StoreSelfMetrics member that is NOT a kind const does not. */
+    [InlineData("if (r.ObjectKind == StoreSelfMetrics.ContinuousAggregateObjectKind) { }\n", 1, 0)]
+    [InlineData("if (r.ObjectKind != StoreSelfMetrics.JobHistoryObjectKind) { }\n", 1, 0)]
+    [InlineData("if (r.ObjectKind == StoreSelfMetrics.OtherObjectName) { }\n", 1, 1)]
     [InlineData("if (r.ObjectKind == \"store\") { }\n", 1, 1)]
     [InlineData("if (r.ObjectKind != \"store\") { }\n", 1, 1)]
     [InlineData("/* r.ObjectKind == \"store\" is what this used to do. */\n", 0, 0)]

@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpServerInfoTools
 {
-    [McpServerTool(Name = "get_server_properties"), Description("Gets SQL Server instance properties: edition, version, CPU count, physical memory, socket/core topology, HADR status, and clustering. Use for capacity planning and edition-aware recommendations.")]
+    [McpServerTool(Name = "get_server_properties"), Description("Gets SQL Server instance properties: edition, version, CPU count, memory, socket/core topology, HADR, clustering, and the clock (utc_offset_minutes, time_zone_id). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected, and on a stalled collector it is the only sign of staleness. time_zone_id is CURRENT_TIMEZONE_ID() (SQL Server 2022+/Azure SQL only); null means a pre-2022 engine, so only the offset in force at captured_at is known, and an instant across a DST transition from it can read an hour off. <<GUIDE>> Gets SQL Server instance properties: edition, version, CPU count, physical memory, socket/core topology, HADR status, clustering, and the server's clock: utc_offset_minutes is the UTC offset in force when the snapshot was collected, and time_zone_id is the engine's own time-zone name (CURRENT_TIMEZONE_ID(), SQL Server 2022+ and Azure SQL only) - a null time_zone_id means a pre-2022 engine, where only the offset is known and any instant on the far side of a DST transition from the snapshot is placed an hour off by that offset. Use for capacity planning and edition-aware recommendations. LATEST IS A TIME: this reads the newest properties snapshot, not a window, and captured_at is the instant it was collected - a core count or memory figure here is what the server reported AT that stamp, and on a server whose collector has stalled the stamp is the only thing that says how stale it is. ON AN AZURE SQL DATABASE (engine_edition 5) the host's hardware is not the database's allocation: hyperthread_ratio, socket_count, cores_per_socket and physical_memory_mb come back null with a hardware_note, cpu_count is the database's own scheduler count (it can be higher than its vCores), and service_objective with vcore_count says what the database is given.")]
     public static async Task<string> GetServerProperties(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -25,25 +25,7 @@ public sealed class McpServerInfoTools
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_properties")
                     ?? McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                collection_time = row.CollectionTime.ToString("o"),
-                edition = row.Edition,
-                engine_edition = row.EngineEdition,
-                product_version = row.ProductVersion,
-                product_level = row.ProductLevel,
-                product_update_level = string.IsNullOrEmpty(row.ProductUpdateLevel) ? null : row.ProductUpdateLevel,
-                cpu_count = row.CpuCount,
-                hyperthread_ratio = row.HyperthreadRatio,
-                socket_count = row.SocketCount,
-                cores_per_socket = row.CoresPerSocket,
-                physical_memory_mb = row.PhysicalMemoryMb,
-                is_hadr_enabled = row.IsHadrEnabled,
-                is_clustered = row.IsClustered,
-                enterprise_features = string.IsNullOrEmpty(row.EnterpriseFeatures) ? null : row.EnterpriseFeatures,
-                service_objective = string.IsNullOrEmpty(row.ServiceObjective) ? null : row.ServiceObjective
-            }, McpHelpers.JsonOptions);
+            return ServerPropertiesPayload(resolved.ServerName, row);
         }
         catch (Exception ex)
         {
@@ -51,7 +33,58 @@ public sealed class McpServerInfoTools
         }
     }
 
-    [McpServerTool(Name = "get_database_sizes"), Description("Gets database file sizes, space usage, and volume free space. Shows each database file with total size, used space, auto-growth settings, and the underlying volume's capacity. Use for capacity planning and identifying space pressure.")]
+    /// <summary>
+    /// The <c>get_server_properties</c> payload for one snapshot. On an Azure SQL Database (engine edition 5) the stored
+    /// <c>hyperthread_ratio</c>, <c>socket_count</c>, <c>cores_per_socket</c> and <c>physical_memory_mb</c> are the HOST's, so
+    /// they come back null, <c>cpu_count</c> (the database's own scheduler count) passes through, <c>vcore_count</c> (what the
+    /// service objective gives the database) rides beside <c>service_objective</c>, and a <c>hardware_note</c> says why. Every
+    /// other edition keeps the payload it always had, key for key. Darling's tool emits the same shape in the same words.
+    /// </summary>
+    internal static string ServerPropertiesPayload(string serverName, ServerPropertiesRow row)
+    {
+        var payload = new
+        {
+            server = serverName,
+            /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp. This tool
+               stamped itself as collection_time before that vocabulary existed and was carried as a
+               named allowance on both SKUs; a cut-over rather than an alias, because the census is the
+               contract and a second key for one instant is the drift it exists to refuse. */
+            captured_at = row.CollectionTime.ToString("o"),
+            edition = row.Edition,
+            engine_edition = row.EngineEdition,
+            product_version = row.ProductVersion,
+            product_level = row.ProductLevel,
+            product_update_level = string.IsNullOrEmpty(row.ProductUpdateLevel) ? null : row.ProductUpdateLevel,
+            cpu_count = row.CpuCount,
+            hyperthread_ratio = row.HyperthreadRatio,
+            socket_count = row.SocketCount,
+            cores_per_socket = row.CoresPerSocket,
+            physical_memory_mb = row.PhysicalMemoryMb,
+            is_hadr_enabled = row.IsHadrEnabled,
+            is_clustered = row.IsClustered,
+            enterprise_features = string.IsNullOrEmpty(row.EnterpriseFeatures) ? null : row.EnterpriseFeatures,
+            service_objective = string.IsNullOrEmpty(row.ServiceObjective) ? null : row.ServiceObjective,
+            /* v63 (#3653 item 13, Q8): the clock pair. The offset is the one IN FORCE at captured_at,
+               which is exact for an instant on the same side of a DST transition and an hour wrong for
+               one on the other (#3231); the zone is what can tell the two apart. NULL is a real answer
+               for the zone - CURRENT_TIMEZONE_ID() is SQL Server 2022+ / Azure SQL only - and the note
+               says what it means rather than leaving a caller to read it as "not collected". Byte-for-byte
+               the keys Darling's tool emits. */
+            utc_offset_minutes = row.UtcOffsetMinutes,
+            time_zone_id = string.IsNullOrEmpty(row.TimeZoneId) ? null : row.TimeZoneId,
+            time_zone_note = string.IsNullOrEmpty(row.TimeZoneId)
+                ? "time_zone_id is null: a pre-2022 engine (CURRENT_TIMEZONE_ID() is SQL Server 2022+ / Azure SQL only), so only the offset in force at captured_at is known."
+                : "time_zone_id is the engine's own zone (CURRENT_TIMEZONE_ID()); utc_offset_minutes is the offset that zone had at captured_at."
+        };
+
+        if (!ServerHardwareScope.HardwareIsTheHosts(row.EngineEdition))
+            return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+
+        var scoped = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
+        return ServerHardwareScope.ScopeServerPropertiesPayload(scoped, row.VcoreCount).ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    [McpServerTool(Name = "get_database_sizes"), Description("Gets database file sizes, space usage, and volume free space. Shows each database file with total size, used space, auto-growth settings, and the underlying volume's capacity. Use for capacity planning and identifying space pressure. LATEST IS A TIME: this reads the newest size snapshot, not a window, and captured_at is the instant it was collected - a volume's free space here is what it was AT that stamp, and a file that grew since is not reflected until the next collection.")]
     public static async Task<string> GetDatabaseSizes(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -67,36 +100,106 @@ public sealed class McpServerInfoTools
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_size_stats")
                     ?? McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                collection_time = rows[0].CollectionTime.ToString("o"),
-                file_count = rows.Count,
-                databases = rows
-                    .GroupBy(r => r.DatabaseName)
-                    .Select(g => new
-                    {
-                        database_name = g.Key,
-                        total_size_mb = g.Sum(r => r.TotalSizeMb),
-                        used_size_mb = g.Sum(r => r.UsedSizeMb),
-                        files = g.Select(r => new
-                        {
-                            file_name = r.FileName,
-                            file_type = r.FileTypeDesc,
-                            total_size_mb = r.TotalSizeMb,
-                            used_size_mb = r.UsedSizeMb,
-                            auto_growth_mb = r.AutoGrowthMb,
-                            max_size_mb = r.MaxSizeMb,
-                            volume_mount_point = r.VolumeMountPoint,
-                            volume_total_mb = r.VolumeTotalMb,
-                            volume_free_mb = r.VolumeFreeMb
-                        })
-                    })
-            }, McpHelpers.JsonOptions);
+            return DatabaseSizesPayload(resolved.ServerName, rows);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_database_sizes", ex);
         }
+    }
+
+    /// <summary>
+    /// The get_database_sizes payload, shaped apart from the read so it can be pinned without a store. A file with
+    /// no allocated size (the LOG file of an Azure SQL Database Hyperscale database, which lives in the log
+    /// service) keeps a null <c>total_size_mb</c> and adds nothing to its database's total; the payload then
+    /// carries <see cref="HyperscaleLogSize.Note"/>. The one row another database on an Azure SQL Database server
+    /// gets holds its data size only, and the server reports no log size for it: that row, and its database's
+    /// entry, carry <see cref="AzureSiblingDatabaseSize.LogNote"/> under <see cref="AzureSiblingDatabaseSize.RowNoteKey"/>,
+    /// and the top-level note says it too. No other row has the key. Darling's twin gives the same words and shape.
+    /// </summary>
+    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DatabaseSizeStatsRow> rows)
+    {
+        var databases = rows
+            .GroupBy(r => r.DatabaseName)
+            .Select(g =>
+            {
+                var database = new Dictionary<string, object?>
+                {
+                    ["database_name"] = g.Key,
+                    /* A file with no allocated size (the Hyperscale log file, in the log service) adds nothing,
+                       so a Hyperscale database's total is its data file alone, and used sums over the same files.
+                       Used is null when none of those files has a used size: that is unknown, not 0 MB. */
+                    ["total_size_mb"] = g.Sum(r => r.TotalSizeMb ?? 0),
+                    ["used_size_mb"] = UsedSizeTotalMb(g)
+                };
+                if (g.Any(r => r.IsAzureSiblingRow))
+                    database[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
+                database["files"] = g.Select(FilePayload).ToList();
+                return database;
+            })
+            .ToList();
+
+        /* A null total_size_mb is the Hyperscale log file, whose size is n/a (log service) rather than a
+           storage figure; a sibling row holds data size only. The note rides only on a payload that has one of
+           the two, so every other server's shape is unchanged. */
+        var note = AzureSiblingDatabaseSize.DatabaseSizesNote(
+            hasLogServiceFile: rows.Any(r => r.TotalSizeMb is null),
+            hasSiblingRow: rows.Any(r => r.IsAzureSiblingRow));
+        if (note is not null)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                server = serverName,
+                /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
+                captured_at = rows[0].CollectionTime.ToString("o"),
+                file_count = rows.Count,
+                note,
+                databases
+            }, McpHelpers.JsonOptions);
+        }
+
+        return JsonSerializer.Serialize(new
+        {
+            server = serverName,
+            /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
+            captured_at = rows[0].CollectionTime.ToString("o"),
+            file_count = rows.Count,
+            databases
+        }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>One file of a database in the payload. The note key is added to the one row another database on an
+    /// Azure SQL Database server gets, and to no other.</summary>
+    private static Dictionary<string, object?> FilePayload(DatabaseSizeStatsRow r)
+    {
+        var file = new Dictionary<string, object?>
+        {
+            ["file_name"] = r.FileName,
+            ["file_type"] = r.FileTypeDesc,
+            ["total_size_mb"] = r.TotalSizeMb,
+            ["used_size_mb"] = r.UsedSizeMb
+        };
+        if (r.IsAzureSiblingRow)
+            file[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
+        file["auto_growth_mb"] = r.AutoGrowthMb;
+        file["max_size_mb"] = r.MaxSizeMb;
+        file["volume_mount_point"] = r.VolumeMountPoint;
+        file["volume_total_mb"] = r.VolumeTotalMb;
+        file["volume_free_mb"] = r.VolumeFreeMb;
+        return file;
+    }
+
+    /// <summary>The used space of the files whose size counts toward their database's total, or null when none of
+    /// them has a used size: a database whose used space is not known is not using 0 MB.</summary>
+    private static double? UsedSizeTotalMb(IEnumerable<DatabaseSizeStatsRow> files)
+    {
+        double? used = null;
+        foreach (var file in files)
+        {
+            if (file.TotalSizeMb is not null && file.UsedSizeMb is double fileUsed)
+                used = (used ?? 0) + fileUsed;
+        }
+
+        return used;
     }
 }

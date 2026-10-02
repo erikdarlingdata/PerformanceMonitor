@@ -1,0 +1,1758 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Npgsql;
+
+namespace PerformanceMonitor.Darling.Storage;
+
+/// <summary>
+/// THE MATERIALIZATION-HOLE REPAIR (#3653, Q10 — item 9's last clause): at service start, find every bucket
+/// range INSIDE a continuous aggregate's materialized span where the source holds rows and the aggregate holds
+/// none, and close each with ONE targeted <c>refresh_continuous_aggregate</c> over exactly its bounds.
+///
+/// <para><b>The hole, read honestly (the <see cref="RetentionTierRouter"/> essay, #3698).</b> A refresh policy
+/// re-materializes <c>[now - start_offset, now - end_offset]</c> and nothing else. When the service is down
+/// longer than <see cref="HourlyRefreshStartOffset"/>, the first refresh after it resumes opens at
+/// <c>now - start_offset</c>, the watermark jumps past everything before that, and the raw collected BETWEEN
+/// the last pre-outage refresh's window end and the moment collection stopped — at most <c>end_offset</c> plus
+/// one <see cref="HourlyRefreshScheduleInterval"/> of collections, about two hours — is never materialized.
+/// The outage itself has no rows, so the aggregate is correctly empty there; what goes missing is the tail. On
+/// a <c>materialized_only</c> rollup that tail reads EMPTY under a floor that says it is covered; on a real-time
+/// baseline aggregate the tail sits below the watermark and is served by neither branch. Nothing else in the
+/// product can see it: the startup backfill and <c>--backfill-rollups</c> both measure the FLOOR, and a floor
+/// cannot see a hole above itself. Once the source's retention passes the tail the hole is permanent.</para>
+///
+/// <para><b>Ruled (Q10): a targeted refresh of the hole, not a wider <c>start_offset</c>.</b> Widening the
+/// policy's window would make every hourly refresh forever re-scan the extra span — the cost #3012 measured at
+/// 118–175% of cadence when the window was three days — to cover a shape that happens once per outage. A
+/// refresh over exactly the hole's bounds costs the hole's buckets once, and only on the start that finds them.</para>
+///
+/// <para><b>Detection is by shape, not by ledger.</b> The store keeps no collection-run ledger cheap enough to
+/// read the outage from, so the scan asks the two relations directly: for every bucket from the aggregate's
+/// materialized floor (or the source's horizon, whichever is later) up to its last materialized bucket, does the
+/// materialization hold a row for it, and does the source hold a row that the aggregate's own <c>WHERE</c>
+/// would admit? Both are index probes — every hypertable carries its time index and every materialization
+/// its <c>bucket</c> index — so the scan is a few hundred probes per aggregate whatever the tables weigh. The
+/// scan's SQL has to fence them to keep them that way (#3933, <see cref="MaterializationHoleScanSql"/>): written
+/// bare, the planner joined each one over its whole relation.
+/// The aggregate's WHERE is applied to the source probe (<see cref="MaterializationHoleSourceFilterFor"/>) so a
+/// bucket whose every source row the aggregate rejects — a restart hour on an interval-honest successor — is
+/// not read as a hole and refreshed on every start for nothing. Buckets below the floor are the backfill's
+/// business and are never touched here; buckets past the last materialized one are the live edge the policy
+/// owns.</para>
+///
+/// <para><b>The seam case (#4186), lowered to a CONTIGUOUS DOWNWARD FILL by #4301's ruling.</b> The three
+/// interval-honest successors (<c>SupersededHourlyRollups</c>) can each have an un-materialized span BELOW
+/// their own floor: an outage that outlasts <see cref="HourlyRefreshStartOffset"/> before the successor's
+/// first refresh leaves raw rows between the frozen legacy's last bucket and the successor's floor that
+/// neither side ever materialized (the outage shape worked through above) — and, separately, an outage that
+/// predates this store's freeze can leave a hole INSIDE the legacy's own already-materialized span that
+/// nothing ever re-scans, because the six frozen views are excluded from <see cref="MaterializationHoleTargets"/>.
+/// Both sit BELOW the successor's floor, so the ordinary "floor up to ceiling" scan never reaches them — a
+/// hole, by this pass's own definition, has to be inside the materialized span. For a successor found through
+/// <c>LegacyOf</c>, <see cref="MaterializationHoleScanWindows"/> adds a seam window down to RAW's own filtered
+/// floor — not merely the legacy's last bucket — whenever that reaches further back than the successor's floor
+/// already does — UNCLAMPED by the horizon that still bounds the ordinary window, because an outage longer than
+/// the horizon's own span is exactly the shape that needs repairing, not a shape to skip (an earlier cut folded
+/// the seam into that same horizon clamp, and a seam older than the horizon was silently never scanned — see
+/// <see cref="MaterializationHoleScanWindows"/>'s own doc for that history). Filling all the way to raw's floor
+/// rather than stopping at the legacy's last bucket is the point of the #4301 ruling: <c>RollupCoverage.StitchedRelationSql</c>
+/// splits its read at the successor's own floor, so that floor has to be contiguous with everything raw still
+/// admits for the stitch to read every row exactly once. The seam window then reads as an ordinary hole and
+/// the existing machinery repairs it: bounded per start, NEWEST FIRST (the successor's own invariant — see the
+/// H1 note below), filter-aware — a span wider than one start's cap (<see cref="MaterializationHoleRepairCapBuckets"/>)
+/// takes more than one start to close in full, but every start makes progress on it, walking downward from the
+/// successor's floor toward raw's. Once repaired, the successor's floor covers the seam on its own and
+/// <see cref="RetentionArmSafetySql"/>'s seam probe — which exists because this stitch is NOT gap-free by
+/// construction — finds nothing there and releases the raw purge gate automatically, with no manual step,
+/// bounded only by that same per-start repair cap.</para>
+///
+/// <para><b>Bounded, and the bound is stated.</b> Per aggregate per start, at most one refresh policy window's
+/// worth of buckets (<see cref="MaterializationHoleRepairCapBuckets"/>: 24 hourly, 3 daily) is refreshed,
+/// OLDEST FIRST — the oldest hole is the one the source's retention is about to make permanent. Anything past
+/// the cap is logged with its bounds and left for the next start. Every hole repaired is one INFORMATION line
+/// with its bounds, its bucket count, its duration, which refresh closed it and what the re-scan found
+/// afterwards; failure is isolated per aggregate, the #1775 shape. The pass does NOT write its own
+/// end-of-pass summary: it RETURNS its tally (<see cref="MaterializationHoleRepairSummary"/>) and the
+/// worker writes the ONE summary line per start, unconditionally (#3756). The first cut wrote a summary
+/// here only when something happened and a Debug line otherwise, so the first store to carry the scan
+/// produced a log in which a start that found nothing, a start whose scan threw before its first probe and
+/// a start that never reached the scan read identically; the line that proves the scan RAN belongs to the
+/// caller that knows what a start is and owns the other two outcomes (a connection that would not open, a
+/// shutdown that cut it short).</para>
+///
+/// <para><b>Plain refresh first, FORCED only on a measured remainder — the backfill's own escalation shape
+/// (<see cref="RollupBackfill.RunSliceAsync"/> then <see cref="RollupBackfill.RepairAsync"/>), and the order was
+/// settled on the rig rather than argued.</b> The first cut of this pass went straight to the forced refresh on
+/// the reasoning that the tail's rows were inserted ABOVE the invalidation threshold their day's refresh had set
+/// and so were never logged, leaving a plain refresh nothing to do. Measured on TimescaleDB 2.28.1, that is
+/// FALSE for the outage shape: when a refresh advances the threshold past a region it did not cover, the engine
+/// records that region as invalid, and a plain refresh over the tail materializes it. So the plain form runs
+/// first — it exists on every TimescaleDB version, and on the outage shape it is the whole repair. The re-scan
+/// then decides: a hole that survives a plain refresh has no invalidation behind it (a materialization written
+/// and lost, a refresh cut short after it consumed its entries — the trap <see cref="RollupBackfill.RefreshSliceSql"/>
+/// documents), and only that hole gets the forced refresh, which is the one case <c>force</c> is for and the
+/// one case a pre-2.18 store cannot repair (its 42883 is caught per aggregate and reported). Both paths are
+/// exercised live, each on the shape that needs it. Every refresh carries the backfill's 55P03 retry for a
+/// policy run landing on the same aggregate and its <see cref="RefreshDisclosure"/> for the <c>options</c>
+/// parameter.</para>
+///
+/// <para><b>Dependency order, because a hole propagates down the tier.</b> A hierarchical daily reads its
+/// hourly, so an hourly hole is a daily hole too, and the daily's own refresh window (three days) is no wider
+/// against an outage than the hourly's. The targets are walked in <see cref="RollupBackfill.Targets"/> order —
+/// every raw-sourced rollup before the rollups that read it — followed by the baseline aggregates, so a daily's
+/// scan runs after its hourly has been repaired and sees the rows it needs.</para>
+///
+/// <para><b>A repaired successor-hourly seam chains its successor daily too (#4300).</b> A long outage
+/// across an upgrade can leave the seam repair filling a successor hourly back further than the successor
+/// daily's own refresh window (three days) reaches, and further than its own floor — those days sit below
+/// the daily's policy window, so the daily never materializes them on its own. Since a successor hourly's
+/// 90-day retention is armed only through its successor daily's coverage, an unchased gap holds that
+/// retention indefinitely even though the hourly itself lost no row. After a seam range closes, this pass
+/// also refreshes the dependent successor daily over exactly that range — aligned out to whole days, clipped
+/// to the part strictly older than the daily's own window, and capped to the daily's own per-pass bucket
+/// budget (<see cref="ChainedDailyRange"/> is the pure rule). The same chase also runs on the START-PATH
+/// full walk (<c>seamOnly: false</c>), not only the hourly seam-only repair — any closed seam range chains
+/// its daily regardless of which caller closed it. Failure-isolated from the hourly repair whose range just
+/// closed: a daily-chase error is logged at Warning and never fails the pass that found it. The chase never
+/// refreshes a day while the hourly underneath it still has a hole in that range: it re-scans the hourly
+/// first and defers the chase of that range if one is found, so a partial day is never handed to the daily as
+/// if it were whole. A day the closed range's own dependent-daily refresh (#4716) already refreshed is left out
+/// of the chase (<see cref="ChaseRangesAfterRefresh"/>), so each day is refreshed once per closed range and
+/// counted once.</para>
+///
+/// <para><b>Launched, not awaited.</b> The scan itself is cheap and starts the moment the ensure sweep has
+/// created every aggregate; the repairs are bounded but a full cap on the heaviest aggregate is a policy run's
+/// worth of work, which is minutes on the largest store. So the worker launches this the way it launches the
+/// baseline backfill (#1757) — its own connection, concurrent with the rest of startup, drained at shutdown —
+/// rather than holding a restarted service dark for it. Ordering against the retention policies (i.e. running
+/// this scan before or after <see cref="EnsureRetentionPoliciesAsync"/> on the SAME start) is not load-bearing
+/// under #4299's design (variant d′): the raw purge no longer runs on its own schedule at all — the three raw
+/// jobs stay permanently unscheduled, and the only thing that ever triggers a purge is the service's own
+/// hourly Periodic pass, gated on a repair already finished under the CURRENT
+/// <c>pg_postmaster_start_time()</c> (<see cref="RetentionArmSafetySql"/> states the gate in full). Since that
+/// trigger cannot fire before the NEXT hourly tick, it can never race this start's own hole scan no matter
+/// which of the two the Startup pass launches first. Two things still bypass the service's own gate, named
+/// here rather than treated as a leak: the FIRST start after the upgrade, which still runs whichever raw job
+/// the OLD scheduled-based code had already armed, once (3.8.0 parity for that one run only, before
+/// this store has converged to the never-scheduled shape); and a DBA's own <c>alter_job</c>/<c>run_job</c>
+/// against a raw job, which always executes immediately like any other job in the catalog and is reverted by
+/// the very next hourly converge. Neither exception changes what bounds the ordinary race: a hole is
+/// repairable for exactly as long as its source holds the rows.</para>
+/// </summary>
+public static partial class TimescaleSupport
+{
+    /// <summary>One aggregate the hole scan walks: the view, the relation its CREATE selects FROM, that
+    /// relation's time column, the bucket width, and the CREATE text the source filter is read from.</summary>
+    public readonly record struct MaterializationHoleTarget(
+        string View, string Source, string SourceTimeColumn, TimeSpan BucketWidth, string CreateSql);
+
+    /// <summary>
+    /// The aggregates the repair walks, in dependency order: <see cref="RollupBackfill.Targets"/> (every
+    /// raw-sourced rollup before the rollups that read it) followed by <see cref="BaselineAggregates"/>, each
+    /// paired with its shipped CREATE so the source filter and the group key are read from the definition rather
+    /// than restated. Derived, never hand-listed — an aggregate registered for creation is scanned for holes the
+    /// same moment.
+    /// </summary>
+    public static IReadOnlyList<MaterializationHoleTarget> MaterializationHoleTargets =>
+        RollupBackfill.Targets
+            .Select(t => new MaterializationHoleTarget(
+                t.View, t.Source, t.SourceTimeColumn, t.BucketWidth,
+                HourlyAggregates.Concat(DailyAggregates).Single(a => string.Equals(a.View, t.View, StringComparison.Ordinal)).CreateSql))
+            .Concat(BaselineAggregates.Select(a => new MaterializationHoleTarget(
+                a.View, SourceTableFor(a.View), "collection_time", HourlyBucket, a.CreateSql)))
+            .ToArray();
+
+    /// <summary>
+    /// #3653 A6, lane LC-a4: the same per-relation descriptor as <see cref="MaterializationHoleTargets"/>, but
+    /// over EVERY member of <see cref="RollupViews"/> — including the six the freeze (LC) took out of
+    /// <see cref="RollupBackfill.Targets"/>, and so out of <see cref="MaterializationHoleTargets"/> too. The
+    /// daily summary's not-carried probe (<c>DailySummarySql.QueriesCteForCagg</c> and
+    /// <c>QueriesCteForStitchedCagg</c>) still names a frozen legacy rollup long after LC stops it advancing —
+    /// under <c>RollupCoverage.Unknown</c>, and below a successor's stitch floor — so it needs a lookup that
+    /// still knows one, while the repair walk (<see cref="RepairMaterializationHolesAsync"/>) must never see a
+    /// frozen view among ITS targets: refreshing one is the one thing the freeze forbids. Kept as a SEPARATE
+    /// list rather than folded into <see cref="MaterializationHoleTargets"/> so that list's membership and
+    /// dependency order — a repair-walk invariant — stay exactly as the freeze left them. Its CREATE text comes
+    /// from <see cref="HourlyAggregates"/>, <see cref="DailyAggregates"/> OR <see cref="FrozenRollupAggregates"/>
+    /// — together the three hold exactly one entry per <see cref="RollupViews"/> member, frozen or not, so the
+    /// lookup below cannot go ambiguous or come up empty for any relation this file knows by name.
+    /// </summary>
+    public static IReadOnlyList<MaterializationHoleTarget> RollupCoverageProbeTargets =>
+        RollupViews
+            .Select(r => new MaterializationHoleTarget(
+                r.View, r.Source, r.SourceTimeColumn, r.BucketWidth,
+                HourlyAggregates.Concat(DailyAggregates).Concat(FrozenRollupAggregates)
+                    .Single(a => string.Equals(a.View, r.View, StringComparison.Ordinal)).CreateSql))
+            .Concat(BaselineAggregates.Select(a => new MaterializationHoleTarget(
+                a.View, SourceTableFor(a.View), "collection_time", HourlyBucket, a.CreateSql)))
+            .ToArray();
+
+    /// <summary>
+    /// How many buckets one aggregate may have repaired per start: its own refresh policy's window in buckets —
+    /// <see cref="HourlyRefreshStartSpan"/> over <see cref="HourlyBucket"/> (24) for an hourly aggregate,
+    /// <see cref="DailyRefreshStartSpan"/> over <see cref="DailyBucket"/> (3) for a daily. So a start never does
+    /// more re-materialization for one aggregate than one ordinary policy run would, which is the cost every
+    /// hour already pays; a hole wider than that is repaired across as many starts as it takes, oldest first,
+    /// and each start says what it left.
+    /// </summary>
+    public static int MaterializationHoleRepairCapBuckets(TimeSpan bucketWidth)
+    {
+        if (bucketWidth <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bucketWidth), bucketWidth, "a bucket has a positive width");
+        }
+
+        var window = bucketWidth >= DailyBucket ? DailyRefreshStartSpan : HourlyRefreshStartSpan;
+        return Math.Max(1, (int)(window.Ticks / bucketWidth.Ticks));
+    }
+
+    /// <summary>
+    /// How far back from the aggregate's last materialized bucket the scan reaches: as far as the SOURCE still
+    /// holds rows, because a hole whose source rows have been purged cannot be repaired and a probe over
+    /// purged chunks is wasted. Read from <see cref="RetentionPolicies"/> for a source that has a policy there
+    /// (the three rolled raw tables and every rollup that is itself a source); the collector-purged raw
+    /// tables the baseline aggregates read have no store-side policy, so they take
+    /// <see cref="BaselineRetentionSpan"/>, the longest horizon a baseline-tier read has ever reached.
+    /// </summary>
+    public static TimeSpan MaterializationHoleScanSpanFor(string source)
+    {
+        foreach (var (relation, dropAfter, _, _) in RetentionPolicies)
+        {
+            if (!string.Equals(relation, source, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (string.Equals(dropAfter, RawRetentionInterval, StringComparison.Ordinal)) return RawRetentionSpan;
+            if (string.Equals(dropAfter, HourlyRetentionInterval, StringComparison.Ordinal)) return HourlyRetentionSpan;
+            if (string.Equals(dropAfter, IntervalRetentionInterval, StringComparison.Ordinal)) return IntervalRetentionSpan;
+            if (string.Equals(dropAfter, IntervalDailyRetentionInterval, StringComparison.Ordinal)) return IntervalDailyRetentionSpan;
+            if (string.Equals(dropAfter, BaselineRetentionInterval, StringComparison.Ordinal)) return BaselineRetentionSpan;
+
+            throw new InvalidOperationException(
+                $"{relation}'s retention horizon '{dropAfter}' has no TimeSpan twin the hole scan knows — add the pair here when a new tier is added");
+        }
+
+        return BaselineRetentionSpan;
+    }
+
+    /// <summary>
+    /// The aggregate's own row filter, as text to append to the source probe — the <c>WHERE</c> clause of its
+    /// CREATE between <c>WHERE</c> and <c>GROUP BY</c>, or empty for a definition with none. Applied so the scan
+    /// asks "does the source hold a row this aggregate would produce output from", not merely "does the source
+    /// hold a row": an hour in which every collection was a restart holds rows an interval-honest successor
+    /// rejects, and reading it as a hole would refresh it on every start and report a repair that repaired
+    /// nothing. The clause is taken verbatim, so a predicate the aggregate applies the probe applies.
+    /// </summary>
+    public static string MaterializationHoleSourceFilterFor(string createSql)
+    {
+        ArgumentNullException.ThrowIfNull(createSql);
+
+        var match = Regex.Match(createSql, @"\bWHERE\b(.*?)\bGROUP BY\b", RegexOptions.Singleline);
+        if (!match.Success)
+        {
+            return string.Empty;
+        }
+
+        var clause = string.Join(" ", match.Groups[1].Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return clause.Length == 0 ? string.Empty : clause;
+    }
+
+    /// <summary>
+    /// The scan, for one aggregate: every bucket in <c>[$1, $2]</c> at <c>$3</c> width that the materialization
+    /// hypertable holds NO row for and the source holds at least one row for that the aggregate's own filter
+    /// admits. Two correlated <c>EXISTS</c> probes per bucket, each an index range on a relation whose time index
+    /// TimescaleDB creates by default (the source's <c>&lt;time&gt;_idx</c>, the materialization's
+    /// <c>bucket_idx</c>), so cost follows the number of buckets scanned and not the size of either table.
+    /// <paramref name="materialization"/> is the aggregate's materialization hypertable
+    /// (<see cref="ResolveMaterializationAsync"/>), read directly so a real-time aggregate's un-materialized
+    /// tail does not count as covered. Ordered oldest first, the order the cap consumes.
+    ///
+    /// <para><b>The probes stay probes because the SQL says so (#3933).</b> Written as a bare <c>NOT EXISTS</c>
+    /// and <c>EXISTS</c>, PostgreSQL pulls both up into joins, and neither join can push the per-bucket bound into
+    /// its scan. The planner made the materialization side a merge anti-join that read the WHOLE materialization
+    /// hypertable (every server, its whole retention, decompressing every compressed chunk to sort it by bucket),
+    /// and the source side a semi-join over a <c>Materialize</c> of the WHOLE source table. On a healthy store
+    /// the second never runs, because no bucket survives the first. After an outage, which is the case this pass
+    /// exists for, every outage bucket survives, holds no source row, and reads the entire materialized source
+    /// through once; the first one builds it, spilling past <c>work_mem</c>. That is the #3905 defect in
+    /// <see cref="DailySummarySql"/>'s not-carried probes without the <c>server_id</c> that bounded it there to
+    /// one server's rows. So each probe carries <c>OFFSET 0</c>, which PostgreSQL will not pull up into a join
+    /// (<c>simplify_EXISTS_query</c>: "OFFSET 0 ... traditionally is used as an optimization fence"), and runs as
+    /// a SubPlan once per bucket with the chunk it needs picked at run time. The candidate buckets are fenced the
+    /// same way, so the source is probed only for the buckets the materialization probe found empty. Measured
+    /// with the old text as the oracle: the same buckets, in the same order, on every target.</para>
+    /// </summary>
+    public static string MaterializationHoleScanSql(MaterializationHoleTarget target, (string Schema, string Name) materialization)
+    {
+        var filter = MaterializationHoleSourceFilterFor(target.CreateSql);
+        var sourceFilter = filter.Length == 0 ? string.Empty : $"\n    AND   {filter}";
+
+        return $@"
+SELECT c.bucket
+FROM (
+    SELECT b.bucket
+    FROM generate_series($1::timestamp, $2::timestamp, $3::interval) AS b(bucket)
+    WHERE NOT EXISTS (SELECT 1 FROM {QuoteIdentifier(materialization.Schema)}.{QuoteIdentifier(materialization.Name)} AS m WHERE m.bucket = b.bucket OFFSET 0)
+    OFFSET 0
+) AS c
+WHERE EXISTS (
+    SELECT 1 FROM collect.{target.Source} AS s
+    WHERE s.{target.SourceTimeColumn} >= c.bucket
+    AND   s.{target.SourceTimeColumn} < c.bucket + $3::interval{sourceFilter}
+    OFFSET 0)
+ORDER BY c.bucket";
+    }
+
+    /// <summary>
+    /// ONE hole definition for a frozen-legacy/successor pair (#4301), used by
+    /// <see cref="TimescaleSupport.RetentionArmSafetySql"/> (the gate): a bucket in
+    /// <c>[<paramref name="fromExpr"/>, <paramref name="toExpr"/>]</c> is a hole when raw admits at least one
+    /// row in <c>[bucket, bucket + width)</c> AND neither the legacy nor the successor has materialized that
+    /// bucket. <paramref name="fromExpr"/>/<paramref name="toExpr"/> are SQL expressions (a literal, a
+    /// parameter placeholder, a correlated subquery) so each caller supplies its own bounds in its own idiom.
+    /// OFFSET 0 fenced for the same #3933 reason <see cref="MaterializationHoleScanSql"/> is: written bare, the
+    /// planner pulls the per-bucket EXISTS probes up into joins that scan the whole relation instead of
+    /// probing one bucket's worth. A bucket below raw's own current floor can hold no admitted row, so it can
+    /// never be a hole under this definition and never holds the purge — a gap left below the floor by an
+    /// earlier version's purge is invisible here by construction, not merely undetected (see this member's own
+    /// callers for what that means for the gate).
+    ///
+    /// <para><b>The repair walk (#4301, the ruling lane) does NOT share this definition.</b> An earlier cut of
+    /// #4301 planned a walk branch that probed the legacy-or-successor union the same way the gate does; the
+    /// ruling replaced it with a plain successor-only fill down to raw's own filtered floor
+    /// (<see cref="RepairMaterializationHolesAsync"/>'s seam-floor block), so the walk's own hole definition
+    /// stays <see cref="MaterializationHoleScanSql"/> (successor-only) throughout — every non-empty hour below
+    /// the successor's floor simply becomes a successor bucket. The LIST-form twin this method used to have
+    /// (<c>LegacySuccessorHoleScanSql</c>) had no other caller once that ruling landed and was removed with it.
+    /// </para>
+    /// </summary>
+    public static string LegacySuccessorHoleExistsSql(
+        string relation, string sourceTimeColumn, string sourceFilter, string legacy, string successor,
+        string fromExpr, string toExpr, string bucketWidthLiteral)
+        => $"EXISTS ({LegacySuccessorHoleBodySql(relation, sourceTimeColumn, sourceFilter, legacy, successor, fromExpr, toExpr, bucketWidthLiteral)})";
+
+    /// <summary>
+    /// The body <see cref="LegacySuccessorHoleExistsSql"/> wraps in <c>EXISTS(...)</c> — kept as its own
+    /// method (#4301, H2) so a future second caller can share it without duplicating the buckets clause;
+    /// today <see cref="LegacySuccessorHoleExistsSql"/> is its only caller.
+    /// </summary>
+    private static string LegacySuccessorHoleBodySql(
+        string relation, string sourceTimeColumn, string sourceFilter, string legacy, string successor,
+        string fromExpr, string toExpr, string bucketWidthLiteral)
+    {
+        ArgumentNullException.ThrowIfNull(relation);
+        ArgumentNullException.ThrowIfNull(sourceTimeColumn);
+        ArgumentNullException.ThrowIfNull(sourceFilter);
+        ArgumentNullException.ThrowIfNull(legacy);
+        ArgumentNullException.ThrowIfNull(successor);
+        ArgumentNullException.ThrowIfNull(fromExpr);
+        ArgumentNullException.ThrowIfNull(toExpr);
+        ArgumentNullException.ThrowIfNull(bucketWidthLiteral);
+
+        var filterClause = sourceFilter.Length == 0 ? string.Empty : $"\n        AND   {sourceFilter}";
+
+        return $@"
+    SELECT hb.bucket
+    FROM generate_series({fromExpr}, {toExpr}, {bucketWidthLiteral}) AS hb(bucket)
+    WHERE NOT EXISTS (SELECT 1 FROM collect.{legacy} AS hl WHERE hl.bucket = hb.bucket OFFSET 0)
+    AND   NOT EXISTS (SELECT 1 FROM collect.{successor} AS hs WHERE hs.bucket = hb.bucket OFFSET 0)
+    AND   EXISTS (
+              SELECT 1 FROM collect.{relation} AS hr
+              WHERE hr.{sourceTimeColumn} >= hb.bucket
+              AND   hr.{sourceTimeColumn} < hb.bucket + {bucketWidthLiteral}{filterClause}
+              OFFSET 0)
+    OFFSET 0";
+    }
+
+    /// <summary>The materialized span of one aggregate — its oldest and newest bucket — read off the
+    /// materialization hypertable, both index-endpoint lookups. NULLs for an aggregate that has never
+    /// materialized, which is the backfill's case and not this pass's.</summary>
+    public static string MaterializationSpanSql((string Schema, string Name) materialization)
+        => $"SELECT min(bucket), max(bucket) FROM {QuoteIdentifier(materialization.Schema)}.{QuoteIdentifier(materialization.Name)}";
+
+    /// <summary>
+    /// Runs of consecutive hole buckets folded into half-open ranges <c>[Start, End)</c>, oldest first — one
+    /// refresh call per run rather than per bucket. Pure. A bucket that is not exactly one
+    /// <paramref name="bucketWidth"/> after the previous one starts a new range, so two holes with a covered
+    /// bucket between them stay two refreshes and the covered bucket is not re-materialized.
+    /// </summary>
+    public static IReadOnlyList<(DateTime Start, DateTime End)> MergeContiguousBuckets(IEnumerable<DateTime> buckets, TimeSpan bucketWidth)
+    {
+        ArgumentNullException.ThrowIfNull(buckets);
+        if (bucketWidth <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bucketWidth), bucketWidth, "a bucket has a positive width");
+        }
+
+        var ranges = new List<(DateTime Start, DateTime End)>();
+        foreach (var bucket in buckets.OrderBy(b => b))
+        {
+            if (ranges.Count > 0 && ranges[^1].End == bucket)
+            {
+                ranges[^1] = (ranges[^1].Start, bucket + bucketWidth);
+                continue;
+            }
+
+            ranges.Add((bucket, bucket + bucketWidth));
+        }
+
+        return ranges;
+    }
+
+    /// <summary>
+    /// The cap applied to the merged ranges: up to <paramref name="capBuckets"/> buckets in total are repaired
+    /// this start, the rest are reported and left. A range that straddles the cap is split at it, so the budget
+    /// is spent exactly and the remainder is a well-formed range for the next start. Pure, so the tests can walk
+    /// it.
+    ///
+    /// <para><b>Direction (#4186 round-3 H1).</b> Oldest-first (<paramref name="newestFirst"/> <c>false</c>,
+    /// the default) takes the OLDEST ranges, splitting a straddler at its NEWER edge — safe for the ordinary
+    /// window, where a repair sits strictly above the floor and can never move it. Newest-first takes the
+    /// ranges closest to the END of the ordering, splitting a straddler at its OLDER edge so the kept portion
+    /// stays adjacent to whatever is already materialized — the seam window's own requirement, since there the
+    /// floor IS a bare <c>min(bucket)</c> with no contiguity check behind it, and only a gapless top-down
+    /// descent keeps every unrepaired row inside the gate's probe window.</para>
+    /// </summary>
+    public static (IReadOnlyList<(DateTime Start, DateTime End)> Repair, IReadOnlyList<(DateTime Start, DateTime End)> Deferred) CapMaterializationHoleRepairs(
+        IReadOnlyList<(DateTime Start, DateTime End)> ranges, int capBuckets, TimeSpan bucketWidth, bool newestFirst = false)
+    {
+        ArgumentNullException.ThrowIfNull(ranges);
+        if (capBuckets <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(capBuckets), capBuckets, "the cap is at least one bucket");
+        }
+
+        var repair = new List<(DateTime Start, DateTime End)>();
+        var deferred = new List<(DateTime Start, DateTime End)>();
+        var remaining = capBuckets;
+
+        var ordered = newestFirst ? ranges.OrderByDescending(r => r.Start) : ranges.OrderBy(r => r.Start);
+        foreach (var range in ordered)
+        {
+            var width = (int)((range.End - range.Start).Ticks / bucketWidth.Ticks);
+            if (remaining <= 0)
+            {
+                deferred.Add(range);
+                continue;
+            }
+
+            if (width <= remaining)
+            {
+                repair.Add(range);
+                remaining -= width;
+                continue;
+            }
+
+            if (newestFirst)
+            {
+                var newestSplit = range.End - TimeSpan.FromTicks(bucketWidth.Ticks * remaining);
+                repair.Add((newestSplit, range.End));
+                deferred.Add((range.Start, newestSplit));
+                remaining = 0;
+                continue;
+            }
+
+            var split = range.Start + TimeSpan.FromTicks(bucketWidth.Ticks * remaining);
+            repair.Add((range.Start, split));
+            deferred.Add((split, range.End));
+            remaining = 0;
+        }
+
+        return (repair, deferred);
+    }
+
+    /// <summary>
+    /// The scan window(s) for one aggregate this start, given its own <paramref name="floor"/> and
+    /// <paramref name="ceiling"/>, the horizon <see cref="MaterializationHoleScanSpanFor"/> computes for its
+    /// source, and the seam bound (<paramref name="seamFloor"/>, equal to <paramref name="floor"/> when the
+    /// aggregate has no frozen legacy or raw's own filtered floor does not reach back past the successor's
+    /// floor). Pure, so the tests can walk it.
+    ///
+    /// <para><b>Two windows, not one (#4186 follow-up).</b> The seam fix's first cut folded the seam into the
+    /// SAME <c>max(_, horizon)</c> the ordinary scan already clamps to — <c>from = max(seamFloor, horizon)</c>
+    /// — which reads right for an outage shorter than the horizon (<see cref="MaterializationHoleScanSpanFor"/>:
+    /// 4 days of raw retention for <c>query_stats</c>/<c>procedure_stats</c>) and silently drops the rest of the
+    /// seam for a longer one: a store stopped more than 4 days before its first start on this version has its
+    /// seam tail clamped away every single start, the gate's seam probe (<see cref="RetentionArmSafetySql"/>)
+    /// keeps finding the un-repaired rows, and the raw purge never releases on its own. The horizon exists to
+    /// skip source rows the raw retention has already purged — scanning past it wastes a probe on a bucket that
+    /// cannot be repaired. A seam is not that case: the outage that opened it left the source with no rows
+    /// there at all (not purged, empty), and probing an empty span costs one cheap index range per bucket
+    /// whatever its age. So the seam gets its OWN window, <c>[seamFloor, floor)</c>, scanned in full however far
+    /// below the horizon it reaches, while the ordinary window stays exactly <c>[max(floor, horizon), ceiling]</c>
+    /// — the successor's own span below the horizon is the source retention's business, not this repair's, and
+    /// widening it was never the fix.</para>
+    ///
+    /// <para><b>The seam now reaches raw's own filtered floor, not merely the legacy's last bucket (#4301,
+    /// per the ruling "fill the successor CONTIGUOUSLY DOWNWARD").</b> An earlier cut of this method took a
+    /// separate, oldest-first-walked third window for a hole strictly INSIDE the frozen legacy's own span —
+    /// dead code once the ruling landed: the walk fills every hole below the successor's floor down to raw's
+    /// floor in ONE newest-first descent (the seam window itself, now with its lower bound moved), because
+    /// contiguity from the successor's floor upward is the property <c>RollupCoverage.StitchedRelationSql</c>
+    /// needs, and a bucket does not care which side of the legacy's last bucket it happened to sit on.</para>
+    /// </summary>
+    public static IReadOnlyList<(DateTime From, DateTime To)> MaterializationHoleScanWindows(
+        DateTime floor, DateTime ceiling, DateTime horizon, DateTime seamFloor, TimeSpan bucketWidth)
+    {
+        if (bucketWidth <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bucketWidth), bucketWidth, "a bucket has a positive width");
+        }
+
+        var windows = new List<(DateTime From, DateTime To)>();
+
+        if (seamFloor < floor)
+        {
+            var seamTo = floor - bucketWidth;
+            if (seamFloor <= seamTo)
+            {
+                windows.Add((seamFloor, seamTo));
+            }
+        }
+
+        var ordinaryFrom = floor > horizon ? floor : horizon;
+        if (ordinaryFrom <= ceiling)
+        {
+            windows.Add((ordinaryFrom, ceiling));
+        }
+
+        return windows;
+    }
+
+    /// <summary>
+    /// What one start's pass did — the whole tally the worker's one unconditional summary line reports (#3756)
+    /// and the live test asserts. Every count the line names is carried here rather than re-derived by the
+    /// caller, so the line cannot say something the pass did not measure.
+    ///
+    /// <para><see cref="AggregatesScanned"/> is the aggregates the scan actually probed ("walked");
+    /// <see cref="AggregatesSkipped"/> the ones it had a reason not to (not a continuous aggregate on this
+    /// store, never materialized, or — absent a seam — a span entirely below the source's horizon; a seam
+    /// window is never skipped for that reason). <see cref="HolesFound"/>
+    /// counts the contiguous hole RANGES the scan saw across every aggregate, BEFORE the cap, and
+    /// <see cref="BucketsFound"/> the buckets those ranges span — so <c>BucketsFound == BucketsRepaired +
+    /// BucketsDeferred</c> always, while <c>HolesRepaired + HolesDeferred</c> exceeds <c>HolesFound</c> by one
+    /// for every range the cap split (the straddle <see cref="CapMaterializationHoleRepairs"/> describes: one
+    /// hole as the scan saw it, two lines as the repair reported it). Buckets are the unambiguous currency;
+    /// the range counts are how the per-hole lines are numbered. <see cref="HolesRemaining"/> is buckets still
+    /// reading as holes after both refresh paths; <see cref="Failures"/> the aggregates whose scan or repair
+    /// threw and was isolated; <see cref="HolesForced"/> the holes the plain refresh left standing and the
+    /// forced one had to close. <see cref="Elapsed"/> is the pass's own wall clock from entry to return —
+    /// the detect, every probe, every refresh — and not the caller's connection open. <see
+    /// cref="DailyBucketsChained"/> (#4300, #4716) is the DAYS of a dependent daily that a closed repair
+    /// range was ALSO refreshed over — added last so every existing construction site keeps compiling
+    /// unchanged. It sums two things: the days the seam chase refreshes (#4300: the part of a closed seam
+    /// range older than the successor daily's own 3-day window, whether or not the daily held a row yet), and
+    /// the days a closed hourly range (seam OR ordinary loop, #4716) invalidated in a daily that already held
+    /// a bucket for them, plus the dailies chained behind those (interval_daily to daygrain_daily). A day both
+    /// would reach is refreshed and counted once: the seam chase leaves out the days the #4716 refresh already
+    /// refreshed (<see cref="ChaseRangesAfterRefresh"/>). A failed
+    /// daily refresh is not counted here (it is isolated and logged separately, never surfaced as a <see
+    /// cref="Failures"/> of the hourly repair itself). Counted the same way whether the closed range came
+    /// from the hourly seam-only repair or the start-path full walk (<c>seamOnly: false</c>). A day the
+    /// hourly underneath still holds a hole for is never counted here: the chase defers, and the #4716
+    /// refresh runs only for a range that closed.</para>
+    /// </summary>
+    public sealed record MaterializationHoleRepairSummary(
+        int AggregatesScanned, int AggregatesSkipped, int HolesFound, int BucketsFound, int HolesRepaired, int BucketsRepaired, int HolesDeferred, int BucketsDeferred, int HolesRemaining, int Failures, int HolesForced, TimeSpan Elapsed, int DailyBucketsChained = 0);
+
+    /// <summary>
+    /// THE PASS: scan every registered continuous aggregate for materialization holes and close each with one
+    /// forced, targeted refresh, oldest first, up to the per-aggregate cap. <paramref name="utcNow"/> is the
+    /// service clock, the scan's horizon anchor; bound as a parameter, never written as <c>now()</c> in store
+    /// SQL (the <see cref="BaselineBackfillProbeSql(string, string)"/> zone reasoning). Returns what it did,
+    /// as the complete tally — and ONLY returns it: the one summary line per start is the caller's (#3756;
+    /// the type summary says why), so a pass that finds nothing returns zeros rather than falling silent.
+    /// Failure-isolated per aggregate; a store without the extension, or an aggregate that is a plain fallback
+    /// view, is skipped with a Debug line. See the type summary for the design.
+    /// </summary>
+    public static Task<MaterializationHoleRepairSummary> RepairMaterializationHolesAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
+        => RepairMaterializationTargetsAsync(connection, logger, utcNow, MaterializationHoleTargets, seamOnly: false, cancellationToken);
+
+    /// <summary>
+    /// #4300: the SEAM-ONLY repair the hourly Periodic pass runs (<c>DarlingWorker.ReevaluateRetentionPoliciesAsync</c>),
+    /// so a legacy/successor seam an outage opened across the upgrade closes within the hour on a store that keeps
+    /// running, with no second service start. Reuses the exact per-target body <see cref="RepairMaterializationHolesAsync"/>
+    /// runs at start — same cap, same source filter, same failure isolation — restricted to targets with a frozen
+    /// legacy (<see cref="LegacyOf"/> non-null) and, within each, to the seam window alone: a target with only an
+    /// ordinary interior hole (no legacy pairing) is never touched here, and a legacy-paired target whose seam is
+    /// already closed (seamFloor no longer below its own floor) is skipped rather than re-scanning its ordinary
+    /// window, which the retention sweep's own coverage read already covers. The first start after a long outage
+    /// still runs the full walk (this method changes nothing about that path); this method exists for every hour
+    /// AFTER it, while the successor's own first refresh has run but nothing else has re-launched the full repair.
+    /// </summary>
+    public static Task<MaterializationHoleRepairSummary> RepairMaterializationSeamsAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
+    {
+        var legacyPaired = MaterializationHoleTargets.Where(t => LegacyOf(t.View) is not null).ToList();
+        return RepairMaterializationTargetsAsync(connection, logger, utcNow, legacyPaired, seamOnly: true, cancellationToken);
+    }
+
+    /// <summary>
+    /// THE shared per-target walk <see cref="RepairMaterializationHolesAsync"/> and <see cref="RepairMaterializationSeamsAsync"/>
+    /// both run — factored out rather than duplicated so the seam-only path can never drift from the start path's
+    /// cap, source filter, or failure isolation. <paramref name="seamOnly"/> restricts each target's scan to its
+    /// seam window alone (skipping the ordinary window and its horizon computation entirely) and skips a target
+    /// with no seam left to close; <c>false</c> is the unrestricted start-path walk, unchanged from before this
+    /// method existed.
+    /// </summary>
+    private static async Task<MaterializationHoleRepairSummary> RepairMaterializationTargetsAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, IReadOnlyList<MaterializationHoleTarget> targets, bool seamOnly, CancellationToken cancellationToken)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        /* #3756: the pass times itself from here, so the summary's Elapsed is the scan's own cost — detect,
+           probes, refreshes — and not whatever the caller did to get a connection. */
+        var passClock = Stopwatch.StartNew();
+
+        var scanned = 0;
+        var skipped = 0;
+        var holesFound = 0;
+        var bucketsFound = 0;
+        var holesRepaired = 0;
+        var bucketsRepaired = 0;
+        var holesDeferred = 0;
+        var bucketsDeferred = 0;
+        var holesRemaining = 0;
+        var failures = 0;
+
+        var holesForced = 0;
+        var dailyBucketsChained = 0;
+
+        if (!await DetectAsync(connection, cancellationToken))
+        {
+            logger?.LogDebug("Materialization-hole repair (#3653): no TimescaleDB on this store, nothing to scan.");
+            return new MaterializationHoleRepairSummary(0, targets.Count, 0, 0, 0, 0, 0, 0, 0, 0, 0, passClock.Elapsed);
+        }
+
+        var disclosure = new RefreshDisclosure(message => logger?.LogWarning(
+            "Materialization-hole repair (#3653): {Message}", message));
+
+        foreach (var target in targets)
+        {
+            try
+            {
+                var materialization = await ResolveMaterializationAsync(connection, target.View, cancellationToken);
+                if (materialization is null)
+                {
+                    skipped++;
+                    logger?.LogDebug("Materialization-hole repair (#3653): {View} is not a continuous aggregate on this store — skipped.", target.View);
+                    continue;
+                }
+
+                DateTime? floor;
+                DateTime? ceiling;
+                using (var span = new NpgsqlCommand(MaterializationSpanSql(materialization.Value), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await using var reader = await span.ExecuteReaderAsync(cancellationToken);
+                    await reader.ReadAsync(cancellationToken);
+                    floor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                    ceiling = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                }
+
+                if (floor is null || ceiling is null)
+                {
+                    skipped++;
+                    logger?.LogDebug("Materialization-hole repair (#3653): {View} has materialized nothing yet — the backfill's case, not a hole.", target.View);
+                    continue;
+                }
+
+                /* #4186 seam fix, lowered by #4301's ruling ("fill the successor CONTIGUOUSLY DOWNWARD"):
+                   a successor whose legacy is frozen (LegacyOf, non-null only for the three
+                   SupersededHourlyRollups successors) can hold an un-materialized span BELOW its own floor —
+                   not only the seam an outage opens between the legacy's last bucket and the successor's
+                   first refresh, but any hole INSIDE the legacy's own frozen span from an outage that predates
+                   this store's freeze (see this class's doc, and RetentionArmSafetySql's, for the full shape).
+                   A hole is defined as a gap INSIDE the materialized span, so scanning from the successor's own
+                   floor never reaches either one. Extend the lower bound down to raw's own filtered floor —
+                   the successor's admitted source floor, the SAME bound RetentionArmSafetySql's stitch probes
+                   from — whenever that reaches further back than the successor's own floor; below it raw
+                   admits no row, so no hole can exist there and the walk has nothing left to fill (this is the
+                   contiguous-downward fill: RollupCoverage.StitchedRelationSql splits its read at the
+                   successor's floor, so every row below it must already be a successor bucket once this
+                   converges). min() is a no-op once the successor's floor overtakes raw's floor on its own, so
+                   this converges to plain floor scanning as the successor accumulates history. A raw table
+                   with nothing admitted (min is NULL) leaves the floor untouched. */
+                var seamFloor = floor.Value;
+                var legacy = LegacyOf(target.View);
+                if (legacy is not null)
+                {
+                    var sourceFilter = MaterializationHoleSourceFilterFor(target.CreateSql);
+                    var sourceWhere = sourceFilter.Length == 0 ? string.Empty : $" WHERE {sourceFilter}";
+                    using var rawFilteredFloor = new NpgsqlCommand($"SELECT min({target.SourceTimeColumn}) FROM collect.{target.Source}{sourceWhere}", connection) { CommandTimeout = SetupTimeoutSeconds };
+                    if (await rawFilteredFloor.ExecuteScalarAsync(cancellationToken) is DateTime rawFloor)
+                    {
+                        var seamBound = AlignDown(rawFloor, target.BucketWidth);
+                        if (seamBound < seamFloor)
+                        {
+                            seamFloor = seamBound;
+                        }
+                    }
+                }
+
+                if (seamOnly && seamFloor >= floor.Value)
+                {
+                    /* #4300: this target's seam is already closed (or it never had one this pass) — the
+                       hourly seam-only repair has nothing to do for it, and skips WITHOUT the ordinary
+                       window's horizon probe below (RawFloorHorizonAsync/MaterializationHoleScanSpanFor):
+                       the retention sweep's own coverage read is what judges the ordinary window; this pass
+                       only exists to close the seam.
+
+                       #4300 catch-up: BEFORE skipping, ask whether the successor DAILY has already
+                       caught up to where THIS hourly's own floor now reaches. A closed seam here means the
+                       normal chase (ChainDailyAsync, run right after a seam range closes below) already had
+                       its one chance to run for whatever repaired the hourly to this floor — if that chase
+                       threw (caught inside it, logged at Warning, returns 0) or was cut off mid-flight by the
+                       seam's own 2-minute budget (the OperationCanceledException propagates past this method
+                       entirely, so nothing here ever ran), the hourly floor still moved but the daily never
+                       heard about it, and no LATER pass would ever ask again — every later pass sees the same
+                       already-closed seam and skips here exactly as this one is about to. This check is the
+                       retention hold's own condition re-asked directly (does the daily's floor already reach
+                       back to the hourly's?) rather than a record of any one failure mode, so it heals a
+                       thrown chase, a cancelled one, or a chase that simply never got the chance to run, all
+                       the same way, on the very next pass. Legacy-paired targets only (checked by the caller
+                       above via LegacyOf); a target with no successor daily returns 0 immediately. */
+                    dailyBucketsChained += await CatchUpDailyChaseAsync(floor.Value);
+                    skipped++;
+                    continue;
+                }
+
+                /* #4299: for a raw-sourced target the old time horizon (utcNow - MaterializationHoleScanSpanFor)
+                   assumed raw purges on ITS OWN schedule, so nothing older than that span could still be sitting
+                   in raw unrepaired. The service-triggered purge stops scheduling the three raw jobs at all —
+                   raw now purges only when the service's own trigger fires — so raw can hold rows far older than that span
+                   while the trigger has not yet run, and the old clamp would leave a hole below it unscanned
+                   indefinitely. For raw-sourced targets the lower bound is instead the RAW FLOOR actually still
+                   present (min(SourceTimeColumn) in the source table itself), so the scan reaches every bucket
+                   raw genuinely still holds; a raw table with nothing in it yet (fresh install) falls back to the
+                   old time horizon, which is harmless there since there is nothing to scan either way.
+
+                   #4300: seamOnly skips this probe and clamps the horizon ABOVE the ceiling instead, so
+                   MaterializationHoleScanWindows below never emits the ordinary window — the seam-only pass
+                   spends nothing on the ordinary window's own horizon, which is the retention sweep's business,
+                   not this repair's. */
+                var horizon = seamOnly
+                    ? ceiling.Value + target.BucketWidth
+                    : IsRawSourced(target.Source)
+                        ? await RawFloorHorizonAsync(connection, target, utcNow, cancellationToken)
+                        : AlignDown(utcNow - MaterializationHoleScanSpanFor(target.Source), target.BucketWidth);
+                var windows = MaterializationHoleScanWindows(floor.Value, ceiling.Value, horizon, seamFloor, target.BucketWidth);
+                if (windows.Count == 0)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                scanned++;
+
+                /* #4186 round-3 H1: the seam window's holes are scanned, capped and walked SEPARATELY from
+                   the ordinary window's, never merged into one oldest-first pass. windows[0] is the seam
+                   window whenever one exists — MaterializationHoleScanWindows always emits it first, and it
+                   exists exactly when seamFloor < floor (both bucket-aligned, so that comparison alone
+                   decides it; see that method for why). An interior (ordinary) repair can never move the
+                   successor's floor (s.mn) — it only fills a gap strictly above an already-materialized
+                   bucket — so oldest-first there is exactly as safe as it always was. A SEAM repair is
+                   different: s.mn is a bare min(bucket) with no contiguity check behind it, so materializing
+                   the OLDEST seam buckets first (the bug) can drop the floor straight to the seam's bottom
+                   while newer seam buckets in between are still holes, and RetentionArmSafetySql's probe —
+                   bounded above by s.mn — stops looking there. Walking the seam from the TOP (the buckets
+                   next to s.mn) and stopping at the first range that fails keeps the descent gapless: the
+                   floor only ever retreats into ground this pass already covered, so every unrepaired seam
+                   row stays inside the probe window — the property RollupBackfill.cs:39-44 states for its own
+                   newest-first slices. */
+                var isSeamWindow = seamFloor < floor.Value;
+                var seamWindow = isSeamWindow ? windows[0] : ((DateTime From, DateTime To)?)null;
+                var ordinaryWindows = isSeamWindow ? windows.Skip(1) : windows;
+
+                var seamHoles = seamWindow is { } sw
+                    ? await ScanHolesAsync(connection, target, materialization.Value, sw.From, sw.To, cancellationToken)
+                    : new List<DateTime>();
+
+                var ordinaryHoles = new List<DateTime>();
+                foreach (var (from, to) in ordinaryWindows)
+                {
+                    ordinaryHoles.AddRange(await ScanHolesAsync(connection, target, materialization.Value, from, to, cancellationToken));
+                }
+
+                if (seamHoles.Count == 0 && ordinaryHoles.Count == 0)
+                {
+                    continue;
+                }
+
+                var seamRanges = MergeContiguousBuckets(seamHoles, target.BucketWidth);
+                var ordinaryRanges = MergeContiguousBuckets(ordinaryHoles, target.BucketWidth);
+
+                /* #3756: found is counted as the scan saw it — contiguous ranges and the buckets they span — BEFORE
+                   the cap decides what this start repairs and what it leaves, so the summary can say "found"
+                   independently of "repaired" and "deferred" (the record's summary states the arithmetic). */
+                holesFound += seamRanges.Count + ordinaryRanges.Count;
+                bucketsFound += seamHoles.Count + ordinaryHoles.Count;
+
+                /* One shared cap per aggregate, same total as before this fix — the seam spends from it FIRST,
+                   newest end down, and whatever it leaves is what the ordinary window (oldest-first, as
+                   always) has this start. That keeps "a start never re-materializes more for one aggregate
+                   than an ordinary policy run does" true with the seam in the mix, not only without it. */
+                var cap = MaterializationHoleRepairCapBuckets(target.BucketWidth);
+                var (seamRepair, seamDeferred) = CapMaterializationHoleRepairs(seamRanges, cap, target.BucketWidth, newestFirst: true);
+                var seamBucketsTaken = seamRepair.Sum(r => (int)((r.End - r.Start).Ticks / target.BucketWidth.Ticks));
+                var ordinaryCap = cap - seamBucketsTaken;
+
+                IReadOnlyList<(DateTime Start, DateTime End)> ordinaryRepair;
+                IReadOnlyList<(DateTime Start, DateTime End)> ordinaryDeferred;
+                if (ordinaryCap > 0)
+                {
+                    (ordinaryRepair, ordinaryDeferred) = CapMaterializationHoleRepairs(ordinaryRanges, ordinaryCap, target.BucketWidth);
+                }
+                else
+                {
+                    ordinaryRepair = Array.Empty<(DateTime Start, DateTime End)>();
+                    ordinaryDeferred = ordinaryRanges;
+                }
+
+                /* One range's plain-then-forced repair, shared by the seam and ordinary walks below. Returns
+                   the holes still standing in [start, lastBucket] after both attempts, and (#4716) the
+                   (daily, day) pairs its dependent-daily refresh refreshed — empty unless the range closed —
+                   which the seam walk hands to the older successor-daily chase so it skips them. */
+                async Task<(int Remaining, IReadOnlyList<(string Daily, DateTime Day)> Refreshed)> RepairRangeAsync(DateTime start, DateTime end)
+                {
+                    var buckets = (int)((end - start).Ticks / target.BucketWidth.Ticks);
+                    var lastBucket = end - target.BucketWidth;
+                    var stopwatch = Stopwatch.StartNew();
+                    IReadOnlyList<(string Daily, DateTime Day)> refreshed = Array.Empty<(string Daily, DateTime Day)>();
+
+                    /* Plain first: on the outage shape this IS the repair (measured on 2.28.1 — see the type
+                       summary), and it runs on every TimescaleDB version. */
+                    await RollupBackfill.RunSliceAsync(connection, target.View, start, end, disclosure, cancellationToken);
+                    var remaining = (await ScanHolesAsync(connection, target, materialization.Value, start, lastBucket, cancellationToken)).Count;
+                    var forced = false;
+
+                    if (remaining > 0)
+                    {
+                        /* A hole the plain refresh left has no invalidation behind it; the forced refresh
+                           re-batches every bucket in the range regardless. Escalation on a MEASURED remainder,
+                           the backfill's rule, never speculative. */
+                        forced = true;
+                        holesForced++;
+                        await RollupBackfill.RepairAsync(connection, target.View, start, end, disclosure, cancellationToken);
+                        remaining = (await ScanHolesAsync(connection, target, materialization.Value, start, lastBucket, cancellationToken)).Count;
+                    }
+
+                    stopwatch.Stop();
+                    holesRepaired++;
+                    bucketsRepaired += buckets;
+                    holesRemaining += remaining;
+
+                    if (remaining == 0)
+                    {
+                        logger?.LogInformation(
+                            "Materialization-hole repair (#3653): {View} had {Buckets} bucket(s) in [{Start}, {End}) that the source held rows for and the aggregate had never materialized — {Path} over exactly those bounds closed it in {Seconds:F1}s.",
+                            target.View, buckets, start.ToString("O", CultureInfo.InvariantCulture), end.ToString("O", CultureInfo.InvariantCulture),
+                            forced ? "a plain refresh left it standing (no invalidation behind it) and one forced refresh" : "one refresh",
+                            stopwatch.Elapsed.TotalSeconds);
+
+                        /* #4716: the closed range invalidated the day above it in every dependent daily that already
+                           holds a bucket for that day. Runs for the seam loop AND the ordinary loop (both call this),
+                           only once the range is whole (a range with holes standing is not ready to back a day), and
+                           is failure-isolated inside: it never fails the hourly repair. */
+                        refreshed = await RefreshDependentDailiesAsync(
+                            connection, logger, disclosure, target.View, CompleteDaysTouched(start, end, utcNow), cancellationToken);
+                        dailyBucketsChained += refreshed.Count;
+                    }
+                    else
+                    {
+                        logger?.LogWarning(
+                            "Materialization-hole repair (#3653): {View} still shows {Remaining} of {Buckets} bucket(s) in [{Start}, {End}) as holes after a plain and a forced refresh ({Seconds:F1}s) — the source has rows there that the refresh produced no output for; the aggregate's own filter and the scan's copy of it may have diverged, or the refresh was cut short. Re-judged on a later run.",
+                            target.View, remaining, buckets, start.ToString("O", CultureInfo.InvariantCulture), end.ToString("O", CultureInfo.InvariantCulture), stopwatch.Elapsed.TotalSeconds);
+                    }
+
+                    return (remaining, refreshed);
+                }
+
+                /* #4300: after a seam range closes, chase the dependent successor DAILY over the same
+                   ground, ALIGNED OUT to whole days, but ONLY the part older than the daily's own 3-day
+                   refresh window (DailyRefreshStartSpan) — a day inside that window is the daily policy's own
+                   business and this never duplicates it. Exists because the seam repair can fill a successor
+                   HOURLY back 5+ days across a long outage, and those days are below the successor DAILY's
+                   floor and its own policy window, so the daily never reaches them on its own — and the
+                   hourly's 90-day retention is armed only through its successor daily's coverage
+                   (RequireSuccessorDailyOf), so an unchased gap holds that retention open indefinitely even
+                   though the hourly itself lost no row. Runs ONLY for a seam range (never the ordinary
+                   window): an ordinary interior repair sits strictly above the floor and is never the shape
+                   this exists for. Bounded to MaterializationHoleRepairCapBuckets(DailyBucket) days per pass
+                   (the daily tier's own cap, so this never re-materializes more of the daily per pass than an
+                   ordinary daily policy run would) and failure-isolated: a throw here is caught, logged at
+                   Warning, and never fails the hourly repair whose range just closed — the days left uncounted
+                   here are simply re-judged by a later pass, exactly like a deferred hole. */
+                async Task<int> RunDailyChaseAsync(string successorDaily, DateTime chainStart, DateTime chainEnd, DateTime logStart, DateTime logEnd, string reason)
+                {
+                    /* The daily is hierarchical from THIS hourly, so a day this chase would refresh must not
+                       still hold an unmaterialized hourly bucket underneath it — a partial day reads Covered
+                       (min/max, no contiguity check) exactly like a whole one, and once that happens nothing
+                       ever refreshes it again: the day is below the daily's own 3-day policy window, so the
+                       ordinary daily walk never re-visits it, and the hourly hole scan only ever runs on the
+                       hourly, not on what the daily rolled up from it. Scan the HOURLY over the same bounds
+                       the chase is about to hand the daily, reusing the materialization this pass already
+                       resolved for target — a hole anywhere in that range means the hourly is not ready yet,
+                       so this defers the whole chase rather than refreshing a day the hourly cannot back. */
+                    var hourlyHoles = await ScanHolesAsync(connection, target, materialization.Value, chainStart, chainEnd - target.BucketWidth, cancellationToken);
+                    if (hourlyHoles.Count > 0)
+                    {
+                        logger?.LogInformation(
+                            "Materialization-hole repair (#4300): the successor daily {Daily} waits: the hourly {View} still has {Holes} unmaterialized bucket(s) in [{Start}, {End}) from its {Reason} — a later pass re-judges.",
+                            successorDaily, target.View, hourlyHoles.Count, logStart.ToString("O", CultureInfo.InvariantCulture), logEnd.ToString("O", CultureInfo.InvariantCulture), reason);
+                        return 0;
+                    }
+
+                    await RollupBackfill.RunSliceAsync(connection, successorDaily, chainStart, chainEnd, disclosure, cancellationToken);
+
+                    var dailyMaterialization = await ResolveMaterializationAsync(connection, successorDaily, cancellationToken);
+                    if (dailyMaterialization is not null)
+                    {
+                        var dailyTarget = MaterializationHoleTargets.FirstOrDefault(t => string.Equals(t.View, successorDaily, StringComparison.Ordinal));
+                        var dailyRemaining = dailyTarget.View is null
+                            ? 0
+                            : (await ScanHolesAsync(connection, dailyTarget, dailyMaterialization.Value, chainStart, chainEnd - DailyBucket, cancellationToken)).Count;
+                        if (dailyRemaining > 0)
+                        {
+                            await RollupBackfill.RepairAsync(connection, successorDaily, chainStart, chainEnd, disclosure, cancellationToken);
+                        }
+                    }
+
+                    var days = (int)((chainEnd - chainStart).Ticks / DailyBucket.Ticks);
+                    logger?.LogInformation(
+                        "Materialization-hole repair (#4300): {View}'s {Reason} chained its successor daily {Daily} over {Days} day(s) in [{Start}, {End}), keeping the hourly's own 90-day retention from being held on days its daily would not otherwise reach yet.",
+                        target.View, reason, successorDaily, days, logStart.ToString("O", CultureInfo.InvariantCulture), logEnd.ToString("O", CultureInfo.InvariantCulture));
+                    return days;
+                }
+
+                /* #4716: refreshedByRange is what the closed range's own dependent-daily refresh (RepairRangeAsync)
+                   already refreshed. That refresh force-refreshes every complete day the successor daily holds a
+                   bucket for, and this chase used to refresh the same days a second time and count them twice, so
+                   it chases only the days ChaseRangesAfterRefresh leaves (the ones the daily holds no bucket for
+                   yet, which is what this chase is for), one contiguous range at a time. The days already chased
+                   stay counted if a later range throws. */
+                async Task<int> ChainDailyAsync(DateTime seamStart, DateTime seamEnd, IReadOnlyList<(string Daily, DateTime Day)> refreshedByRange)
+                {
+                    var successorDaily = SuccessorDailyOf(target.View);
+                    if (successorDaily is null)
+                    {
+                        return 0;
+                    }
+
+                    var chasedDays = 0;
+                    try
+                    {
+                        var dailyPolicyWindowStart = utcNow - DailyRefreshStartSpan;
+                        var chained = ChainedDailyRange(seamStart, seamEnd, dailyPolicyWindowStart, MaterializationHoleRepairCapBuckets(DailyBucket));
+                        if (chained is null)
+                        {
+                            return 0;
+                        }
+
+                        foreach (var (chainStart, chainEnd) in ChaseRangesAfterRefresh(chained.Value, successorDaily, refreshedByRange))
+                        {
+                            chasedDays += await RunDailyChaseAsync(successorDaily, chainStart, chainEnd, chainStart, chainEnd, "repaired seam range");
+                        }
+
+                        return chasedDays;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger?.LogWarning(
+                            "Materialization-hole repair (#4300): could not chase {View}'s successor daily over its just-repaired seam range [{Start}, {End}) this run — re-judged on a later run: {Message}",
+                            target.View, seamStart.ToString("O", CultureInfo.InvariantCulture), seamEnd.ToString("O", CultureInfo.InvariantCulture), ex.Message);
+                        return chasedDays;
+                    }
+                }
+
+                /* #4300 catch-up: re-asks the SAME question ChainDailyAsync answers right after a seam
+                   range closes — does the successor daily's own floor already reach back to where this
+                   hourly's floor now sits? — but from the seam-already-closed skip, which every LATER pass
+                   takes once the hourly floor has moved and the seam has nothing left to close. Runs on every
+                   seamOnly pass a legacy-paired target's seam is closed, so it is exactly the retention hold's
+                   own condition: whatever left the daily behind (a thrown chase, one cut short by the seam's
+                   2-minute budget, or a chase that never got the chance to run at all across a service
+                   restart) is healed here the same way, on the very next pass, with no separate bookkeeping of
+                   which cause it was. */
+                async Task<int> CatchUpDailyChaseAsync(DateTime hourlyFloor)
+                {
+                    var successorDaily = SuccessorDailyOf(target.View);
+                    if (successorDaily is null)
+                    {
+                        return 0;
+                    }
+
+                    try
+                    {
+                        var dailyMaterialization = await ResolveMaterializationAsync(connection, successorDaily, cancellationToken);
+                        if (dailyMaterialization is null)
+                        {
+                            return 0;
+                        }
+
+                        DateTime? dailyFloor;
+                        using (var span = new NpgsqlCommand(MaterializationSpanSql(dailyMaterialization.Value), connection) { CommandTimeout = SetupTimeoutSeconds })
+                        {
+                            await using var reader = await span.ExecuteReaderAsync(cancellationToken);
+                            await reader.ReadAsync(cancellationToken);
+                            dailyFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                        }
+
+                        /* A daily that has materialized nothing yet is the plain backfill's case (its own
+                           first refresh has not landed), not this catch-up's business — the ordinary daily
+                           policy or the backfill runbook owns that, not a seam-adjacent chase keyed on a
+                           successor floor that does not exist yet. */
+                        if (dailyFloor is null)
+                        {
+                            return 0;
+                        }
+
+                        var dailyPolicyWindowStart = utcNow - DailyRefreshStartSpan;
+                        var chained = ChainedDailyRange(hourlyFloor, dailyFloor.Value, dailyPolicyWindowStart, MaterializationHoleRepairCapBuckets(DailyBucket));
+                        if (chained is null)
+                        {
+                            return 0;
+                        }
+
+                        var (chainStart, chainEnd) = chained.Value;
+                        return await RunDailyChaseAsync(successorDaily, chainStart, chainEnd, chainStart, chainEnd, "seam-already-closed catch-up");
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger?.LogWarning(
+                            "Materialization-hole repair (#4300): could not catch up {View}'s successor daily {Daily} on this closed-seam pass — re-judged on a later run: {Message}",
+                            target.View, successorDaily, ex.Message);
+                        return 0;
+                    }
+                }
+
+                /* #4186 round-3 H1: newest seam range first; stop at the first one that throws (propagates to
+                   this target's own catch below, exactly the risk the ordinary window always carried) or
+                   leaves buckets standing (remaining > 0) — do NOT go on to an older seam range once either
+                   happens, or the floor could advance past a still-open hole the same way the bug did. */
+                foreach (var (start, end) in seamRepair)
+                {
+                    var (remaining, refreshedByRange) = await RepairRangeAsync(start, end);
+                    if (remaining > 0)
+                    {
+                        break;
+                    }
+
+                    /* #4300 belt-and-braces: RunDailyChaseAsync's own hourly hole-scan already refuses a day
+                       the hourly cannot back, but a cap-split seam (this range repaired, older ranges of the
+                       SAME seam deferred) makes that redundant here too — this target still has a hole in the
+                       seam this pass, so its daily has no business chasing yet regardless of what the scan
+                       would find in THIS range alone. */
+                    if (seamDeferred.Count > 0)
+                    {
+                        continue;
+                    }
+
+                    dailyBucketsChained += await ChainDailyAsync(start, end, refreshedByRange);
+                }
+
+                /* Ordinary window: unchanged from before this fix. An interior repair cannot move the floor,
+                   so a remainder here only means "re-judged on the next start" — it never risks the gate. */
+                foreach (var (start, end) in ordinaryRepair)
+                {
+                    await RepairRangeAsync(start, end);
+                }
+
+                foreach (var (start, end) in seamDeferred.Concat(ordinaryDeferred))
+                {
+                    var buckets = (int)((end - start).Ticks / target.BucketWidth.Ticks);
+                    holesDeferred++;
+                    bucketsDeferred += buckets;
+                    logger?.LogInformation(
+                        "Materialization-hole repair (#3653): {View} has a further {Buckets} bucket(s) of hole in [{Start}, {End}) left for a later run — this run's cap for it is {Cap} bucket(s), one refresh policy window, so a run never re-materializes more for one aggregate than an ordinary policy run does.",
+                        target.View, buckets, start.ToString("O", CultureInfo.InvariantCulture), end.ToString("O", CultureInfo.InvariantCulture), MaterializationHoleRepairCapBuckets(target.BucketWidth));
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures++;
+                logger?.LogWarning(
+                    "Materialization-hole repair (#3653): could not scan or repair {View} this run — its holes, if any, stand until a later run retries: {Message}",
+                    target.View, ex.Message);
+            }
+        }
+
+        /* #3756: no summary line here — the tally goes back to the caller, whose one INFORMATION line per start
+           is written whatever the counts are. The conditional summary this replaced (Information when something
+           happened, Debug otherwise) is the exact shape the issue names: at the level a production log is read,
+           a zero-hole start wrote nothing, and nothing is also what a start that never reached the scan writes. */
+        passClock.Stop();
+        return new MaterializationHoleRepairSummary(
+            scanned, skipped, holesFound, bucketsFound, holesRepaired, bucketsRepaired, holesDeferred, bucketsDeferred, holesRemaining, failures, holesForced, passClock.Elapsed, dailyBucketsChained);
+    }
+
+    /// <summary>
+    /// #4299: is <paramref name="source"/> one of the three raw tables named in <see cref="RawTierCoverage"/>
+    /// (the ones a service-triggered purge drops, never on a schedule of their own)? Used to pick the hole
+    /// scan's lower bound: a raw-sourced target needs the RAW FLOOR itself, not the old time-based horizon (see
+    /// <see cref="RawFloorHorizonAsync"/>'s doc for why the time horizon stopped being safe under the
+    /// service-triggered purge).
+    /// </summary>
+    public static bool IsRawSourced(string source)
+    {
+        foreach (var (relation, _, _) in RawTierCoverage)
+        {
+            if (string.Equals(relation, source, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// #4299: the hole scan's lower bound for a raw-sourced target, aligned down to a bucket boundary — the
+    /// oldest row <paramref name="target"/>'s source table (one of <see cref="RawTierCoverage"/>'s three) still
+    /// holds, or <c>utcNow - MaterializationHoleScanSpanFor(target.Source)</c> when the source is empty (nothing
+    /// to scan below either bound in that case, so the fallback is harmless).
+    ///
+    /// <para><b>Why the time horizon stopped being safe.</b> Before #4299, every raw table purged on its OWN
+    /// scheduled retention job, so nothing older than <see cref="MaterializationHoleScanSpanFor"/>'s span could
+    /// still be sitting in raw — scanning further back than that was wasted probes over rows already gone.
+    /// The service-triggered purge UNSCHEDULES the three raw jobs (<c>scheduled</c> stays permanently false) and moves the
+    /// purge onto a service-triggered <c>CALL run_job(id)</c>, gated on this very repair having found no hole in
+    /// the range about to be dropped (see <see cref="HoleFreeThroughAsync"/>). Between the moment raw ages past
+    /// that old span and the moment the trigger's gate is satisfied, raw legitimately holds rows older than the
+    /// old horizon — an outage-lengthened startup, a store that has never yet passed the gate, or simply a
+    /// service that has not reached an hourly Periodic pass yet. Clamping the scan to the old time horizon in
+    /// that window would leave a real hole below it unscanned and unrepaired for as long as the purge stays
+    /// held, which is now indefinite rather than bounded by the old schedule. Reading the raw floor directly
+    /// removes the assumption: the scan reaches exactly as far back as raw still has rows to lose.</para>
+    /// </summary>
+    public static async Task<DateTime> RawFloorHorizonAsync(
+        NpgsqlConnection connection, MaterializationHoleTarget target, DateTime utcNow, CancellationToken cancellationToken)
+    {
+        using var floorCommand = new NpgsqlCommand(
+            $"SELECT min({target.SourceTimeColumn}) FROM collect.{target.Source}", connection) { CommandTimeout = SetupTimeoutSeconds };
+        var rawFloor = await floorCommand.ExecuteScalarAsync(cancellationToken);
+        return rawFloor is DateTime raw
+            ? AlignDown(raw, target.BucketWidth)
+            : AlignDown(utcNow - MaterializationHoleScanSpanFor(target.Source), target.BucketWidth);
+    }
+
+    /// <summary>
+    /// #4299: the raw purge's own trigger gate, checked as a FRESH scan of the EXACT range the purge is about
+    /// to drop — never a reuse of a repair pass's stale tally, because the repair and the trigger can run in
+    /// different passes and a range clean when the repair last looked can have grown a hole since (a plain
+    /// refresh that regressed, a collection gap the repair pass never saw). Returns <c>true</c> only when EVERY
+    /// bucket in <c>[dropFrom, dropTo)</c> is covered by the materialization AND not one of <paramref
+    /// name="deferredRanges"/> — a range this same pass's <see cref="CapMaterializationHoleRepairs"/> capped out
+    /// of and left for the next start counts as a hole for gating purposes even though the scan itself would
+    /// currently read it clean once repaired, because "repaired" here means "already closed", not "queued".
+    /// <paramref name="deferredRanges"/> is the union of a target's seam-deferred and ordinary-deferred ranges
+    /// from the SAME pass that produced the fresh <paramref name="materialization"/> reads this call scans
+    /// against — passing a stale deferred list from an earlier pass defeats the point exactly as reusing a
+    /// stale "finished" flag would.
+    /// </summary>
+    public static async Task<bool> HoleFreeThroughAsync(
+        NpgsqlConnection connection, MaterializationHoleTarget target, (string Schema, string Name) materialization,
+        DateTime dropFrom, DateTime dropTo, IReadOnlyList<(DateTime Start, DateTime End)> deferredRanges,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(deferredRanges);
+        if (dropTo <= dropFrom)
+        {
+            return true;
+        }
+
+        foreach (var deferred in deferredRanges)
+        {
+            if (deferred.Start < dropTo && deferred.End > dropFrom)
+            {
+                return false;
+            }
+        }
+
+        var holes = await ScanHolesAsync(connection, target, materialization, dropFrom, dropTo - target.BucketWidth, cancellationToken);
+        return holes.Count == 0;
+    }
+
+    /// <summary>The hole buckets of one aggregate over <c>[from, to]</c> inclusive, oldest first.</summary>
+    private static async Task<List<DateTime>> ScanHolesAsync(
+        NpgsqlConnection connection, MaterializationHoleTarget target, (string Schema, string Name) materialization,
+        DateTime from, DateTime to, CancellationToken cancellationToken)
+    {
+        var holes = new List<DateTime>();
+        using var scan = new NpgsqlCommand(MaterializationHoleScanSql(target, materialization), connection) { CommandTimeout = SetupTimeoutSeconds };
+        scan.Parameters.AddWithValue(DateTime.SpecifyKind(from, DateTimeKind.Unspecified));
+        scan.Parameters.AddWithValue(DateTime.SpecifyKind(to, DateTimeKind.Unspecified));
+        scan.Parameters.AddWithValue(target.BucketWidth);
+        await using var reader = await scan.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            holes.Add(reader.GetDateTime(0));
+        }
+
+        return holes;
+    }
+
+    /// <summary>An instant aligned DOWN to a bucket boundary from the epoch — how <c>time_bucket</c> aligns for
+    /// the widths in use (an hour, a day), so a scan horizon lands on a bucket the series can produce.</summary>
+    public static DateTime AlignDown(DateTime instant, TimeSpan bucketWidth)
+    {
+        if (bucketWidth <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bucketWidth), bucketWidth, "a bucket has a positive width");
+        }
+
+        return new DateTime(instant.Ticks - (instant.Ticks % bucketWidth.Ticks), DateTimeKind.Unspecified);
+    }
+
+    /// <summary>An instant aligned UP to a bucket boundary — <see cref="AlignDown"/>'s twin, used by
+    /// <see cref="ChainedDailyRange"/> to widen a repaired hourly range OUT to whole days rather than in,
+    /// so the daily chase never leaves a bucket the hourly repair touched unrefreshed.</summary>
+    public static DateTime AlignUp(DateTime instant, TimeSpan bucketWidth)
+    {
+        var down = AlignDown(instant, bucketWidth);
+        return down == instant ? down : down + bucketWidth;
+    }
+
+    /// <summary>
+    /// #4300: which part, if any, of a just-repaired successor-hourly range <c>[repairedStart,
+    /// repairedEnd)</c> the dependent successor DAILY should also be chased over, so an outage-aged gap the
+    /// seam repair fills does not sit forever below the daily's own 3-day refresh window (<see
+    /// cref="DailyRefreshStartSpan"/>) — the daily never materializes there on its own, and the successor
+    /// hourly's 90-day retention is armed only through its successor daily's coverage (<see
+    /// cref="RequireSuccessorDailyOf"/>), so an unchased gap holds that retention indefinitely even though no
+    /// row was lost.
+    ///
+    /// <para><b>The rule.</b> Aligned OUT to whole days — <c>[AlignDown(repairedStart, 1 day),
+    /// AlignUp(repairedEnd, 1 day))</c> — because the daily aggregate only ever materializes whole-day
+    /// buckets and a partial day would either under-chase or double back on itself run to run. Then clipped to
+    /// ONLY the part strictly older than <paramref name="dailyPolicyWindowStart"/>: days inside the daily's
+    /// own policy window are left for that policy to pick up on its ordinary schedule, so this never chases a
+    /// day the daily was always going to reach anyway. A range entirely inside the window returns
+    /// <c>null</c> — nothing to chase. A range straddling the boundary returns only the OLDER part.</para>
+    ///
+    /// <para><b>Capped, newest-first.</b> When the clipped span is wider than <paramref name="capDays"/>, only
+    /// the <paramref name="capDays"/> days closest to the boundary (the newest of the clipped span) are
+    /// returned — the same "fill contiguously downward" shape the hourly seam walk itself uses
+    /// (<see cref="CapMaterializationHoleRepairs"/>'s <c>newestFirst</c>), so a day this pass leaves behind is
+    /// always adjacent to what a later pass will pick up next, never a gap in the middle.</para>
+    ///
+    /// Pure, so the tests can walk it without a live store.
+    /// </summary>
+    public static (DateTime Start, DateTime End)? ChainedDailyRange(
+        DateTime repairedStart, DateTime repairedEnd, DateTime dailyPolicyWindowStart, int capDays)
+    {
+        if (capDays <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(capDays), capDays, "the cap is at least one day");
+        }
+
+        if (repairedEnd <= repairedStart)
+        {
+            return null;
+        }
+
+        var alignedStart = AlignDown(repairedStart, DailyBucket);
+        var alignedEnd = AlignUp(repairedEnd, DailyBucket);
+        var windowStart = AlignDown(dailyPolicyWindowStart, DailyBucket);
+
+        var chainEnd = alignedEnd < windowStart ? alignedEnd : windowStart;
+        if (chainEnd <= alignedStart)
+        {
+            return null;
+        }
+
+        var days = (int)((chainEnd - alignedStart).Ticks / DailyBucket.Ticks);
+        if (days > capDays)
+        {
+            alignedStart = chainEnd - TimeSpan.FromDays(capDays);
+        }
+
+        return (alignedStart, chainEnd);
+    }
+
+    /// <summary>
+    /// #4716: the part of a seam chase range (<see cref="ChainedDailyRange"/>) that is still left to the older
+    /// chase once <see cref="RefreshDependentDailiesAsync"/> has refreshed some of the same days for the closed
+    /// range. That refresh force-refreshes every complete day the dependent daily already holds a bucket for; the
+    /// chase used to refresh those days a second time, and <see cref="MaterializationHoleRepairSummary.DailyBucketsChained"/>
+    /// counted them twice. The chase exists for the days the daily holds NO bucket for yet (retention arms
+    /// through the daily's coverage), so it keeps exactly those: the days of <paramref name="chase"/> minus the
+    /// days <paramref name="refreshed"/> names for <paramref name="successorDaily"/> (a pair for another daily,
+    /// or for a day outside <paramref name="chase"/>, changes nothing), as the contiguous whole-day ranges they
+    /// leave, oldest first. The days those ranges span are the days the chase refreshes and counts. Pure, so the
+    /// tests can walk it without a live store.
+    /// </summary>
+    public static IReadOnlyList<(DateTime Start, DateTime End)> ChaseRangesAfterRefresh(
+        (DateTime Start, DateTime End) chase, string successorDaily, IEnumerable<(string Daily, DateTime Day)> refreshed)
+    {
+        ArgumentNullException.ThrowIfNull(successorDaily);
+        ArgumentNullException.ThrowIfNull(refreshed);
+
+        var skip = new HashSet<DateTime>();
+        foreach (var (daily, day) in refreshed)
+        {
+            if (string.Equals(daily, successorDaily, StringComparison.Ordinal))
+            {
+                skip.Add(day);
+            }
+        }
+
+        /* The chase range is whole days by construction (ChainedDailyRange aligns both ends), so a walk from its
+           start in day steps lands on the same instants the refreshed days name. */
+        var ranges = new List<(DateTime Start, DateTime End)>();
+        DateTime? runStart = null;
+        for (var day = chase.Start; day < chase.End; day += DailyBucket)
+        {
+            if (skip.Contains(day))
+            {
+                if (runStart is not null)
+                {
+                    ranges.Add((runStart.Value, day));
+                    runStart = null;
+                }
+            }
+            else
+            {
+                runStart ??= day;
+            }
+        }
+
+        if (runStart is not null)
+        {
+            ranges.Add((runStart.Value, chase.End));
+        }
+
+        return ranges;
+    }
+
+    /// <summary>
+    /// #4716: the non-frozen DAILY rollups built directly on <paramref name="view"/> — <see cref="RollupViews"/>
+    /// rows whose <c>Source</c> is the view and whose width is a day, kept to <see cref="DailyAggregates"/> so a
+    /// frozen legacy daily (which the freeze forbids refreshing) never appears. Derived, never hand-listed.
+    /// <c>query_store_stats_interval_hourly</c> has two (corrected and interval); a daily's own dependents chain
+    /// on (<c>query_store_stats_interval_daily</c> feeds <c>query_store_stats_daygrain_daily</c>); an hourly
+    /// that reads another hourly (<c>query_store_stats_corrected_hourly</c>) is excluded by its width.
+    /// </summary>
+    public static IReadOnlyList<string> DependentDailiesOf(string view) =>
+        RollupViews
+            .Where(r => r.BucketWidth == DailyBucket
+                && string.Equals(r.Source, view, StringComparison.Ordinal)
+                && DailyAggregates.Any(a => string.Equals(a.View, r.View, StringComparison.Ordinal)))
+            .Select(r => r.View)
+            .ToArray();
+
+    /// <summary>
+    /// #4716: the whole days a just-closed repaired range <c>[repairedStart, repairedEnd)</c> touched and that are
+    /// COMPLETE at <paramref name="utcNow"/> — aligned out to whole days, oldest first, dropping any day whose end
+    /// is after <c>AlignDown(utcNow, 1 day)</c> (the day still filling belongs to the daily's own policy). No
+    /// clip to the daily policy's 3-day window: a complete day the daily already holds is refreshed wherever it
+    /// sits. Pure, so the tests can walk it without a live store.
+    /// </summary>
+    public static IReadOnlyList<DateTime> CompleteDaysTouched(DateTime repairedStart, DateTime repairedEnd, DateTime utcNow)
+    {
+        var days = new List<DateTime>();
+        if (repairedEnd <= repairedStart)
+        {
+            return days;
+        }
+
+        var completeBefore = AlignDown(utcNow, DailyBucket);
+        for (var day = AlignDown(repairedStart, DailyBucket); day < repairedEnd; day += DailyBucket)
+        {
+            if (day + DailyBucket <= completeBefore)
+            {
+                days.Add(day);
+            }
+        }
+
+        return days;
+    }
+
+    /// <summary>Does the daily's MATERIALIZATION hypertable hold a bucket for <paramref name="day"/>? Probed on the
+    /// materialization, never the view (a real-time view shows rows that are not materialized), with the same
+    /// <c>OFFSET 0</c> fence the hole scan uses (#3933) so it stays a per-day probe.</summary>
+    private static async Task<bool> DailyRowExistsAsync(
+        NpgsqlConnection connection, (string Schema, string Name) materialization, DateTime day, CancellationToken cancellationToken)
+    {
+        using var probe = new NpgsqlCommand(
+            $"SELECT EXISTS (SELECT 1 FROM {QuoteIdentifier(materialization.Schema)}.{QuoteIdentifier(materialization.Name)} AS m WHERE m.bucket = $1::timestamp OFFSET 0)",
+            connection) { CommandTimeout = SetupTimeoutSeconds };
+        probe.Parameters.AddWithValue(DateTime.SpecifyKind(day, DateTimeKind.Unspecified));
+        return (bool)(await probe.ExecuteScalarAsync(cancellationToken))!;
+    }
+
+    /// <summary>
+    /// #4716: after an hourly range closes, force-refresh the days of every dependent daily that already holds a
+    /// bucket for them. A hole repair invalidates the day above it, but the ordinary repair loop repaired only the
+    /// hourly and the daily chase ran only from the seam loop, so a day older than the daily policy's 3-day window
+    /// stayed partial — and became the only copy when the hourly aged out. Per dependent daily: the complete days
+    /// (<see cref="CompleteDaysTouched"/>) that have a MATERIALIZED row (<see cref="DailyRowExistsAsync"/>), oldest
+    /// first, at most <see cref="MaterializationHoleRepairCapBuckets"/> days for the daily tier per call, each with
+    /// <see cref="RollupBackfill.RepairAsync"/> (plain refresh where the engine has no forced form, SQLSTATE 42883).
+    /// A day with no row is left alone: the daily's own hole scan materializes it. The days refreshed chain on to
+    /// the daily's own dependents (interval_daily to daygrain_daily). Failure-isolated per daily — a throw is
+    /// logged at Warning and never fails the hourly repair whose range just closed. Returns the (daily, day) pairs
+    /// it refreshed, the dailies chained behind them included, each added once its refresh succeeded: the caller
+    /// counts them (<see cref="MaterializationHoleRepairSummary.DailyBucketsChained"/>) and hands them to the seam
+    /// chase (<see cref="ChaseRangesAfterRefresh"/>) so a day refreshed here is not refreshed or counted again
+    /// there.
+    /// </summary>
+    private static async Task<IReadOnlyList<(string Daily, DateTime Day)>> RefreshDependentDailiesAsync(
+        NpgsqlConnection connection, ILogger? logger, RefreshDisclosure disclosure, string closedView,
+        IReadOnlyList<DateTime> touchedDays, CancellationToken cancellationToken)
+    {
+        var refreshed = new List<(string Daily, DateTime Day)>();
+        if (touchedDays.Count == 0)
+        {
+            return refreshed;
+        }
+
+        foreach (var daily in DependentDailiesOf(closedView))
+        {
+            try
+            {
+                var materialization = await ResolveMaterializationAsync(connection, daily, cancellationToken);
+                if (materialization is null)
+                {
+                    continue;
+                }
+
+                var cap = MaterializationHoleRepairCapBuckets(DailyBucket);
+                var kept = new List<DateTime>();
+                foreach (var day in touchedDays)
+                {
+                    if (kept.Count >= cap)
+                    {
+                        break;
+                    }
+
+                    if (await DailyRowExistsAsync(connection, materialization.Value, day, cancellationToken))
+                    {
+                        kept.Add(day);
+                    }
+                }
+
+                if (kept.Count == 0)
+                {
+                    continue;
+                }
+
+                foreach (var day in kept)
+                {
+                    var stopwatch = Stopwatch.StartNew();
+                    try
+                    {
+                        await RollupBackfill.RepairAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
+                    }
+                    catch (PostgresException ex) when (ex.SqlState == RollupBackfill.UndefinedFunctionSqlState)
+                    {
+                        await RollupBackfill.RunSliceAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
+                    }
+
+                    refreshed.Add((daily, day));
+
+                    /* One line per forced refresh, the shape of the heal's per-day line (the daily, the day, the
+                       seconds), so a slow day shows in the log as it happens rather than only in the per-daily
+                       summary below, which comes after the whole loop. */
+                    logger?.LogInformation(
+                        "Materialization-hole repair (#4716): refreshed {Daily} for {Day} in {Seconds:F1} s — {Source} was rebuilt under it.",
+                        daily, day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), stopwatch.Elapsed.TotalSeconds, closedView);
+                }
+
+                logger?.LogInformation(
+                    "Materialization-hole repair (#4716): {Hourly}'s repaired range invalidated {Days} day(s) of {Daily} that it already held a bucket for ({FirstDay} to {LastDay}) — refreshed them so a partial day does not stand until the source ages out.",
+                    closedView, kept.Count, daily, kept[0].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), kept[^1].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+
+                refreshed.AddRange(await RefreshDependentDailiesAsync(connection, logger, disclosure, daily, kept, cancellationToken));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Materialization-hole repair (#4716): could not refresh the days of {Daily} that {View}'s repaired range invalidated this run — re-judged on a later run: {Message}",
+                    daily, closedView, ex.Message);
+            }
+        }
+
+        return refreshed;
+    }
+
+    /* ─────────────── #4716: the one-time heal of daily days an earlier hourly repair left short ─────────────── */
+
+    /// <summary>
+    /// #4716: the non-frozen dailies the one-time heal walks, each with the relation it is built on, in the
+    /// order they must be walked — every daily built on an HOURLY first, then every daily built on another
+    /// daily (<c>query_store_stats_daygrain_daily</c> reads <c>query_store_stats_interval_daily</c>), so a
+    /// source daily is whole before the daily above it is compared against it. Derived from
+    /// <see cref="DailyAggregates"/> and <see cref="RollupViews"/> (a frozen legacy daily is not in the first,
+    /// and a daily with no row in the second has no source to compare against), never hand-listed.
+    /// </summary>
+    public static IReadOnlyList<(string Daily, string Source)> PartialDailyHealOrder()
+    {
+        var dailies = new HashSet<string>(DailyAggregates.Select(a => a.View), StringComparer.Ordinal);
+        var pairs = RollupViews
+            .Where(r => r.BucketWidth == DailyBucket && dailies.Contains(r.View))
+            .Select(r => (Daily: r.View, Source: r.Source, SourceIsDaily: RollupViews.Any(s =>
+                string.Equals(s.View, r.Source, StringComparison.Ordinal) && s.BucketWidth == DailyBucket)))
+            .ToArray();
+
+        return pairs.Where(p => !p.SourceIsDaily)
+            .Concat(pairs.Where(p => p.SourceIsDaily))
+            .Select(p => (p.Daily, p.Source))
+            .ToArray();
+    }
+
+    /// <summary>
+    /// #4716: the COMPLETE days the one-time heal compares for one daily — from the day AFTER the source's
+    /// oldest materialized bucket (the day that bucket sits in may begin mid-day, or have lost its early hours
+    /// to the source's own retention, so it is not a whole day to hold the daily to) up to, NOT including,
+    /// <c>AlignDown(utcNow, 1 day)</c> minus the daily policy's own window (<see cref="DailyRefreshStartSpan"/>):
+    /// the days inside that window are the policy's to refresh, and the day still filling is not complete.
+    /// Oldest first. Empty when the source holds nothing yet. Pure, so the tests can walk both edges without a
+    /// live store.
+    /// </summary>
+    public static IReadOnlyList<DateTime> PartialDailyHealDays(DateTime? sourceOldestBucket, DateTime utcNow)
+    {
+        var days = new List<DateTime>();
+        if (sourceOldestBucket is null)
+        {
+            return days;
+        }
+
+        var before = AlignDown(utcNow, DailyBucket) - DailyRefreshStartSpan;
+        for (var day = AlignDown(sourceOldestBucket.Value, DailyBucket) + DailyBucket; day < before; day += DailyBucket)
+        {
+            days.Add(day);
+        }
+
+        return days;
+    }
+
+    /// <summary>
+    /// #4716: whether one day of a daily is a partial day the heal should rebuild, from the two
+    /// <c>sum(sample_count)</c> totals (null where that side holds no row for the day). Refresh only when BOTH
+    /// sides hold rows and the daily holds FEWER samples than its source — a partial day is exactly missing
+    /// samples. A source with rows and no daily row is the hole scan's to close; a daily row with no source rows
+    /// is a day the source has already aged out, where the daily may be the only copy left; equal totals need
+    /// nothing; and a daily that holds MORE than its source is the same only-copy case (the source lost rows the
+    /// daily kept), which a refresh from that source would shrink — never done here.
+    /// </summary>
+    public static bool PartialDayNeedsRefresh(long? sourceSamples, long? dailySamples) =>
+        sourceSamples.HasValue && dailySamples.HasValue && dailySamples.Value < sourceSamples.Value;
+
+    /// <summary>
+    /// #4716: the two totals one day is judged on, in ONE statement, read off the MATERIALIZATION hypertables
+    /// (never the views — a real-time view shows rows that are not materialized) behind an <c>OFFSET 0</c> fence
+    /// like <see cref="DailyRowExistsAsync"/>'s. <c>$1</c> is the day, <c>$2</c> the day after. The daily side is
+    /// read first and the source side only when the daily holds a row for the day, so a day the daily has no
+    /// row for costs one bucket probe rather than a day's sum over the source.
+    /// </summary>
+    public static string PartialDailyDaySamplesSql((string Schema, string Name) source, (string Schema, string Name) daily)
+    {
+        var sourceRelation = $"{QuoteIdentifier(source.Schema)}.{QuoteIdentifier(source.Name)}";
+        var dailyRelation = $"{QuoteIdentifier(daily.Schema)}.{QuoteIdentifier(daily.Name)}";
+        return $@"
+WITH d AS MATERIALIZED (
+    SELECT sum(x.sample_count)::bigint AS samples
+    FROM (SELECT m.sample_count FROM {dailyRelation} AS m WHERE m.bucket = $1::timestamp OFFSET 0) AS x
+)
+SELECT
+    CASE WHEN d.samples IS NULL THEN NULL
+         ELSE (SELECT sum(y.sample_count)::bigint
+               FROM (SELECT s.sample_count FROM {sourceRelation} AS s
+                     WHERE s.bucket >= $1::timestamp AND s.bucket < $2::timestamp OFFSET 0) AS y)
+    END AS source_samples,
+    d.samples AS daily_samples
+FROM d";
+    }
+
+    /// <summary>What the heal did for one daily. <see cref="Available"/> is false when the daily or its source is
+    /// not a continuous aggregate on this store (nothing to compare, nothing failed, no marker to write).
+    /// <see cref="Completed"/> is true only when the whole walk and every refresh in it succeeded — the one
+    /// condition the caller may write the daily's marker on. <see cref="DaysChained"/> counts the days the
+    /// healed days were chained on to the daily's own dependents. <see cref="FailedDay"/> and
+    /// <see cref="FailureCode"/> name where and why a walk stopped.</summary>
+    public sealed record PartialDailyHealOutcome(
+        bool Available, bool Completed, int DaysCompared, int DaysPartial, int DaysRefreshed, int DaysChained,
+        DateTime? FailedDay = null, string? FailureCode = null);
+
+    /// <summary>
+    /// #4716: the one-time heal of ONE daily. An hourly hole repair before #4716's fix left the day above it
+    /// partial in every daily that already held a bucket for that day, and a day older than the daily policy's
+    /// window is never refreshed again — so it stays short, and becomes the only copy when the hourly ages out.
+    /// This walks every complete day of <paramref name="daily"/> that is older than that window and newer than
+    /// the source's oldest materialized bucket (<see cref="PartialDailyHealDays"/>), compares the day's
+    /// <c>sum(sample_count)</c> on the two materializations (<see cref="PartialDailyDaySamplesSql"/>), and
+    /// rebuilds each day <see cref="PartialDayNeedsRefresh"/> names — one day per refresh, one at a time, with
+    /// <see cref="RollupBackfill.RepairAsync"/> (plain refresh where the engine has no forced form, SQLSTATE
+    /// 42883). The healed days chain on to the daily's own dependents (<see cref="RefreshDependentDailiesAsync"/>).
+    ///
+    /// <para><b>Failure stops this daily, never the caller.</b> Anything but cancellation is logged once at
+    /// Warning (the daily, the day, the SQLSTATE) and returned as an incomplete outcome: the caller writes no
+    /// marker, so the next start walks the daily again. Cancellation propagates.</para>
+    /// </summary>
+    public static async Task<PartialDailyHealOutcome> HealPartialDailyAsync(
+        NpgsqlConnection connection, ILogger? logger, RefreshDisclosure disclosure, string daily, string source,
+        DateTime utcNow, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(disclosure);
+
+        var compared = 0;
+        var partial = 0;
+        var refreshed = 0;
+        var chained = 0;
+        DateTime? currentDay = null;
+        try
+        {
+            var dailyMaterialization = await ResolveMaterializationAsync(connection, daily, cancellationToken);
+            var sourceMaterialization = await ResolveMaterializationAsync(connection, source, cancellationToken);
+            if (dailyMaterialization is null || sourceMaterialization is null)
+            {
+                logger?.LogDebug("Partial-daily heal (#4716): {Daily} or its source {Source} is not a continuous aggregate on this store — nothing to compare.", daily, source);
+                return new PartialDailyHealOutcome(false, false, 0, 0, 0, 0);
+            }
+
+            DateTime? sourceOldest;
+            using (var span = new NpgsqlCommand(MaterializationSpanSql(sourceMaterialization.Value), connection) { CommandTimeout = SetupTimeoutSeconds })
+            await using (var reader = await span.ExecuteReaderAsync(cancellationToken))
+            {
+                sourceOldest = await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetDateTime(0) : null;
+            }
+
+            var sql = PartialDailyDaySamplesSql(sourceMaterialization.Value, dailyMaterialization.Value);
+            var healed = new List<DateTime>();
+            foreach (var day in PartialDailyHealDays(sourceOldest, utcNow))
+            {
+                currentDay = day;
+                long? sourceSamples;
+                long? dailySamples;
+                using (var read = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    read.Parameters.AddWithValue(DateTime.SpecifyKind(day, DateTimeKind.Unspecified));
+                    read.Parameters.AddWithValue(DateTime.SpecifyKind(day + DailyBucket, DateTimeKind.Unspecified));
+                    await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+                    await reader.ReadAsync(cancellationToken);
+                    sourceSamples = reader.IsDBNull(0) ? null : reader.GetInt64(0);
+                    dailySamples = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+                }
+
+                if (sourceSamples is not null && dailySamples is not null)
+                {
+                    compared++;
+                }
+
+                if (!PartialDayNeedsRefresh(sourceSamples, dailySamples))
+                {
+                    continue;
+                }
+
+                partial++;
+                var stopwatch = Stopwatch.StartNew();
+                try
+                {
+                    await RollupBackfill.RepairAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
+                }
+                catch (PostgresException ex) when (ex.SqlState == RollupBackfill.UndefinedFunctionSqlState)
+                {
+                    await RollupBackfill.RunSliceAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
+                }
+
+                refreshed++;
+                healed.Add(day);
+                logger?.LogInformation(
+                    "Partial-daily heal (#4716): refreshed {Daily} for {Day} in {Seconds:F1} s — it held {DailySamples} sample(s) against {SourceSamples} in {Source}.",
+                    daily, day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), stopwatch.Elapsed.TotalSeconds, dailySamples, sourceSamples, source);
+            }
+
+            currentDay = null;
+            if (healed.Count > 0)
+            {
+                chained = (await RefreshDependentDailiesAsync(connection, logger, disclosure, daily, healed, cancellationToken)).Count;
+            }
+
+            return new PartialDailyHealOutcome(true, true, compared, partial, refreshed, chained);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            var code = ex is PostgresException { SqlState: { Length: > 0 } sqlState } ? sqlState : ex.GetType().Name;
+            logger?.LogWarning(
+                "Partial-daily heal (#4716): stopped {Daily} at {Day} with {Code} — no marker is written, so the next start walks it again.",
+                daily, currentDay?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "the walk's setup", code);
+            return new PartialDailyHealOutcome(true, false, compared, partial, refreshed, chained, currentDay, code);
+        }
+    }
+
+    /// <summary>
+    /// #4300: how many hours of open legacy/successor seam still stand, across every legacy-paired target,
+    /// after a seam-only pass is cut short by its own budget — a cheap re-read (one span read, one raw-floor
+    /// read per target, the same two probes <see cref="RepairMaterializationTargetsAsync"/>'s own skip check
+    /// already makes), not a re-walk of the seam itself, so a caller can name a real count in a WARNING
+    /// without spending what the budget just cut off. A target whose seam is already closed (or one this
+    /// store never registered as a continuous aggregate) contributes zero.
+    /// </summary>
+    public static async Task<int> CountOpenSeamHoursAsync(NpgsqlConnection connection, DateTime utcNow, CancellationToken cancellationToken)
+    {
+        var totalHours = 0;
+        foreach (var target in MaterializationHoleTargets)
+        {
+            if (LegacyOf(target.View) is null)
+            {
+                continue;
+            }
+
+            var materialization = await ResolveMaterializationAsync(connection, target.View, cancellationToken);
+            if (materialization is null)
+            {
+                continue;
+            }
+
+            DateTime? floor;
+            using (var span = new NpgsqlCommand(MaterializationSpanSql(materialization.Value), connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await using var reader = await span.ExecuteReaderAsync(cancellationToken);
+                await reader.ReadAsync(cancellationToken);
+                floor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+            }
+
+            if (floor is null)
+            {
+                continue;
+            }
+
+            var sourceFilter = MaterializationHoleSourceFilterFor(target.CreateSql);
+            var sourceWhere = sourceFilter.Length == 0 ? string.Empty : $" WHERE {sourceFilter}";
+            using var rawFilteredFloor = new NpgsqlCommand($"SELECT min({target.SourceTimeColumn}) FROM collect.{target.Source}{sourceWhere}", connection) { CommandTimeout = SetupTimeoutSeconds };
+            if (await rawFilteredFloor.ExecuteScalarAsync(cancellationToken) is not DateTime rawFloor)
+            {
+                continue;
+            }
+
+            var seamBound = AlignDown(rawFloor, target.BucketWidth);
+            if (seamBound < floor.Value)
+            {
+                totalHours += (int)((floor.Value - seamBound).Ticks / target.BucketWidth.Ticks);
+            }
+        }
+
+        return totalHours;
+    }
+}

@@ -8,12 +8,17 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -44,7 +49,7 @@ internal static class DarlingDataReader
 {
     /* ─────────────────────────── result records ─────────────────────────── */
 
-    /// <summary>One raw CPU ring-buffer sample: sample_time (de-skewed to naive UTC) + the SQL and
+    /// <summary>One raw CPU ring-buffer sample: sample_time (naive UTC — the stored UTC twin since V134, else de-skewed) + the SQL and
     /// other-process CPU percentages. The tool buckets these to 1-minute averages.</summary>
     public sealed record CpuSample(DateTime SampleTime, int SqlServerCpu, int OtherProcessCpu);
 
@@ -56,7 +61,10 @@ internal static class DarlingDataReader
     public sealed record WaitTrendPoint(DateTime CollectionTime, double WaitTimeMsPerSecond, double SignalWaitTimeMsPerSecond);
 
     /// <summary>The latest memory_stats snapshot (Lite's <c>MemoryStatsRow</c>); utilization is
-    /// computed by the tool.</summary>
+    /// computed by the tool. The row carries NO engine edition: the tool reads the edition once from the registry
+    /// (<c>DarlingEngineCapability.EngineEditionAsync</c>), the one every Darling MCP engine gate reads, and builds the payload
+    /// from this row and that value. On an Azure SQL Database (5) <c>TotalPhysicalMemoryMb</c> is the database's memory limit and
+    /// <c>AvailablePhysicalMemoryMb</c> the room left under it.</summary>
     public sealed record MemoryStatsRow(
         DateTime CollectionTime, double TotalPhysicalMemoryMb, double AvailablePhysicalMemoryMb,
         double TotalPageFileMb, double AvailablePageFileMb, string SystemMemoryState, string SqlMemoryModel,
@@ -165,11 +173,26 @@ internal static class DarlingDataReader
                     + (TextFetchProbeMs ?? 0) + (TextFetchWriteMs ?? 0);
     }
 
-    /// <summary>One database file's latest I/O snapshot; avg latency is computed by the tool.</summary>
+    /// <summary>One database file's latest I/O snapshot; avg latency is computed by the tool.
+    /// <para><paramref name="SampleIntervalSeconds"/> (#3540): the measured seconds the deltas accrued over;
+    /// 0 is the calculator's "no delta knowable" marker (first sighting, counter reset, gap past the policy)
+    /// and null is a pre-V127 row that never recorded one. The tool reports latency as null on a 0 rather than
+    /// the "0.00 ms" a restart used to render.</para></summary>
     public sealed record FileIoRow(
-        string DatabaseName, string FileName, string FileType, string PhysicalName, double SizeMb,
+        string DatabaseName, string FileName, string FileType, string PhysicalName, double? SizeMb,
         long DeltaReads, long DeltaWrites, long DeltaReadBytes, long DeltaWriteBytes,
-        long DeltaStallReadMs, long DeltaStallWriteMs);
+        long DeltaStallReadMs, long DeltaStallWriteMs, int? SampleIntervalSeconds)
+    {
+        /// <summary>What to show in place of a size when <c>SizeMb</c> is null, else null. A null size is the log
+        /// file of an Azure SQL Database Hyperscale database: the log lives in the log service, so the collector
+        /// stores no size for it.</summary>
+        public string? SizeNote => SizeMb is null ? PerformanceMonitor.Collectors.FileIoStatsCollector.NoSizeLabel : null;
+
+        /// <summary>True when the row's deltas are the calculator's unknowable marker — a stored interval of
+        /// exactly 0. NULL (pre-V127, interval never recorded) is NOT unknowable: those rows keep the
+        /// pre-#3540 reading, because nothing about them can say otherwise.</summary>
+        public bool IsUnknowable => SampleIntervalSeconds == 0;
+    }
 
     /// <summary>One tempdb space-usage sample over the window.</summary>
     public sealed record TempDbSample(
@@ -177,8 +200,12 @@ internal static class DarlingDataReader
         double VersionStoreReservedMb, double TotalReservedMb, double UnallocatedMb,
         long TotalSessionsUsingTempDb, int TopSessionId, double TopSessionTempDbMb);
 
-    /// <summary>One perfmon counter at the latest snapshot.</summary>
-    public sealed record PerfmonRow(string CounterName, string InstanceName, long Value, long DeltaValue);
+    /// <summary>One perfmon counter at the latest snapshot. <c>DeltaValue</c> is null on a gauge row, which
+    /// stores no delta (V132, #3653 A7); <c>CntrType</c> is the DMV's type id as stored, null on a row written
+    /// before the rung. <c>SampleIntervalSeconds</c> is the seconds the delta covers under the three-state rule
+    /// (0 = no delta knowable, null on a gauge), the denominator of the row's per-second figure.</summary>
+    public sealed record PerfmonRow(
+        string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null, int? SampleIntervalSeconds = null);
 
     /// <summary>One (database, query_hash) group's summed query-stats deltas over the window. Time
     /// metrics are in microseconds (converted to ms by the tool, matching Lite).</summary>
@@ -191,7 +218,7 @@ internal static class DarlingDataReader
         string QueryPlanHash, string SqlHandle, string PlanHandle,
         long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long TotalLogicalReads, long TotalLogicalWrites,
         long TotalPhysicalReads, long TotalRows, long TotalSpills, int MinDop, int MaxDop,
-        long MinCpuUs, long MaxCpuUs, long MinElapsedUs, long MaxElapsedUs, string QueryText,
+        long MinCpuUs, long MaxCpuUs, long MinElapsedUs, long MaxElapsedUs, string? QueryText,
         /* #2012: distinct statement texts merged into this group; with stage 2's host-object split this
            flags the remaining ad-hoc literal blends (proc-hosted groups converge to 1). */
         long DistinctTexts,
@@ -215,7 +242,7 @@ internal static class DarlingDataReader
     /// did not attribute the row (pre-2022, or a 2022 standalone).
     /// </summary>
     public sealed record QueryStoreRow(
-        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash,
+        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash, string ExecutionTypeDesc, string? ModuleName,
         long TotalExecutions, double AvgDurationMs, double AvgCpuTimeMs, double AvgLogicalReads,
         double AvgLogicalWrites, double AvgPhysicalReads, double AvgRowcount, DateTime? LastExecutionTime, string QueryText,
         string? ReplicaRole);
@@ -224,7 +251,15 @@ internal static class DarlingDataReader
     /// freshness-derived status the tool assigns; the viewer has no live ping either).
     /// <para><c>EngineKind</c> and <c>PostgresMajorVersion</c> ride along because the row's version label is
     /// engine-aware (#3145): without the discriminator this read fed <c>SqlMajorVersion</c> — <c>0</c> at
-    /// every PostgreSQL target — through a SQL-Server-only table and published "SQL Server v0".</para></summary>
+    /// every PostgreSQL target — through a SQL-Server-only table and published "SQL Server v0".</para>
+    /// <para><c>RegisteredAt</c> is the registry's <c>created_date</c>, the server's first successful connect
+    /// (#3967). The newest-collection read has no window, but the collection log's retention bounds what it
+    /// can see, and the registration is what tells a server whose history retention dropped (Offline) from
+    /// one that has never collected.</para>
+    /// <para><c>SqlEngineEdition</c> is <c>servers.sql_engine_edition</c>, read because the version label needs
+    /// it: an Azure SQL Database reports major <c>12</c>, which the year table would publish as "SQL Server
+    /// 2014". The two Azure editions (5 and 8) label as the platform instead; null, 0 and every other edition
+    /// leave the label to <c>SqlMajorVersion</c>.</para></summary>
     public sealed record ServerListRow(
         int ServerId,
         string ServerName,
@@ -232,31 +267,51 @@ internal static class DarlingDataReader
         int? SqlMajorVersion,
         DateTime? LastCollection,
         string? EngineKind = null,
-        int? PostgresMajorVersion = null);
+        int? PostgresMajorVersion = null,
+        DateTime? RegisteredAt = null,
+        int? SqlEngineEdition = null);
 
-    /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).</summary>
+    /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
+    /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
+    /// and <paramref name="TimeZoneId"/> the engine's own zone name beside it (V134, #3653 item 13, Q8) — null
+    /// where the engine cannot say, which is every SQL Server before 2022 and a real, common value rather than
+    /// a miss. <paramref name="VcoreCount"/> is the vCore count the collector parses from an Azure SQL Database's
+    /// service objective (null off Azure SQL Database, and for a DTU-model objective or an elastic pool, which name no vCores) — what
+    /// the database is given there, where <paramref name="CpuCount"/> is the schedulers it can see (possibly more than its vCores) and
+    /// the memory, socket, cores-per-socket and hyperthread figures beside it describe the HOST.</summary>
     public sealed record ServerPropertiesReadRow(
         DateTime CollectionTime, string Edition, string ProductVersion, string ProductLevel, string? ProductUpdateLevel,
         int EngineEdition, int CpuCount, int HyperthreadRatio, long PhysicalMemoryMb, int SocketCount, int CoresPerSocket,
-        bool IsHadrEnabled, bool IsClustered, string? EnterpriseFeatures, string? ServiceObjective);
+        bool IsHadrEnabled, bool IsClustered, string? EnterpriseFeatures, string? ServiceObjective,
+        int? UtcOffsetMinutes = null, string? TimeZoneId = null, int? VcoreCount = null);
 
     /* ─────────────────────────── CPU ─────────────────────────── */
 
     /// <summary>
     /// Raw per-sample CPU (the viewer's <c>CpuUtilizationSql</c>): every ring-buffer sample since the
-    /// window start, with <c>sample_time</c> de-skewed from the monitored server's LOCAL wall clock to
-    /// naive UTC by subtracting the per-batch UTC offset (#1262). Windows on <c>collection_time</c> (the
-    /// reliable naive-UTC clock, not the server-local sample_time). Reads the base
-    /// <c>cpu_utilization_stats</c> table (the de-skew window function needs collection_time alongside
-    /// sample_time). $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// window start, its instant in naive UTC — the stored <c>sample_time_utc</c> where the row carries one
+    /// (V134, #3653 item 13, Q7: the collector writes the same instant in UTC beside the unchanged local
+    /// stamp), else <c>sample_time</c> de-skewed from the monitored server's LOCAL wall clock by subtracting
+    /// the per-batch UTC offset (#1262). The COALESCE order is the ruling ("readers prefer the new column
+    /// when present"): a post-rung row is placed by a measured UTC instant, exact across a DST transition;
+    /// a pre-rung row keeps the derivation, which rounds a straddling batch to one side and is the hour-wrong
+    /// placement the column retires — nothing is backfilled, because the offset a server had at a past
+    /// sample's instant is what the store never recorded. Windows on <c>collection_time</c> (the reliable
+    /// naive-UTC clock, not the server-local sample_time). Reads the base <c>cpu_utilization_stats</c> table
+    /// (the de-skew window function needs collection_time alongside sample_time). The output alias stays
+    /// <c>sample_time</c>, so <c>ORDER BY sample_time</c> orders on the projected UTC value and the payload
+    /// field keeps its name while its value is UTC either way. $1 server_id, $2 window start, $3 window end
+    /// (naive UTC).
     /// </summary>
     public const string CpuUtilizationSql = """
         SELECT
-            sample_time
-                - INTERVAL '15 minutes'
-                  * ROUND(EXTRACT(EPOCH FROM (
-                        MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time
-                    )) / 900.0)::double precision AS sample_time,
+            COALESCE(
+                sample_time_utc,
+                sample_time
+                    - INTERVAL '15 minutes'
+                      * ROUND(EXTRACT(EPOCH FROM (
+                            MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time
+                        )) / 900.0)::double precision) AS sample_time,
             sqlserver_cpu_utilization,
             other_process_cpu_utilization
         FROM cpu_utilization_stats
@@ -285,6 +340,60 @@ internal static class DarlingDataReader
         }
 
         return samples;
+    }
+
+    /// <summary>
+    /// CPU BUCKETED (#3960): <see cref="CpuUtilizationSql"/>'s de-skewed samples, byte for byte, averaged per bucket of
+    /// <c>$4</c> minutes on the samples' own UTC instant — the tool used to bucket every sample to the minute in C#,
+    /// after reading a week of them (40,000 rows on an Azure SQL DB source) — with the busiest sample's SQL and total
+    /// CPU beside the averages and the sample count. A NULL reading counts as 0, as the per-sample reader always read
+    /// it. Each point is stamped at its bucket's start and NOT clamped to the window's: the window is on
+    /// collection_time, and a collection can carry samples from before it, which the per-minute points always showed
+    /// at their own minute. $1 server_id, $2/$3 window (naive UTC), $4 the bucket width in minutes.
+    /// </summary>
+    public const string CpuUtilizationBucketedSql = $"""
+        SELECT
+            date_bin(CAST($4 AS integer) * INTERVAL '1 minute', sample_time, {TrendBucketSql.OriginSql}) AS bucket_start,
+            AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
+            AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu,
+            AVG(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS total_cpu,
+            AVG(GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)))) AS idle_cpu,
+            MAX(COALESCE(sqlserver_cpu_utilization, 0)) AS peak_sql_server_cpu,
+            MAX(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS peak_total_cpu,
+            COUNT(*) AS samples
+        FROM (
+        {CpuUtilizationSql}
+        ) AS samples
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="CpuUtilizationBucketedSql"/>.</summary>
+    public static async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        var items = new List<CpuBucketPoint>();
+        await using var command = postgres.CreateCommand(CpuUtilizationBucketedSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new CpuBucketPoint(
+                reader.GetDateTime(0),
+                Convert.ToDouble(reader.GetValue(1)),
+                Convert.ToDouble(reader.GetValue(2)),
+                Convert.ToDouble(reader.GetValue(3)),
+                Convert.ToDouble(reader.GetValue(4)),
+                Convert.ToInt32(reader.GetValue(5)),
+                Convert.ToInt32(reader.GetValue(6)),
+                reader.GetInt64(7)));
+        }
+
+        return items;
     }
 
     public sealed record CpuWindowAggregate(int SampleCount, DateTime? FirstSample, DateTime? LastSample, double? AvgSqlCpuPercent);
@@ -335,30 +444,53 @@ internal static class DarlingDataReader
     /// wait_type, heaviest first. The SUMs CAST to bigint for the typed GetInt64 reader (Postgres
     /// <c>SUM(bigint)</c> is numeric). Lite's per-user IgnoredWaitTypes exclusion is dropped (headless
     /// has no per-user ignore config — the viewer's wait reads drop it the same way). $1 server_id, $2/$3
-    /// window (naive UTC).
+    /// window (naive UTC), $4 row cap.
+    ///
+    /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 50</c> while the tool advertised
+    /// a <c>limit</c> up to 1,000 and applied it with <c>Take(limit)</c>, so a caller asking for every wait
+    /// type on a server that had observed 80 silently got 50 — the same shape <c>DarlingPgWaitReader</c> fixed
+    /// for the PostgreSQL twin. The tool passes <c>limit + 1</c> and reads the extra row as truncation.</para>
+    ///
+    /// <para>A wait stored under two spellings is one row with the summed values. Four wait names were stored with
+    /// the trailing space <c>sys.dm_os_wait_stats</c> reports before the collector began trimming them (#4884), and a
+    /// store upgraded across that change holds both spellings. The inner query is the per-spelling aggregation this
+    /// read always ran, so the chunk scans keep their partial aggregation; the outer query merges the spellings on
+    /// <c>rtrim(wait_type)</c>, once per group rather than once per row. Sums of sums are exact.</para>
     /// </summary>
     public const string WaitStatsSql = """
         SELECT
-            wait_type,
-            CAST(SUM(delta_waiting_tasks) AS bigint) AS total_waiting_tasks,
-            CAST(SUM(delta_wait_time_ms) AS bigint) AS total_wait_time_ms,
-            CAST(SUM(delta_signal_wait_time_ms) AS bigint) AS total_signal_wait_time_ms
-        FROM v_wait_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        GROUP BY wait_type
-        ORDER BY SUM(delta_wait_time_ms) DESC
-        LIMIT 50
+            rtrim(wait_type) AS wait_type,
+            CAST(SUM(waiting_tasks) AS bigint) AS total_waiting_tasks,
+            CAST(SUM(wait_time_ms) AS bigint) AS total_wait_time_ms,
+            CAST(SUM(signal_wait_time_ms) AS bigint) AS total_signal_wait_time_ms
+        FROM
+        (
+            SELECT
+                wait_type,
+                SUM(delta_waiting_tasks) AS waiting_tasks,
+                SUM(delta_wait_time_ms) AS wait_time_ms,
+                SUM(delta_signal_wait_time_ms) AS signal_wait_time_ms
+            FROM v_wait_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY wait_type
+        ) AS per_spelling
+        GROUP BY rtrim(wait_type)
+        ORDER BY SUM(wait_time_ms) DESC
+        LIMIT $4
         """;
 
+    /// <summary>The <paramref name="cap"/> heaviest wait types over the window. Callers detecting truncation
+    /// pass <c>limit + 1</c> and read the extra row as the signal.</summary>
     public static async Task<List<WaitStatRow>> GetWaitStatsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
     {
         var rows = new List<WaitStatRow>();
         await using var command = postgres.CreateCommand(WaitStatsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
+        AddInt(command, cap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -374,16 +506,25 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// The distinct wait types collected over the window, heaviest first — feeds the get_wait_trend
-    /// "not_collected" hint (Lite's <c>GetDistinctWaitTypesAsync</c>). $1 server_id, $2/$3 window.
+    /// "not_collected" hint (Lite's <c>GetDistinctWaitTypesAsync</c>). Like <see cref="WaitStatsSql"/>, it sums per
+    /// stored spelling and then merges the spellings on <c>rtrim(wait_type)</c>, so a wait stored under two spellings
+    /// is one clean name. $1 server_id, $2/$3 window.
     /// </summary>
     public const string DistinctWaitTypesSql = """
-        SELECT wait_type
-        FROM v_wait_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        GROUP BY wait_type
-        ORDER BY SUM(delta_wait_time_ms) DESC
+        SELECT rtrim(wait_type) AS wait_type
+        FROM
+        (
+            SELECT
+                wait_type,
+                SUM(delta_wait_time_ms) AS total_delta
+            FROM v_wait_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY wait_type
+        ) AS per_spelling
+        GROUP BY rtrim(wait_type)
+        ORDER BY SUM(total_delta) DESC
         """;
 
     public static async Task<List<string>> GetDistinctWaitTypesAsync(
@@ -429,31 +570,112 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// A single wait type's per-second trend — Lite's <c>GetWaitStatsTrendAsync</c>: the interval rate is
-    /// this collection's delta divided by the seconds since the previous collection (a <c>LAG</c> over the
-    /// truncate-then-diff epoch idiom proven value-identical DuckDB↔Postgres). $1 server_id, $2 wait_type,
+    /// this collection's delta divided by the seconds the delta accrued over. $1 server_id, $2 wait_type,
     /// $3/$4 window (naive UTC).
+    ///
+    /// <para><b>The interval is the STORED one where the row has it (#3540).</b> <c>wait_stats</c> carries
+    /// <c>sample_interval_seconds</c> since V127 — the calculator's measured seconds, 0 when no delta was
+    /// knowable (first sighting, counter reset, a gap past the policy). A 0 maps to NULL through
+    /// <c>NULLIF</c>, so the rate is NULL rather than the confident 0.00 ms/sec this read used to emit at
+    /// exactly the moments (restarts) it was unknowable; the reader drops the row (a missing sample, never a
+    /// fabricated idle one). A NULL interval is a pre-V127 row whose interval was never recorded, and for
+    /// those the LAG over collection_time (the truncate-then-diff epoch idiom proven value-identical
+    /// DuckDB↔Postgres) is what this read always did, so history keeps rendering. The first row of the
+    /// window has no prior and no stored interval either way — NULL, not 0.</para>
     /// </summary>
-    public const string WaitTrendSql = """
-        WITH raw AS
+    public const string WaitTrendSql = $"""
+        WITH {WaitRawCte}
+        SELECT
+            collection_time,
+            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
+            CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second
+        FROM raw
+        ORDER BY collection_time
+        """;
+
+    /// <summary>The wait trend's per-row read (#3960): shared, so the per-collection statement and the bucketed one
+    /// read the same rows with the same three-state interval.
+    /// <para>The name matches both spellings a wait can be stored under: <c>$2</c> and <c>$2 || ' '</c>. Four wait
+    /// names were stored with the trailing space <c>sys.dm_os_wait_stats</c> reports before the collector began
+    /// trimming them (#4884), so a trend by the clean name would otherwise stop at the upgrade. <c>wait_type</c> stays
+    /// bare, so the filter reads the column as stored. One wait per call, so the <c>LAG</c> needs no partition and
+    /// runs across the spelling change.</para></summary>
+    private const string WaitRawCte = """
+        raw AS
         (
             SELECT
                 collection_time,
                 delta_wait_time_ms,
                 delta_signal_wait_time_ms,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+                CASE WHEN sample_interval_seconds IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                     ELSE NULLIF(sample_interval_seconds, 0)
+                END AS interval_seconds
             FROM v_wait_stats
             WHERE server_id = $1
-            AND   wait_type = $2
+            AND   wait_type IN ($2, $2 || ' ')
             AND   collection_time >= $3
             AND   collection_time <= $4
         )
-        SELECT
-            collection_time,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS signal_wait_time_ms_per_second
-        FROM raw
-        ORDER BY collection_time
         """;
+
+    /// <summary>
+    /// The wait trend BUCKETED (#3960): <see cref="WaitTrendSql"/>'s rows gathered into buckets of <c>$5</c> minutes.
+    /// Only a collection whose rate is knowable counts — each one's wait, signal wait and seconds are NULL through a
+    /// no-ELSE CASE otherwise, the same collections the per-collection reader drops — and a bucket holding none of
+    /// them is left out, as the reader left such a collection out. A bucket's rate is its summed wait over the
+    /// seconds its rated collections covered — time-weighted, never an average of per-collection rates — and its
+    /// peak is the busiest single collection, so a one-minute pile-up survives a ten-minute bucket.
+    /// $1 server_id, $2 wait_type, $3/$4 window (naive UTC), $5 the bucket width in minutes.
+    /// </summary>
+    public const string WaitTrendBucketedSql = $"""
+        WITH {WaitRawCte},
+        rated AS
+        (
+            SELECT
+                collection_time,
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) END AS rated_wait_ms,
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) END AS rated_signal_ms,
+                CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
+            FROM raw
+        )
+        SELECT
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
+            SUM(rated_wait_ms) / SUM(rated_seconds) AS wait_time_ms_per_second,
+            SUM(rated_signal_ms) / SUM(rated_seconds) AS signal_wait_time_ms_per_second,
+            MAX(wait_time_ms_per_second) AS peak_wait_time_ms_per_second
+        FROM rated
+        GROUP BY 1
+        HAVING COUNT(rated_seconds) > 0
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="WaitTrendBucketedSql"/>: only buckets holding a rated collection come back.</summary>
+    public static async Task<List<WaitBucketPoint>> GetWaitBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, string waitType, DateTime startUtc, DateTime endUtc, int bucketMinutes,
+        CancellationToken cancellationToken = default)
+    {
+        var items = new List<WaitBucketPoint>();
+        await using var command = postgres.CreateCommand(WaitTrendBucketedSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddText(command, waitType);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new WaitBucketPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1)),
+                reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3))));
+        }
+
+        return items;
+    }
 
     public static async Task<List<WaitTrendPoint>> GetWaitTrendAsync(
         NpgsqlDataSource postgres, int serverId, string waitType, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
@@ -468,9 +690,16 @@ internal static class DarlingDataReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* A NULL rate is an unknowable interval (#3540) — the row is dropped rather than read as 0. Both
+               rates share one interval, so they are NULL together; the first is the test. */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
             items.Add(new WaitTrendPoint(
                 reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
+                reader.GetDouble(1),
                 reader.IsDBNull(2) ? 0 : reader.GetDouble(2)));
         }
 
@@ -531,19 +760,22 @@ internal static class DarlingDataReader
     /// <summary>
     /// The latest memory-clerk breakdown — Lite's <c>GetLatestMemoryClerksAsync</c>: every clerk at the
     /// newest collection, heaviest first. memory_mb is <c>numeric(18,2)</c> → double precision. $1 server_id.
+    /// <c>collection_time</c> rides along on every row (#3541 A10) so the tool can say WHEN the snapshot it
+    /// serves was taken — the same statement as the rows, never a second read that could stamp the next one.
     /// </summary>
     public const string LatestMemoryClerksSql = """
-        SELECT clerk_type, CAST(memory_mb AS double precision)
+        SELECT clerk_type, CAST(memory_mb AS double precision), collection_time
         FROM v_memory_clerks
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_clerks WHERE server_id = $1)
         ORDER BY memory_mb DESC
         """;
 
-    public static async Task<List<MemoryClerkRow>> GetLatestMemoryClerksAsync(
+    public static async Task<LatestSnapshot<MemoryClerkRow>> GetLatestMemoryClerksAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<MemoryClerkRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(LatestMemoryClerksSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
@@ -553,9 +785,10 @@ internal static class DarlingDataReader
             rows.Add(new MemoryClerkRow(
                 reader.GetString(0),
                 reader.IsDBNull(1) ? 0 : reader.GetDouble(1)));
+            capturedAt ??= reader.GetDateTime(2);
         }
 
-        return rows;
+        return new LatestSnapshot<MemoryClerkRow>(capturedAt, rows);
     }
 
     /* ─────────────────────────── file I/O ─────────────────────────── */
@@ -563,7 +796,9 @@ internal static class DarlingDataReader
     /// <summary>
     /// The latest file-I/O snapshot per database file — Lite's <c>GetLatestFileIoStatsAsync</c>, ordered
     /// by total stall descending; avg latency (stall/op) is computed by the tool. size_mb is
-    /// <c>numeric</c> → double precision; the delta columns are bigint. $1 server_id.
+    /// <c>numeric</c> → double precision, and NULL for the log file of an Azure SQL Database Hyperscale database;
+    /// the delta columns are bigint. $1 server_id. <c>collection_time</c>
+    /// is the trailing column (#3541 A10): the snapshot's stamp, read once and published as <c>captured_at</c>.
     /// </summary>
     public const string LatestFileIoStatsSql = """
         SELECT
@@ -577,17 +812,20 @@ internal static class DarlingDataReader
             delta_read_bytes,
             delta_write_bytes,
             delta_stall_read_ms,
-            delta_stall_write_ms
+            delta_stall_write_ms,
+            sample_interval_seconds,
+            collection_time
         FROM v_file_io_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
         ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC
         """;
 
-    public static async Task<List<FileIoRow>> GetLatestFileIoStatsAsync(
+    public static async Task<LatestSnapshot<FileIoRow>> GetLatestFileIoStatsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<FileIoRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(LatestFileIoStatsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
@@ -599,16 +837,18 @@ internal static class DarlingDataReader
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? "" : reader.GetString(2),
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? 0 : reader.GetInt64(10)));
+                reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                reader.IsDBNull(11) ? null : reader.GetInt32(11)));
+            capturedAt ??= reader.GetDateTime(12);
         }
 
-        return rows;
+        return new LatestSnapshot<FileIoRow>(capturedAt, rows);
     }
 
     /* ─────────────────────────── tempdb ─────────────────────────── */
@@ -663,28 +903,93 @@ internal static class DarlingDataReader
         return samples;
     }
 
+    /// <summary>
+    /// tempdb BUCKETED (#3960): <see cref="TempDbTrendSql"/>'s samples, byte for byte, gathered into buckets of
+    /// <c>$4</c> minutes — each space figure averaged, the fullest collection's reserved and version-store space as
+    /// the peaks, the most sessions any collection saw, and the single largest consumer (its session and its MB,
+    /// the earliest on a tie). A NULL reading counts as 0, as the per-sample reader always read it. $1 server_id,
+    /// $2/$3 window (naive UTC), $4 the bucket width in minutes.
+    /// </summary>
+    public const string TempDbTrendBucketedSql = $"""
+        SELECT
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            AVG(COALESCE(user_object_reserved_mb, 0)) AS user_objects_mb,
+            AVG(COALESCE(internal_object_reserved_mb, 0)) AS internal_objects_mb,
+            AVG(COALESCE(version_store_reserved_mb, 0)) AS version_store_mb,
+            AVG(COALESCE(total_reserved_mb, 0)) AS total_reserved_mb,
+            AVG(COALESCE(unallocated_mb, 0)) AS unallocated_mb,
+            MAX(COALESCE(total_reserved_mb, 0)) AS peak_total_reserved_mb,
+            MAX(COALESCE(version_store_reserved_mb, 0)) AS peak_version_store_mb,
+            MAX(COALESCE(total_sessions_using_tempdb, 0)) AS sessions_using_tempdb,
+            (array_agg(COALESCE(top_session_id, 0) ORDER BY COALESCE(top_session_tempdb_mb, 0) DESC, collection_time))[1] AS top_consumer_session_id,
+            MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb
+        FROM (
+        {TempDbTrendSql}
+        ) AS samples
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="TempDbTrendBucketedSql"/>.</summary>
+    public static async Task<List<TempDbBucketPoint>> GetTempDbBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        var items = new List<TempDbBucketPoint>();
+        await using var command = postgres.CreateCommand(TempDbTrendBucketedSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new TempDbBucketPoint(
+                reader.GetDateTime(0),
+                Convert.ToDouble(reader.GetValue(1)),
+                Convert.ToDouble(reader.GetValue(2)),
+                Convert.ToDouble(reader.GetValue(3)),
+                Convert.ToDouble(reader.GetValue(4)),
+                Convert.ToDouble(reader.GetValue(5)),
+                Convert.ToDouble(reader.GetValue(6)),
+                Convert.ToDouble(reader.GetValue(7)),
+                Convert.ToInt64(reader.GetValue(8)),
+                Convert.ToInt32(reader.GetValue(9)),
+                Convert.ToDouble(reader.GetValue(10))));
+        }
+
+        return items;
+    }
+
     /* ─────────────────────────── perfmon ─────────────────────────── */
 
     /// <summary>
     /// The latest perfmon counters — Lite's <c>GetLatestPerfmonStatsAsync</c>: counter_name /
-    /// instance_name / cntr_value / delta_cntr_value at the newest collection. $1 server_id.
+    /// instance_name / cntr_value / delta_cntr_value at the newest collection, with that collection's
+    /// <c>collection_time</c> trailing (#3541 A10, published once as <c>captured_at</c>), the row's
+    /// stored <c>cntr_type</c> after it (V132), and last the <c>sample_interval_seconds</c> a rate row's
+    /// per-second figure divides by. $1 server_id.
     /// </summary>
     public const string LatestPerfmonStatsSql = """
         SELECT
             counter_name,
             instance_name,
             cntr_value,
-            delta_cntr_value
+            delta_cntr_value,
+            collection_time,
+            cntr_type,
+            sample_interval_seconds
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
         ORDER BY counter_name
         """;
 
-    public static async Task<List<PerfmonRow>> GetLatestPerfmonStatsAsync(
+    public static async Task<LatestSnapshot<PerfmonRow>> GetLatestPerfmonStatsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<PerfmonRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(LatestPerfmonStatsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
@@ -695,10 +1000,14 @@ internal static class DarlingDataReader
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
+                /* NULL stays NULL: a gauge row stores no delta (V132); 0 here would be a fabricated zero. */
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                reader.IsDBNull(6) ? null : reader.GetInt32(6)));
+            capturedAt ??= reader.GetDateTime(4);
         }
 
-        return rows;
+        return new LatestSnapshot<PerfmonRow>(capturedAt, rows);
     }
 
     /* ─────────────────────────── top queries ─────────────────────────── */
@@ -706,13 +1015,15 @@ internal static class DarlingDataReader
     /// <summary>
     /// Top query-stats groups over the window — a focused projection of the viewer's <c>TopQueriesSql</c>
     /// (the columns Lite's get_top_queries_by_cpu returns): group by (database, query_hash), sum the
-    /// deltas + carry min/max spreads, rank by summed <c>delta_elapsed_time</c> descending, over-fetch by
+    /// deltas + carry min/max spreads, rank by summed <c>delta_worker_time</c> (CPU — the tool's promise;
+    /// #3523, the viewer's duration grid keeps its elapsed ranking) descending, over-fetch by
     /// 5 to drop WAITFOR shells via the latest-text LATERAL, cap at top. Summed bigints CAST back to bigint
     /// for the typed reader. The aggregate reads the base <c>query_stats</c> table (it projects no text);
     /// the text LATERAL reads <c>v_query_stats</c>, which resolves the #1767 payload dimension — the plan
-    /// tools read it the same way. $1 server_id, $2/$3 window (naive UTC), $4 top.
+    /// tools read it the same way. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database filter (NULL = all),
+    /// $6 lifetime max_dop floor (0 = no parallelism filter; #3541 A13).
     /// </summary>
-    public const string TopQueriesSql = """
+    public const string TopQueriesSql = $"""
         WITH ranked AS (
             SELECT
                 database_name,
@@ -748,12 +1059,28 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
+            /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
+               TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
+               bake into their CREATE, so a raw-served and an hourly-served read of the same window
+               agree by construction. The collector writes a zero-interval row with zero deltas
+               (CollectorDeltaCalculator's first-sighting, reset and gap cases), so this changes no
+               total in practice. It keeps the two tiers from disagreeing if that ever stops holding. */
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
             /* #2012 stage 2: host_object_name splits INSERT...EXEC callers that share a query_hash
                (each proc-hosted statement groups under its own host object), while ad-hoc rows carry
                NULL and keep collapsing into one group per hash exactly as before. */
             GROUP BY database_name, query_hash, host_object_name
-            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-            ORDER BY SUM(delta_elapsed_time) DESC
+            HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+            /* #3541 A13: the parallelism filter is part of the QUERY, applied to the grouped population
+               BEFORE the CPU ranking and the cap. It used to run in C# over the returned top-N page, so
+               parallel_only=true on a box whose twenty hottest plans were serial answered an empty page while
+               the window held parallel plans further down — and the engine's own CXPACKET advice sends agents
+               to exactly that call. $6 is the group's lifetime max_dop floor: 0 admits every group (the
+               unfiltered read, byte-identical in result to before), 2 is parallel_only, min_dop is itself. The
+               COALESCE keeps a group whose max_dop was never captured (NULL) out of a filtered page, which is
+               what the C# arm did too (null read as 0, and 0 > 1 is false). */
+            AND COALESCE(MAX(max_dop), 0) >= $6
+            ORDER BY SUM(delta_worker_time) DESC
             LIMIT $4 + 5
         )
         SELECT
@@ -795,7 +1122,7 @@ internal static class DarlingDataReader
             LIMIT 1
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_elapsed_us DESC
+        ORDER BY r.total_cpu_us DESC
         LIMIT $4
         """;
 
@@ -826,7 +1153,7 @@ internal static class DarlingDataReader
     /// <c>query_hash</c> in a rolled-up row is one member of the group, exactly as <c>query_text</c> already
     /// is when <c>distinct_texts &gt; 1</c> — <c>distinct_query_hashes</c> is what says so.</para>
     /// </summary>
-    public const string TopQueriesByHostObjectSql = """
+    public const string TopQueriesByHostObjectSql = $"""
         WITH ranked AS (
             SELECT
                 database_name,
@@ -857,14 +1184,20 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
+            /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
             /* #2235: proc-hosted rows collapse to one row per (database, host object) — every literal
                fragment of one statement lands together. Ad-hoc rows (host_object_name NULL) fall to the
                CASE and stay keyed on their OWN query_hash, so they group exactly as the default read does;
                without that arm every unrelated ad-hoc statement in a database would pool into one row. */
             GROUP BY database_name, host_object_name,
                      CASE WHEN host_object_name IS NULL THEN query_hash END
-            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-            ORDER BY SUM(delta_elapsed_time) DESC
+            HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+            /* #3541 A13: same in-query parallelism floor as TopQueriesSql — see its note. Under the rollup
+               the group's max_dop is the max across every fragment, so a procedure whose dynamic SQL went
+               parallel in ANY fragment passes parallel_only, which is the question being asked. */
+            AND COALESCE(MAX(max_dop), 0) >= $6
+            ORDER BY SUM(delta_worker_time) DESC
             LIMIT $4 + 5
         )
         SELECT
@@ -907,14 +1240,255 @@ internal static class DarlingDataReader
             LIMIT 1
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_elapsed_us DESC
+        ORDER BY r.total_cpu_us DESC
         LIMIT $4
         """;
 
+    /// <summary>The FROM-clause placeholder <see cref="TopQueriesHourlySql"/> carries — replaced with
+    /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
+    /// <c>query_stats_interval_hourly</c> or <c>query_stats_hourly</c> in its place; see
+    /// <see cref="GetTopQueriesByCpuHourlyAsync"/>.</summary>
+    public const string TopQueriesHourlyFromPlaceholder = "$FROM$";
+
+    /// <summary>
+    /// #4231 stage 3: the hourly-tier twin of <see cref="TopQueriesSql"/>, over <c>query_stats_hourly</c> /
+    /// <c>query_stats_interval_hourly</c> — routed here ONLY through <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// (never by naming either relation directly). The rollup carries neither <c>host_object_name</c> nor
+    /// <c>query_text</c> (see <c>s_stitchColumnsByLegacy[QueryStatsHourlyView]</c>, <c>TimescaleSupport.cs</c>),
+    /// so this groups by <c>(database_name, query_hash)</c> only — a proc-hosted statement that raw would keep
+    /// split by host object COLLAPSES across host objects at this tier (a real precision loss, disclosed by
+    /// the MCP tool's <c>precision_note</c>, not hidden). Ranks by <c>SUM(worker_time_sum) DESC</c> — the same
+    /// CPU promise <see cref="TopQueriesSql"/> makes, over the rollup's pre-summed bucket columns rather than
+    /// per-collection deltas. <c>query_text</c> is resolved in the same statement by a LATERAL over
+    /// <c>v_query_stats</c> (the same shape as <see cref="TopQueriesSql"/> minus the host-object predicate the
+    /// rollup has nothing to match), and WAITFOR shells are dropped after an over-fetch of 5, as raw does; a
+    /// hash raw no longer holds yields a null text. <c>host_object_name</c>/<c>distinct_texts</c> are NOT projected.
+    /// The rollup's min/max columns are per-collection sums, not per-execution extremes, so none are selected. <c>$FROM$</c> is a
+    /// PLACEHOLDER, substituted (string.Replace, not string.Format — the SQL text otherwise contains braces)
+    /// with the FROM-clause item <see cref="RollupCoverage.StitchedRelationSql"/> returns for this window at
+    /// call time — never a literal relation name. $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a
+    /// bucket is stamped at its START, so the bucket that begins at $3 lies after the window and is not read),
+    /// $4 top, $5 database
+    /// filter (NULL = all), $6 the materialization ceiling (naive UTC), bound only when the ceiling is known.
+    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $6</c> or nothing. <c>min_dop</c> and host-object grouping need columns only raw carries, so
+    /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6.
+    /// </summary>
+    public const string TopQueriesHourlySql = """
+        WITH ranked AS (
+            SELECT
+                database_name,
+                query_hash,
+                CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
+                CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
+                CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
+                MAX(sql_handle) AS sql_handle
+            FROM $FROM$
+            WHERE server_id = $1
+            AND   bucket >= $2
+            AND   bucket < $3$CEIL$
+            AND   ($5::text IS NULL OR database_name = $5)
+            GROUP BY database_name, query_hash
+            HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
+            ORDER BY SUM(worker_time_sum) DESC
+            LIMIT $4 + 5
+        )
+        SELECT
+            r.database_name,
+            r.query_hash,
+            r.total_executions,
+            r.total_cpu_us,
+            r.total_elapsed_us,
+            r.sql_handle,
+            t.query_text
+        FROM ranked AS r
+        LEFT JOIN LATERAL (
+            SELECT query_text
+            FROM v_query_stats
+            WHERE server_id = $1
+            AND   query_hash = r.query_hash
+            AND   database_name = r.database_name
+            AND   query_text IS NOT NULL
+            ORDER BY collection_time DESC
+            LIMIT 1
+        ) AS t ON TRUE
+        WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+        ORDER BY r.total_cpu_us DESC
+        LIMIT $4
+        """;
+
+    /// <summary>
+    /// The hourly tier's per-server coverage probe when the read is stitched: the first bucket the ranked read's
+    /// window actually holds for this server. A stitched <c>UNION ALL</c> cannot give an ordered first row (the
+    /// planner cannot merge-append it in order, so <c>ORDER BY … LIMIT 1</c> over it sorts every row the server
+    /// has), so the probe splits at the stitch floor F, the same F <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// uses (<see cref="RollupCoverage.StitchFloor"/> is documented to agree with it exactly). The legacy relation
+    /// only holds rows below F, so the first bucket of the stitch is <c>least()</c> of the legacy relation's first
+    /// bucket below F and the successor's first bucket from F; <c>least()</c> ignores a null half. Each half is an
+    /// ordered <c>LIMIT 1</c> over one relation. $1 server_id, $2/$3 window (naive UTC), $4 F (naive UTC).
+    /// Null when the server has no bucket in the window. <c>$LEGACY$</c> and <c>$SUCCESSOR$</c> are relation names.
+    /// </summary>
+    public const string HourlyFirstBucketSql =
+        "SELECT least(" +
+        "(SELECT f.bucket FROM collect.$LEGACY$ AS f WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $4 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1), " +
+        "(SELECT f.bucket FROM collect.$SUCCESSOR$ AS f WHERE f.server_id = $1 AND f.bucket >= $4 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1))";
+
+    /// <summary>
+    /// The coverage probe when <see cref="RollupCoverage.StitchFloor"/> answers null: the window is served by ONE
+    /// relation, and <c>$FROM$</c> is replaced with the exact single-relation splice
+    /// <see cref="RollupCoverage.StitchedRelationSql"/> returns. <c>ORDER BY … LIMIT 1</c> stops at the first
+    /// bucket. Never used over a stitch (a <c>UNION ALL</c> cannot be read in order; see
+    /// <see cref="HourlyFirstBucketSql"/>). $1 server_id, $2/$3 window (naive UTC).
+    /// </summary>
+    public const string HourlyFirstBucketSingleRelationSql =
+        "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1";
+
+    /// <summary>The placeholder the hourly reads carry where the materialization-ceiling bound goes. It is replaced
+    /// with <see cref="CeilingClause"/> when the ceiling is known and with the empty string when it is not.</summary>
+    private const string CeilingPlaceholder = "$CEIL$";
+
+    /// <summary>The ceiling bound: a bucket at or after the relation's materialization ceiling is never read, so
+    /// "nothing after the ceiling was read" holds by construction. <paramref name="ordinal"/> is the bound
+    /// parameter's position; the value is bound, never computed in SQL.</summary>
+    private static string CeilingClause(int ordinal) => " AND f.bucket < $" + ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>Awaits a probe task whose result is no longer wanted so its fault is observed, never thrown over
+    /// the exception already in flight.</summary>
+    private static async Task ObserveAsync(Task task)
+    {
+        try { await task; }
+        catch (Exception) { /* the ranked read's own exception is the one that propagates. */ }
+    }
+
+    /// <summary>The materialization ceiling of the relation that serves the END of an hourly window: the
+    /// successor when the read is stitched (the successor serves everything from the stitch floor on), otherwise
+    /// the one relation the splice names. Null when that relation has no measured ceiling (nothing materialized,
+    /// or an unknown coverage).</summary>
+    private static DateTime? HourlyEndCeiling(RollupCoverage coverage, string legacy, DateTime startUtc)
+    {
+        var relation = coverage.StitchFloor(legacy, RollupCoverage.StitchTier.Hourly, startUtc) is not null
+            ? TimescaleSupport.SuccessorOf(legacy)!
+            : coverage.HourlyRelationNameFor(legacy, startUtc);
+        return coverage.CeilingOf(relation);
+    }
+
+    /// <summary>Runs the coverage probe for <paramref name="legacy"/>'s hourly tier: two ordered first-row probes
+    /// split at the stitch floor when the read is stitched (<see cref="HourlyFirstBucketSql"/>), one probe when a
+    /// single relation serves the window (<see cref="HourlyFirstBucketSingleRelationSql"/>). The single seam a
+    /// cache can wrap.</summary>
+    private static async Task<DateTime?> GetHourlyFirstBucketAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, string legacy, int serverId, DateTime startUtc, DateTime endUtc,
+        DateTime? ceiling, CancellationToken cancellationToken)
+    {
+        var floor = coverage.StitchFloor(legacy, RollupCoverage.StitchTier.Hourly, startUtc);
+        string sql;
+        if (floor is null)
+        {
+            var splice = coverage.StitchedRelationSql(legacy, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+            if (splice.Contains("UNION", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "The hourly coverage probe found a stitched relation where StitchFloor answered a single one.");
+            }
+
+            sql = HourlyFirstBucketSingleRelationSql
+                .Replace(TopQueriesHourlyFromPlaceholder, splice, StringComparison.Ordinal)
+                .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(4), StringComparison.Ordinal);
+        }
+        else
+        {
+            sql = HourlyFirstBucketSql
+                .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(5), StringComparison.Ordinal)
+                .Replace("$LEGACY$", legacy, StringComparison.Ordinal)
+                .Replace("$SUCCESSOR$", TimescaleSupport.SuccessorOf(legacy)!, StringComparison.Ordinal);
+        }
+
+        await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddWindow(command, serverId, startUtc, endUtc);
+        if (floor is not null)
+        {
+            AddTimestamp(command, floor.Value);
+        }
+
+        if (ceiling is not null)
+        {
+            AddTimestamp(command, ceiling.Value);
+        }
+
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime bucket ? bucket : null;
+    }
+
+    /// <summary>
+    /// The top-N groups by CPU, ranked over the population that passes every filter. <paramref name="minMaxDop"/>
+    /// is the lifetime <c>max_dop</c> floor a group must reach to be ranked at all (#3541 A13): 0 for no
+    /// parallelism filter, 2 for <c>parallel_only</c>, the caller's <c>min_dop</c> otherwise — see
+    /// <see cref="TopQueriesSql"/>'s HAVING note. The filter is IN the statement so the page is the top-N of the
+    /// filtered population, not the filtered remainder of an unfiltered top-N.
+    ///
+    /// <para>#4231 stage 3: when the window has aged past raw's floor, this routes to the hourly rollup via
+    /// <see cref="RetentionTierRouter.Resolve(DateTime,DateTime,bool,bool,TierCoverage)"/> over
+    /// <see cref="RollupCoverage.For"/>'s <c>(QueryStatsHourlyView, QueryStatsDailyView)</c> pair — Daily is out
+    /// of scope for this lane, so a Daily verdict is clamped to Hourly (a top-N-by-CPU daily rollup answer is a
+    /// separate ask). The parallelism filter (<paramref name="minMaxDop"/>) and <paramref name="rollUpByHostObject"/>
+    /// are Raw-tier-only refinements the rollup cannot answer (no per-group DOP, no host_object_name); a read
+    /// that sets either is forced to raw and reports <see cref="TopQueriesReadResult.RawForced"/>.</para>
+    /// </summary>
     public static async Task<List<TopQueryRow>> GetTopQueriesByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
-        bool rollUpByHostObject = false, CancellationToken cancellationToken = default)
+        bool rollUpByHostObject = false, int minMaxDop = 0, CancellationToken cancellationToken = default)
     {
+        var result = await GetTopQueriesByCpuRoutedAsync(
+            postgres, serverId, startUtc, endUtc, top, databaseName, rollUpByHostObject, minMaxDop, cancellationToken);
+        return result.Rows;
+    }
+
+    /// <summary>#4231 stage 3: which tier <see cref="GetTopQueriesByCpuRoutedAsync"/> actually read —
+    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly);
+    /// the MCP tool's <c>tier_used</c> comes from here. <paramref name="RawForced"/> is true when the age alone
+    /// would have routed to the rollup but a raw-only filter kept the read on raw.
+    /// <paramref name="HourlyFirstBucket"/> is the first rollup bucket this server holds inside the window on
+    /// the hourly tier (null when none, or on raw).</summary>
+    public sealed record TopQueriesReadResult(
+        List<TopQueryRow> Rows, RetentionTier Tier, bool RawForced = false, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null);
+
+    /// <summary>
+    /// #4231 stage 3: <see cref="GetTopQueriesByCpuAsync"/>'s routed form, exposing the tier it read so a
+    /// caller can disclose it. Tier is decided over the LEGACY pair's coverage
+    /// (<see cref="RollupCoverage.For"/>, the deeper of the legacy/successor floors); Daily is out of scope for
+    /// this lane (query_stats_db_hourly's successor and a daily top-N answer are both separate asks) and is
+    /// clamped to Hourly. <paramref name="rollUpByHostObject"/> and <paramref name="minMaxDop"/> are Raw-tier-
+    /// only refinements the rollup cannot answer (no per-group DOP, no host_object_name) — a read that sets either
+    /// stays on raw.
+    /// </summary>
+    public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        bool rollUpByHostObject = false, int minMaxDop = 0, CancellationToken cancellationToken = default)
+    {
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
+        if (tier == RetentionTier.Daily)
+        {
+            tier = RetentionTier.Hourly;
+        }
+
+        var rawForced = false;
+        if (tier == RetentionTier.Hourly && (minMaxDop > 0 || rollUpByHostObject))
+        {
+            tier = RetentionTier.Raw;
+            rawForced = true;
+        }
+
+        Debug.Assert(!(tier == RetentionTier.Hourly && (minMaxDop > 0 || rollUpByHostObject)));
+        if (tier == RetentionTier.Hourly)
+        {
+            var ceiling = HourlyEndCeiling(coverage, TimescaleSupport.QueryStatsHourlyView, startUtc);
+            var (hourlyRows, firstBucket) = await GetTopQueriesByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, ceiling, cancellationToken);
+            return new TopQueriesReadResult(hourlyRows, RetentionTier.Hourly, HourlyFirstBucket: firstBucket, HourlyCeiling: ceiling);
+        }
+
         var rows = new List<TopQueryRow>();
         /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
         await using var command = postgres.CreateCommand(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql);
@@ -922,6 +1496,7 @@ internal static class DarlingDataReader
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
+        AddInt(command, minMaxDop);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -951,7 +1526,73 @@ internal static class DarlingDataReader
                 reader.FieldCount > 22 && !reader.IsDBNull(22) ? reader.GetInt64(22) : 1));
         }
 
-        return rows;
+        return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced);
+    }
+
+    /// <summary>
+    /// #4231 stage 3: the hourly-rollup arm of <see cref="GetTopQueriesByCpuRoutedAsync"/> — builds
+    /// <see cref="TopQueriesHourlySql"/>'s FROM clause ONLY through
+    /// <see cref="RollupCoverage.StitchedRelationSql"/> (the standing gate: a raw-vs-rollup reader never names
+    /// <c>query_stats_interval_hourly</c> or <c>query_stats_hourly</c> directly) and runs the ranked read, which
+    /// resolves each row's representative <c>query_text</c> in the same statement. The first-bucket coverage
+    /// probe runs concurrently over the same FROM clause. Rows carry <c>host_object_name = null</c>; the columns
+    /// the rollup does not have are zero here and null on the MCP payload.
+    /// </summary>
+    private static async Task<(List<TopQueryRow> Rows, DateTime? FirstBucket)> GetTopQueriesByCpuHourlyAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
+        int top, string? databaseName, DateTime? ceiling, CancellationToken cancellationToken)
+    {
+        var fromClause = coverage.StitchedRelationSql(
+            TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        var sql = TopQueriesHourlySql
+            .Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
+            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(6), StringComparison.Ordinal);
+
+        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView, serverId, startUtc, endUtc, ceiling, cancellationToken);
+        var rows = new List<TopQueryRow>();
+        try
+        {
+        await using (var command = postgres.CreateCommand(sql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddWindow(command, serverId, startUtc, endUtc);
+            AddInt(command, top);
+            AddNullableText(command, databaseName);
+            if (ceiling is not null)
+            {
+                AddTimestamp(command, ceiling.Value);
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new TopQueryRow(
+                    reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    HostObjectName: null,   /* the rollup has no host_object_name column. */
+                    QueryPlanHash: "",
+                    SqlHandle: reader.IsDBNull(5) ? "" : reader.GetString(5),
+                    PlanHandle: "",
+                    TotalExecutions: reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                    TotalCpuUs: reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                    TotalElapsedUs: reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                    TotalLogicalReads: 0, TotalLogicalWrites: 0, TotalPhysicalReads: 0, TotalRows: 0, TotalSpills: 0,
+                    MinDop: 0, MaxDop: 0,
+                    MinCpuUs: 0, MaxCpuUs: 0, MinElapsedUs: 0, MaxElapsedUs: 0,
+                    /* null = no raw row still holds this hash's text; the raw tier keeps "" for the same case. */
+                    QueryText: reader.IsDBNull(6) ? null : reader.GetString(6),
+                    DistinctTexts: 0,
+                    DistinctQueryHashes: 1));
+            }
+        }
+        }
+        catch
+        {
+            await ObserveAsync(firstBucketTask);
+            throw;
+        }
+
+        return (rows, await firstBucketTask);
     }
 
     /* ─────────────────────────── top procedures ─────────────────────────── */
@@ -960,10 +1601,10 @@ internal static class DarlingDataReader
     /// Top procedure-stats groups over the window — a focused projection of the viewer's
     /// <c>TopProceduresSql</c> (the columns Lite's get_top_procedures_by_cpu returns): group by
     /// (database, schema, object, type), sum the deltas + carry min/max spreads, rank by summed
-    /// <c>delta_elapsed_time</c> descending, cap at top. Reads the base <c>procedure_stats</c> table
+    /// <c>delta_worker_time</c> (CPU — the tool's promise; #3523) descending, cap at top. Reads the base <c>procedure_stats</c> table
     /// (no v_ view). $1 server_id, $2/$3 window (naive UTC), $4 top.
     /// </summary>
-    public const string TopProceduresSql = """
+    public const string TopProceduresSql = $"""
         SELECT
             database_name,
             schema_name,
@@ -987,15 +1628,103 @@ internal static class DarlingDataReader
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text IS NULL OR database_name = $5)
+        /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
+        AND   {TimescaleSupport.IntervalHonestSourceFilter}
         GROUP BY database_name, schema_name, object_name, object_type
         HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-        ORDER BY SUM(delta_elapsed_time) DESC
+        ORDER BY SUM(delta_worker_time) DESC
         LIMIT $4
         """;
+
+    /// <summary>The FROM-clause placeholder <see cref="TopProceduresHourlySql"/> carries — replaced with
+    /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
+    /// <c>procedure_stats_interval_hourly</c> or <c>procedure_stats_hourly</c> in its place; see
+    /// <see cref="GetTopProceduresByCpuHourlyAsync"/>.</summary>
+    public const string TopProceduresHourlyFromPlaceholder = "$FROM$";
+
+    /// <summary>
+    /// #4231 stage 3b: the hourly-tier twin of <see cref="TopProceduresSql"/>, over <c>procedure_stats_hourly</c> /
+    /// <c>procedure_stats_interval_hourly</c> — routed here ONLY through <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// (never by naming either relation directly). The rollup carries neither <c>object_type</c> nor
+    /// <c>sql_handle</c>/<c>plan_handle</c> (see <c>s_stitchColumnsByLegacy[ProcedureStatsHourlyView]</c>,
+    /// <c>TimescaleSupport.cs</c>), so this groups by <c>(database_name, schema_name, object_name)</c> only —
+    /// <c>object_type</c> is disclosed as null by the MCP tool's <c>precision_note</c>, not hidden. Ranks by
+    /// <c>SUM(worker_time_sum) DESC</c> — the same CPU promise <see cref="TopProceduresSql"/> makes, over the
+    /// rollup's pre-summed bucket columns rather than per-collection deltas. <c>$FROM$</c> is a PLACEHOLDER,
+    /// substituted (string.Replace, not string.Format) with the FROM-clause item
+    /// <see cref="RollupCoverage.StitchedRelationSql"/> returns for this window at call time — never a literal
+    /// relation name. $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a bucket is stamped at its
+    /// START, so the bucket that begins at $3 lies after the window and is not read), $4 top, $5 database
+    /// filter (NULL = all).
+    /// </summary>
+    public const string TopProceduresHourlySql = """
+        WITH ranked AS (
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
+                CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
+                CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us
+            FROM $FROM$
+            WHERE server_id = $1
+            AND   bucket >= $2
+            AND   bucket < $3$CEIL$
+            AND   ($5::text IS NULL OR database_name = $5)
+            GROUP BY database_name, schema_name, object_name
+            HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
+            ORDER BY SUM(worker_time_sum) DESC
+            LIMIT $4
+        )
+        SELECT
+            r.database_name,
+            r.schema_name,
+            r.object_name,
+            r.total_executions,
+            r.total_cpu_us,
+            r.total_elapsed_us
+        FROM ranked AS r
+        ORDER BY r.total_cpu_us DESC
+        """;
+
+    /// <summary>
+    /// #4231 stage 3b: which tier <see cref="GetTopProceduresByCpuRoutedAsync"/> actually read —
+    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly);
+    /// the MCP tool's <c>tier_used</c> comes from here.</summary>
+    public sealed record TopProceduresReadResult(
+        List<TopProcedureRow> Rows, RetentionTier Tier, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null);
 
     public static async Task<List<TopProcedureRow>> GetTopProceduresByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
     {
+        var result = await GetTopProceduresByCpuRoutedAsync(postgres, serverId, startUtc, endUtc, top, databaseName, cancellationToken);
+        return result.Rows;
+    }
+
+    /// <summary>
+    /// #4231 stage 3b: <see cref="GetTopProceduresByCpuAsync"/>'s routed form, exposing the tier it read so a
+    /// caller can disclose it. Tier is decided over the LEGACY pair's coverage (<see cref="RollupCoverage.For"/>);
+    /// Daily is clamped to Hourly (#4231).
+    /// </summary>
+    public static async Task<TopProceduresReadResult> GetTopProceduresByCpuRoutedAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
+    {
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, startUtc, rollups.ProcedureGrainHourly, dailyAvailable: false,
+            coverage.For(TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView));
+        if (tier == RetentionTier.Daily)
+        {
+            tier = RetentionTier.Hourly;
+        }
+
+        if (tier == RetentionTier.Hourly)
+        {
+            var ceiling = HourlyEndCeiling(coverage, TimescaleSupport.ProcedureStatsHourlyView, startUtc);
+            var (hourlyRows, firstBucket) = await GetTopProceduresByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, ceiling, cancellationToken);
+            return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly, firstBucket, ceiling);
+        }
+
         var rows = new List<TopProcedureRow>();
         await using var command = postgres.CreateCommand(TopProceduresSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -1025,7 +1754,66 @@ internal static class DarlingDataReader
                 reader.IsDBNull(16) ? 0 : reader.GetInt64(16)));
         }
 
-        return rows;
+        return new TopProceduresReadResult(rows, RetentionTier.Raw);
+    }
+
+    /// <summary>
+    /// #4231 stage 3b: the hourly-rollup arm of <see cref="GetTopProceduresByCpuRoutedAsync"/> — builds
+    /// <see cref="TopProceduresHourlySql"/>'s FROM clause ONLY through <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// (the standing gate: a raw-vs-rollup reader never names <c>procedure_stats_interval_hourly</c> or
+    /// <c>procedure_stats_hourly</c> directly). Rows carry <c>ObjectType = ""</c>, <c>SqlHandle = ""</c> and
+    /// <c>PlanHandle = ""</c>, zero I/O totals and zero min/max — the rollup has none of those columns, and the MCP
+    /// tool reports them as null with a <c>precision_note</c>. The first-bucket coverage probe runs concurrently
+    /// over the same FROM clause.
+    /// </summary>
+    private static async Task<(List<TopProcedureRow> Rows, DateTime? FirstBucket)> GetTopProceduresByCpuHourlyAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
+        int top, string? databaseName, DateTime? ceiling, CancellationToken cancellationToken)
+    {
+        var fromClause = coverage.StitchedRelationSql(
+            TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        var sql = TopProceduresHourlySql
+            .Replace(TopProceduresHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
+            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(6), StringComparison.Ordinal);
+
+        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.ProcedureStatsHourlyView, serverId, startUtc, endUtc, ceiling, cancellationToken);
+        var rows = new List<TopProcedureRow>();
+        try
+        {
+        await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddWindow(command, serverId, startUtc, endUtc);
+        AddInt(command, top);
+        AddNullableText(command, databaseName);
+        if (ceiling is not null)
+        {
+            AddTimestamp(command, ceiling.Value);
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new TopProcedureRow(
+                DatabaseName: reader.IsDBNull(0) ? "" : reader.GetString(0),
+                SchemaName: reader.IsDBNull(1) ? "" : reader.GetString(1),
+                ObjectName: reader.IsDBNull(2) ? "" : reader.GetString(2),
+                /* #4231 stage 3b: the rollup has no object_type column. */
+                ObjectType: "",
+                SqlHandle: "", PlanHandle: "",
+                TotalExecutions: reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                TotalCpuUs: reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                TotalElapsedUs: reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                TotalLogicalReads: 0, TotalLogicalWrites: 0, TotalPhysicalReads: 0, TotalSpills: 0,
+                MinCpuUs: 0, MaxCpuUs: 0, MinElapsedUs: 0, MaxElapsedUs: 0));
+        }
+        }
+        catch
+        {
+            await ObserveAsync(firstBucketTask);
+            throw;
+        }
+
+        return (rows, await firstBucketTask);
     }
 
     /* ─────────────────────────── query store ─────────────────────────── */
@@ -1040,42 +1828,69 @@ internal static class DarlingDataReader
     ///
     /// <para>Bounded on both sides, so it prunes chunks and answers from an ordered scan that stops at the first
     /// row rather than reading the window. $1 server_id, $2/$3 window (naive UTC).</para>
+    ///
+    /// <para>#4231 generalized this single-table probe into <see cref="RawWindowFloor"/>, which
+    /// <c>query_stats</c> and <c>procedure_stats</c> now share rather than each carrying its own copy; this
+    /// constant is <see cref="RawWindowFloor.FloorSql"/> for <see cref="RawWindowFloor.Table.QueryStoreStats"/>,
+    /// kept under its original name because <c>DarlingMcpQueryStoreClutterTools</c> and the #2364 tests still
+    /// reach it by this one.</para>
     /// </summary>
-    public const string QueryStoreWindowFloorSql = """
-        SELECT MIN(collection_time)
-        FROM query_store_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        """;
+    public static readonly string QueryStoreWindowFloorSql = RawWindowFloor.FloorSql(RawWindowFloor.Table.QueryStoreStats);
 
     /// <summary>
-    /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the window holds nothing at all, which the caller
-    /// reports as "nothing was read" rather than as an absence of activity.
+    /// Reads <see cref="QueryStoreWindowFloorSql"/> through the shared <see cref="RawWindowFloor.GetAsync"/>, at
+    /// this surface's own MCP read deadline. Null when the window holds nothing at all, which the caller reports
+    /// as "nothing was read" rather than as an absence of activity. Deliberately unfiltered: the floor is a
+    /// property of the tier, so a database or module filter on the top read does not narrow it.
     /// </summary>
-    public static async Task<DateTime?> GetQueryStoreWindowFloorAsync(
+    public static Task<DateTime?> GetQueryStoreWindowFloorAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default)
-    {
-        await using var command = postgres.CreateCommand(QueryStoreWindowFloorSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is DateTime dt ? dt : null;
-    }
+        CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStoreStats, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
+    /// <summary>
+    /// #4231's <c>query_stats</c> arm of the same probe: <c>get_top_queries_by_cpu</c> reads the raw table only,
+    /// which on a store with the rollups armed is dropped at 4 days, and its top-N-by-CPU rows say nothing about
+    /// how far back the window reached (the same reasoning as <see cref="GetQueryStoreWindowFloorAsync"/>).
+    /// </summary>
+    public static Task<DateTime?> GetQueryStatsWindowFloorAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStats, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
+    /// <summary>
+    /// #4231's <c>procedure_stats</c> arm of the same probe, for <c>get_top_procedures_by_cpu</c>.
+    /// </summary>
+    public static Task<DateTime?> GetProcedureStatsWindowFloorAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.ProcedureStats, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
 
     /// <summary>
     /// Top Query Store groups over the window — a focused projection of the viewer's
     /// <c>QueryStoreTopSql</c> (the columns Lite's get_query_store_top returns): group by
-    /// (database, query_id, plan_id, query_hash, replica_role), average the per-interval metrics, rank by total duration
-    /// (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending, over-fetch by 5 for the WAITFOR
-    /// trim, cap at top. The avg columns are bigint (per-interval averages) → double precision before the
-    /// AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view). $1 server_id, $2/$3 window
-    /// (naive UTC), $4 top.
+    /// (database, query_id, plan_id, query_hash, execution_type_desc, replica_role), average the per-interval
+    /// metrics, rank by total duration (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending,
+    /// over-fetch by 5 for the WAITFOR trim, cap at top. The avg columns are bigint (per-interval averages) →
+    /// double precision before the AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
+    /// $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database (NULL = all), $6 execution outcome
+    /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way), $7 module_name
+    /// (NULL = every module; applied to the deduplicated interval rows, before the ranking and the cap).
+    /// <see cref="QueryStoreTopRawPrefix"/> + <see cref="QueryStoreTopSuffix"/>, byte-identical to this
+    /// constant's prior single-string form (#3953 split it off so <see cref="QueryStoreTopTableSql"/> can
+    /// share <see cref="QueryStoreTopSuffix"/>).
     /// </summary>
-    public const string QueryStoreTopSql = """
+    public const string QueryStoreTopSql = QueryStoreTopRawPrefix + QueryStoreTopSuffix;
+
+    /// <summary>
+    /// The raw read's head (#3953 split it off <see cref="QueryStoreTopSql"/>'s prior single-string form,
+    /// byte-identical — the split itself changes nothing about the text a raw call sends): the interval dedupe
+    /// over the server's raw Query Store slice, plus the $6 execution-outcome filter (kept here, before the
+    /// ROW_NUMBER partition, exactly where it sat before the split). <see cref="QueryStoreTopSuffix"/> is
+    /// shared with <see cref="QueryStoreTopTableSql"/>, so the two reads cannot drift above <c>ranked</c>.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database, $6 execution outcome.
+    /// </summary>
+    private const string QueryStoreTopRawPrefix = """
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
@@ -1101,13 +1916,82 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
+            /* Filtered HERE, before the ROW_NUMBER, not after it: execution_type_desc is in the partition,
+               so dropping the other outcomes first cannot change which row wins any partition, and the window
+               sort then sees only the outcome asked for. */
+            AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
+        """;
+
+    /// <summary>
+    /// The table read's head (#3953): <c>query_store_interval_wide</c> already holds the latest snapshot per
+    /// interval — the raw prefix's ROW_NUMBER dedupe above, maintained as the table is written — so this reads
+    /// it directly and sets <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's <c>ReadStart</c>:
+    /// <c>max(window start, raw's chunk floor)</c> at and above the floor, where raw chunks drop whole and the table
+    /// returns exactly the raw read's own answer, and the exact below-floor start beneath it. $3 is bound the same way
+    /// raw's own $3 is (a plain lower bound, never NULL): the MCP surface has no concept of an open/preset end.
+    /// $6 is repeated here, before this CTE's own GROUP BY-eligible rows reach <c>ranked</c>, mirroring the raw
+    /// prefix's placement — <c>execution_type_desc</c> is a <c>ranked</c> GROUP BY key, not filtered again
+    /// there, so an unfiltered table CTE would silently ignore the outcome filter.
+    /// <para><b>The <c>first_execution_time</c> floor (#4605).</b> Neither the unique key (it leads with
+    /// <c>server_id</c>) nor <c>idx_query_store_interval_wide_first_exec</c> serves <c>collection_time</c>, so
+    /// this read walked all of the server's rows. <c>first_execution_time</c> is a key column of that unique key, so
+    /// <c>first_execution_time &gt;= $2 - </c><see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> filters its
+    /// entries before the heap, and it drops no row: every stored row has
+    /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
+    /// because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
+    /// </summary>
+    private static readonly string QueryStoreTopTablePrefix = $$"""
+        WITH deduped AS (
+            SELECT
+                *,
+                1 AS rn
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   ($5::text IS NULL OR database_name = $5)
+            AND   ($6::text IS NULL OR execution_type_desc = $6)
+        ),
+        """;
+
+    /// <summary>
+    /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reads
+    /// <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreTopSuffix"/> so
+    /// the two reads cannot drift below <c>ranked</c>. Chosen per call by
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; every unfiltered/filtered combination this read
+    /// supports must agree with <see cref="QueryStoreTopSql"/> over the same window.
+    /// $1 server_id, $2 the gate's <c>ReadStart</c> (<c>max(window start, raw's chunk floor)</c> at and above the floor, or the exact below-floor start), $3 window end (naive
+    /// UTC — the MCP surface always supplies a literal instant here, never an open/preset end), $4 top,
+    /// $5 database, $6 execution outcome.
+    /// <para>A static readonly (#4605), declared AFTER <see cref="QueryStoreTopTablePrefix"/> on purpose: static
+    /// initializers run in textual order, so declared above it this would concatenate a null prefix.</para>
+    /// </summary>
+    public static readonly string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopSuffix;
+
+    /// <summary>Everything from <c>ranked</c> down, shared by <see cref="QueryStoreTopSql"/> and
+    /// <see cref="QueryStoreTopTableSql"/> — both prefixes above produce the same "one row per identity, every
+    /// column deduped's dedupe/the table's own upsert already kept" shape, so this aggregates either one
+    /// identically. $7 (module_name) lives here, unchanged from the pre-split statement's own position
+    /// (<c>QueryStoreSql_AppliesModuleFilterAfterDedupAndBeforeRankingLimit</c> pins it: after <c>WHERE rn = 1</c>,
+    /// before <c>LIMIT $4 + 5</c>) — module_name is not a GROUP BY key here (<c>MAX(module_name)</c> is the
+    /// aggregate), so it has to filter the deduplicated rows before the GROUP BY rather than after it, and
+    /// living in the shared suffix means both the raw and the table CTE inherit that same placement.</summary>
+    private const string QueryStoreTopSuffix = """
         ranked AS (
             SELECT
                 database_name,
                 query_id,
                 plan_id,
                 query_hash,
+                /* A GROUP BY key, like replica_role below: Query Store keeps Regular, Aborted and Exception
+                   executions of one plan in separate runtime-stats rows, and averaging them together would
+                   blend a timeout's duration into the plan's normal cost. One row per outcome instead. */
+                execution_type_desc,
+                MAX(module_name) AS module_name,
                 /* A GROUP BY key, not MAX(): an AG's Query Store for secondary replicas (2022+) keeps ONE
                    shared store on the primary holding every replica's rows, so grouping without it would
                    average primary and secondary workload into a single blended row. No-op on a
@@ -1124,7 +2008,8 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash
             FROM deduped
             WHERE rn = 1
-            GROUP BY database_name, query_id, plan_id, query_hash, replica_role
+            AND   ($7::text IS NULL OR module_name = $7)
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
         )
@@ -1134,6 +2019,8 @@ internal static class DarlingDataReader
             r.plan_id,
             r.query_hash,
             r.query_plan_hash,
+            r.execution_type_desc,
+            r.module_name,
             r.total_executions,
             r.avg_duration_ms,
             r.avg_cpu_time_ms,
@@ -1176,46 +2063,203 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    /// <summary>
+    /// #3953's own threshold for this read (ruling issuecomment-5836972848 item 5): below this window the
+    /// table's extra round trips (the gate's own reads plus a second transaction) cost more than they save, so
+    /// the gate reads raw regardless of coverage. A read's own constant — does not share
+    /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> (the grid's) — the two reads may not share a
+    /// threshold. Raised from 12 to 24 hours (lane B4t, rig-d4, 15-day seed at a field store's rate,
+    /// end-to-end through <see cref="GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,CancellationToken)"/>):
+    /// median of 5 at the ruled 12-hour cell, table 737.0 ms (spread 655.1-746.5) against raw 581.1 ms (spread
+    /// 544.3-629.3) — the table was slower than raw there, so the ruling moves this threshold to 24 hours.
+    /// </summary>
+    public static readonly TimeSpan QueryStoreTopMinWindow = TimeSpan.FromHours(24);
+
+    /// <summary>The store schema version <see cref="TryGetQueryStoreTopFromTableAsync"/> requires (#3953 gate
+    /// clause 6, ruling issuecomment-5836972848) before it will even attempt the table. Unlike the viewer —
+    /// a separately-versioned desktop app that can connect to an older remote store, so it probes the live
+    /// connection via <c>GetStoreSchemaVersionAsync</c> — this headless service always applies its own pending
+    /// migrations up to <see cref="StorageVersion.SchemaVersion"/> before it starts serving MCP/web reads
+    /// (<see cref="StorageVersion"/>: "a store at this version is fully migrated"), so the compiled constant IS
+    /// the connected store's version for this surface; no extra round trip earns its keep here.</summary>
+    private const int QueryStoreTopTableMinSchemaVersion = 145;
+
+    public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        CancellationToken cancellationToken = default) =>
+        GetQueryStoreTopAsync(postgres, serverId, startUtc, endUtc, top, databaseName, executionType: null, moduleName: null, cancellationToken);
+
+    /// <summary>The rows, and the table read's plan when the interval table served them.</summary>
+    /// <param name="Rows">The top rows.</param>
+    /// <param name="Table">The read's <see cref="QueryStoreIntervalWide.WideReadPlan"/> when the interval table
+    /// served; null when the raw tier did.</param>
+    public readonly record struct QueryStoreTopRead(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan? Table);
+
+    /// <summary>
+    /// #3953: reads <c>query_store_interval_wide</c> when <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
+    /// says its coverage holds the window; any fault or a "no" reads <see cref="QueryStoreTopSql"/> unchanged,
+    /// exactly as before this table existed. <paramref name="endUtc"/> doubles as the gate's clause-4 literal
+    /// end: every caller of this MCP surface (the tool and its <c>/api/read</c> mirror) already resolves
+    /// <c>as_of</c> to a concrete instant before calling in, so there is no "open end" case to thread through
+    /// the way the viewer's WPF presets have.
+    /// </summary>
     public static async Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        string? executionType, string? moduleName, CancellationToken cancellationToken = default) =>
+        (await GetQueryStoreTopWithReachAsync(postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken)).Rows;
+
+    /// <summary>
+    /// <see cref="GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,string,string,CancellationToken)"/>
+    /// plus which tier served it: when the interval table did, <see cref="QueryStoreTopRead.Table"/> carries the
+    /// bound it read from so the caller can say how far back the answer reaches.
+    /// </summary>
+    public static async Task<QueryStoreTopRead> GetQueryStoreTopWithReachAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        string? executionType, string? moduleName, CancellationToken cancellationToken = default)
     {
+        /* Review D4R H1: the window check first, before the gate's own round trips even open — this surface
+           has no live schema probe to save (StorageVersion.SchemaVersion is a compiled constant), but every
+           call under QueryStoreTopMinWindow otherwise still opens a second connection, a transaction, and
+           pays ReadSourceInputsSql plus the unindexed PlainTableFloorSql scan for a read that can only ever
+           land on raw (UseTable's clause 5). */
+        if (StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion && endUtc - startUtc >= QueryStoreTopMinWindow)
+        {
+            var table = await TryGetQueryStoreTopFromTableAsync(
+                postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken);
+            if (table is var (tableRows, tablePlan))
+            {
+                return new QueryStoreTopRead(tableRows, tablePlan);
+            }
+        }
+
         var rows = new List<QueryStoreRow>();
         await using var command = postgres.CreateCommand(QueryStoreTopSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
+        AddNullableText(command, executionType);
+        AddNullableText(command, moduleName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new QueryStoreRow(
-                reader.IsDBNull(0) ? "" : reader.GetString(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? "" : reader.GetString(3),
-                reader.IsDBNull(4) ? "" : reader.GetString(4),
-                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
-                reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
-                reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
-                reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
-                reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
-                reader.IsDBNull(11) ? 0 : reader.GetDouble(11),
-                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
-                reader.IsDBNull(13) ? "" : reader.GetString(13),
-                reader.IsDBNull(14) ? null : reader.GetString(14)));
+            rows.Add(ReadQueryStoreTopRow(reader));
         }
 
-        return rows;
+        return new QueryStoreTopRead(rows, null);
     }
+
+    /// <summary>The transaction's own read-only statement (#3953). Named, not inline, so this store-only
+    /// construction keeps the receiver shape <c>McpReadCommandTimeoutTests</c>' census recognizes: a
+    /// two-argument <c>NpgsqlCommand(sqlIdentifier, connection)</c> with <c>Transaction</c> set through the
+    /// object initializer rather than threaded positionally. A three-argument
+    /// <c>NpgsqlCommand(sql, connection, transaction)</c> is also the shape the HypoPG experiment's
+    /// monitored-TARGET command uses, so the census deliberately does not auto-accept it here.</summary>
+    private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
+
+    /// <summary>
+    /// #3953's gate and table read for the MCP/web top-queries surface, on ONE connection in ONE read-only
+    /// REPEATABLE READ transaction (M1, ruling issuecomment-5836972848), mirroring the viewer's
+    /// <c>TryGetQueryStoreTopQueriesFromTableAsync</c> so the gate's decision and the read it authorizes see the
+    /// same snapshot. Returns null (never an empty list) when the gate says raw, so the caller can tell "read
+    /// raw instead" from "the table legitimately has nothing" — an empty list from the table IS a valid answer.
+    /// Any fault opening the connection, starting the transaction, running the gate, or reading the table also
+    /// returns null (except cancellation, which propagates): the gate already does this for its own statements,
+    /// and the table read must fail the same way rather than surface to the caller as an error.
+    /// </summary>
+    private static async Task<(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryGetQueryStoreTopFromTableAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        string? executionType, string? moduleName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var plan = await QueryStoreIntervalWide.ResolveReadAsync(
+                connection, serverId, startUtc, endUtc, endUtc, QueryStoreTopMinWindow,
+                McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
+            if (!plan.UseTable)
+            {
+                return null;
+            }
+
+            var rows = new List<QueryStoreRow>();
+            await using var command = new NpgsqlCommand(QueryStoreTopTableSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            AddInt(command, serverId);
+            AddTimestamp(command, plan.ReadStart);
+            AddTimestamp(command, endUtc);
+            AddInt(command, top);
+            AddNullableText(command, databaseName);
+            AddNullableText(command, executionType);
+            AddNullableText(command, moduleName);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(ReadQueryStoreTopRow(reader));
+            }
+
+            return (rows, plan);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Review D4R M2: same silent-fallback risk as the viewer's twin. This surface has no ILogger
+               reachable from a static method with no DI-injected instance (its caller, DarlingMcpDataTools,
+               takes no logger either), so Trace is the only seam available here. */
+            System.Diagnostics.Trace.TraceWarning($"#3953 MCP top-queries table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Shared by <see cref="GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,string,string,CancellationToken)"/>'s
+    /// raw and table paths: both <see cref="QueryStoreTopSql"/> and <see cref="QueryStoreTopTableSql"/> project
+    /// the same <see cref="QueryStoreTopSuffix"/> column list, in the same order.</summary>
+    private static QueryStoreRow ReadQueryStoreTopRow(System.Data.Common.DbDataReader reader) => new(
+        reader.IsDBNull(0) ? "" : reader.GetString(0),
+        reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+        reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+        reader.IsDBNull(3) ? "" : reader.GetString(3),
+        reader.IsDBNull(4) ? "" : reader.GetString(4),
+        reader.IsDBNull(5) ? "" : reader.GetString(5),
+        reader.IsDBNull(6) ? null : reader.GetString(6),
+        reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+        reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
+        reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
+        reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
+        reader.IsDBNull(11) ? 0 : reader.GetDouble(11),
+        reader.IsDBNull(12) ? 0 : reader.GetDouble(12),
+        reader.IsDBNull(13) ? 0 : reader.GetDouble(13),
+        reader.IsDBNull(14) ? null : reader.GetDateTime(14),
+        reader.IsDBNull(15) ? "" : reader.GetString(15),
+        reader.IsDBNull(16) ? null : reader.GetString(16));
 
     /* ─────────────────────────── discovery / health ─────────────────────────── */
 
     /// <summary>
-    /// Every enabled server plus its newest collection instant — the list_servers read. The
-    /// correlated <c>MAX(collection_time)</c> per server drives the freshness-derived status the tool
-    /// assigns (the headless viewer has no live ping either — see <c>ServerSummaryItem.ClassifyFreshness</c>).
-    /// $-free (no parameters, no bare now()) so a test can pin the dialect ungated.
+    /// Every enabled server plus its newest collection instant — the list_servers read. Drives the
+    /// freshness-derived status the tool assigns (the headless viewer has no live ping either — see
+    /// <c>ServerSummaryItem.ClassifyFreshness</c>). <c>created_date</c> rides on the same registry row for the
+    /// retention rule <see cref="ServerListRow"/> describes (#3967). $-free (no parameters, no bare now()) so a
+    /// test can pin the dialect ungated.
+    ///
+    /// <para><b>#3976: a per-server LATERAL probe, not a correlated <c>MAX(collection_time)</c>.</b> The two
+    /// read the SAME value — the newest collection per server — but a bound cannot make the old shape cheap:
+    /// <c>collection_log</c> keeps <c>DarlingRetentionHorizons.CollectionLogRetentionDays</c> days, so any
+    /// bound wide enough to keep the answer identical is the retention horizon itself, and every retained
+    /// chunk falls inside it (measured: 172.8 ms of cold planning and 9,694 buffers over 19 daily chunks on
+    /// DARLING01, several times that at the 60-day production retention). <c>ViewerDataService.ServerFreshnessSql</c>
+    /// already carries this exact <c>ORDER BY collection_time DESC LIMIT 1</c> shape for the SAME table
+    /// (#3895) and measures 2.5-6.4 ms there — an ordered per-chunk descent that stops at the newest chunk
+    /// with a row, which a plan built to prove a MAX over the whole retained history cannot do regardless of
+    /// any WHERE clause. No <c>collection_time</c> bound is added; a dark-past-retention server still reads
+    /// Offline through <see cref="ServerHealthClassifier.ClassifyFreshness(DateTime?, DateTime?, DateTime, DateTime)"/>
+    /// exactly as it did before this fix (<c>DarkPastRetentionReadsOfflineTests</c> pins that rule unchanged)
+    /// — this is a plan-shape fix, not a semantic one, and the rows are identical.</para>
     /// </summary>
     public const string ServerListSql = """
         SELECT
@@ -1223,10 +2267,20 @@ internal static class DarlingDataReader
             s.server_name,
             s.display_name,
             s.sql_major_version,
-            (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = s.server_id) AS last_collection,
+            latest.collection_time AS last_collection,
             s.engine_kind,
-            s.postgres_major_version
+            s.postgres_major_version,
+            s.created_date,
+            s.sql_engine_edition
         FROM servers s
+        LEFT JOIN LATERAL
+        (
+            SELECT cl.collection_time
+            FROM v_collection_log cl
+            WHERE cl.server_id = s.server_id
+            ORDER BY cl.collection_time DESC
+            LIMIT 1
+        ) AS latest ON TRUE
         WHERE s.is_enabled
         ORDER BY s.server_name
         """;
@@ -1247,7 +2301,9 @@ internal static class DarlingDataReader
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
                 reader.IsDBNull(4) ? null : reader.GetDateTime(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetInt32(6)));
+                reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
         }
 
         return rows;
@@ -1259,8 +2315,11 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>24 columns since #3017 (16 at #2460, plus #2472's four fan-out columns, #2804's
-    /// abandoned_count, #3010's last_denied_time and #3017's rows_stored/runs_with_rows) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// <para>30 columns since #3885 (16 at #2460, plus #2472's four fan-out columns, #2804's
+    /// abandoned_count, #3010's last_denied_time, #3017's rows_stored/runs_with_rows, #3240's
+    /// extension_missing_count, #3754's session_missing_count, #3819's current_status /
+    /// last_non_skip_time / last_productive_time and #3885's trailing_zero_row_success_runs) — every
+    /// addition APPENDED, never inserted, because both MCP surfaces read
     /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
@@ -1423,7 +2482,77 @@ internal static class DarlingDataReader
             -- — the EXTENSION_MISSING status the fault mapper split out of PERMISSIONS, counted apart so
             -- the banding stops calling an uninstalled optional extension NO_PERMISSIONS. APPENDED, like
             -- every column since #2472, because this result set is read positionally.
-            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+            -- #3754: runs whose XE session was missing or could not be created - the SESSION_MISSING status
+            -- the tolerant XE readers write for a permission-denied session read and, since #3754, the
+            -- long-query reconcile writes for a session refused in every database. Until now this status
+            -- reached this surface as total_runs and NOTHING else: not an error, not a success, not a
+            -- denial, so a collector whose every run was SESSION_MISSING banded FAILING on the never-
+            -- succeeded clock while the row said errors 0 and the output finding said it had read and
+            -- found nothing. Counted apart from error_count on purpose - it is not fed to the band, whose
+            -- capture-down story belongs to the self-alert - and fed with error_count to the output
+            -- finding as the runs that could not read. APPENDED, like every column since #2472, because
+            -- this result set is read positionally and Lite's DuckDB read mirrors the ordinals.
+            SUM(CASE WHEN status = 'SESSION_MISSING' THEN 1 ELSE 0 END) AS session_missing_count,
+            -- #3819: the three columns that tell a collector which STOPPED producing apart from one that
+            -- never produced here. The same named skip carries opposite meanings on those two rows, and
+            -- until now the surface read both as the benign resting state -- which is how an install that
+            -- took pg_statement_stats from 85% productive to EXTENSION_MISSING on 23 of 50 clusters was
+            -- accepted by the countersign for 24 hours. APPENDED, like every column since #2472, because
+            -- this result set is read positionally and Lite's DuckDB read mirrors the ordinals.
+            --
+            -- current_status is what the collector is reporting NOW, for the finding's prose. Taken at
+            -- recency_rank = 1 rather than as a MAX over the skip rows: MAX is lexicographic, so on a
+            -- streak whose status changed it would name whichever word sorts highest instead of the one
+            -- being reported.
+            MAX(CASE WHEN recency_rank = 1 THEN status END) AS current_status,
+            -- The instant the current skip streak began AFTER: the newest run that was NOT a named skip.
+            -- The vocabulary is interpolated from CollectorRuntimePrecondition, which is where each of
+            -- those statuses is declared, so this cannot ask about three of four after a fourth is split
+            -- out. A NULL status counts as non-skip: it is not one of the declared skip words, and reading
+            -- it as one would let an unwritten status manufacture a streak.
+            MAX(CASE WHEN status IS NULL
+                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                     THEN collection_time END) AS last_non_skip_time,
+            -- The newest run that stored anything. Off the same rows_collected > 0 test as runs_with_rows
+            -- above, so productive means one thing on this row. Compared against last_non_skip_time it
+            -- says the productivity sits BEFORE the streak rather than inside it, which is the ORDER that
+            -- makes this a regression rather than two unrelated facts.
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+            -- #3885: how many runs, counting back from the NEWEST, were SUCCESS with zero rows and nothing
+            -- else. The column that makes the #3819 regression arm able to see the class it could not:
+            -- job_history recorded SUCCESS / 0 rows run after run on 41 of 43 servers of the largest
+            -- production store for up to a fortnight -- 1,900+ consecutive such runs on one of them -- and
+            -- banded HEALTHY throughout, because #3819 keys on a skip STATUS and this collector's status was
+            -- the most reassuring word the vocabulary has.
+            --
+            -- Exact, and FREE: recency_rank already exists in the subquery below (#3819 added it for
+            -- current_status), so this buys the streak's true width with no new window function and no new
+            -- sort. MIN of the rank of the newest run that BREAKS the streak, minus one, is the count of
+            -- runs ahead of it; NULL (no run breaks it -- every run in the window is a zero-row success)
+            -- falls back to COUNT(*), which is that same count. A streak broken by an error, a denial, a
+            -- skip or a productive run therefore reads 0 rather than reaching past it, because what this
+            -- measures is the collector's CURRENT state and any of those is a different current state.
+            --
+            -- The abandonment exclusion is the one success_count above uses, for the same #2926 reason: a
+            -- pre-#2803 abandoned cycle is stored as SUCCESS with zero rows and the budget note, which is
+            -- data LOSS rather than a source that went quiet, and counting it here would attribute an
+            -- abandonment to a regression. APPENDED, like every column since #2472, because this result set
+            -- is read positionally.
+            COALESCE(
+                MIN(CASE WHEN NOT (status = 'SUCCESS'
+                                   AND COALESCE(rows_collected, 0) = 0
+                                   AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+                         THEN recency_rank END) - 1,
+                COUNT(*)) AS trailing_zero_row_success_runs,
+            -- #4748: the note the collector's NEWEST run left, which is not last_note above. last_note is the
+            -- newest run that CARRIED a note (note_rank), so a clean run after a partial-failure cycle still
+            -- shows the older cycle's note there; the band must not read that, because the loss it names
+            -- is not the collector's current state. recency_rank = 1 is the newest run of any status, and the
+            -- SUCCESS gate matches last_note's (only the SUCCESS write carries a note). APPENDED like every
+            -- column since #2472, because this result set is read positionally and Lite's DuckDB read
+            -- mirrors the ordinals.
+            MAX(CASE WHEN recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1474,7 +2603,16 @@ internal static class DarlingDataReader
                     ORDER BY slowest_item_ms IS NULL,
                              slowest_item_ms DESC,
                              collection_time DESC
-                ) AS slowest_rank
+                ) AS slowest_rank,
+                -- #3819: newest run first, so current_status above can take the status the collector is
+                -- reporting NOW. status DESC only breaks an exact-timestamp tie, and breaks it identically
+                -- on DuckDB and Postgres -- the same reason the ranks above tie-break on error_message.
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY collection_time DESC,
+                             status DESC
+                ) AS recency_rank
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -1482,6 +2620,81 @@ internal static class DarlingDataReader
         GROUP BY collector_name
         ORDER BY collector_name
         """;
+
+    /// <summary>How long a completed per-server collection-health read is served from memory before the next
+    /// caller re-reads it (#3856) — 60 seconds, the SAME figure as the fleet rollup's
+    /// <see cref="DarlingFleetReader.CollectionHealthMemoLifetime"/> and deliberately not an independent
+    /// constant: both memos cover reads of <c>collection_log</c> over the same trailing seven days, and the
+    /// floor of what either could report differently is one collector cadence (a minute). Two lifetimes would
+    /// let <c>get_collection_health</c> and <c>get_fleet_overview</c>'s collector dots disagree about the same
+    /// rows for up to the difference between them, which is exactly the drift #3735 memoized the rollup to
+    /// avoid. Read through the fleet reader's declaration so a change to the cadence reasoning moves both.</summary>
+    internal static TimeSpan CollectionHealthMemoLifetime => DarlingFleetReader.CollectionHealthMemoLifetime;
+
+    /// <summary>One <see cref="PerServerCollectionHealthMemo"/> per <see cref="NpgsqlDataSource"/>, weakly
+    /// keyed so a disposed data source takes its memo with it — the shape and the reasons are
+    /// <see cref="DarlingFleetReader.CollectionHealthMemoFor"/>'s: the MCP host and the web host build their
+    /// OWN data source (different roles, different pools), so the bound this buys is one scan per minute per
+    /// HOST per server, and gated-live tests spin several stores in one process where a bare static would
+    /// bleed one store's collection health into another's.</summary>
+    private static readonly ConditionalWeakTable<NpgsqlDataSource, PerServerCollectionHealthMemo> s_collectionHealthMemos = new();
+
+    /// <summary>The memo the per-server 7-day collection-health read for <paramref name="postgres"/> is served
+    /// through (#3856). Internal so a live test can ask the memo how many statements N racing
+    /// <c>get_collection_health</c> calls actually cost the store.</summary>
+    internal static PerServerCollectionHealthMemo CollectionHealthMemoFor(NpgsqlDataSource postgres) =>
+        s_collectionHealthMemos.GetOrCreateValue(postgres);
+
+    /// <summary>
+    /// The per-collector 7-day health rows for one server, through the single-flight memo (#3856) —
+    /// <paramref name="nowUtc"/> is the freshness reference AND the instant the trailing-7-day window is cut
+    /// from, and the returned age is how many whole seconds older than it the reading is (0 when this call's
+    /// own statement produced it).
+    ///
+    /// <para><b>Why a second memo rather than a filter over the fleet rollup's.</b> #3856 preferred deriving
+    /// this from the scan #3735 already memoizes, gated on the two windows being the same fixed
+    /// <c>now - 7 days</c>. They ARE (this method's caller and
+    /// <see cref="DarlingFleetReader.GetFleetOverviewAsync"/>'s both cut it that way), and the window is not
+    /// what makes the derivation unavailable: the RESULTS are different reads of the same rows.
+    /// <see cref="DarlingFleetReader.FleetCollectionHealthSql"/> is twelve plain aggregates reduced to four
+    /// per-server COUNTS plus two band words — every per-collector fact this payload publishes is already
+    /// summed away by the time the fleet memo holds it — while <see cref="CollectionHealthSql"/> is
+    /// twenty-nine columns per collector over a subquery carrying four window functions. Widening the fleet
+    /// statement to carry them is what its own comment refuses in terms: putting a fleet-wide sort of a week of
+    /// <c>collection_log</c> in front of a GROUP BY that hashes today would spend the very headroom #3735
+    /// bought. So the honest shape here is #3856's first: the same primitive, the same lifetime, keyed per
+    /// server.</para>
+    ///
+    /// <para>The memo is keyed on (server, window LENGTH) — the window is part of the key rather than an
+    /// argument the memo ignores, which is the guard #3856 asked for in the derivation's place, but it is the
+    /// length and not the start. #3894 is why: this method's production caller cuts
+    /// <c>DateTime.UtcNow.AddDays(-7)</c>, so the START moved by however many ticks had elapsed on every
+    /// call, the key differed every time, and the memo never hit once in production while its dictionary grew
+    /// a permanent entry per call. The doc that used to sit here asserted the opposite — "one key per server
+    /// and the memo holds" — and that sentence was the bug's alibi: the LENGTH is what every caller fixes,
+    /// the start is what every caller moves. The always-zero <c>collection_health_age_seconds</c> on the
+    /// payload was the tell, and nobody (this author included) read it.</para>
+    ///
+    /// <para>Keying on the length is honest because the age stamp is the disclosure: two calls a few seconds
+    /// apart asking for the same seven days are served one scan, and the payload says how many seconds old
+    /// that reading is. A caller asking for a genuinely DIFFERENT window still gets its own key and its own
+    /// statement rather than a reading cut from someone else's span — the fall-through the issue required.
+    /// This is the shape the fleet twin already had by keeping a single slot for its one fixed window.
+    /// Cited: #3735 / #3738 (the fleet twin), #3856 (this one), #3894 (the key).</para>
+    /// </summary>
+    internal static async Task<(List<CollectorHealth> Rows, int AgeSeconds)> GetCollectionHealthMemoizedAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        DateTime windowStartUtc,
+        DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        await CollectionHealthMemoFor(postgres).GetAsync(
+            serverId,
+            windowStartUtc,
+            nowUtc,
+            (scanServerId, scanWindowStart, scanToken) =>
+                GetCollectionHealthAsync(postgres, scanServerId, scanWindowStart, scanToken),
+            cancellationToken);
 
     public static async Task<List<CollectorHealth>> GetCollectionHealthAsync(
         NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, CancellationToken cancellationToken = default)
@@ -1526,10 +2739,311 @@ internal static class DarlingDataReader
                 RunsWithRows = reader.IsDBNull(23) ? 0 : Convert.ToInt64(reader.GetValue(23)),
                 /* Appended (#3240), for the same reason every column before it was. */
                 ExtensionMissingCount = reader.IsDBNull(24) ? 0 : Convert.ToInt64(reader.GetValue(24)),
+                /* Appended (#3754), for the same reason every column before it was. */
+                SessionMissingCount = reader.IsDBNull(25) ? 0 : Convert.ToInt64(reader.GetValue(25)),
+                /* Appended (#3819), for the same reason every column before it was. */
+                CurrentStatus = reader.IsDBNull(26) ? null : reader.GetString(26),
+                LastNonSkipTime = reader.IsDBNull(27) ? null : reader.GetDateTime(27),
+                LastProductiveTime = reader.IsDBNull(28) ? null : reader.GetDateTime(28),
+                /* Appended (#3885), for the same reason every column before it was. The EXACT trailing
+                   width, off the subquery's existing recency_rank -- the fleet twin estimates the same
+                   quantity from two instants and the cadence because it has no ranked subquery to read
+                   and will not grow one (see FleetCollectionHealthSql). */
+                TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : Convert.ToInt64(reader.GetValue(29)),
+                /* #4748: the newest run's note, the band's text input. */
+                LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30),
             });
         }
 
         return rows;
+    }
+
+    /// <summary>One completed per-server collection-health read (#3856): the rows
+    /// <see cref="GetCollectionHealthAsync"/> produced and the <c>nowUtc</c> the scan was started with — both
+    /// the instant its window was cut from and the instant <c>collection_health_age_seconds</c> is measured
+    /// from. The list is handed to every caller of the next minute and none of them may mutate it under the
+    /// others, so the payload projection only ever enumerates it; the fleet twin says the same thing by giving
+    /// its dictionary a read-only type, which a <c>List&lt;T&gt;</c> has no equivalent of without copying the
+    /// rows this memo exists to avoid re-reading.</summary>
+    internal sealed record PerServerCollectionHealthScan(List<CollectorHealth> Rows, DateTime ReadAtUtc);
+
+    /// <summary>
+    /// Single-flight plus a one-minute memo over the per-server 7-day collection-health read (#3856) —
+    /// <see cref="DarlingFleetReader.CollectionHealthMemo"/>'s primitive, keyed per (server, window start).
+    /// Concurrent callers asking the same key share ONE in-flight statement; a completed scan younger than
+    /// <see cref="CollectionHealthMemoLifetime"/> is served from memory.
+    ///
+    /// <para><b>The production photo this answers.</b> 2026-09-21 21:3xZ, the largest production store:
+    /// <see cref="CollectionHealthSql"/> was cancelled by the <c>mcp</c> role's 15 s server-side
+    /// <c>statement_timeout</c> (SQLSTATE 57014) for the first time on record, during a store-busy minute —
+    /// the hourly successor materializations' write burst and the checkpoint sync tail behind it, the same
+    /// write-IO band that produced #3735's photo on this read's fleet twin — alongside an out-of-band overview
+    /// timeout in the same hour. The sequential retry succeeded. Solo on a quiet store this statement runs in
+    /// well under a second, and neither the plan nor the role's cap is the problem: the exposure is the band,
+    /// and with one caller there is no fan-out amplifier, which is why it took a week to appear once. What is
+    /// wrong is that the read was UNMEMOIZED while its twin was not — #3738 gave the rollup one scan per minute
+    /// per host and left the per-server read of the same table running on every call.</para>
+    ///
+    /// <para><b>Keyed on (server, window start), and the window start is in the key.</b> #3856 preferred
+    /// deriving this read from the fleet memo's scan if and only if the two windows were the same fixed
+    /// <c>now - 7 days</c>; they are, but the fleet memo holds per-server COUNTS off a twelve-column plain
+    /// aggregate and this payload needs twenty-nine columns per collector, so there is nothing to filter (the
+    /// long reasoning is on <see cref="GetCollectionHealthMemoizedAsync"/>). The window still belongs in the
+    /// key rather than being ignored: a reading cut from a different window is not this caller's answer, and a
+    /// memo that served it anyway would answer a question nobody asked. Both production callers pass the fixed
+    /// seven days, so production holds one key per server; anything else falls through to its own statement,
+    /// which is the direct read staying alive.</para>
+    ///
+    /// <para>Everything else — the caller's <c>nowUtc</c> as the memo's clock, the shared scan running on
+    /// <see cref="CancellationToken.None"/> so one caller's token releases only that caller, a failed scan
+    /// never memoized and never an unobserved exception, the last good reading surviving a failed re-read —
+    /// is <see cref="DarlingFleetReader.CollectionHealthMemo"/>'s behaviour for
+    /// <see cref="DarlingFleetReader.CollectionHealthMemo"/>'s reasons, deliberately copied rather than
+    /// re-derived. The one thing this class adds is the dictionary of per-key state, and its entries are
+    /// bounded by the servers a host reads: a key whose reading has aged out is REPLACED by the next caller's
+    /// scan, and the fixed window start means a server contributes one entry, not one per call.</para>
+    /// </summary>
+    internal sealed class PerServerCollectionHealthMemo
+    {
+        /// <summary>The scan's outcome as a VALUE — exactly one of the two is non-null — so the shared task
+        /// completes successfully whether the statement did or not, and a scan every waiter abandoned before it
+        /// failed cannot surface on the finalizer thread as an unobserved exception. The dispatch info rather
+        /// than the bare exception so a waiter's rethrow keeps the statement's own stack.</summary>
+        private sealed record ScanOutcome(PerServerCollectionHealthScan? Scan, ExceptionDispatchInfo? Failure);
+
+        /// <summary>One key's state: the scan its current callers share (non-null and incomplete while a
+        /// statement is running) and the newest scan that SUCCEEDED. Separate fields for the same reason the
+        /// fleet memo keeps them apart — a failure must not evict a good reading that is still inside its
+        /// minute, or one timed-out statement becomes a burst of retries from every caller of the next
+        /// minute.</summary>
+        private sealed class KeyState
+        {
+            public Task<ScanOutcome>? InFlight;
+            public PerServerCollectionHealthScan? Latest;
+
+            /// <summary>When this key was last ASKED for — the axis eviction runs on (#3894). Deliberately
+            /// not the reading's own age: a reading that has aged past the lifetime is still the thing a
+            /// failed re-read must not destroy, which is a contract
+            /// <c>AFailedReRead_DoesNotEvictTheLastGoodReading</c> pins and which the first version of this
+            /// sweep broke.</summary>
+            public DateTime LastTouchedUtc;
+        }
+
+        private readonly object _gate = new();
+
+        /// <summary>Per (server, window LENGTH) — see <see cref="GetCollectionHealthMemoizedAsync"/> for why
+        /// the length rather than the start (#3894: a moving start made every call its own key, so the memo
+        /// never hit and this dictionary never stopped growing). Guarded by <c>_gate</c>, like every field on
+        /// the fleet twin — nothing here is read or written outside it, so a plain Dictionary is correct and a
+        /// concurrent one would buy nothing but the illusion that the compound check-and-start below was
+        /// atomic without it.</summary>
+        private readonly Dictionary<(int ServerId, TimeSpan WindowLength), KeyState> _byKey = new();
+
+        private int _scansStarted;
+
+        /// <summary>How many statements this memo has actually started, over its whole life and across every
+        /// key — the figure a live test compares against the number of <c>get_collection_health</c> calls it
+        /// raced. Diagnostic; nothing reads it in production.</summary>
+        internal int ScansStarted
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _scansStarted;
+                }
+            }
+        }
+
+        /// <summary>How many keys this memo is currently holding — the figure #3894's eviction pin reads,
+        /// because "the dictionary grows forever" is otherwise only observable as host memory. Diagnostic;
+        /// nothing reads it in production.</summary>
+        internal int TrackedKeys
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _byKey.Count;
+                }
+            }
+        }
+
+        /// <summary>
+        /// One server's per-collector health rows as of <paramref name="nowUtc"/> — from memory when this key's
+        /// reading is under a minute old, from the scan already in flight for it when there is one, else from a
+        /// scan this call starts through <paramref name="scan"/> — with how many whole seconds older than
+        /// <paramref name="nowUtc"/> the reading is (0 when this call's own scan produced it).
+        /// </summary>
+        /// <param name="scan">The statement, as a function of the server, the window start and the token to run
+        /// under. The memo, not the caller, decides the token (a departing caller must not tear down a
+        /// statement two others are waiting on), which is why the seam takes one rather than closing over the
+        /// caller's. Substitutable so a test can count executions without a store.</param>
+        /// <param name="cancellationToken">Releases THIS caller's wait. It does not reach the statement.</param>
+        internal async Task<(List<CollectorHealth> Rows, int AgeSeconds)> GetAsync(
+            int serverId,
+            DateTime windowStartUtc,
+            DateTime nowUtc,
+            Func<int, DateTime, CancellationToken, Task<List<CollectorHealth>>> scan,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(scan);
+
+            /* #3894: the LENGTH, at the grain callers specify it — never a raw instant.
+
+               A START key misses on every production call: the tool cuts its window from a fresh UtcNow, so
+               the start moves by ticks each time, and that is the defect this issue was filed for. But the
+               RAW length (nowUtc - windowStartUtc) fails the mirror-image way: a caller that holds its window
+               start while its clock advances drifts the length by the elapsed seconds and misses too. Both are
+               the same mistake — keying on an instant — applied to the two ends of the window.
+
+               What identifies "the same question" is the span the caller ASKED for, and every caller asks in
+               whole hours: the tool for a trailing seven days, the endpoints for an integer hours_back. So the
+               length is rounded to the nearest hour, which absorbs any clock-read drift inside the 60 s
+               lifetime (worst case well under a minute) while keeping every genuinely different window its own
+               key — a one-day window and a seven-day window are 144 hours apart and cannot round together. */
+            var key = (serverId, WindowLength: RoundToWholeHours(nowUtc - windowStartUtc));
+
+            Task<ScanOutcome> shared;
+            TaskCompletionSource<ScanOutcome>? lead = null;
+            lock (_gate)
+            {
+                PruneUntouched(nowUtc);
+
+                if (!_byKey.TryGetValue(key, out var state))
+                {
+                    state = new KeyState();
+                    _byKey[key] = state;
+                }
+
+                state.LastTouchedUtc = nowUtc;
+
+                if (state.Latest is { } latest && nowUtc - latest.ReadAtUtc < CollectionHealthMemoLifetime)
+                {
+                    return (latest.Rows, AgeSeconds(nowUtc, latest));
+                }
+
+                if (state.InFlight is not { IsCompleted: false })
+                {
+                    /* RunContinuationsAsynchronously: the waiters' continuations — a whole payload projection,
+                       the sweep-pressure arithmetic and the JSON write each — must not run inline on whichever
+                       thread completes the statement, or the leader's connection callback would carry every
+                       joiner's work. */
+                    lead = new TaskCompletionSource<ScanOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    state.InFlight = lead.Task;
+                    _scansStarted++;
+                }
+
+                shared = state.InFlight;
+            }
+
+            if (lead is not null)
+            {
+                /* Started OUTSIDE the lock so the statement's synchronous prefix (command construction) never
+                   runs under it, and deliberately not awaited here: this caller is one waiter among any
+                   number, and its own cancellation below must not be the scan's. RunScanAsync completes the
+                   source in both arms and never throws, so the discarded task cannot fault. */
+                _ = RunScanAsync(lead, key, windowStartUtc, nowUtc, scan);
+            }
+
+            var outcome = await shared.WaitAsync(cancellationToken);
+            outcome.Failure?.Throw();
+            var read = outcome.Scan!;
+            return (read.Rows, AgeSeconds(nowUtc, read));
+        }
+
+        /// <summary>A window length at the grain its callers ask in (#3894). Nearest rather than floor, so a
+        /// length that drifted a few seconds either side of a whole hour still lands on that hour instead of
+        /// splitting one question across two keys at the boundary.</summary>
+        private static TimeSpan RoundToWholeHours(TimeSpan length) =>
+            TimeSpan.FromHours(Math.Round(length.TotalHours, MidpointRounding.AwayFromZero));
+
+        /// <summary>How long a key nobody has asked for is kept before it is dropped — ten times the reading
+        /// lifetime, so a key in any kind of active use is never yanked out from under a caller and the
+        /// dictionary still cannot accumulate history.</summary>
+        private static TimeSpan KeyRetention => CollectionHealthMemoLifetime * 10;
+
+        /// <summary>Drops keys that NOBODY HAS ASKED FOR inside <see cref="KeyRetention"/> and that have no
+        /// statement in flight.
+        ///
+        /// <para>#3894: this dictionary had no eviction of any kind — no Remove, no cap, no sweep — which was
+        /// survivable only while the key space was believed to be one entry per server. It was not: a moving
+        /// window start made every call its own key, so a long-lived MCP host accumulated one KeyState, and
+        /// the rows list it holds, per call forever. Length-keying alone bounds the space to (servers ×
+        /// distinct windows asked); this sweep bounds it in TIME as well, so a window asked for once never
+        /// occupies the host for its lifetime.</para>
+        ///
+        /// <para><b>On the axis, which the first version of this sweep got wrong.</b> Evicting on the
+        /// READING's age looks equivalent and is not: an aged-out reading is still the last good one, and the
+        /// memo's documented contract is that a failed re-read must not destroy it — a caller whose clock
+        /// lands back inside the lifetime is still served it. Sweeping on staleness deleted exactly that, and
+        /// <c>AFailedReRead_DoesNotEvictTheLastGoodReading</c> caught it by hanging. Eviction is therefore
+        /// about whether the KEY is in use, never about whether its reading is servable.</para></summary>
+        private void PruneUntouched(DateTime nowUtc)
+        {
+            if (_byKey.Count == 0)
+            {
+                return;
+            }
+
+            /* Materialized before removing: a Dictionary cannot be mutated while it is being enumerated, and
+               the count here is bounded by the live key space rather than by history. */
+            var untouched = new List<(int ServerId, TimeSpan WindowLength)>();
+            foreach (var (key, state) in _byKey)
+            {
+                var scanning = state.InFlight is { IsCompleted: false };
+                var idleFor = nowUtc - state.LastTouchedUtc;
+
+                if (!scanning && idleFor >= KeyRetention)
+                {
+                    untouched.Add(key);
+                }
+            }
+
+            foreach (var key in untouched)
+            {
+                _byKey.Remove(key);
+            }
+        }
+
+        private async Task RunScanAsync(
+            TaskCompletionSource<ScanOutcome> lead,
+            (int ServerId, TimeSpan WindowLength) key,
+            DateTime windowStartUtc,
+            DateTime nowUtc,
+            Func<int, DateTime, CancellationToken, Task<List<CollectorHealth>>> scan)
+        {
+            try
+            {
+                /* The window start comes from the caller that LED this scan, not from the key: the key
+                   carries the length, and the rows are honestly the leader's span. A joiner a few seconds
+                   later is served these rows with collection_health_age_seconds saying how old they are. */
+                var rows = await scan(key.ServerId, windowStartUtc, CancellationToken.None);
+                var read = new PerServerCollectionHealthScan(rows, nowUtc);
+                lock (_gate)
+                {
+                    /* The key's state, not a fresh one: a scan that outlived every waiter still belongs to the
+                       key it was started for, and the entry is always present because GetAsync created it
+                       before starting this scan. */
+                    if (_byKey.TryGetValue(key, out var state))
+                    {
+                        state.Latest = read;
+                    }
+                }
+
+                lead.SetResult(new ScanOutcome(read, null));
+            }
+            catch (Exception ex)
+            {
+                lead.SetResult(new ScanOutcome(null, ExceptionDispatchInfo.Capture(ex)));
+            }
+        }
+
+        /// <summary>Whole seconds from the scan's reference instant to <paramref name="nowUtc"/>, floored at
+        /// zero — a caller whose clock reads behind the scan's is not holding a reading from the future, it is
+        /// holding the freshest one there is.</summary>
+        private static int AgeSeconds(DateTime nowUtc, PerServerCollectionHealthScan read) =>
+            (int)Math.Max(0, Math.Floor((nowUtc - read.ReadAtUtc).TotalSeconds));
     }
 
     /// <summary>
@@ -1553,7 +3067,10 @@ internal static class DarlingDataReader
             is_hadr_enabled,
             is_clustered,
             enterprise_features,
-            service_objective
+            service_objective,
+            utc_offset_minutes,
+            time_zone_id,
+            vcore_count
         FROM server_properties
         WHERE server_id = $1
         ORDER BY collection_time DESC
@@ -1587,7 +3104,12 @@ internal static class DarlingDataReader
             !reader.IsDBNull(11) && reader.GetBoolean(11),
             !reader.IsDBNull(12) && reader.GetBoolean(12),
             reader.IsDBNull(13) ? null : reader.GetString(13),
-            reader.IsDBNull(14) ? null : reader.GetString(14));
+            reader.IsDBNull(14) ? null : reader.GetString(14),
+            /* V16 / V134 (#3653 item 13): both nullable in the store and both read null-or-value — a 0 offset
+               would claim UTC of a row that never recorded one, and an empty zone would claim a name. */
+            reader.IsDBNull(15) ? null : reader.GetInt32(15),
+            reader.IsDBNull(16) ? null : reader.GetString(16),
+            reader.IsDBNull(17) ? null : reader.GetInt32(17));
     }
 
     /* ─────────────────────────── parameter helpers ─────────────────────────── */
@@ -1610,9 +3132,16 @@ internal static class DarlingDataReader
     ///
     /// <para>Reads <c>v_collection_log</c>, the same view the viewer uses, so the web dashboard and the
     /// MCP surface cannot drift from what the desktop shows. $1 server_id, $2 window start, $3 window
-    /// end (naive UTC), $4 row cap, $5 collector name or NULL, $6 duration floor in ms or NULL.</para>
+    /// end (naive UTC), $4 row cap, $5 collector name or NULL, $6 duration floor in ms or NULL, $7 run
+    /// status or NULL.</para>
     ///
-    /// <para>The two filters are NULL-tolerant predicates against always-bound parameters rather than
+    /// <para>The status arm (#3869) compares <c>UPPER($7)</c> rather than the raw parameter, so the stored
+    /// vocabulary's own casing is what matches whatever spelling the caller sent. The tool validates the
+    /// value against <c>EnumeratedCollectorDriver.CollectionLogStatuses</c> before reaching here, so this
+    /// predicate can never quietly match nothing on a typo — an unknown status is refused up there, not
+    /// filtered to an empty page down here.</para>
+    ///
+    /// <para>The three filters are NULL-tolerant predicates against always-bound parameters rather than
     /// conditionally appended text, which is the shape a dozen sibling readers already use
     /// (<c>DarlingStoredPlanReader</c>, <c>DarlingObjectStatsReader</c>, <c>DarlingAgReader</c>). It keeps
     /// every parameter at a FIXED position, which is what makes a renumbering bug impossible rather than
@@ -1657,6 +3186,7 @@ internal static class DarlingDataReader
         AND   collection_time <= $3
         AND   ($5::text IS NULL OR collector_name = $5::text)
         AND   ($6::double precision IS NULL OR duration_ms >= $6::double precision)
+        AND   ($7::text IS NULL OR status = UPPER($7::text))
         """;
 
     /// <summary>
@@ -1735,6 +3265,12 @@ internal static class DarlingDataReader
     /// <para><paramref name="collectorName"/> is matched EXACTLY, not by prefix or pattern. A name the store
     /// has never seen therefore returns zero rows, which the caller cannot distinguish from a quiet window on
     /// the row list alone; the tool's empty branch is what separates those two.</para>
+    ///
+    /// <para><paramref name="status"/> (#3869) is matched exactly too, case-insensitively, against the closed
+    /// vocabulary in <c>EnumeratedCollectorDriver.CollectionLogStatuses</c>. Unlike the collector name, an
+    /// unknown value is NOT this reader's problem: the tool refuses it by name before calling, because a
+    /// closed set whose members the caller cannot see makes "no rows" an unreadable answer. Appended after
+    /// the floor, like every filter before it, so no existing positional caller moved.</para>
     /// </summary>
     public static async Task<List<CollectionLogEntry>> GetCollectionLogAsync(
         NpgsqlDataSource postgres,
@@ -1744,6 +3280,7 @@ internal static class DarlingDataReader
         int maxRows,
         string? collectorName = null,
         double? minDurationMs = null,
+        string? status = null,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<CollectionLogEntry>();
@@ -1756,50 +3293,192 @@ internal static class DarlingDataReader
         AddInt(command, maxRows);
         AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
         AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new CollectionLogEntry(
-                reader.GetString(0),
-                reader.GetDateTime(1),
-                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
-                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
-                reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
-                reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5)),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7),
-                /* NULL on every row written before V108, and on every run whose path emits no split -
-                   both genuinely "not recorded", which is why these stay nullable rather than defaulting
-                   to zero. A zero here would claim a measured instant open. */
-                reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
-                reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
-                reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
-                /* V109 (#2864). NULL means NOT RECORDED and no more: a row written before the rung, a path
-                   that emits no forensics (every per-database ENUMERATED collector - query_store, the
-                   Pg*Stats family - never sets the measured flag), or an abandon that fired before the
-                   counting reader was constructed. Do NOT read a NULL as 'old row'. DrainLastReadMs beside
-                   a 0 DrainRowsRead does mean nothing arrived; that pairing is the one safe inference. */
-                reader.IsDBNull(11) ? null : Convert.ToInt64(reader.GetValue(11)),
-                reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
-                reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
-                reader.IsDBNull(14) ? null : Convert.ToInt32(reader.GetValue(14)),
-                reader.IsDBNull(15) ? null : Convert.ToDouble(reader.GetValue(15)),
-                /* V110 (#2860). NULL means the run performed no deferred fetch - which is every collector
-                   but the plan/text-fetching ones, and ~78% of even those runs, since a fetch only runs when
-                   the probe finds something missing. Read raw rather than pre-divided into ms-per-id: the
-                   rate is the interesting number (31.65 ms/id measured on production's cold plans against
-                   ~1.6 on #2806's hot ones), but there are three useful rates over these five figures and
-                   blessing one in the record would hide the others. The consumer divides. */
-                reader.IsDBNull(16) ? null : Convert.ToDouble(reader.GetValue(16)),
-                reader.IsDBNull(17) ? null : Convert.ToDouble(reader.GetValue(17)),
-                reader.IsDBNull(18) ? null : Convert.ToDouble(reader.GetValue(18)),
-                reader.IsDBNull(19) ? null : Convert.ToInt64(reader.GetValue(19)),
-                reader.IsDBNull(20) ? null : Convert.ToInt64(reader.GetValue(20)),
-                reader.IsDBNull(21) ? null : Convert.ToDouble(reader.GetValue(21)),
-                reader.IsDBNull(22) ? null : Convert.ToDouble(reader.GetValue(22)),
-                reader.IsDBNull(23) ? null : Convert.ToDouble(reader.GetValue(23)),
-                reader.IsDBNull(24) ? null : Convert.ToInt64(reader.GetValue(24)),
-                reader.IsDBNull(25) ? null : Convert.ToInt64(reader.GetValue(25))));
+            rows.Add(MapCollectionLogEntry(reader, 0));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Maps one <see cref="CollectionLogBody"/> / <see cref="CollectionLogFleetBody"/> row to a
+    /// <see cref="CollectionLogEntry"/>, starting at column <paramref name="i"/> — 0 for the per-server SELECT,
+    /// whose 26 columns start at the first ordinal, and 1 for the fleet-wide SELECT (#4199), which reads
+    /// <c>server_name</c> as its own leading column ahead of the same 26. Factored out of
+    /// <see cref="GetCollectionLogAsync"/> so the fleet form (<see cref="GetCollectionLogFleetAsync"/>) cannot
+    /// drift from the per-server column mapping by so much as one ordinal — the two SELECTs were kept
+    /// column-for-column identical after the leading name for exactly this reason.
+    /// </summary>
+    private static CollectionLogEntry MapCollectionLogEntry(NpgsqlDataReader reader, int i) =>
+        new(
+            reader.GetString(i),
+            reader.GetDateTime(i + 1),
+            reader.IsDBNull(i + 2) ? null : Convert.ToDouble(reader.GetValue(i + 2)),
+            reader.IsDBNull(i + 3) ? null : Convert.ToDouble(reader.GetValue(i + 3)),
+            reader.IsDBNull(i + 4) ? null : Convert.ToDouble(reader.GetValue(i + 4)),
+            reader.IsDBNull(i + 5) ? null : Convert.ToInt64(reader.GetValue(i + 5)),
+            reader.IsDBNull(i + 6) ? null : reader.GetString(i + 6),
+            reader.IsDBNull(i + 7) ? null : reader.GetString(i + 7),
+            /* NULL on every row written before V108, and on every run whose path emits no split -
+               both genuinely "not recorded", which is why these stay nullable rather than defaulting
+               to zero. A zero here would claim a measured instant open. */
+            reader.IsDBNull(i + 8) ? null : Convert.ToDouble(reader.GetValue(i + 8)),
+            reader.IsDBNull(i + 9) ? null : Convert.ToDouble(reader.GetValue(i + 9)),
+            reader.IsDBNull(i + 10) ? null : Convert.ToDouble(reader.GetValue(i + 10)),
+            /* V109 (#2864). NULL means NOT RECORDED and no more: a row written before the rung, a path
+               that emits no forensics (every per-database ENUMERATED collector - query_store, the
+               Pg*Stats family - never sets the measured flag), or an abandon that fired before the
+               counting reader was constructed. Do NOT read a NULL as 'old row'. DrainLastReadMs beside
+               a 0 DrainRowsRead does mean nothing arrived; that pairing is the one safe inference. */
+            reader.IsDBNull(i + 11) ? null : Convert.ToInt64(reader.GetValue(i + 11)),
+            reader.IsDBNull(i + 12) ? null : Convert.ToInt64(reader.GetValue(i + 12)),
+            reader.IsDBNull(i + 13) ? null : Convert.ToDouble(reader.GetValue(i + 13)),
+            reader.IsDBNull(i + 14) ? null : Convert.ToInt32(reader.GetValue(i + 14)),
+            reader.IsDBNull(i + 15) ? null : Convert.ToDouble(reader.GetValue(i + 15)),
+            /* V110 (#2860). NULL means the run performed no deferred fetch - which is every collector
+               but the plan/text-fetching ones, and ~78% of even those runs, since a fetch only runs when
+               the probe finds something missing. Read raw rather than pre-divided into ms-per-id: the
+               rate is the interesting number (31.65 ms/id measured on production's cold plans against
+               ~1.6 on #2806's hot ones), but there are three useful rates over these five figures and
+               blessing one in the record would hide the others. The consumer divides. */
+            reader.IsDBNull(i + 16) ? null : Convert.ToDouble(reader.GetValue(i + 16)),
+            reader.IsDBNull(i + 17) ? null : Convert.ToDouble(reader.GetValue(i + 17)),
+            reader.IsDBNull(i + 18) ? null : Convert.ToDouble(reader.GetValue(i + 18)),
+            reader.IsDBNull(i + 19) ? null : Convert.ToInt64(reader.GetValue(i + 19)),
+            reader.IsDBNull(i + 20) ? null : Convert.ToInt64(reader.GetValue(i + 20)),
+            reader.IsDBNull(i + 21) ? null : Convert.ToDouble(reader.GetValue(i + 21)),
+            reader.IsDBNull(i + 22) ? null : Convert.ToDouble(reader.GetValue(i + 22)),
+            reader.IsDBNull(i + 23) ? null : Convert.ToDouble(reader.GetValue(i + 23)),
+            reader.IsDBNull(i + 24) ? null : Convert.ToInt64(reader.GetValue(i + 24)),
+            reader.IsDBNull(i + 25) ? null : Convert.ToInt64(reader.GetValue(i + 25)));
+
+    /// <summary>One <see cref="CollectionLogEntry"/> plus which server it came from — the fleet-wide row shape
+    /// (#4199), needed only because <see cref="GetCollectionLogFleetAsync"/> merges runs across every enabled
+    /// server into one ranked page and the per-server record carries no server identity of its own.</summary>
+    public sealed record FleetCollectionLogEntry(string ServerName, CollectionLogEntry Entry);
+
+    /// <summary>
+    /// The FLEET-WIDE form of <see cref="CollectionLogBody"/> (#4199): the same per-run log, across EVERY
+    /// ENABLED server at once, each row carrying which server it came from. $1 window start, $2 window end
+    /// (naive UTC), $3 row cap, $4 collector name or NULL, $5 duration floor or NULL, $6 status or NULL.
+    ///
+    /// <para>Scoped to enabled servers by joining <c>servers</c> — the SAME population
+    /// <see cref="DarlingServerResolver"/> resolves a name against — rather than adding a predicate of its own,
+    /// so the two can never disagree about which servers are in scope. That join is also what excludes the
+    /// fleet-MAINTENANCE sentinel row (<c>server_id = 0</c>), which the registry deliberately never contains
+    /// (see <see cref="DarlingServerResolver.ResolveOrErrorWithFleetSentinelAsync"/>): a fleet-wide page of
+    /// ordinary collector runs is not that sentinel's maintenance run-records, and no extra predicate is needed
+    /// to keep the two apart.</para>
+    ///
+    /// <para>Column-for-column identical to <see cref="CollectionLogBody"/> after its own leading
+    /// <c>server_name</c>, so <see cref="MapCollectionLogEntry"/> reads both with one mapping.</para>
+    /// </summary>
+    private const string CollectionLogFleetBody = """
+        SELECT
+            cl.server_name,
+            cl.collector_name,
+            cl.collection_time,
+            cl.duration_ms,
+            cl.sql_duration_ms,
+            cl.duckdb_duration_ms,
+            cl.rows_collected,
+            cl.status,
+            cl.error_message,
+            cl.sql_open_ms,
+            cl.sql_drain_ms,
+            cl.watermark_ms,
+            cl.drain_rows_read,
+            cl.drain_bytes_read,
+            cl.drain_last_read_ms,
+            cl.target_session_id,
+            cl.sweep_peer_max_ms,
+            cl.plan_fetch_probe_ms,
+            cl.plan_fetch_target_ms,
+            cl.plan_fetch_write_ms,
+            cl.plan_fetch_ids_attempted,
+            cl.plan_fetch_probe_ids,
+            cl.text_fetch_probe_ms,
+            cl.text_fetch_target_ms,
+            cl.text_fetch_write_ms,
+            cl.text_fetch_ids_attempted,
+            cl.text_fetch_probe_ids
+        FROM v_collection_log cl
+        JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
+        WHERE cl.collection_time >= $1
+        AND   cl.collection_time <= $2
+        AND   ($4::text IS NULL OR cl.collector_name = $4::text)
+        AND   ($5::double precision IS NULL OR cl.duration_ms >= $5::double precision)
+        AND   ($6::text IS NULL OR cl.status = UPPER($6::text))
+        """;
+
+    /// <summary>Fleet-wide newest-first — see <see cref="CollectionLogSql"/>, its per-server twin.</summary>
+    public const string CollectionLogFleetSql = CollectionLogFleetBody + """
+
+        ORDER BY cl.collection_time DESC, cl.duration_ms DESC NULLS LAST
+        LIMIT $3
+        """;
+
+    /// <summary>Fleet-wide slowest-first, when a duration floor is supplied — see
+    /// <see cref="CollectionLogSlowestFirstSql"/>, its per-server twin.</summary>
+    public const string CollectionLogFleetSlowestFirstSql = CollectionLogFleetBody + """
+
+        ORDER BY cl.duration_ms DESC NULLS LAST, cl.collection_time DESC
+        LIMIT $3
+        """;
+
+    /// <summary>Whether ANY enabled server has EVER recorded a collector run — the fleet-wide
+    /// <see cref="HasAnyCollectionLogSql"/>, used the same way: to tell a genuinely quiet fleet-wide window
+    /// from a fleet that has never once collected (every server newly added, or the service never started).
+    /// </summary>
+    public const string HasAnyCollectionLogFleetSql = """
+        SELECT 1
+        FROM v_collection_log cl
+        JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyCollectionLogFleetSql"/>.</summary>
+    public static async Task<bool> HasAnyCollectionLogFleetAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyCollectionLogFleetSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>
+    /// Runs <see cref="CollectionLogFleetSql"/>, or <see cref="CollectionLogFleetSlowestFirstSql"/> when
+    /// <paramref name="minDurationMs"/> is supplied — the fleet-wide twin of <see cref="GetCollectionLogAsync"/>,
+    /// same filter and ordering rules, merged across every enabled server instead of scoped to one.
+    /// </summary>
+    public static async Task<List<FleetCollectionLogEntry>> GetCollectionLogFleetAsync(
+        NpgsqlDataSource postgres,
+        DateTime windowStartUtc,
+        DateTime windowEndUtc,
+        int maxRows,
+        string? collectorName = null,
+        double? minDurationMs = null,
+        string? status = null,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<FleetCollectionLogEntry>();
+        await using var command = postgres.CreateCommand(
+            minDurationMs is null ? CollectionLogFleetSql : CollectionLogFleetSlowestFirstSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddInt(command, maxRows);
+        AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
+        AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var serverName = reader.GetString(0);
+            rows.Add(new FleetCollectionLogEntry(serverName, MapCollectionLogEntry(reader, 1)));
         }
 
         return rows;
@@ -1807,12 +3486,14 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// Waiting-task total wait duration per wait type per collection, for one server over an explicit
-    /// window. The viewer's Current Waits reader verbatim. $1 server_id, $2 start, $3 end (naive UTC).
+    /// window. The viewer's Current Waits reader verbatim. Grouped on <c>rtrim(wait_type)</c>, so a wait stored
+    /// with and without the trailing space the collector trimmed from #4884 on is one series under the clean name.
+    /// $1 server_id, $2 start, $3 end (naive UTC).
     /// </summary>
     public const string WaitingTaskTrendSql = """
         SELECT
             collection_time,
-            wait_type,
+            rtrim(wait_type) AS wait_type,
             CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms
         FROM waiting_tasks
         WHERE server_id = $1
@@ -1821,10 +3502,10 @@ internal static class DarlingDataReader
         AND   wait_type IS NOT NULL
         GROUP BY
             collection_time,
-            wait_type
+            rtrim(wait_type)
         ORDER BY
             collection_time,
-            wait_type
+            rtrim(wait_type)
         """;
 
     /// <summary>
@@ -1934,7 +3615,10 @@ internal static class DarlingDataReader
     /// <para>XE blocked-process reports are the primary source and the DMV snapshot is the fallback, and
     /// the fallback contributes ONLY when the XE source has no rows in the window at all. Mixing them
     /// would double-count the same incident from two captures, so it is a fallback and never a union.
-    /// $1 server_id, $2 start, $3 end (naive UTC).</para>
+    /// $1 server_id, $2 start, $3 end (naive UTC). $4 is the <see cref="EventWindowFloor"/> for $2 — both
+    /// tables are hypertables partitioned on <c>collection_time</c>, which this event-time window alone
+    /// gives the planner nothing to exclude a chunk on (#4229); the floor lets it skip every chunk older
+    /// than the window, without being able to drop a row (an event is collected after it happens).</para>
     /// </summary>
     public const string BlockingDurationStatsSql = """
         WITH bpr AS (
@@ -1946,6 +3630,7 @@ internal static class DarlingDataReader
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -1957,6 +3642,7 @@ internal static class DarlingDataReader
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
@@ -2007,6 +3693,7 @@ internal static class DarlingDataReader
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2023,9 +3710,9 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// The raw deadlock graphs in the window, for severity aggregation.
-    /// <para>Windowed on collection_time but ORDERED and bucketed by deadlock_time -- the graph carries
-    /// when the deadlock happened, while collection_time is only when we picked it up, and the two differ
-    /// by up to a collection interval. $1 server_id, $2 start, $3 end (naive UTC).</para>
+    /// <para>Windowed, ordered and bucketed on deadlock_time -- when the deadlock happened, not when we picked
+    /// it up -- so it reconciles with the deadlock count trend. $1 server_id, $2 start, $3 end (naive UTC),
+    /// $4 the <see cref="EventWindowFloor"/> for $2 (no upper bound, so a late-collected deadlock still counts).</para>
     /// </summary>
     public const string DeadlockSeverityGraphsSql = """
         SELECT
@@ -2033,8 +3720,9 @@ internal static class DarlingDataReader
             deadlock_graph_xml
         FROM v_deadlocks
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   deadlock_time >= $2
+        AND   deadlock_time <= $3
+        AND   collection_time >= $4
         ORDER BY deadlock_time
         """;
 
@@ -2049,6 +3737,7 @@ internal static class DarlingDataReader
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2144,6 +3833,119 @@ internal sealed class CollectorHealth
     public long ExtensionMissingCount { get; set; }
 
     /// <summary>
+    /// Runs recorded <c>SESSION_MISSING</c> (#3754): the XE session the collector reads was missing or could
+    /// not be created, so nothing was read. Counted apart from <see cref="ErrorCount"/> because it is not
+    /// an input to <see cref="HealthStatus"/> - the capture-down story belongs to the self-alert - and
+    /// apart from <see cref="PermissionDeniedCount"/> because a missing session is not a grant. Fed with
+    /// the error count to <see cref="OutputFinding"/> as the runs that could not read; before this the
+    /// status reached this surface as <see cref="TotalRuns"/> and nothing else. Always 0 for a collector
+    /// that reads no XE session.
+    /// </summary>
+    public long SessionMissingCount { get; set; }
+
+    /* ── Regressed from productive (#3819) ────────────────────────────────────────────────────────
+       A named skip on a collector that had been producing is a different fact from the same status on
+       one that never has. These three columns are what tells them apart; the predicate and the
+       sentence below are composed from the shared classifier so no surface can answer differently. */
+
+    /// <summary>
+    /// The status the collector is reporting NOW — its newest run's (<c>current_status</c>). Display
+    /// text for <see cref="RegressedFinding"/> and nothing else: <see cref="HealthStatus"/> reads the
+    /// window's COUNTS, never one row's word. Null on a surface that does not project it, which makes
+    /// the finding null rather than a sentence with a hole in it.
+    /// </summary>
+    public string? CurrentStatus { get; set; }
+
+    /// <summary>
+    /// The newest run whose status was NOT one of <c>CollectorRuntimePrecondition.NamedSkipStatuses</c>
+    /// (<c>last_non_skip_time</c>) — the instant the current skip streak began after. Null when every
+    /// run in the window was a skip, which is the never-produced-here case the benign band already
+    /// describes correctly.
+    /// </summary>
+    public DateTime? LastNonSkipTime { get; set; }
+
+    /// <summary>
+    /// The newest run that stored anything (<c>last_productive_time</c>) — off the same
+    /// <c>rows_collected > 0</c> test as <see cref="RunsWithRows"/>, so productive means one thing on
+    /// this row. Its ORDER against <see cref="LastNonSkipTime"/> is what makes a regression a
+    /// regression rather than two unrelated facts.
+    /// </summary>
+    public DateTime? LastProductiveTime { get; set; }
+
+    /// <summary>
+    /// Whether this collector WAS producing rows and now reports a named skip every cycle (#3819) — the
+    /// distinction <see cref="HealthStatus"/> could not make on its own, because the benign skip bands
+    /// are gated on the window holding no success and a regressed collector's window holds its
+    /// productive days. Its own member rather than an expression at the call site for the reason
+    /// <see cref="DeniedSinceLastSuccess"/> is one: every surface derives it from the one shared
+    /// predicate instead of each writing the comparison out.
+    /// </summary>
+    public bool RegressedFromProductive => CollectorHealthClassifier.RegressedFromProductive(
+        LastRunTime, LastNonSkipTime, LastProductiveTime);
+
+    /// <summary>
+    /// The sentence a regressed collector carries, or null when it is not one (#3819). Composed from
+    /// the shared formatter, like <see cref="OutputFinding"/> above, so no consumer re-derives it
+    /// differently. <see cref="RowsStored"/> is the count it reports: on a regressed row that figure is
+    /// entirely pre-regression, because a named skip stores nothing.
+    /// </summary>
+    public string? RegressedFinding => RegressedFromProductive
+        ? CollectorHealthClassifier.FormatRegressedFromProductiveFinding(
+            RowsStored, LastNonSkipTime, CurrentStatus)
+        : null;
+
+    /* ── Produced then stopped (#3885) ────────────────────────────────────────────────────────────
+       The second regression class, and the one #3819 could not see: not a skip word but a SUCCESS
+       storing nothing, run after run, on a collector that had been productive. job_history sat
+       HEALTHY like that on 41 of 43 servers of the largest production store for up to a fortnight. */
+
+    /// <summary>
+    /// How many runs, counting back from the newest, were SUCCESS with zero rows and nothing else
+    /// (<c>trailing_zero_row_success_runs</c>). EXACT on this per-server read, which resolves it off the
+    /// ranked subquery #3819 already added; the fleet twin sets it from
+    /// <see cref="CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns"/> instead, because that
+    /// statement has no subquery to rank and #3735's statement-timeout headroom is not spent on one.
+    /// 0 on a surface that does not project it, which keeps <see cref="ProducedThenStopped"/> false
+    /// rather than making a claim from an absence.
+    /// </summary>
+    public long TrailingZeroRowSuccessRuns { get; set; }
+
+    /// <summary>
+    /// Whether this collector WAS producing rows and is now recording SUCCESS with zero rows every cycle
+    /// (#3885) — the regression class whose status word is the most reassuring one the vocabulary has,
+    /// which is why nothing on any health surface could see it. Event collectors and on-load collectors
+    /// are excluded inside the shared predicate, so a fortnight of zeros from a deadlock capture at rest
+    /// stays HEALTHY.
+    /// </summary>
+    public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+
+    /// <summary>
+    /// The sentence a produced-then-stopped collector carries, or null when it is not one (#3885).
+    /// Composed from the shared formatter for the same reason <see cref="RegressedFinding"/> is.
+    /// </summary>
+    public string? ProducedThenStoppedFinding => ProducedThenStopped
+        ? CollectorHealthClassifier.FormatProducedThenStoppedFinding(
+            RowsStored, LastProductiveTime, TrailingZeroRowSuccessRuns)
+        : null;
+
+    /// <summary>
+    /// EITHER regression class — stopped skipping (#3819) or stopped producing (#3885). What the band
+    /// floor, the <c>regressed_from_productive</c> field and the fleet's one regressed count all read, so
+    /// widening the definition did not fork any of the three. The two predicates are disjoint by
+    /// construction: one requires the newest run to be a named skip, the other requires the newest runs
+    /// to be successes, so this is an OR over populations that cannot overlap.
+    /// </summary>
+    public bool AnyRegression => RegressedFromProductive || ProducedThenStopped;
+
+    /// <summary>
+    /// Whichever regression sentence applies, or null on a row that is neither (#3885). One slot rather
+    /// than two on the payload, because the two classes are disjoint and a reader asking "why is this
+    /// WARNING" wants the answer, not a pair of fields of which one is always null.
+    /// </summary>
+    public string? AnyRegressionFinding => RegressedFinding ?? ProducedThenStoppedFinding;
+
+    /// <summary>
     /// Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from errors for the
     /// same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike a yield it is
     /// data LOSS: the cycle stored nothing and advanced no watermark. Feeds
@@ -2161,6 +3963,15 @@ internal sealed class CollectorHealth
 
     /// <summary>How many of <see cref="TotalRuns"/> carried a <see cref="LastNote"/>.</summary>
     public long NoteCount { get; set; }
+
+    /// <summary>
+    /// The note the collector's NEWEST run left (#4748), or null when that run left none. Unlike
+    /// <see cref="LastNote"/>, which is the newest note in the window whatever run wrote it, this is the
+    /// newest RUN's, so a clean run after a partial-failure cycle clears it. It is the one note the band reads
+    /// (<see cref="CollectorHealthClassifier.Classify"/>): a cycle that lost half or more of its databases
+    /// still records SUCCESS, and the note is the only record of the loss.
+    /// </summary>
+    public string? LatestRunNote { get; set; }
 
     /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
@@ -2274,12 +4085,17 @@ internal sealed class CollectorHealth
     /// <see cref="DeniedSinceLastSuccess"/> is one: both SKUs' tools compose it from the one shared
     /// formatter instead of each writing the branch out, so the two cannot answer differently.
     ///
-    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term and
-    /// <see cref="NoteCount"/> the fourth. Zero output with a current denial is a collector that could not
-    /// read; zero output whose runs recorded a note is one that already said why, and the finding defers to
-    /// <see cref="LastNote"/> rather than asserting the event-collector reading over it (#3160); zero output
-    /// with neither is the event collector at rest. Both predicates are READ here and still not banded —
-    /// <c>HealthStatus</c> does not call this, and this returns display text.</para>
+    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term,
+    /// <see cref="NoteCount"/> the fourth, and (#3754) the faulted-run count and the collector's category
+    /// the fifth and sixth. Zero output with a current denial is a collector that could not read; zero
+    /// output with faulted runs (<see cref="ErrorCount"/> plus <see cref="SessionMissingCount"/>) is one
+    /// that could not read on those runs and the finding says so instead of offering the resting-state
+    /// reading; zero output whose runs recorded a note is one that already said why, and the finding defers
+    /// to <see cref="LastNote"/> rather than asserting the event-collector reading over it (#3160); zero
+    /// output with none of those is the event collector at rest - if it IS an event collector
+    /// (<see cref="CollectorHealthClassifier.IsEventCollector"/>), and a snapshot whose source came back
+    /// empty if it is not. Every predicate is READ here and still not banded — <c>HealthStatus</c> does not
+    /// call this, and this returns display text.</para>
     /// </summary>
     public string? OutputFinding =>
         /* #3240: an all-extension-missing window read NOTHING, so both of the formatter's zero-output
@@ -2288,7 +4104,10 @@ internal sealed class CollectorHealth
            carry the whole story, extension named. */
         string.Equals(HealthStatus, CollectorHealthClassifier.ExtensionMissing, StringComparison.Ordinal)
             ? null
-            : CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount)
+            : CollectorHealthClassifier.FormatOutputFinding(
+                    RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount,
+                    faultedRuns: ErrorCount + SessionMissingCount,
+                    isEventCollector: CollectorHealthClassifier.IsEventCollector(CollectorName))
                 is { Length: > 0 } finding
                 ? finding
                 : null;
@@ -2316,15 +4135,38 @@ internal sealed class CollectorHealth
         ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
         : HoursSinceLastSuccess;
 
-    /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
-    /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
-    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity.
-    /// Internal since #2296: the tool's sweep-pressure roll-up amortizes each collector's average
-    /// duration by this same cadence, so both readers of it share one resolution.</summary>
+    /// <summary>The collector's cadence, routed through <c>EffectiveRecurringIntervalMinutes</c> (#4000) so an
+    /// on-load collector's catalog 0 reads as the daily recapture interval, which is what lets
+    /// <see cref="CollectorHealthClassifier.Classify"/> band it on the SAME ladder as any other. A name the
+    /// catalog doesn't know keeps 0 and the classifier's floor thresholds, as before #4000: resolving it to
+    /// daily too would leave a collector that went dark HEALTHY for a day and a half. The banding uses the
+    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity. Internal
+    /// since #2296: the tool's sweep-pressure roll-up amortizes each collector's average duration by this same
+    /// cadence, so both readers of it share one resolution.</summary>
     internal int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
+        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+            ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
+            : 0;
 
-    public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
+    /// <summary>
+    /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
+    /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
+    /// answer everywhere else.
+    ///
+    /// <para>The floor is applied outside <c>Classify</c> rather than as an eleventh parameter, and
+    /// deliberately: that signature takes RUN-CLASS COUNTS (plus, since #4748, the newest run's
+    /// partial-failure note - the run's own outcome, still a run-class fact) and nothing about output or
+    /// currency, a discipline both SKUs' suites pin off the type. A regression is a fact about rows stored and the
+    /// order of two instants, so feeding it in would be exactly the leak those pins refuse. The ladder
+    /// stays a function of the counts; the floor is a separate, strictly-louder decision composed on
+    /// top of it.</para>
+    /// </summary>
+    public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
+        CollectorHealthClassifier.Classify(
+            TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
+        /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
+           that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
+           would return HEALTHY forever. */
+        AnyRegression);
 }

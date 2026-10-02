@@ -10,25 +10,33 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>One Query Store regression row — the DuckDB twin of Darling's
 /// <c>DarlingQueryStoreRegressionReader.RegressionRow</c>. Durations and CPU are ms (converted from the
-/// stored microseconds); reads are raw pages; the percents are plain deltas.</summary>
+/// stored microseconds); reads are raw pages; the percents are plain deltas.
+/// <para>The three percents are NULLABLE (#3541 A12, contract rule 5). Each divides through
+/// <c>NULLIF(baseline, 0)</c>, so a query whose baseline side is 0 — no logical reads in every capture before
+/// the window, then 50,000 per execution inside it — has no ratio: the SQL returns NULL, and the reader used
+/// to coerce it to 0, which published the most dramatic possible I/O regression as
+/// <c>io_regression_percent: 0</c>, "no change". NULL stays NULL here and the tool says why. The CPU percent
+/// cannot actually arrive NULL (the WHERE gate <c>&gt; 25</c> drops a NULL comparison), but it is typed like
+/// its siblings so the three cannot drift in how they treat a missing denominator.</para></summary>
 public sealed class QueryStoreRegressionRow
 {
     public string DatabaseName { get; set; } = "";
     public long QueryId { get; set; }
     public double BaselineDurationMs { get; set; }
     public double RecentDurationMs { get; set; }
-    public double DurationRegressionPercent { get; set; }
+    public double? DurationRegressionPercent { get; set; }
     public double BaselineCpuMs { get; set; }
     public double RecentCpuMs { get; set; }
-    public double CpuRegressionPercent { get; set; }
+    public double? CpuRegressionPercent { get; set; }
     public double BaselineReads { get; set; }
     public double RecentReads { get; set; }
-    public double IoRegressionPercent { get; set; }
+    public double? IoRegressionPercent { get; set; }
     public double AdditionalDurationMs { get; set; }
     public long BaselineExecCount { get; set; }
     public long RecentExecCount { get; set; }
@@ -42,15 +50,14 @@ public sealed class QueryStoreRegressionRow
 /*
  * The Query Store regressions read (#2484) — Lite's port of Darling's, which is itself the viewer's port
  * of the Dashboard's report.query_store_regressions inline TVF. Two windowed passes over the SAME
- * v_query_store_stats view: BASELINE is every capture BEFORE the window start, RECENT is the window.
+ * v_query_store_stats view: BASELINE is a fixed lookback before the window start, RECENT is the window.
  *
  * Both arms are DEDUPED first, and that is correctness rather than performance. Query Store rows are
  * CUMULATIVE per-interval snapshots and the collector re-fetches an open interval every cycle, so the same
  * interval is stored repeatedly with a growing execution_count. This read is the most exposed of any to
- * that: the baseline arm is UNBOUNDED (potentially months) while the recent arm is a short window, so the
- * two arms have systematically different re-collection density per interval — which alone moves the
- * averages the regression percent is computed from and the 25% CPU gate, manufacturing and hiding
- * regressions for reasons that have nothing to do with the query.
+ * that: the baseline arm and the recent arm can have systematically different re-collection density per
+ * interval — which alone moves the averages the regression percent is computed from and the 25% CPU gate,
+ * manufacturing and hiding regressions for reasons that have nothing to do with the query.
  *
  * One deliberate difference from Darling's: the query-text sample comes only from MAX(query_text) on the
  * fact rows. Darling resolves it from collect.query_store_text (#2150) and falls back to the fact rows;
@@ -60,8 +67,19 @@ public sealed class QueryStoreRegressionRow
 public partial class LocalDataService
 {
     /// <summary>
+    /// The baseline's own lookback (Lite's twin of Darling's #4195 fix): a fixed 7 days ending at the recent
+    /// window's start, so the comparison period stops moving with retention. Before this the baseline was
+    /// every retained row before the window with NO lower bound, so its cost tracked how much history the
+    /// store still held rather than the window asked for. A regression against a baseline OLDER than 7 days
+    /// is no longer caught; a server retaining less than 7 days of Query Store history is unaffected — the
+    /// bound never reaches further back than the unbounded read already stopped.
+    /// </summary>
+    public const int BaselineLookbackDays = 7;
+
+    /// <summary>
     /// The queries whose Query Store performance got WORSE over [now - <paramref name="hoursBack"/>, now]
-    /// compared with everything collected before it, ranked by execution-count-weighted extra duration.
+    /// compared with a fixed <see cref="BaselineLookbackDays"/>-day baseline ending at the window's start,
+    /// ranked by execution-count-weighted extra duration.
     /// </summary>
     public async Task<List<QueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
         int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
@@ -69,9 +87,11 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
-        var limitIndex = 4 + dbValues.Count;
+        var baselineParamIndex = 4 + dbValues.Count;
+        var limitIndex = baselineParamIndex + 1;
 
         command.CommandText = @"
 WITH deduped_baseline AS (
@@ -92,6 +112,7 @@ WITH deduped_baseline AS (
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
+    AND   collection_time >= $" + baselineParamIndex + @"
     AND   collection_time < $2" + dbClause + @"
 ),
 deduped_recent AS (
@@ -181,6 +202,7 @@ LIMIT $" + limitIndex;
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
 
         var rows = new List<QueryStoreRegressionRow>();
@@ -193,13 +215,13 @@ LIMIT $" + limitIndex;
                 QueryId = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
                 BaselineDurationMs = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
                 RecentDurationMs = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
-                DurationRegressionPercent = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                DurationRegressionPercent = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
                 BaselineCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 RecentCpuMs = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
-                CpuRegressionPercent = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
+                CpuRegressionPercent = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
                 BaselineReads = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
                 RecentReads = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
-                IoRegressionPercent = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+                IoRegressionPercent = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
                 AdditionalDurationMs = reader.IsDBNull(11) ? 0 : ToDouble(reader.GetValue(11)),
                 BaselineExecCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
                 RecentExecCount = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
@@ -215,7 +237,8 @@ LIMIT $" + limitIndex;
     }
 
     /// <summary>
-    /// Whether this server has Query Store rows BEFORE the window, and whether it has any INSIDE it.
+    /// Whether this server has Query Store rows in the baseline lookback before the window, and whether it
+    /// has any INSIDE it.
     /// <para>One round trip for the two facts that decide what an empty regression result means, run only
     /// on the empty path. Zero regressions is four states here, not two, and only one of them is good news.
     /// The dangerous one is a server whose entire collected history sits INSIDE the requested window: it
@@ -229,7 +252,8 @@ LIMIT $" + limitIndex;
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
 
         command.CommandText = @"
 SELECT
@@ -237,6 +261,7 @@ SELECT
         SELECT 1
         FROM v_query_store_stats
         WHERE server_id = $1
+        AND   collection_time >= $4
         AND   collection_time < $2
     ) AS has_baseline,
     EXISTS (
@@ -250,6 +275,7 @@ SELECT
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
 
         using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync())

@@ -50,6 +50,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpFleetSweepTools
 {
     [McpServerTool(Name = "get_sweep_reports"), Description(
+        "Reads the scheduled Fleet Sweep Report: the timeline for the window, the newest sweep in full, and the " +
+        "watch worklist (default: open+carried only; pass watch_state for pending/closed); pass sweep_id (a " +
+        "STRING) for one sweep. MUTE SEMANTICS: alerts_enabled false means DELIVERY WAS OFF that window; such a " +
+        "sweep carries would_have_paged (present-and-empty means nothing would have paged; ABSENT on an " +
+        "alerts-on sweep). QUIET IS NOT CLEAN: instruments_alive false means the sweep could not prove its data " +
+        "sources; read instrument_liveness before trusting a quiet window. Stored read. <<GUIDE>> " +
         "Reads the scheduled Fleet Sweep Reports - the stateful whole-fleet summaries the service persists at " +
         "the configured cadence (get_alert_settings' fleet_sweep group holds the knobs; default hourly). One " +
         "call returns the sweep timeline for the window (each sweep's full document embedded), the newest " +
@@ -68,7 +74,8 @@ public sealed class DarlingMcpFleetSweepTools
         "instruments_alive: false means the sweep could NOT prove its own data sources - a dead reader, a " +
         "silent fleet outside the post-restart settle window, or a frozen alert-pass counter beside a " +
         "delivering path. Read the instrument_liveness block before believing any quiet card on that sweep: " +
-        "an empty window there is unreadable, not healthy. " +
+        "an empty window there is unreadable, not healthy. Sweep content reaches the alert channels through " +
+        "at most one daily rollup (INFO, master-gated); this tool and the web feed are the full-cadence record. " +
         "Watch items carry entry/exit hysteresis (the bars ride the payload beside the counters); the default " +
         "worklist view is open plus carried, because open lasts exactly one sweep by design - ask for a named " +
         "state (pending, open, carried, closed) with watch_state. A stored read over the monitoring store; no " +
@@ -89,7 +96,8 @@ public sealed class DarlingMcpFleetSweepTools
         [Description("One sweep's id, AS A STRING (from the timeline's sweep_id). When set, returns that " +
             "sweep in full and nothing else; unparseable or unknown ids are refused/reported, never rounded.")] string? sweep_id = null,
         [Description("Watch-item state filter: pending, open, carried, or closed. Omit for the default view " +
-            "(open + carried - what is standing right now).")] string? watch_state = null)
+            "(open + carried - what is standing right now).")] string? watch_state = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -99,33 +107,33 @@ public sealed class DarlingMcpFleetSweepTools
                    and the miss would read as retention. */
                 if (!long.TryParse(sweep_id, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id))
                 {
-                    return $"Invalid sweep_id value '{sweep_id}'. Expected a whole number as a string, " +
-                        "exactly as the timeline's sweep_id field spells it.";
+                    return McpHelpers.Refusal("sweep_id", $"Invalid sweep_id value '{sweep_id}'. Expected a whole number as a string, " +
+                        "exactly as the timeline's sweep_id field spells it.");
                 }
 
-                var run = await FleetSweepStore.GetSweepAsync(postgres, id, CancellationToken.None);
+                var run = await FleetSweepStore.GetSweepAsync(postgres, id, cancellationToken);
                 return run is null
                     ? McpHelpers.Status(
                         "empty",
                         $"No sweep with id {id} exists - pruned by retention, or never recorded. The timeline " +
                         "(call this tool without sweep_id) shows what the store holds.")
-                    : (await BuildDetailAsync(postgres, logger, run)).ToJsonString();
+                    : (await BuildDetailAsync(postgres, run, cancellationToken)).ToJsonString();
             }
 
             var windowError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (windowError != null) return windowError;
 
-            var stateError = DarlingFleetSweepEndpoints.ValidateWatchState(watch_state);
+            var stateError = DarlingFleetSweepEndpoints.ValidateWatchState(watch_state, parameterName: "watch_state");
             if (stateError != null) return stateError;
 
             var windowStart = windowEnd.AddHours(-hours_back);
             var runs = await FleetSweepStore.GetSweepsBySpanAsync(
-                postgres, windowStart, windowEnd, logger, CancellationToken.None);
+                postgres, windowStart, windowEnd, cancellationToken);
 
             /* The latest sweep is the landing document — read OUTSIDE the caller's window on purpose, the
                web feed's own landing shape: an agent asking about a quiet historical hour still learns what
                the newest sweep says now, and the timeline answers the window it asked about. */
-            var latest = await FleetSweepStore.GetLatestSweepAsync(postgres, CancellationToken.None);
+            var latest = await FleetSweepStore.GetLatestSweepAsync(postgres, cancellationToken);
             if (latest is null)
             {
                 return McpHelpers.Status(
@@ -136,41 +144,53 @@ public sealed class DarlingMcpFleetSweepTools
             }
 
             var watchItems = watch_state is null
-                ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, logger, CancellationToken.None)
-                : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, watch_state, logger, CancellationToken.None);
+                ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, cancellationToken)
+                : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, watch_state, cancellationToken);
 
             /* The worklist's names, through the web feed's own gate-and-read (#3482) — the
                ValidateWatchState sharing pattern, so the two surfaces cannot drift on when names are
                joined, and a failed read costs the names, never the worklist. */
             var watchItemNames = await DarlingFleetSweepEndpoints.ReadWatchItemNamesAsync(
-                postgres, watchItems, logger, CancellationToken.None);
+                postgres, watchItems, logger, cancellationToken);
 
             var result = FleetSweepPresentation.BuildTimelineNode(runs, windowStart, windowEnd);
-            result["latest"] = await BuildDetailAsync(postgres, logger, latest);
+            result["latest"] = await BuildDetailAsync(postgres, latest, cancellationToken);
             result["watch_state"] = watch_state ?? "open + carried (default)";
             result["watch_items"] = FleetSweepPresentation.BuildWatchItemsNode(watchItems, watchItemNames);
             return result.ToJsonString();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4315: the child presentation reads above now throw instead of log-and-degrade, so this
+               is the ONE place a sweep-report fault is traced for the MCP path — the #3473 review's
+               reason this tool carries its own logger seat unlike get_fleet_overview/get_ag_health.
+               McpHelpers.FormatError still answers the tool's usual error envelope; this only adds the
+               service-log line the removed internal catches used to write.
+
+               Reached through /api/read/get_sweep_reports, a fault logs TWICE, on purpose: this line
+               carries the exception and its stack, and DarlingWebEndpoints' ToHttpResult ->
+               ServerErrorResult line (the same one every other /api/read/* tool's fault writes) carries
+               the route and the elapsed time. Two lines, two different pieces of the same fault — not a
+               duplicate to collapse. */
+            logger?.LogError(ex, "get_sweep_reports failed: {Message}", ex.Message);
             return McpHelpers.FormatError("get_sweep_reports", ex);
         }
     }
 
     /// <summary>One sweep's full document — the web feed's <c>BuildDetailAsync</c> twin over the same
-    /// builders and the same presentation reads, log-and-degrade with the host's logger (#3473 review):
-    /// a child fault still costs its section and never the answer, but now leaves a trace, so "why did
-    /// the ledger section disappear" is answerable from the service log instead of unknowable. The
-    /// ledger is read only for a master-off sweep, because the engine writes none otherwise and the
-    /// builder OMITS the key on an alerts-on sweep by contract.</summary>
-    private static async Task<JsonObject> BuildDetailAsync(NpgsqlDataSource postgres, ILogger? logger, FleetSweepRun run)
+    /// builders and the same presentation reads. THROWS on a store fault (#4315): a verdicts or
+    /// would-have-paged fault now fails the whole answer rather than costing only its section, caught
+    /// by <see cref="GetSweepReports"/>'s outer try, which logs and answers the tool's usual error
+    /// envelope. The ledger is read only for a master-off sweep, because the engine writes none
+    /// otherwise and the builder OMITS the key on an alerts-on sweep by contract.</summary>
+    private static async Task<JsonObject> BuildDetailAsync(NpgsqlDataSource postgres, FleetSweepRun run, CancellationToken cancellationToken = default)
     {
         var verdicts = await FleetSweepStore.GetServerVerdictsAsync(
-            postgres, run.SweepId, logger, CancellationToken.None);
+            postgres, run.SweepId, cancellationToken);
 
         var ledger = run.AlertsEnabled
             ? new List<FleetSweepWouldHavePagedEntry>()
-            : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, logger, CancellationToken.None);
+            : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, cancellationToken);
 
         return FleetSweepPresentation.BuildSweepDetailNode(run, verdicts, ledger);
     }

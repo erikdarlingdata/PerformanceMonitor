@@ -285,4 +285,20 @@ public sealed record ForcePlanTarget(
        one shape for ALL parameter values — and is the standing gate for the future auto-force bot:
        a flagged target is never auto-forced, it gets an investigate verdict. Display + disclosure
        only. Appended with a default for the same wire-compatibility reasons as ReplicaRole. */
-    bool ParameterSensitivityCoFired = false);
+    bool ParameterSensitivityCoFired = false,
+
+    /* #3953: when the best plan last ran, from the drill-down's best_plan_last_seen (naive UTC). Null on a
+       finding written before the column existed, when raw's 4-day retention already capped the age. The
+       unattended bot's age gate reads it (ForcePlanBotPolicy.MaxBestPlanAgeDays). Display and gating only,
+       never an execution input; appended with a default for the same wire-compatibility reasons. */
+    System.DateTime? BestPlanLastSeenUtc = null,
+
+    /* #4736: how old the best plan was when the finding was built, in days from BestPlanLastSeenUtc to the
+       analysis window's end. That is the reference the advice's "it last ran N days ago" uses
+       (best_plan_age_days), so every target says about itself what the prose says about the worst offender.
+       Null when BestPlanLastSeenUtc is null or the finding carries no window end. Display only: never an
+       execution input and never a blocker (age narrows only the unattended bot, which reads
+       BestPlanLastSeenUtc against its own clock). Appended with a default for the same wire-compatibility
+       reasons. Mirrored, with BestPlanLastSeenUtc, on ForcePlanTargetDto (PerformanceMonitor.Notifications),
+       so a persisted action reads back with both. */
+    double? BestPlanAgeDays = null);

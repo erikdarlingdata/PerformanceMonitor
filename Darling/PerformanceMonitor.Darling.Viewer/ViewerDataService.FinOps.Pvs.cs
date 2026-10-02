@@ -93,10 +93,19 @@ ORDER BY p.database_name, p.collection_time";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* #3653: a NULL size is an UNMEASURED point (the collector could not read the version store that
+               pass), not an empty one — the same class as the trend rates' fabricated first-point 0 (#3642).
+               It is skipped rather than plotted as 0 MB, which would draw a cliff into a series that has none
+               and drag the legend's max toward it. Twinned with Lite's reader. */
+            if (reader.IsDBNull(2))
+            {
+                continue;
+            }
+
             items.Add(new PvsTrendPoint(
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.GetDateTime(1),
-                reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2)),
+                Convert.ToDouble(reader.GetValue(2)),
                 reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3))));
         }
 

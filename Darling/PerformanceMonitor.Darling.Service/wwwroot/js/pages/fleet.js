@@ -13,7 +13,7 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
-import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
 import { VIZ, navigateServer } from "../panels.js";
 
 const BAND_RANK = { Offline: 0, Critical: 1, Warning: 2, Healthy: 3 };
@@ -165,7 +165,7 @@ function tagPills(c) {
 export async function renderFleet(main) {
   mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
 
-  const res = await apiGet("/api/fleet");
+  const res = await apiGetFleet();
   if (res.kind === "error") {
     mount(main, [pageHead(null), errorStrip(res.message)]);
     return;
@@ -451,10 +451,14 @@ function groupControl() {
 /*
  * #3017: the deadlock total's denominator, as a VISIBLE sub-line rather than a tooltip.
  *
- * total_deadlocks comes out of v_deadlocks, which is the SQL Server extended-event capture and nothing else,
- * so it is structurally zero on a PostgreSQL fleet — permanently, whatever those clusters do. Zero is also
- * exactly what a genuinely quiet SQL Server fleet reports, and the tile could not tell an operator which one
- * they were looking at. The API answers that (deadlock_coverage), and this renders it.
+ * total_deadlocks is each engine's own instrument summed across the fleet — the SQL Server extended-event
+ * capture, and since #3539 the PostgreSQL server counter differenced over the window — so a server whose
+ * deadlock-source collector is silent or denied contributes a structural zero. Zero is also exactly what a
+ * genuinely quiet fleet reports, and the tile could not tell an operator which one they were looking at.
+ * The API answers that (deadlock_coverage), and this renders it; the note on the tile's title names how many
+ * of the read servers were counted the counter way (postgres_servers), which is a sub-count of servers_read.
+ * (Before #3539 a PostgreSQL target was structurally uncounted and this sub-line read "N of M" on any mixed
+ * fleet; a PostgreSQL fleet whose pg_database_stats collectors run now reads "all".)
  *
  * ALWAYS shown when the API reports coverage, including at full coverage, for two reasons. A line that
  * appeared only on partial coverage would make its ABSENCE the load-bearing signal, which an operator has to
@@ -545,9 +549,25 @@ function rollup(d) {
 
 function serverCard(c) {
   const cls = bandClass(c.band);
+  /* #3528: the band's fold skips Unknown, so a card can read Healthy off one measured metric of six —
+     say so instead of rendering an unqualified green. The counts are the server's own (R1: read the
+     pre-computed field, never re-derive); an awaiting card keeps its plain status, which already says
+     nothing has been measured yet. */
+  const coverage =
+    c.metric_count > 0 && c.measured_metric_count < c.metric_count
+      ? " · " + c.measured_metric_count + " of " + c.metric_count + " measured"
+      : "";
+  /* #3935: an Offline card's last collection can be days old, or absent (nothing in the fleet read's
+     window), so it reads as an age, never as a bare time of day that implies today. */
+  const lastCollect =
+    c.is_online === false
+      ? c.last_collection
+        ? " · last collect " + relTime(c.last_collection)
+        : " · no recent collection"
+      : " · last collect " + localClock(c.last_collection);
   const statusLine = c.awaiting_first_collection
     ? el("div", { class: "status-line awaiting", text: c.status })
-    : el("div", { class: "status-line", text: c.status + " · last collect " + localClock(c.last_collection) });
+    : el("div", { class: "status-line", text: c.status + lastCollect + coverage });
 
   return el(
     "div",
@@ -625,16 +645,25 @@ export function metricBands(c) {
      the reachability signal the card already carries (is_online, the same one that bands the card Offline and
      titles the header "no recent collection"): when the server is offline the chip reads "Stale" in the neutral
      Unknown tone instead of a green "OK · N healthy" (the "no recent collection" detail carries the specifics,
-     and "Stale" is the word the Collection Health tab lands on for these rows once its own floor is crossed). */
+     and "Stale" is the word the Collection Health tab lands on for these rows once its own floor is crossed).
+
+     #3539 A6: a REACHABLE server with no collector banded at all (collector_count 0, nothing failing) arrives
+     with collector_severity "Unknown" from the shared band, and its value reads "n/a" — the chip's word for a
+     metric with no reading (the Threads chip's) — rather than "OK". R1: the severity is read off the card, not
+     re-derived here; only the WORD keys on the count, and only so a green word never sits under a grey chip. */
   const collectorsStale = c.is_online === false;
   const collectorsValue = collectorsStale
     ? "Stale"
     : c.failed_collector_count > 0
     ? fmtInt(c.failed_collector_count) + " failing"
-    : "OK";
+    : c.collector_count > 0
+    ? "OK"
+    : "n/a";
   const collectorsDetail = collectorsStale
     ? "no recent collection" + (c.last_collection ? " · last " + relTime(c.last_collection) : "")
-    : fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing";
+    : c.collector_count > 0
+    ? fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing"
+    : "no collector banded yet";
   const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
 
   return el("div", { class: "metric-bands" }, [

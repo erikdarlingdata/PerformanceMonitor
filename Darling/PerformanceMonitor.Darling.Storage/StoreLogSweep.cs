@@ -178,6 +178,90 @@ WHERE capture_time < $1";
         bool OffsetReset,
         StoreLogClassifier.Census Census);
 
+    /// <summary>How many stored rows one re-mask pass examines (#3915, #3944): a bounded slice per hourly tick, so
+    /// a store with a long retained history finishes over a few ticks instead of overrunning one tick's
+    /// budget.</summary>
+    public const int MaxRemaskRowsPerPass = 5000;
+
+    /// <summary>How long one re-mask slice may run (#3920's review). It shares the hourly self-metrics budget,
+    /// and a slice that ran that budget out would take the collector-cost flush after it down too; a slice that
+    /// runs out of its own time gives up alone and resumes from its cursor next hour.</summary>
+    public static readonly TimeSpan RemaskSliceBudget = TimeSpan.FromSeconds(60);
+
+    /// <summary>One page of rows to re-mask, in physical order after <c>$1</c> (null for the start).</summary>
+    public const string RemaskPageSql = @"
+SELECT
+    e.ctid::text,
+    e.event_class,
+    e.message_text,
+    e.sample_line
+FROM collect.store_log_events AS e
+WHERE ($1::tid IS NULL OR e.ctid > $1::tid)
+AND   (e.message_text IS NOT NULL OR e.sample_line IS NOT NULL)
+ORDER BY e.ctid
+LIMIT $2";
+
+    /// <summary>Writes one row's re-masked key and sample back, by the physical row it was read from.</summary>
+    public const string RemaskUpdateSql = @"
+UPDATE collect.store_log_events
+SET message_text = $1,
+    sample_line = $2
+WHERE ctid = $3::tid";
+
+    /// <summary>
+    /// Brings rows stored before this build to its rules (#3915, #3944), one bounded slice per call. The
+    /// releases that captured the store's log (3.7.0 through 3.8.0) kept each entry whole, so an ERROR's
+    /// STATEMENT line with a password literal, and the first #3899 build's raw slow statements, sit in
+    /// <c>collect.store_log_events</c> for the sweep's 400-day retention, readable by the viewer and mcp roles;
+    /// and their message is the text rather than its grouping key. Each row goes through
+    /// <see cref="StoreLogClassifier.MaskStoredEvent"/>, which normalizes its SQL and re-keys its message the way
+    /// a new capture does, and is rewritten only if that changed it; the function is idempotent, so rows this
+    /// build wrote come back unchanged (bar a sample the cap cut inside a token, rewritten once) and a pass that is
+    /// cut short loses nothing. Returns the cursor to resume from, null once the table's end is reached, with how
+    /// many rows were examined and rewritten.
+    /// </summary>
+    public static async Task<(string? NextCursor, int Examined, int Rewritten)> RemaskStoredEventsAsync(
+        NpgsqlConnection connection, string? afterCursor, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var page = new List<(string Ctid, string EventClass, string? Message, string? Sample)>();
+        await using (var select = new NpgsqlCommand(RemaskPageSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+        {
+            select.Parameters.Add(new NpgsqlParameter { Value = (object?)afterCursor ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            select.Parameters.AddWithValue(MaxRemaskRowsPerPass);
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                page.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3)));
+            }
+        }
+
+        var rewritten = 0;
+        foreach (var row in page)
+        {
+            var (message, sample) = StoreLogClassifier.MaskStoredEvent(row.EventClass, row.Message, row.Sample);
+            if (string.Equals(message, row.Message, StringComparison.Ordinal)
+                && string.Equals(sample, row.Sample, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            await using var update = new NpgsqlCommand(RemaskUpdateSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+            update.Parameters.Add(new NpgsqlParameter { Value = (object?)message ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            update.Parameters.Add(new NpgsqlParameter { Value = (object?)sample ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            update.Parameters.AddWithValue(row.Ctid);
+            rewritten += await update.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var next = page.Count < MaxRemaskRowsPerPass ? null : page[^1].Ctid;
+        return (next, page.Count, rewritten);
+    }
+
     /// <summary>
     /// One capture: list the log directory, read what is unread in each file, classify it, and write the
     /// census, the capture row and the advanced marker.
@@ -317,6 +401,17 @@ WHERE capture_time < $1";
     public static bool ShouldWriteHeartbeat(int consumedFiles, int candidateFiles) =>
         consumedFiles == 0 && candidateFiles > 0;
 
+    /// <summary>
+    /// Whether a file in the log directory is the stderr-format log <see cref="StoreLogClassifier"/> reads (#3944's
+    /// review). A store that also logs to csvlog or jsonlog writes <c>.csv</c> / <c>.json</c> files beside it (the
+    /// name with its <c>.log</c> suffix swapped, or the suffix appended). Their records have no tab continuation
+    /// and no <c>SEVERITY:  </c> field, so a record whose text happened to hold one would open an entry that took
+    /// in the records after it, their statement columns included, and a retained entry keeps its prose as written.
+    /// </summary>
+    public static bool IsStderrLogFile(string logFile) =>
+        !logFile.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+        && !logFile.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>One row of <see cref="LogDirectoryListSql"/>.</summary>
     private readonly record struct Candidate(string LogFile, long SizeBytes, long? StoredOffset, long? StoredLastSize);
 
@@ -329,6 +424,11 @@ WHERE capture_time < $1";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            if (!IsStderrLogFile(reader.GetString(0)))
+            {
+                continue;
+            }
+
             rows.Add(new Candidate(
                 LogFile: reader.GetString(0),
                 SizeBytes: reader.IsDBNull(1) ? 0 : reader.GetInt64(1),

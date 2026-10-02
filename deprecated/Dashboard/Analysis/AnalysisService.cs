@@ -362,13 +362,22 @@ public class AnalysisService
     }
 
     /// <summary>
-    /// Mutes a finding pattern so it won't appear in future runs.
+    /// Mutes a finding pattern so it won't appear in future runs. Returns whether the mute row landed
+    /// (see <see cref="SqlServerFindingStore.MuteStoryAsync"/>).
     /// </summary>
-    public async Task MuteFindingAsync(AnalysisFinding finding, string? reason = null)
+    public async Task<bool> MuteFindingAsync(AnalysisFinding finding, string? reason = null)
     {
-        await _findingStore.MuteStoryAsync(
+        return await _findingStore.MuteStoryAsync(
             finding.ServerId, finding.StoryPathHash, finding.StoryPath, reason);
     }
+
+    /// <summary>
+    /// How many stored findings for the server carry the hash right now — the <c>matched_now</c>
+    /// disclosure (#3653, #3615's class). A pass-through to
+    /// <see cref="SqlServerFindingStore.CountStoredFindingsAsync"/>; see its remarks.
+    /// </summary>
+    public Task<long> CountStoredFindingsAsync(int serverId, string storyPathHash) =>
+        _findingStore.CountStoredFindingsAsync(serverId, storyPathHash);
 
     /// <summary>
     /// Cleans up old findings beyond the retention period.

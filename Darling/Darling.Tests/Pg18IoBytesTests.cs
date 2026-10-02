@@ -131,7 +131,9 @@ public sealed class Pg18IoBytesTests
             .Count(l => l.Contains(" AS ", StringComparison.Ordinal)
                         || l.TrimEnd(',') is "backend_type" or "object_type" or "context");
 
-        /* 15 before this rung, plus read_bytes, write_bytes, extend_bytes and byte_counters_tracked. */
-        Assert.Equal(19, items);
+        /* 15 before this rung, plus read_bytes, write_bytes, extend_bytes and byte_counters_tracked, plus the
+           two window totals #3541 A7 appended (window_total_reads, window_total_read_time_ms) - which the
+           positional reader lifts onto the PAGE at ordinals 19 and 20 rather than onto the row. */
+        Assert.Equal(21, items);
     }
 }

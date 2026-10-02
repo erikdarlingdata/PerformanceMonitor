@@ -1,0 +1,44 @@
+name: Runtime currency
+
+# #3906: the Darling store runtime (the PostgreSQL + TimescaleDB pinned in Darling/tools/fetch-pg-runtime.ps1)
+# is the one shipped dependency nothing else watches. Dependabot covers the NuGet packages, the Actions and,
+# through its dotnet-sdk updates, the .NET runtime the self-contained builds pack. But the EDB binaries zip
+# and the TimescaleDB release asset are URLs in a script. 3.8.0 shipped PostgreSQL 18.4 a month after 18.6
+# fixed 23 CVEs in it, and TimescaleDB 2.28.1 after 2.29.1 fixed a high-severity advisory. A prospective
+# user's security review found both before anyone here did.
+#
+# Weekly, and red when behind. GitHub notifies whoever last edited this schedule when a scheduled run
+# fails, and the run's annotations name the version to move to. Nothing is opened or pushed from here: a
+# new runtime is a store upgrade on every field host (DarlingStoreUpgrade), so it goes through a pull
+# request and the full live suite like any other change. What counts as "behind" is documented in the
+# script, which runs the same way by hand.
+#
+# Advisory rather than a merge gate: it is not a pull_request check, so an upstream release can never
+# turn an unrelated pull request red. Scheduled workflows run from the default branch, so this starts
+# checking once it reaches main.
+on:
+  schedule:
+    # Mondays, after the Dependabot sweep has opened its pull requests.
+    - cron: '23 14 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-currency:
+    name: Bundled PostgreSQL and TimescaleDB are current
+    runs-on: ubuntu-latest
+    # Two small HTTP reads and a comparison. Anything approaching this is wedged.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Compare the pins with upstream
+        shell: pwsh
+        env:
+          # Only for the advisory listing's rate limit; the endpoint is public.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./Darling/tools/check-runtime-currency.ps1

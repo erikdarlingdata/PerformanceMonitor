@@ -24,6 +24,7 @@ public sealed class McpHostService : BackgroundService
     private readonly ServerManager _serverManager;
     private readonly MuteRuleService _muteRuleService;
     private readonly DuckDbInitializer _duckDb;
+    private readonly ScheduleManager? _scheduleManager;
     private readonly int _port;
     private WebApplication? _app;
 
@@ -34,13 +35,41 @@ public sealed class McpHostService : BackgroundService
     /// </summary>
     public int Port => _port;
 
-    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port)
+    /// <param name="scheduleManager">#3896: the collector schedules, so the analysis tools bound each
+    /// latest-value read by the cadence its collector runs at. Null bounds by the shipped defaults.</param>
+    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, ScheduleManager? scheduleManager = null)
     {
         _dataService = dataService;
         _serverManager = serverManager;
         _muteRuleService = muteRuleService;
         _duckDb = duckDb;
         _port = port;
+        _scheduleManager = scheduleManager;
+    }
+
+    /// <summary>
+    /// #4726: registers the analysis service TRANSIENT, so every MCP call gets its own instance. One shared instance
+    /// answered a second, overlapping analyze_server call with an empty list (its busy check) and the tool then read
+    /// the FIRST call's running state, so the second server got "No significant findings" for a server it never
+    /// analyzed. The scheduler and the Recommendations tab keep their own instances. Every instance is handed the
+    /// store's ONE shared baseline tier (#3941), so an analysis hour a scheduled pass already computed reads no
+    /// 30-day baseline. Extracted so a test resolves the service from the production registration instead of a
+    /// hand-copied one that could drift from it.
+    /// </summary>
+    internal static void RegisterAnalysisService(
+        IServiceCollection services,
+        DuckDbInitializer duckDb,
+        IPlanFetcher planFetcher,
+        ServerManager serverManager,
+        ScheduleManager? schedules)
+    {
+        services.AddTransient<AnalysisService>(_ => new AnalysisService(
+            duckDb,
+            planFetcher,
+            collectorFrequencyMinutes: schedules is null
+                ? null
+                : (serverId, collector) => schedules.GetFrequencyForStorageServer(serverManager, serverId, collector),
+            baselineCache: BaselineCache.For(duckDb)));
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -63,7 +92,8 @@ public sealed class McpHostService : BackgroundService
             builder.Services.AddSingleton(_serverManager);
             builder.Services.AddSingleton(_muteRuleService);
             var planFetcher = new SqlPlanFetcher(_serverManager);
-            builder.Services.AddSingleton(new AnalysisService(_duckDb, planFetcher));
+            /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
+            RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);
 
             /* Register MCP server with all tool classes */
             builder.Services
@@ -111,7 +141,28 @@ public sealed class McpHostService : BackgroundService
                 .WithGeminiCompatibleTools<McpConfigHistoryTools>()
                 .WithGeminiCompatibleTools<McpDefaultTraceTools>()
                 .WithGeminiCompatibleTools<McpHealthParserTools>()
-                .WithGeminiCompatibleTools<McpAnalysisTools>();
+                .WithGeminiCompatibleTools<McpAnalysisTools>()
+                /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off
+                   at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Darling twin:
+                   DarlingMcpToolGuideTools. */
+                .WithGeminiCompatibleTools<McpToolGuideTools>()
+                /* The unknown-argument guard (#3870): ONE call-tool filter, registered once, covering
+                   every tool with no per-tool change. A call carrying an argument no tool parameter
+                   declares is refused before dispatch — the refusal names the key and lists what the
+                   tool accepts — instead of being run with the key silently dropped. The SDK binds
+                   arguments by name and ignores the rest, so a misremembered parameter used to produce
+                   an answer to a different question with nothing anywhere saying so; for a surface whose
+                   callers are language models, a silently dropped key is a confidently wrong answer.
+                   The SAME filter object Darling's host registers (shared from
+                   PerformanceMonitor.Common), so the two SKUs cannot refuse differently.
+
+                   #4198 ruled out a second filter here that trimmed any oversized result after the
+                   fact: it would make a tool's own truncated/*_returned fields wrong, cut calls that
+                   explicitly asked for more rows, and drop the newest rows of anything sorted
+                   oldest-first. Each tool sizes its own defaults to fit instead — see
+                   McpResponseBudget.DefaultBytes, the one shared size target both SKUs read. */
+                .WithRequestFilters(filters => filters
+                    .AddCallToolFilter(McpUnknownArgumentGuard.Instance));
 
             _app = builder.Build();
 

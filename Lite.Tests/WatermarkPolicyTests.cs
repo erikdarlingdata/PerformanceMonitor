@@ -265,8 +265,12 @@ public sealed class WatermarkPolicyTests
         var yaml = File.ReadAllText(Path.Combine(RepoRoot(), ".github", "workflows", "build.yml"))
             .Replace("\r\n", "\n", StringComparison.Ordinal);
 
-        var at = yaml.IndexOf("\n            lite:\n", StringComparison.Ordinal);
-        Assert.True(at > 0, "build.yml's 'lite' path filter is gone — find where it moved before editing this test");
+        /* #3887: the filter that gates the SUITE is the lite-tests matrix job's 'lite_shard' — a
+           byte-for-byte copy of 'lite', pinned equal by CrossAppGuardCiGateTests. This pin follows the
+           suite rather than the name, because what it protects is the Darling Service tree REACHING the
+           tests; 'lite' itself still gates the Lite build and publish in the build job. */
+        var at = yaml.IndexOf("\n            lite_shard:\n", StringComparison.Ordinal);
+        Assert.True(at > 0, "build.yml's 'lite_shard' path filter is gone — find where it moved before editing this test");
 
         /* The block runs to the next area key at the same indent; its own entries are indented deeper. */
         var rest = yaml[(at + 1)..];
@@ -275,11 +279,17 @@ public sealed class WatermarkPolicyTests
 
         Assert.Contains("Darling/PerformanceMonitor.Darling.Service/**/!(*.md)", block, StringComparison.Ordinal);
 
-        /* The step that consumes it. If "Run Lite tests" ever stops reading `lite`, the entry above is
-           decoration and this test is the only thing that would notice. */
-        var step = yaml.IndexOf("name: Run Lite tests", StringComparison.Ordinal);
-        Assert.True(step > 0, "the 'Run Lite tests' step is gone — find where it moved before editing this test");
-        Assert.Contains("steps.filter.outputs.lite == 'true'", yaml[step..(step + 400)], StringComparison.Ordinal);
+        /* The step that consumes it. If the sharded run ever stops reading `lite_shard`, the entry above
+           is decoration and this test is the only thing that would notice.
+
+           Matched on the FULL step name, not a prefix: since #3887 there are two steps whose names begin
+           "Run Lite tests" — the build job's release-only unsharded pass and the matrix job's sharded one
+           — and IndexOf on the prefix finds the release-only one, whose `if` is the release guard and
+           carries no filter at all. That is exactly how this pin first went red on the change that split
+           the suite, which is the pin working. */
+        var step = yaml.IndexOf("name: Run Lite tests (shard)", StringComparison.Ordinal);
+        Assert.True(step > 0, "the 'Run Lite tests (shard)' step is gone — find where it moved before editing this test");
+        Assert.Contains("steps.filter.outputs.lite_shard == 'true'", yaml[step..(step + 400)], StringComparison.Ordinal);
     }
 
     /// <summary>The repo root, located by walking up from this file's compile-time path — the same idiom
