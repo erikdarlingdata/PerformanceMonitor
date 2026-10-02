@@ -385,6 +385,10 @@ WHERE {alias}.name IN ({literals});";
         return ComposeDropStatement(canonical, scope);
     }
 
+    /// <summary>The stop that goes before a drop over a read-only connection. Not built yet.</summary>
+    public static string StopStatement(string sessionName, string? installId = null) =>
+        throw new NotImplementedException("#4961: the stop is not built yet.");
+
     /// <summary>
     /// <c>DROP EVENT SESSION [name] ON SERVER;</c> or <c>... ON DATABASE;</c>, with no check on the name: the caller has
     /// already limited it to a list it owns. <see cref="DropStatement"/> limits it to <see cref="SessionNames"/> and the plan
@@ -981,6 +985,10 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         return await ReadNamesAsync(connection, FindOthersDatabaseSql!, cancellationToken);
     }
 
+    /// <summary>A test's stand-in for the connection a drop opens: called with the connection string it would open, it answers
+    /// the database the drop's statements run through. Null in production, which opens a SQL connection.</summary>
+    internal Func<string, CancellationToken, Task<IAlwaysOnXeDatabase>>? OpenDatabaseForTests { get; set; }
+
     public async Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(drop);
@@ -990,6 +998,12 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         var connectionString = drop.Session.Scope == XeSessionScope.Database
             ? SqlServerTargetProvider.Instance.WithDatabase(_server.ConnectionString, drop.Session.Database!)
             : _server.ConnectionString;
+
+        if (OpenDatabaseForTests is { } open)
+        {
+            await (await open(connectionString, cancellationToken)).ExecuteAsync(statement, cancellationToken);
+            return;
+        }
 
         using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
