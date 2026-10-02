@@ -816,30 +816,29 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         return new AzureSearchPlan(alwaysOn, off.Drop);
     }
 
+    /// <summary>
+    /// The result of the server-scope search (every engine but Azure SQL Database) for the names the catalog gave: the sessions of
+    /// this install and the shared ones, and the sessions of other installs. Split from the connection so a test drives it
+    /// without a server.
+    /// </summary>
+    internal Task<XeSessionSearch> ServerScopeSearchAsync(IReadOnlyList<string> foundNames, IReadOnlyList<string> otherNames)
+    {
+        var found = foundNames.Select(name => new ExistingXeSession(name, XeSessionScope.Server)).ToList();
+        var others = otherNames.Select(name => new ExistingXeSession(name, XeSessionScope.Server)).ToList();
+        return Task.FromResult(new XeSessionSearch(found, new List<string>()) { Others = others });
+    }
+
     public async Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken)
     {
-        var found = new List<ExistingXeSession>();
-        var problems = new List<string>();
-
         if (!_server.Target.IsAzureSqlDb)
         {
             using var connection = new SqlConnection(_server.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-            foreach (var name in await ReadNamesAsync(connection, FindServerSql, cancellationToken))
-            {
-                found.Add(new ExistingXeSession(name, XeSessionScope.Server));
-            }
-
-            var others = new List<ExistingXeSession>();
-            if (FindOthersServerSql is not null)
-            {
-                foreach (var name in await ReadNamesAsync(connection, FindOthersServerSql, cancellationToken))
-                {
-                    others.Add(new ExistingXeSession(name, XeSessionScope.Server));
-                }
-            }
-
-            return new XeSessionSearch(found, problems) { Others = others };
+            var foundNames = await ReadNamesAsync(connection, FindServerSql, cancellationToken);
+            var otherNames = FindOthersServerSql is null
+                ? new List<string>()
+                : await ReadNamesAsync(connection, FindOthersServerSql, cancellationToken);
+            return await ServerScopeSearchAsync(foundNames, otherNames);
         }
 
         var monitored = await ListAzureDatabasesAsync(applyExclusions: true, cancellationToken);

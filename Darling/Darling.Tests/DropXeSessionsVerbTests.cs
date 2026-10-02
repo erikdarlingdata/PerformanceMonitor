@@ -43,6 +43,9 @@ public sealed class DropXeSessionsVerbTests
     private const string AzureHost = "dropxe.database.windows.net";
 
     private static SqlServerXeSessionCleanupTarget AzureTarget(MonitoredServer self, params MonitoredServer[] registry) =>
+        AzureTarget(facts: null, self, registry);
+
+    private static SqlServerXeSessionCleanupTarget AzureTarget(XeCleanupStoreFacts? facts, MonitoredServer self, params MonitoredServer[] registry) =>
         new(
             new ServerRuntime
             {
@@ -53,7 +56,35 @@ public sealed class DropXeSessionsVerbTests
                 ServerId = self.ServerId,
             },
             sessionNames: null,
-            registry);
+            registry,
+            facts);
+
+    private const int SelfId = 11;
+    private const int SecondId = 12;
+    private const string StoreInstallId = "1a2b3c4d";
+    private const string OwnLongQuery = "PerformanceMonitor_Darling_1a2b3c4d_LongQueryCompletions";
+
+    /// <summary>One row of the store's collector schedules for the long-query collector: a registration's own override, or the
+    /// install's default when <paramref name="serverId"/> is null.</summary>
+    private static ScheduleOverride LongQueryRow(int? serverId, bool enabled) =>
+        new(serverId, "long_query_completions", FrequencyMinutes: null, RetentionDays: null, enabled);
+
+    private static XeCleanupStoreFacts FactsWith(IReadOnlyList<ScheduleOverride>? rows, IReadOnlyDictionary<int, string>? names = null) =>
+        new(StoreInstallId, rows, names);
+
+    /// <summary>Two registrations of one logical server: this one, which excludes gamma, and a second with read-only intent,
+    /// which excludes delta.</summary>
+    private static (MonitoredServer Self, MonitoredServer Second) TwoRegistrations() =>
+        (new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"], StoredServerId = SelfId },
+         new MonitoredServer { Name = "dropxe-ro", Host = AzureHost, ReadOnlyIntent = true, ExcludedDatabases = ["delta"], StoredServerId = SecondId });
+
+    private static SqlServerXeSessionCleanupTarget.AzureSearchPlan PlanWith(XeCleanupStoreFacts? facts)
+    {
+        var (self, second) = TwoRegistrations();
+        return AzureTarget(facts, self, self, second).PlanAzureSearch(
+            monitored: ["master", "alpha", "delta"],
+            every: ["master", "alpha", "gamma", "delta"]);
+    }
 
     /// <summary>
     /// The long-query session is searched in the databases the registration excludes, because a session created before the
@@ -82,21 +113,55 @@ public sealed class DropXeSessionsVerbTests
     }
 
     /// <summary>
-    /// The verb cannot read another registration's long-query schedule, so it counts every other registration of the logical
-    /// server as keeping the session: it leaves each database that registration would create the session in.
+    /// #4961: another registration of the logical server keeps the session when its EFFECTIVE long-query setting is on, its own
+    /// override or else the install's default: the verb leaves each database that registration would create the session in.
     /// </summary>
     [Fact]
     public void TheLongQuerySearch_SkipsADatabaseAnotherRegistrationOfTheServerKeeps()
     {
-        var self = new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"] };
-        var second = new MonitoredServer { Name = "dropxe-ro", Host = AzureHost, ReadOnlyIntent = true, ExcludedDatabases = ["delta"] };
-        var target = AzureTarget(self, self, second);
-
-        var plan = target.PlanAzureSearch(
-            monitored: ["master", "alpha", "delta"],
-            every: ["master", "alpha", "gamma", "delta"]);
+        var plan = PlanWith(FactsWith([LongQueryRow(SecondId, enabled: true)]));
 
         Assert.Equal(new[] { "delta" }, plan.LongQueryDatabases);
+    }
+
+    /// <summary>The install's default can turn a registration's trace on: it keeps the session with no row of its own.</summary>
+    [Fact]
+    public void TheLongQuerySearch_SkipsADatabaseWhenTheInstallsDefaultTurnsTheOtherRegistrationOn()
+    {
+        var plan = PlanWith(FactsWith([LongQueryRow(serverId: null, enabled: true)]));
+
+        Assert.Equal(new[] { "delta" }, plan.LongQueryDatabases);
+    }
+
+    /// <summary>
+    /// #4961: a registration whose long-query trace is off keeps nothing, so the verb drops the session in every database it
+    /// finds it in, the ones that registration would have created it in too. Its own override beats the install's default,
+    /// and with no row at all the collector's default, which is off, applies.
+    /// </summary>
+    [Fact]
+    public void TheLongQuerySearch_DropsInADatabaseTheOtherRegistrationLeavesOff()
+    {
+        var everyDatabase = new[] { "alpha", "gamma", "delta" };
+
+        /* Its own override is off. */
+        Assert.Equal(everyDatabase, PlanWith(FactsWith([LongQueryRow(SecondId, enabled: false)])).LongQueryDatabases);
+
+        /* Its own override beats an install's default that is on. */
+        Assert.Equal(
+            everyDatabase,
+            PlanWith(FactsWith([LongQueryRow(serverId: null, enabled: true), LongQueryRow(SecondId, enabled: false)])).LongQueryDatabases);
+
+        /* No row at all: the collector's own default applies, which is off. */
+        Assert.Equal(everyDatabase, PlanWith(FactsWith([])).LongQueryDatabases);
+    }
+
+    /// <summary>A store whose schedule rows could not be read gives the verb no setting to go by, so it keeps counting every
+    /// other registration of the logical server as keeping the session, as it did before it read them.</summary>
+    [Fact]
+    public void TheLongQuerySearch_WhenTheScheduleRowsCouldNotBeRead_CountsEveryOtherRegistrationAsKeeping()
+    {
+        Assert.Equal(new[] { "delta" }, PlanWith(FactsWith(rows: null)).LongQueryDatabases);
+        Assert.Equal(new[] { "delta" }, PlanWith(facts: null).LongQueryDatabases);
     }
 
     [Fact]
@@ -117,6 +182,176 @@ public sealed class DropXeSessionsVerbTests
 
         Assert.Empty(plan.LongQueryDatabases);
         Assert.Equal(new[] { "alpha" }, plan.AlwaysOnDatabases);
+    }
+
+    // ---- on-premises: this install's long-query session when another registration of this install keeps it (#4961) ---------------
+
+    private static SqlServerXeSessionCleanupTarget OnPremisesTarget(XeCleanupStoreFacts facts, MonitoredServer self, params MonitoredServer[] registry) =>
+        new(
+            new ServerRuntime
+            {
+                Config = self,
+                ConnectionString = "Server=sql01;Encrypt=True",
+                Target = new CollectorTargetInfo(),
+                StorageName = "sql01",
+                ServerId = self.ServerId,
+            },
+            sessionNames: null,
+            registry,
+            facts);
+
+    private static (MonitoredServer Self, MonitoredServer Second) TwoOnPremisesRegistrations() =>
+        (new MonitoredServer { Name = "sql01-a", Host = "sql01-a", StoredServerId = SelfId },
+         new MonitoredServer { Name = "sql01-b", Host = "sql01-b", StoredServerId = SecondId });
+
+    private static Dictionary<int, string> InstanceNames(string? own, string? second)
+    {
+        var names = new Dictionary<int, string>();
+        if (own is not null)
+        {
+            names[SelfId] = own;
+        }
+
+        if (second is not null)
+        {
+            names[SecondId] = second;
+        }
+
+        return names;
+    }
+
+    /// <summary>The server-scope search of a server that holds this install's long-query session, the old shared one and the
+    /// shared deadlock session.</summary>
+    private static Task<XeSessionSearch> OnPremisesSearchAsync(
+        IReadOnlyList<ScheduleOverride>? rows, IReadOnlyDictionary<int, string>? names, params string[] found)
+    {
+        var (self, second) = TwoOnPremisesRegistrations();
+        return OnPremisesTarget(FactsWith(rows, names), self, self, second)
+            .ServerScopeSearchAsync(found.Length == 0 ? [Deadlock, OwnLongQuery, LongQuery] : found, []);
+    }
+
+    private static readonly string[] SharedAndLegacy = [Deadlock, LongQuery];
+
+    /// <summary>
+    /// A server's session is the instance's own, so another registration of this install on the same instance, with its
+    /// long-query trace on, keeps this install's session: the verb leaves it and says why. The shared sessions and the old
+    /// shared long-query session are nobody's keeper session, so they stay in the plan.
+    /// </summary>
+    [Fact]
+    public async Task OnPremises_AKeeperOnTheSameInstance_LeavesThisInstallsLongQuerySession_AndSaysWhy()
+    {
+        var search = await OnPremisesSearchAsync([LongQueryRow(SecondId, enabled: true)], InstanceNames("SQL01", "sql01"));
+
+        Assert.Equal(SharedAndLegacy, search.Sessions.Select(session => session.Name).ToArray());
+        var note = Assert.Single(search.Notes);
+        Assert.Contains(OwnLongQuery, note, StringComparison.Ordinal);
+        Assert.Contains("another registration of this install keeps it on the same instance", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>A name that is not known cannot match: this registration's own, or the keeper's. The session is dropped.</summary>
+    [Fact]
+    public async Task OnPremises_AnUnknownInstanceName_DropsThisInstallsLongQuerySession()
+    {
+        var keeperOn = new[] { LongQueryRow(SecondId, enabled: true) };
+
+        foreach (var names in new[] { InstanceNames(null, "SQL01"), InstanceNames("SQL01", null), InstanceNames(null, null) })
+        {
+            var search = await OnPremisesSearchAsync(keeperOn, names);
+
+            Assert.Equal(new[] { Deadlock, OwnLongQuery, LongQuery }, search.Sessions.Select(session => session.Name).ToArray());
+            Assert.Empty(search.Notes);
+        }
+    }
+
+    [Fact]
+    public async Task OnPremises_AKeeperOnAnotherInstance_DropsThisInstallsLongQuerySession()
+    {
+        var search = await OnPremisesSearchAsync([LongQueryRow(SecondId, enabled: true)], InstanceNames("SQL01", "SQL02"));
+
+        Assert.Equal(new[] { Deadlock, OwnLongQuery, LongQuery }, search.Sessions.Select(session => session.Name).ToArray());
+        Assert.Empty(search.Notes);
+    }
+
+    /// <summary>A registration whose effective trace setting is off keeps nothing, however its instance name reads: its own
+    /// override, or with no row at all the collector's default, which is off.</summary>
+    [Fact]
+    public async Task OnPremises_AKeeperWithItsTraceOff_DoesNotCount()
+    {
+        var sameInstance = InstanceNames("SQL01", "SQL01");
+
+        foreach (var rows in new[] { new[] { LongQueryRow(SecondId, enabled: false) }, Array.Empty<ScheduleOverride>() })
+        {
+            var search = await OnPremisesSearchAsync(rows, sameInstance);
+
+            Assert.Equal(new[] { Deadlock, OwnLongQuery, LongQuery }, search.Sessions.Select(session => session.Name).ToArray());
+            Assert.Empty(search.Notes);
+        }
+    }
+
+    /// <summary>With the schedule rows unreadable, every other registration counts as having its trace on, as on Azure SQL
+    /// Database; the instance names still have to match.</summary>
+    [Fact]
+    public async Task OnPremises_WhenTheScheduleRowsCouldNotBeRead_AKeeperOnTheSameInstanceStillCounts()
+    {
+        var search = await OnPremisesSearchAsync(rows: null, InstanceNames("SQL01", "SQL01"));
+
+        Assert.Equal(SharedAndLegacy, search.Sessions.Select(session => session.Name).ToArray());
+        Assert.Single(search.Notes);
+    }
+
+    /// <summary>The guard is for this install's long-query session alone: with that session not on the server, nothing is left
+    /// and nothing is said.</summary>
+    [Fact]
+    public async Task OnPremises_WithNoLongQuerySessionOfThisInstallOnTheServer_SaysNothing()
+    {
+        var search = await OnPremisesSearchAsync([LongQueryRow(SecondId, enabled: true)], InstanceNames("SQL01", "SQL01"), Deadlock, LongQuery);
+
+        Assert.Equal(SharedAndLegacy, search.Sessions.Select(session => session.Name).ToArray());
+        Assert.Empty(search.Notes);
+    }
+
+    /// <summary>
+    /// Under the real executor: the session left in place is never dropped, the reason is on stderr, and it is a note, not a
+    /// failure, so the exit code stays 0 for a script that removes the server next.
+    /// </summary>
+    [Fact]
+    public async Task OnPremises_TheVerbDoesNotDropTheSessionItLeft_AndPrintsWhyOnStderr()
+    {
+        var (self, second) = TwoOnPremisesRegistrations();
+        var real = OnPremisesTarget(FactsWith([LongQueryRow(SecondId, enabled: true)], InstanceNames("SQL01", "SQL01")), self, self, second);
+        var target = new OnPremisesSearchTarget(real, [Deadlock, OwnLongQuery, LongQuery]);
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await DarlingXeSessionCleanup.RunAsync("sql01", dryRun: false, target, output, error, CancellationToken.None, StoreInstallId);
+
+        Assert.Equal(0, exit);
+        Assert.Equal(SharedAndLegacy, target.Dropped.Select(drop => drop.Session.Name).ToArray());
+        Assert.Contains(OwnLongQuery, error.ToString(), StringComparison.Ordinal);
+        Assert.Contains("keeps it on the same instance", error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(OwnLongQuery, output.ToString(), StringComparison.Ordinal);
+    }
+
+    private sealed class OnPremisesSearchTarget : IXeSessionCleanupTarget
+    {
+        private readonly SqlServerXeSessionCleanupTarget _real;
+        private readonly string[] _found;
+
+        public OnPremisesSearchTarget(SqlServerXeSessionCleanupTarget real, string[] found)
+        {
+            _real = real;
+            _found = found;
+        }
+
+        public List<XeSessionDrop> Dropped { get; } = [];
+
+        public Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken) => _real.ServerScopeSearchAsync(_found, []);
+
+        public Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
+        {
+            Dropped.Add(drop);
+            return Task.CompletedTask;
+        }
     }
 
     // ---- a database the search cannot open: a problem when it is monitored, a note when the registration excludes it ----------
