@@ -925,6 +925,9 @@ public sealed class DarlingWorker : BackgroundService
     /* #4970: the in-flight hourly store-maintenance tick. Only the launch loop writes it. */
     private Task? _storeMaintenanceTick;
 
+    /* #4970: the in-flight hourly store self-metrics tick. Only the launch loop writes it. */
+    private Task? _storeMetricsTick;
+
     /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the
        operator-configured cadence (fleet_sweep_interval_minutes, default hourly, clamped by
        FleetSweepEngine.ClampIntervalMinutes). Fleet-level by definition — a sweep is one statement about
@@ -3488,81 +3491,10 @@ LIMIT 1";
             /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */
             if (StampIsDue(_nextStoreMetricsUtc, s_storeMetricsInterval, DateTime.UtcNow))
             {
-                _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, DateTime.UtcNow, s_storeMetricsInterval);
-
-                /* #4834: the longest single checkpoint sync the minute samples saw since the last tick, taken ONCE and
-                   here, so the window closes on the hour whatever the sweep below goes on to do. The sweep stores it on
-                   the hour's checkpointer row; the checkpointer evaluation and get_store_metrics both read it back from
-                   that row, so neither is handed a window. */
-                var checkpointWindow = _checkpointSyncSampler.TakeWindowMax();
-
                 /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
                    same log-hash key the runner's log-event runs share. */
                 _pgDeadlockRemaskKey = runner.LogHashKey;
-                await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
-
-                /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
-                   regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
-                if (_selfAlerts is not null)
-                {
-                    try
-                    {
-                        await _selfAlerts.EvaluateCollectorCostAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
-                    }
-
-                    /* #3783: the two store physical-health conditions the sweep just wrote the evidence for —
-                       the dimensions' TOAST utilisation (dormant until the store carries pg_freespacemap; the
-                       evaluator says why) and the checkpointer's last interval, differenced from the newest
-                       two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
-                       the alert judges the hour the sweep measured rather than the one before it. Both
-                       master-gated inside and failure-isolated inside; the outer catch is the belt.
-                       #4834: the checkpointer check reads the hour's longest single sync from the row the
-                       sweep just wrote, the same value get_store_metrics publishes. */
-                    try
-                    {
-                        await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
-                        await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "store TOAST slack / checkpointer pressure self-alert evaluation failed");
-                    }
-
-                    /* #3466 (lane 4): the fleet sweep's DAILY channel rollup — the delivery half the sweep
-                       engine deliberately does not have. Attempted on this same hourly tick because the
-                       ceiling is enforced inside (one post per trailing day, and only on a day with
-                       something to say — 23 of every 24 ticks cost one dictionary lookup); master-gated
-                       inside like every self-alert, so master-off delivers nothing while the sweeps keep
-                       publishing to the web feed. Deliberately NOT gated on FleetSweepEnabled: sweeps
-                       recorded before the switch went off are still the trailing day's record, and with the
-                       sweep off the store simply serves an empty day, which posts nothing. Failure-isolated
-                       like its sibling above. */
-                    try
-                    {
-                        await _selfAlerts.EvaluateFleetSweepRollupAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "fleet-sweep rollup evaluation failed");
-                    }
-
-                    /* #3712: the third daily document — the analysis singles digest, the once-a-day channel copy
-                       of the findings the corroboration gate routed away from the paging channels. Same hourly
-                       tick, same one-post-per-trailing-day ceiling enforced inside, same master gate inside,
-                       same failure isolation as the two siblings above. */
-                    try
-                    {
-                        await _selfAlerts.EvaluateAnalysisSinglesDigestAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "analysis singles digest evaluation failed");
-                    }
-                }
+                TryStartStoreMetricsTick(DateTime.UtcNow, _checkpointSyncSampler.TakeWindowMax, (window, token) => RunStoreMetricsTickAsync(window, token), stoppingToken);
             }
 
             try
@@ -3596,6 +3528,11 @@ LIMIT 1";
         if (_storeMaintenanceTick is { IsCompleted: false })
         {
             inFlightSweeps.Add(_storeMaintenanceTick);
+        }
+
+        if (_storeMetricsTick is { IsCompleted: false })
+        {
+            inFlightSweeps.Add(_storeMetricsTick);
         }
 
         if (inFlightSweeps.Count > 0)
@@ -9784,6 +9721,115 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         _storeMaintenanceTick = RunTrackedTickAsync("hourly store-maintenance tick", runTick, stoppingToken);
         return true;
+    }
+
+    /// <summary>
+    /// The hourly store self-metrics tick's launcher (#4970). The sweep and the self-alert evaluators that judge
+    /// its rows used to be awaited inline in the collection launch loop; they now run as one tracked background
+    /// task, one at a time. While the store-maintenance tick still runs this returns false WITHOUT advancing the
+    /// due stamp or taking the checkpoint window, so the next 15-second pass retries and maintenance keeps
+    /// running first. Once it launches (or skips), the stamp advances on the grid. If the previous metrics tick
+    /// is still running at this due time the hour is skipped with a Warning, so a late tick never doubles up.
+    /// </summary>
+    internal bool TryStartStoreMetricsTick(
+        DateTime nowUtc,
+        Func<CheckpointSyncMax?> takeWindow,
+        Func<CheckpointSyncMax?, CancellationToken, Task> runTick,
+        CancellationToken stoppingToken)
+    {
+        if (_storeMaintenanceTick is { IsCompleted: false })
+        {
+            return false;
+        }
+
+        _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, nowUtc, s_storeMetricsInterval);
+
+        if (_storeMetricsTick is { IsCompleted: false })
+        {
+            _logger.LogWarning(
+                "the previous hourly store self-metrics tick was still running at this tick's due time — skipping this hour");
+            return false;
+        }
+
+        /* #4834: the longest single checkpoint sync the minute samples saw since the last tick, taken ONCE and
+           here, so the window closes on the hour whatever the sweep goes on to do. The sweep stores it on the
+           hour's checkpointer row; the checkpointer evaluation and get_store_metrics both read it back from
+           that row, so neither is handed a window. */
+        var checkpointWindow = takeWindow();
+        _storeMetricsTick = RunTrackedTickAsync("hourly store self-metrics tick", token => runTick(checkpointWindow, token), stoppingToken);
+        return true;
+    }
+
+    /// <summary>
+    /// The hourly store self-metrics tick's body: the store self-metrics sweep, then the self-alerts that judge
+    /// the rows it just wrote, moved out of the launch loop (#4970) unchanged.
+    /// </summary>
+    private async Task RunStoreMetricsTickAsync(CheckpointSyncMax? checkpointWindow, CancellationToken stoppingToken)
+    {
+            await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
+
+            /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
+               regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
+            if (_selfAlerts is not null)
+            {
+                try
+                {
+                    await _selfAlerts.EvaluateCollectorCostAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
+                }
+
+                /* #3783: the two store physical-health conditions the sweep just wrote the evidence for —
+                   the dimensions' TOAST utilisation (dormant until the store carries pg_freespacemap; the
+                   evaluator says why) and the checkpointer's last interval, differenced from the newest
+                   two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
+                   the alert judges the hour the sweep measured rather than the one before it. Both
+                   master-gated inside and failure-isolated inside; the outer catch is the belt.
+                   #4834: the checkpointer check reads the hour's longest single sync from the row the
+                   sweep just wrote, the same value get_store_metrics publishes. */
+                try
+                {
+                    await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
+                    await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "store TOAST slack / checkpointer pressure self-alert evaluation failed");
+                }
+
+                /* #3466 (lane 4): the fleet sweep's DAILY channel rollup — the delivery half the sweep
+                   engine deliberately does not have. Attempted on this same hourly tick because the
+                   ceiling is enforced inside (one post per trailing day, and only on a day with
+                   something to say — 23 of every 24 ticks cost one dictionary lookup); master-gated
+                   inside like every self-alert, so master-off delivers nothing while the sweeps keep
+                   publishing to the web feed. Deliberately NOT gated on FleetSweepEnabled: sweeps
+                   recorded before the switch went off are still the trailing day's record, and with the
+                   sweep off the store simply serves an empty day, which posts nothing. Failure-isolated
+                   like its sibling above. */
+                try
+                {
+                    await _selfAlerts.EvaluateFleetSweepRollupAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "fleet-sweep rollup evaluation failed");
+                }
+
+                /* #3712: the third daily document — the analysis singles digest, the once-a-day channel copy
+                   of the findings the corroboration gate routed away from the paging channels. Same hourly
+                   tick, same one-post-per-trailing-day ceiling enforced inside, same master gate inside,
+                   same failure isolation as the two siblings above. */
+                try
+                {
+                    await _selfAlerts.EvaluateAnalysisSinglesDigestAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "analysis singles digest evaluation failed");
+                }
+            }
     }
 
     /// <summary>
