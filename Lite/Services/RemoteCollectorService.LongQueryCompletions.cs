@@ -136,7 +136,7 @@ public partial class RemoteCollectorService
         {
             if (enabled)
             {
-                var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, isAzureSqlDatabase, separatelyMonitored, cancellationToken);
+                var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, isAzureSqlDatabase, separatelyMonitored, createRepeats, cancellationToken);
 
                 /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
                 _longQueryTraceFault.TryRemove(server.Id, out _);
@@ -225,9 +225,11 @@ public partial class RemoteCollectorService
     /// (<see cref="LongQueryCompletionsCollector.RunsPerDatabase"/>,
     /// <see cref="LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases"/>). Returns the monitored
     /// databases on Azure SQL DB, for the drop outside that set; null on every other engine.
+    /// <paramref name="createRepeats"/> is true once a create has warned for this server (#4964): the Azure arm's own
+    /// failure lines, and the shared ensure's, then log at Debug.
     /// </summary>
     private async Task<List<string>?> EnsureLongQueryCompletionsXeSessionAsync(
-        ServerConnection server, bool isAzureSqlDatabase, IReadOnlyList<string> separatelyMonitored, CancellationToken cancellationToken)
+        ServerConnection server, bool isAzureSqlDatabase, IReadOnlyList<string> separatelyMonitored, bool createRepeats, CancellationToken cancellationToken)
     {
         if (isAzureSqlDatabase)
         {
@@ -238,7 +240,16 @@ public partial class RemoteCollectorService
             }
             catch (SqlException ex)
             {
-                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to enumerate databases for long query completions XE sessions: {ex.Message}");
+                var listingFailure = $"[{server.DisplayName}] Failed to enumerate databases for long query completions XE sessions: {ex.Message}";
+                if (createRepeats)
+                {
+                    AppLogger.Debug("XeSession", listingFailure);
+                }
+                else
+                {
+                    AppLogger.Error("XeSession", listingFailure);
+                }
+
                 throw new XeSessionEnsureException("long query completions", ex);
             }
 
@@ -250,7 +261,8 @@ public partial class RemoteCollectorService
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "long query completions", LongQueryXeSessionName,
                 EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync, create, cancellationToken,
-                createInDatabase is null ? null : (databaseName, token) => createInDatabase(server, databaseName, true, token));
+                repeatsAtDebug: createRepeats,
+                ensureInDatabaseOverrideForTests: createInDatabase is null ? null : (databaseName, token) => createInDatabase(server, databaseName, true, token));
 
             return monitored;
         }
