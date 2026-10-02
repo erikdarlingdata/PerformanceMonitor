@@ -1375,12 +1375,24 @@ internal sealed class DarlingStoreUpgrade
                would leave an unbootable runtime behind. */
             var failedExtract = pgsqlDirectory + ".failed";
             TryDeleteDirectory(failedExtract);
+
+            /* Both moves retry a briefly locked folder like the rescue does: a same-volume rename is atomic,
+               so trying again is safe, and a lock here would otherwise leave no runtime at pgsql. The waits
+               use CancellationToken.None: if the extract failed because the update was cancelled, the revert
+               still has to finish to leave a bootable runtime, and a cancelled wait would throw a new
+               OperationCanceledException in place of the original failure. */
             if (Directory.Exists(pgsqlDirectory))
             {
-                Directory.Move(pgsqlDirectory, failedExtract);
+                await RetryTransientIoAsync(
+                    () => MoveRuntimeDirectory(pgsqlDirectory, failedExtract),
+                    $"the move aside of the failed extract at {pgsqlDirectory}",
+                    CancellationToken.None);
             }
 
-            Directory.Move(previousPgsql, pgsqlDirectory);
+            await RetryTransientIoAsync(
+                () => MoveRuntimeDirectory(previousPgsql, pgsqlDirectory),
+                $"the restore of the previous runtime to {pgsqlDirectory}",
+                CancellationToken.None);
             TryDeleteDirectory(failedExtract);
             TryEmptyDirectory(previousRoot);
             throw;

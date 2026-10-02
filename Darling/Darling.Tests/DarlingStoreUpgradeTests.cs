@@ -3000,6 +3000,58 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     /// <summary>
+    /// A package whose runtime fails to extract (no <c>pgsql\bin\pg_ctl.exe</c> in it) sends the update to
+    /// its revert. The restore of the previous runtime hits a briefly locked folder twice, and the revert
+    /// retries it: the original extract failure is what surfaces, with the live runtime back at <c>pgsql</c>.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_AFailedExtractWhoseRestoreIsLockedTwice_RetriesAndRestoresTheRuntime()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-revert-retry-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+
+            var brokenSource = Path.Combine(root.FullName, "broken", "pgsql");
+            Directory.CreateDirectory(Path.Combine(brokenSource, "bin"));
+            File.WriteAllText(Path.Combine(brokenSource, "bin", "postgres.exe"), "a package with no pg_ctl");
+            File.Delete(host.Package);
+            ZipFile.CreateFromDirectory(brokenSource, host.Package, CompressionLevel.NoCompression, includeBaseDirectory: true);
+
+            var previousPgsql = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot), "pgsql");
+            var log = new CapturingLogger();
+            var restoreAttempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (string.Equals(from, previousPgsql, StringComparison.OrdinalIgnoreCase) && ++restoreAttempts <= 2)
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken));
+
+            Assert.Equal(3, restoreAttempts);
+            Assert.Equal(2, CountRetryLines(log));
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// The real lock, on the platform where one blocks a rename: a file under the live runtime is held for
     /// about a second, which is longer than the first attempt and shorter than the retry budget.
     /// </summary>
