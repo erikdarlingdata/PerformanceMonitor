@@ -288,11 +288,15 @@ public static class IgnoredWaitTypes
     }
 
     /// <summary>
-    /// Builds a SQL predicate <c>AND wait_type NOT IN ('A','B',...)</c> excluding the ignored types, or an
+    /// Builds a SQL predicate <c>AND rtrim(wait_type) NOT IN ('A','B',...)</c> excluding the ignored types, or an
     /// empty string when there is nothing to exclude. Names are sanitized to [A-Za-z0-9_] before being
     /// inlined, so the literals are injection-safe (the source is controlled config and SQL Server
     /// wait_type names are always identifiers). Applied at display time so benign waits already in the
     /// DuckDB don't surface in the wait-stats tab/picker.
+    /// <para>The stored name is compared without its trailing spaces: rows collected before the collectors
+    /// trimmed wait names (<c>WaitTypeName.Trim</c>) keep the DMV's trailing space, for example
+    /// <c>SQP_STATS_REPORTING </c>, until retention removes them, and the entry <c>SQP_STATS_REPORTING</c> has to
+    /// hide those too. A read that groups or looks up by wait name keys on the same <c>rtrim(wait_type)</c>.</para>
     /// </summary>
     public static string BuildExclusionClause(IReadOnlyCollection<string>? ignored)
     {
@@ -315,7 +319,7 @@ public static class IgnoredWaitTypes
             sb.Append('\'').Append(wait).Append('\'');
         }
 
-        return sb.Length == 0 ? string.Empty : $"AND wait_type NOT IN ({sb})";
+        return sb.Length == 0 ? string.Empty : $"AND rtrim(wait_type) NOT IN ({sb})";
     }
 
     private static bool IsSafeIdentifier(string value)

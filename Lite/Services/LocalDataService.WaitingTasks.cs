@@ -47,7 +47,7 @@ public partial class LocalDataService
 SELECT
     collection_time,
     session_id,
-    wait_type,
+    rtrim(wait_type) AS wait_type,
     wait_duration_ms,
     blocking_session_id,
     resource_description,
@@ -130,11 +130,12 @@ LIMIT 1";
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         /* #1240 parity: exclude the user's ignored (benign) wait types at DISPLAY time (mirrors the
-           wait-stats reads) so the Current Waits duration chart matches the Wait Stats tab. */
+           wait-stats reads) so the Current Waits duration chart matches the Wait Stats tab. Keyed on
+           rtrim(wait_type), so a name stored with the DMV's trailing space is the same series. */
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
 SELECT
-    wait_type,
+    rtrim(wait_type) AS wait_type,
     GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
     SUM(wait_duration_ms) AS total_wait_ms,
     MIN(collection_time) AS first_collection_time,
@@ -146,9 +147,9 @@ AND   collection_time <= $3
 AND   wait_type IS NOT NULL
 {exclude}
 GROUP BY
-    wait_type, 2
+    rtrim(wait_type), 2
 ORDER BY
-    wait_type, 2";
+    rtrim(wait_type), 2";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
