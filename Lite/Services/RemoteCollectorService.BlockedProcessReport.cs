@@ -46,7 +46,8 @@ public partial class RemoteCollectorService
                database could be ensured. */
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "blocked process", BlockedProcessXeSessionName,
-                EnsureBlockedProcessXeSessionAzureSqlDbAsync, cancellationToken);
+                AlwaysOnArmEnsureNotUsed, cancellationToken,
+                (databaseName, token) => EnsureAlwaysOnXeSessionInDatabaseAsync(server, AlwaysOnXeSessionKind.BlockedProcess, "blocked process", databaseName, token));
             return;
         }
 
@@ -190,72 +191,6 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
     }
 
     /// <summary>
-    /// Azure SQL DB: creates database-scoped XE session with ring_buffer target.
-    /// File targets are not supported in Azure SQL DB.
-    /// </summary>
-    private async Task EnsureBlockedProcessXeSessionAzureSqlDbAsync(SqlConnection connection, CancellationToken cancellationToken)
-    {
-        /* Check if database-scoped session already exists */
-        using (var cmd = new SqlCommand(@"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT /* PerformanceMonitorLite */
-    session_state = des.name
-FROM sys.database_event_sessions AS des
-WHERE des.name = @session_name;", connection))
-        {
-            cmd.CommandTimeout = CommandTimeoutSeconds;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = BlockedProcessXeSessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-
-            if (result != null)
-            {
-                /* Session exists - ensure it's started (database-scoped sessions can stop on reconnect) */
-                using var startCmd = new SqlCommand($@"
-IF NOT EXISTS
-(
-    SELECT
-        1/0
-    FROM sys.dm_xe_database_sessions AS xes
-    WHERE xes.name = N'{BlockedProcessXeSessionName}'
-)
-BEGIN
-    ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;
-END;", connection);
-                startCmd.CommandTimeout = CommandTimeoutSeconds;
-                await startCmd.ExecuteNonQueryAsync(cancellationToken);
-
-                /* Debug, not Info: this fires once per monitored database per cycle (#1535). */
-                AppLogger.Debug("XeSession", $"[Azure SQL DB:{connection.Database}] Blocked process XE session verified (database-scoped)");
-                return;
-            }
-        }
-
-        /* Create and start database-scoped session */
-        using (var cmd = new SqlCommand($@"
-CREATE EVENT SESSION [{BlockedProcessXeSessionName}]
-ON DATABASE
-ADD EVENT sqlserver.blocked_process_report
-ADD TARGET package0.ring_buffer
-(
-    SET max_memory = 4096
-)
-WITH
-(
-    MAX_DISPATCH_LATENCY = 5 SECONDS,
-    STARTUP_STATE = ON
-);
-
-ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;", connection))
-        {
-            cmd.CommandTimeout = CommandTimeoutSeconds;
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        AppLogger.Info("XeSession", $"[Azure SQL DB:{connection.Database}] Created and started blocked process XE session (database-scoped)");
-    }
-
-    /// <summary>
     /// True when every error is a benign "the session is already there" extended-events error:
     /// 25631 (event session already exists) or 25705 (already started). On Azure SQL DB the XE
     /// existence catalogs (sys.database_event_sessions / sys.dm_xe_database_sessions) are visibility-
@@ -286,7 +221,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// Azure SQL DB ensure driver, shared by the deadlock and blocked-process paths (#1535): one
     /// database-scoped XE session per monitored database, matching the collectors' per-database
     /// ring-buffer reads. Master is skipped (database-scoped sessions can't be created in logical
-    /// master); ExcludedDatabases is honored by <see cref="GetAzureDatabaseListAsync"/>.
+    /// master); ExcludedDatabases is honored by <see cref="GetAzureDatabaseListAsync(ServerConnection, CancellationToken)"/>.
     ///
     /// <para><b>The #1251 benign path grew a read-back check.</b> A benign "already exists"/"already
     /// started" from the engine proves the session is there, but NOT that this principal can see it:
@@ -308,7 +243,8 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         string captureName,
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task>? alwaysOnInDatabase = null)
     {
         /* A test replaces the open and the ensure in each database. Null in production. */
         var ensureInDatabase = XeSessionDatabaseEnsureOverrideForTests;
@@ -326,7 +262,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
                 server, captureName, sessionName, ensureAsync, plannedDatabases: null, cancellationToken,
                 repeatsAtDebug,
                 ensureInDatabase is null
-                    ? null
+                    ? alwaysOnInDatabase
                     : (databaseName, token) => ensureInDatabase(server, sessionName, databaseName, token));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -592,7 +528,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
                    logged here instead of the server's own message. */
                 var refusal = explainRefusal?.Invoke(ex) is { } explanation
                     ? $"[{server.DisplayName}] [{databaseName}] {explanation}"
-                    : $"[{server.DisplayName}] [{databaseName}] Failed to ensure {captureName} XE session: {ex.Message}";
+                    : $"[{server.DisplayName}] [{databaseName}] Failed to ensure {captureName} XE session: {AlwaysOnXeSessions.DescribeFailure(ex)}";
                 if (repeatsAtDebug)
                 {
                     AppLogger.Debug("XeSession", refusal);

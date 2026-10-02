@@ -79,7 +79,7 @@ public class XeSessionEnsureException : Exception
     public bool RepeatsAtDebug { get; internal set; }
 
     public XeSessionEnsureException(string sessionKind, SqlException inner)
-        : this(sessionKind, inner, $"Failed to ensure {sessionKind} XE session: {inner.Message}")
+        : this(sessionKind, inner, $"Failed to ensure {sessionKind} XE session: {PerformanceMonitor.Collectors.AlwaysOnXeSessions.DescribeFailure(inner)}")
     {
     }
 

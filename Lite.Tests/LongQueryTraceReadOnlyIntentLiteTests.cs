@@ -115,6 +115,8 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
 
         rig.Service.LongQueryTraceUtcNowForTests = () => rig.Clock;
         rig.Service.LongQueryTraceListOverrideForTests = (_, _, _) => Task.FromResult(new List<string> { database });
+        /* The one-time drop of the legacy session has nothing to find. */
+        rig.Service.LegacyLongQuerySessionExistsForTests = (_, _) => false;
         rig.Service.LongQueryTraceStepOverrideForTests = (_, databaseName, connectionString, step, _, _) =>
         {
             rig.Steps.Add((step, databaseName, connectionString));
@@ -130,8 +132,11 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
     private static string DatabaseOf(string connectionString) =>
         new SqlConnectionStringBuilder(connectionString).InitialCatalog;
 
+    /* A line at Warning or above that speaks of a read-only database: what an operator reads about it. The one-time drop of
+       the legacy session logs lines of its own, which these tests do not read. */
     private static bool IsLoud(string line) =>
-        line.Contains("WARN", StringComparison.Ordinal) || line.Contains("ERROR", StringComparison.Ordinal);
+        (line.Contains("WARN", StringComparison.Ordinal) || line.Contains("ERROR", StringComparison.Ordinal))
+        && line.Contains("read-only", StringComparison.OrdinalIgnoreCase);
 
     /* ── Azure SQL Database ── */
 

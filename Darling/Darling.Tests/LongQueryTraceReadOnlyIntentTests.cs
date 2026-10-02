@@ -57,9 +57,12 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
             DarlingWorker.ReconcileLongQueryTraceAsync(
                 State, Runner, enabled: true, Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(), Clock, Logger, CancellationToken.None);
 
-        /// <summary>The lines logged at Warning or above: what an operator reads.</summary>
+        /// <summary>
+        /// The lines logged at Warning or above that speak of a read-only database: what an operator reads about it. The
+        /// one-time drop of the legacy session logs lines of its own, which these tests do not read.
+        /// </summary>
         public List<string> Loud() => Logger.Entries
-            .Where(e => e.Level >= LogLevel.Warning)
+            .Where(e => e.Level >= LogLevel.Warning && e.Message.Contains("read-only", StringComparison.OrdinalIgnoreCase))
             .Select(e => e.Message)
             .ToList();
     }
@@ -93,6 +96,9 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         rig.Listed = new List<string> { database };
 
         runner.LongQueryTraceListOverrideForTests = (_, _, _, _) => Task.FromResult(rig.Listed.ToList());
+        /* The one-time drop of the legacy session has nothing to find, and keeps its record in memory. */
+        runner.LegacyLongQueryRecordsForTests = new LongQueryTraceLifecycleTests.InMemoryLegacyRecords();
+        runner.LegacyLongQueryPresentForTests = (_, _, _) => Task.FromResult(false);
         runner.LongQueryTraceStepOverrideForTests = (_, databaseName, connectionString, step, _, _) =>
         {
             rig.Steps.Add((step, databaseName, connectionString));

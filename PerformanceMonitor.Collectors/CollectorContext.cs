@@ -428,6 +428,15 @@ public sealed class CollectorContext
     public string? LongQuerySessionName { get; init; }
 
     /// <summary>
+    /// The session the deadlock or blocked-process read names in the database being read (#4961): the shared name, or this
+    /// install's own when the host's ensure fell back to it there. Set by the host's per-database loop beside
+    /// <see cref="CurrentDatabaseName"/>, because the choice is per database. Null reads the shared name, which is every
+    /// server-scoped read and a database the ensure has not reached yet. Only the deadlock and blocked-process definitions
+    /// read it, and they refuse any name that is neither the shared name nor an own name of their capture.
+    /// </summary>
+    public string? AlwaysOnSessionName { get; set; }
+
+    /// <summary>
     /// Host override for the per-item text byte budget (#2164), in BYTES. Null keeps the definition's
     /// own <see cref="ICollectorDefinition{TRow}.PerItemTextByteBudget"/> — which is what Lite passes,
     /// so its behavior is unchanged. Darling supplies this from the store's operator knob.

@@ -157,6 +157,8 @@ public sealed class RepoFileAdoptionTests
         /* #3653 item 12 (Q6): its cross-SKU pin slices the multi-line `keyed` CTE out of the Darling provider's
            SOURCE (from `keyed AS (` to `FROM clean` + `)` on the next line) and asserts Lite's source carries the
            identical text; the clock-read twin pin likewise compares a multi-line const body one token apart. */
+        /* #4961: its no-drop pin looks for a statement block that runs across a line break in DarlingXeSessions.cs. */
+        "AlwaysOnXeSessionsTests.cs",
         "LocalClockBucketKeyTests.cs",
         "LockedModeRestoreCoverageTests.cs",
         /* Its always-on guard pin slices EnsureDatabaseScopedAsync's body up to the method's closing brace, on an

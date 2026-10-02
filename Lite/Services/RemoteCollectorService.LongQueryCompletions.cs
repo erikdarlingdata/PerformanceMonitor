@@ -116,6 +116,13 @@ public partial class RemoteCollectorService
     /// </summary>
     public async Task ReconcileLongQueryCompletionsXeSessionAsync(ServerConnection server, CancellationToken cancellationToken = default)
     {
+        /* #4961: a server whose removal has begun is not reconciled: its removal is dropping the session, and a create on
+           this cycle would bring it back. */
+        if (_longQueryTraceRemoved.ContainsKey(server.Id))
+        {
+            return;
+        }
+
         var schedule = _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions");
         var enabled = schedule?.Enabled ?? false;
 
@@ -199,6 +206,15 @@ public partial class RemoteCollectorService
                 return;
             }
 
+            /* #4961: the session that earlier versions shared between installs is dropped once per registration and database, and
+               each cycle tries until the drop is on record. A pass runs it when it is pending and the retry has not given up, or
+               the pass is due anyway (the hourly attempt, a start, a change to the settings). One listing of every database serves
+               it and the drop of this install's own session. */
+            var passDue = afterTheCap || !IsLongQueryTraceApplied(server.Id, enabled, stateKey);
+            var pass = new LongQueryReconcilePass(
+                LegacyLongQuerySessionDue(server, retry, passDue),
+                () => ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken));
+
             if (enabled)
             {
                 /* #4961: a read-only database refused the last create, and stays read-only until the registration or the
@@ -208,7 +224,7 @@ public partial class RemoteCollectorService
                     return;
                 }
 
-                var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, sessionName, isAzureSqlDatabase, separatelyMonitored, createRepeats, cancellationToken);
+                var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, sessionName, isAzureSqlDatabase, separatelyMonitored, createRepeats, pass, afterTheCap, cancellationToken);
                 _longQueryTraceReadOnlyRefused.TryRemove(server.Id, out _);
 
                 /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
@@ -218,7 +234,7 @@ public partial class RemoteCollectorService
 
                 /* The server's own session has no cleanup pass while the trace is on, so a create that succeeded is the end of
                    a run of failed drops: the next time it is turned off, the count starts again (#4964). */
-                if (monitored is null)
+                if (monitored is null && !LegacyLongQuerySessionPending(server))
                 {
                     retry.Reset();
                 }
@@ -226,20 +242,44 @@ public partial class RemoteCollectorService
                 /* Azure SQL Database: drop the session from listed databases outside the monitored set, when
                    the plan's settings changed since the last pass that finished (and once after each start), or
                    when the hourly attempt after the cap is due. */
-                if (monitored is not null && (afterTheCap || !IsLongQueryTraceApplied(server.Id, enabled: true, stateKey)))
+                if (monitored is not null && passDue)
                 {
-                    await DropLongQueryTraceOutsideTheSetAsync(server, sessionName, monitored, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
+                    await DropLongQueryTraceOutsideTheSetAsync(server, sessionName, monitored, separatelyMonitored, KeptElsewhere, afterTheCap, pass, cancellationToken);
+                    if (!LegacyLongQuerySessionPending(server))
+                    {
+                        retry.Reset();
+                    }
+                }
+
+                /* #4961: a failed legacy drop counts as this pass's failure, after this install's own session was ensured. */
+                pass.ThrowLegacyFailure();
+                MarkLongQueryTraceApplied(server.Id, enabled: true, stateKey);
+            }
+            else if (passDue || pass.LegacyDue)
+            {
+                /* Disabled and either never reconciled, previously enabled, or reconciled under different
+                   settings: drop, then remember it is gone so the next cycles skip the connection entirely. #4961: on the
+                   server's own session, a drop would stop the trace another registration of this install keeps on the same
+                   instance, so a positive match leaves it, and counts as done: that registration's own drop removes the
+                   session when it turns its trace off. A name that is not known matches nothing, and drops as it always did. */
+                if (!isAzureSqlDatabase && (await LongQueryTraceInstanceGuardFor(server, cancellationToken)).Kept)
+                {
+                    AppLogger.Info("XeSession", $"[{server.DisplayName}] Long-query completion XE session left in place: another registration of this install keeps it on the same instance");
+
+                    /* The session earlier versions shared between installs is nobody's to keep: its drop still runs. */
+                    await RunLegacyLongQuerySessionAsync(server, pass, isAzureSqlDatabase: false, afterTheCap, cancellationToken);
+                    pass.ThrowLegacyFailure();
+                }
+                else
+                {
+                    await DropLongQueryCompletionsXeSessionAsync(server, sessionName, isAzureSqlDatabase, separatelyMonitored, KeptElsewhere, afterTheCap, pass, cancellationToken);
+                }
+
+                if (!LegacyLongQuerySessionPending(server))
+                {
                     retry.Reset();
                 }
 
-                MarkLongQueryTraceApplied(server.Id, enabled: true, stateKey);
-            }
-            else if (afterTheCap || !IsLongQueryTraceApplied(server.Id, enabled: false, stateKey))
-            {
-                /* Disabled and either never reconciled, previously enabled, or reconciled under different
-                   settings: drop, then remember it is gone so the next cycles skip the connection entirely. */
-                await DropLongQueryCompletionsXeSessionAsync(server, sessionName, isAzureSqlDatabase, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
-                retry.Reset();
                 MarkLongQueryTraceApplied(server.Id, enabled: false, stateKey);
 
                 /* #3754: nothing to be honest about while disabled - the collector is not dispatched - and a
@@ -325,7 +365,8 @@ public partial class RemoteCollectorService
     /// failure lines, and the shared ensure's, then log at Debug.
     /// </summary>
     private async Task<List<string>?> EnsureLongQueryCompletionsXeSessionAsync(
-        ServerConnection server, string sessionName, bool isAzureSqlDatabase, IReadOnlyList<string> separatelyMonitored, bool createRepeats, CancellationToken cancellationToken)
+        ServerConnection server, string sessionName, bool isAzureSqlDatabase, IReadOnlyList<string> separatelyMonitored, bool createRepeats,
+        LongQueryReconcilePass pass, bool afterTheCap, CancellationToken cancellationToken)
     {
         if (isAzureSqlDatabase)
         {
@@ -349,6 +390,10 @@ public partial class RemoteCollectorService
                 throw new XeSessionEnsureException("long query completions", ex);
             }
 
+            /* #4961: in each database the legacy drop runs before this install's create, so it frees a slot there. A failure is
+               kept, and the create still runs. */
+            await RunLegacyLongQuerySessionAsync(server, pass, isAzureSqlDatabase: true, afterTheCap, cancellationToken);
+
             var create = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
 
             /* A test replaces the work in each database (LongQueryTraceDatabaseOverrideForTests), and the shared ensure
@@ -361,12 +406,16 @@ public partial class RemoteCollectorService
                 server, "long query completions", sessionName,
                 (connection, token) => new SqlConnectionStringBuilder(connection.ConnectionString).ApplicationIntent == ApplicationIntent.ReadOnly
                     ? EnsureLongQueryCompletionsXeSessionReadOnlyIntentAsync(connection, server, sessionName, token)
-                    : EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(connection, sessionName, token),
+                    : EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(server, connection, sessionName, token),
                 create, cancellationToken,
                 repeatsAtDebug: createRepeats,
                 explainRefusal: ex => IsReadOnlyDatabaseRefusal(ex) ? LongQueryTraceDatabases.ReadOnlyDatabaseMessage() : null,
                 ensureInDatabaseOverrideForTests: createInDatabase is not null
-                    ? (databaseName, token) => createInDatabase(server, databaseName, true, sessionName, token)
+                    ? async (databaseName, token) =>
+                    {
+                        await createInDatabase(server, databaseName, true, sessionName, token);
+                        LookForLegacyLongQuerySessionForTests(server, databaseName);
+                    }
                     : stepInDatabase is not null
                         ? (databaseName, token) => RunLongQueryTraceStepsAsync(server, databaseName, sessionName, stepInDatabase, token)
                         : null);
@@ -374,10 +423,14 @@ public partial class RemoteCollectorService
             return monitored;
         }
 
+        /* #4961: the legacy drop first, with its failure kept, so this install's own session is still ensured. */
+        await RunLegacyLongQuerySessionAsync(server, pass, isAzureSqlDatabase: false, afterTheCap, cancellationToken);
+
         /* A test replaces the server-scoped create, called with no database name. Null in production. */
         if (LongQueryTraceDatabaseOverrideForTests is { } createOnServer)
         {
             await createOnServer(server, string.Empty, true, sessionName, cancellationToken);
+            LookForLegacyLongQuerySessionForTests(server, string.Empty);
             return null;
         }
 
@@ -531,11 +584,20 @@ SELECT /* PerformanceMonitorLite */
 FROM sys.server_event_sessions AS ses
 LEFT JOIN sys.dm_xe_sessions AS dxs
   ON dxs.name = ses.name
-WHERE ses.name = @session_name;", connection))
+WHERE ses.name = @session_name;" + LegacyLongQuerySessionServerProbeSql, connection))
         {
             cmd.CommandTimeout = CommandTimeoutSeconds;
             cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            cmd.Parameters.Add(LegacyLongQuerySessionProbeParameter(server, string.Empty));
+            object? result;
+            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            {
+                result = await reader.ReadAsync(cancellationToken) ? reader.GetValue(0) : null;
+                if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+                {
+                    ReportLegacyLongQuerySessionFound(server, string.Empty);
+                }
+            }
 
             if (result != null)
             {
@@ -558,7 +620,7 @@ WHERE ses.name = @session_name;", connection))
         AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started long-query completion XE session (duration >= {LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds} us)");
     }
 
-    private async Task EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(SqlConnection connection, string sessionName, CancellationToken cancellationToken)
+    private async Task EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(ServerConnection server, SqlConnection connection, string sessionName, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -566,11 +628,20 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT /* PerformanceMonitorLite */
     session_state = des.name
 FROM sys.database_event_sessions AS des
-WHERE des.name = @session_name;", connection))
+WHERE des.name = @session_name;" + LegacyLongQuerySessionDatabaseProbeSql, connection))
         {
             cmd.CommandTimeout = CommandTimeoutSeconds;
             cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            cmd.Parameters.Add(LegacyLongQuerySessionProbeParameter(server, connection.Database));
+            object? result;
+            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            {
+                result = await reader.ReadAsync(cancellationToken) ? reader.GetValue(0) : null;
+                if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+                {
+                    ReportLegacyLongQuerySessionFound(server, connection.Database);
+                }
+            }
 
             if (result != null)
             {
@@ -617,15 +688,29 @@ END;", connection);
         IReadOnlyList<string> separatelyMonitored,
         Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
         bool afterTheCap,
-        CancellationToken cancellationToken)
+        LongQueryReconcilePass pass,
+        CancellationToken cancellationToken,
+        bool ofARemovedServer = false)
     {
         if (isAzureSqlDatabase)
         {
-            var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
+            var listed = await pass.ListedAsync();
+            await RunLegacyLongQuerySessionAsync(server, pass, isAzureSqlDatabase: true, afterTheCap, cancellationToken);
             var plan = LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored, keptElsewhere(listed));
-            await DropLongQueryTraceInEachAsync(server, sessionName, plan.Drop, afterTheCap, cancellationToken);
+            try
+            {
+                await DropLongQueryTraceInEachAsync(server, sessionName, plan.Drop, afterTheCap, cancellationToken);
+            }
+            catch (LongQueryTraceDropException own) when (pass.LegacyFailure is not null)
+            {
+                throw MergeLongQueryTraceDropFailures(pass.LegacyFailure, own);
+            }
+
+            pass.ThrowLegacyFailure();
             return;
         }
+
+        await RunLegacyLongQuerySessionAsync(server, pass, isAzureSqlDatabase: false, afterTheCap, cancellationToken);
 
         /* #4964: a failure here is a failed drop like the Azure arm's, so it reaches the reconcile's cap as one. Left as it
            was, it landed in the general catch, which warns on every cycle with no end while the trace is off. */
@@ -649,7 +734,11 @@ END;", connection);
             throw LongQueryTraceDropException.ForServer(ex);
         }
 
-        AppLogger.Info("XeSession", $"[{server.DisplayName}] Long-query completion XE session reconciled OFF (collector disabled)");
+        pass.ThrowLegacyFailure();
+        if (!ofARemovedServer)
+        {
+            AppLogger.Info("XeSession", $"[{server.DisplayName}] Long-query completion XE session reconciled OFF (collector disabled)");
+        }
     }
 
     /// <summary>
@@ -765,11 +854,19 @@ END;", connection);
         IReadOnlyList<string> separatelyMonitored,
         Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
         bool afterTheCap,
+        LongQueryReconcilePass pass,
         CancellationToken cancellationToken)
     {
-        var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
+        var listed = await pass.ListedAsync();
         var plan = LongQueryTraceDatabases.Plan(enabled: true, listed, monitored, separatelyMonitored, keptElsewhere(listed));
-        await DropLongQueryTraceInEachAsync(server, sessionName, plan.Drop, afterTheCap, cancellationToken);
+        try
+        {
+            await DropLongQueryTraceInEachAsync(server, sessionName, plan.Drop, afterTheCap, cancellationToken);
+        }
+        catch (LongQueryTraceDropException own) when (pass.LegacyFailure is not null)
+        {
+            throw MergeLongQueryTraceDropFailures(pass.LegacyFailure, own);
+        }
     }
 
     /// <summary>
@@ -819,6 +916,118 @@ END;", connection);
         using var dropCmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(sessionName, databaseScoped: true), connection);
         dropCmd.CommandTimeout = CommandTimeoutSeconds;
         await dropCmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>How long a server's removal waits for the drop of its long-query session, for the whole step (#4961).</summary>
+    internal static readonly TimeSpan LongQueryTraceRemovalTimeout = TimeSpan.FromSeconds(15);
+
+    /* #4961: the servers whose removal has begun, by connection id. The reconcile runs on the collection loop's own timer
+       while the removal waits for its drop, and with the trace on it creates the session again on every cycle, so a
+       server in here is left alone: a session created after the drop would outlive the server. A re-added server has a new
+       connection id, so it is not held back. */
+    private readonly ConcurrentDictionary<string, bool> _longQueryTraceRemoved = new();
+
+    /// <summary>
+    /// A server's removal drops this install's long-query session (#4961), so a server that is no longer monitored does not
+    /// keep tracing: the trace-off drop, once, for the server's own session. On Azure SQL Database that is each listed
+    /// database but master, and one that another registration keeps; elsewhere the server's own session, unless another
+    /// registration of this install keeps it on the same instance. A removed server cannot be checked later, so a name that
+    /// is not known leaves the session in place when another registration could keep it, and says why. Nothing is opened
+    /// for a server whose last finished reconcile dropped the session. One attempt, and every failure, timeout included,
+    /// is logged and returned: it never stops the removal.
+    /// </summary>
+    public async Task DropLongQueryTraceOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        _longQueryTraceRemoved[server.Id] = true;
+
+        try
+        {
+            /* No install id, no session of this install's to drop. */
+            var sessionName = LongQuerySessionName();
+            if (sessionName is null || LongQueryTraceAppliedState(server.Id) == false)
+            {
+                return;
+            }
+
+            var isAzureSqlDatabase = _engineEditions.IsAzureSqlDatabase(server, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition);
+            if (!isAzureSqlDatabase)
+            {
+                var skipReason = (await LongQueryTraceInstanceGuardFor(server, cancellationToken)).RemovalSkipReason();
+                if (skipReason is not null)
+                {
+                    AppLogger.Info("XeSession", $"[{server.DisplayName}] The long-query trace session was left in place on removal: {skipReason}.");
+                    return;
+                }
+            }
+
+            /* The registrations that remain: this one neither keeps a session nor leaves a database to its own registration
+               once it is gone. Its own id is never another registration's. */
+            var registrations = isAzureSqlDatabase ? LongQueryTraceRegistrationsFor(server) : new List<LongQueryTraceRegistration>();
+            var remaining = _serverManager.GetAllServers().Where(other => other.Id != server.Id);
+            var serverSeparatelyMonitored = isAzureSqlDatabase
+                ? KnownEngineEditions.SeparatelyMonitoredDatabasesOnServer(server.ServerName, remaining)
+                : Array.Empty<string>();
+            var separatelyMonitored = isAzureSqlDatabase ? SeparatelyMonitoredDatabasesFor(server) : Array.Empty<string>();
+
+            await DropLongQueryCompletionsXeSessionAsync(
+                server,
+                sessionName,
+                isAzureSqlDatabase,
+                separatelyMonitored,
+                candidates => LongQueryTraceDatabases.KeptElsewhere(server.Id, server.ServerName, candidates, registrations, serverSeparatelyMonitored),
+                afterTheCap: false,
+                /* The session earlier versions shared between installs is not the removal's: its own step stays off. */
+                new LongQueryReconcilePass(legacyDue: false, () => ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken)),
+                cancellationToken,
+                ofARemovedServer: true);
+
+            AppLogger.Info("XeSession", $"[{server.DisplayName}] Dropped the long-query trace session of the removed server");
+        }
+        catch (OperationCanceledException)
+        {
+            AppLogger.Warn("XeSession", $"[{server.DisplayName}] The long-query trace session of the removed server was not dropped within {LongQueryTraceRemovalTimeout.TotalSeconds:0} seconds; it may remain on the server");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("XeSession", $"[{server.DisplayName}] Could not drop the long-query trace session of the removed server; it may remain on the server: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// #4961: where the session is the server's own (every engine but Azure SQL Database), this registration's last-known
+    /// <c>@@SERVERNAME</c> beside the other registrations of this install that are monitored with their trace on
+    /// (<see cref="LongQueryTraceInstanceGuard"/>). Their trace setting is the effective one, their own override or else the
+    /// install's default. The names come from the identity row a wait_stats or cpu_utilization run persisted, and are read
+    /// only when another registration could keep the session, so an install with no other trace on reads none.
+    /// </summary>
+    private async Task<LongQueryTraceInstanceGuard> LongQueryTraceInstanceGuardFor(ServerConnection server, CancellationToken cancellationToken)
+    {
+        var candidates = _serverManager.GetAllServers()
+            .Where(other => other.Id != server.Id
+                && other.IsEnabled
+                && (_scheduleManager.GetScheduleForServer(other.Id, "long_query_completions")?.Enabled ?? false))
+            .ToList();
+        if (candidates.Count == 0)
+        {
+            return LongQueryTraceInstanceGuard.NoKeepers;
+        }
+
+        var ownName = await LastKnownInstanceNameAsync(server, cancellationToken);
+        var keepers = new List<LongQueryTraceInstance>(candidates.Count);
+        foreach (var other in candidates)
+        {
+            /* With no name of its own, this registration matches nothing, so the others' names are not read. */
+            var name = ownName is null ? null : await LastKnownInstanceNameAsync(other, cancellationToken);
+            keepers.Add(new LongQueryTraceInstance(Enabled: true, TraceOn: true, name));
+        }
+
+        return new LongQueryTraceInstanceGuard(ownName, keepers);
+    }
+
+    private Task<string?> LastKnownInstanceNameAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        var serverId = GetServerId(server);
+        return ServerEpoch.LastKnownNameAsync(carrier => GetCollectorStateAsync(serverId, carrier, cancellationToken));
     }
 
     /// <summary>
