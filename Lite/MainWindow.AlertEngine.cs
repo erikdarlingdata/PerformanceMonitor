@@ -27,6 +27,31 @@ namespace PerformanceMonitorLite;
 public partial class MainWindow : Window
 {
     /// <summary>
+    /// The engine editions that the Azure master scope is judged by, for the alert sweep below and the analysis
+    /// provider alike (<see cref="KnownEngineEditions"/>).
+    /// </summary>
+    private readonly KnownEngineEditions _engineEditions = new();
+
+    /// <summary>
+    /// Seeds <see cref="_engineEditions"/> with every server's stored edition in one read. MainWindow_Loaded awaits it
+    /// right after the database is initialized and before it starts anything that reads the scope: the background
+    /// service (its scheduled analysis), the alert engine (a sweep returns early while it is null), the MCP server,
+    /// the server list and the overview timer. So no sweep can run before a seed that is read within the limit.
+    ///
+    /// <para>Because all of that waits for it, it waits at most <see cref="KnownEngineEditions.StartupSeedLimit"/> for
+    /// the read, and it never throws. A read that fails or runs past the limit is logged, and until a late result
+    /// lands, each server has only its live edition, as before (<see cref="KnownEngineEditions.SeedFromStoreAsync"/>).</para>
+    /// </summary>
+    private async Task SeedKnownEngineEditionsAsync()
+    {
+        /* Off the dispatcher, because DuckDB.NET is synchronous. It has its own LocalDataService over the initialized
+           store, because _dataService is built further down MainWindow_Loaded. */
+        await _engineEditions.SeedFromStoreAsync(
+            () => Task.Run(() => new LocalDataService(_databaseInitializer).GetStoredEngineEditionsAsync()),
+            KnownEngineEditions.StartupSeedLimit);
+    }
+
+    /// <summary>
     /// Phase-5 forwarding: one alert sweep for one overview summary. The evaluation —
     /// thresholds, edge triggers, cooldowns, mutes, watermark persistence, resolution
     /// transitions — runs in the shared <see cref="AlertEngine"/> (the same code the headless
@@ -82,13 +107,19 @@ public partial class MainWindow : Window
            fetcher re-checks it fresh at fetch time, exactly where the old loop's gate sat. */
         var connStatus = badgeServer != null ? _serverManager.GetConnectionStatus(badgeServer.Id) : null;
 
+        /* The Azure SQL Database edition comes from _engineEditions, the same as the analysis provider's: the live
+           status when it has read one, else the edition seeded from the store before this first sweep could run.
+           On the live edition alone, the first sweep after a start had none yet, so a master target was unscoped
+           and counted its sibling databases' blocking and deadlocks. */
+        var liveEdition = connStatus?.SqlEngineEdition ?? PerformanceMonitor.Collectors.CollectorEngineCapability.UnknownEngineEdition;
+
         var snapshot = new AlertServerSnapshot(
             key,
             summary.DisplayName,
             IsOnline: connStatus?.IsOnline == true,
             SqlCpuPercent: summary.CpuPercent,
             TotalCpuPercent: summary.TotalCpuPercent,
-            IsAzureSqlDb: connStatus?.SqlEngineEdition == 5,
+            IsAzureSqlDb: badgeServer != null && _engineEditions.IsAzureSqlDatabase(badgeServer, liveEdition),
             Suppressed: suppressPopups,
             /* #3282: the gate counts breaching CPU SAMPLES rather than sweeps. Lite's sweep is the
                30-second overview timer and the ring-buffer sample behind CpuPercent advances about once a
@@ -100,13 +131,7 @@ public partial class MainWindow : Window
             CpuSampleTimeUtc: summary.CpuSampleTimeUtc ?? summary.CpuSampleTime,
             SeparatelyMonitoredDatabases: badgeServer is null
                 ? null
-                : AzureMasterScope.SeparatelyMonitoredDatabases(
-                    connStatus?.SqlEngineEdition == 5,
-                    badgeServer.Id.ToString(),
-                    badgeServer.ServerName,
-                    badgeServer.DatabaseName,
-                    _serverManager.GetAllServers().Select(t => new AlertTargetIdentity(
-                        t.Id.ToString(), t.ServerName, t.DatabaseName, t.IsEnabled, t.ReadOnlyIntent))));
+                : _engineEditions.SeparatelyMonitoredDatabases(badgeServer, liveEdition, _serverManager.GetAllServers()));
 
         /* #4752: the app-lifetime token (_backgroundCts, cancelled once in MainWindow_Closing), so closing the app
            ends an alert post still in flight instead of leaving it to run out its timeout against an endpoint that

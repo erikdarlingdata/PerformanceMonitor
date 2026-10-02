@@ -499,6 +499,13 @@ public partial class App : Application
             ConfigDirectory,
             new[] { "ignored_wait_types.json", "collection_schedule.json" });
 
+        // An install upgraded from an earlier release keeps its per-user ignored_wait_types.json, which the
+        // seeder above never touches. Merge the bundled defaults that file has not seen yet (a no-op once merged), before
+        // anything calls IgnoredWaitTypes.Load.
+        Services.IgnoredWaitTypes.MergeNewDefaults(
+            Path.Combine(AppContext.BaseDirectory, "config", "ignored_wait_types.json"),
+            Path.Combine(ConfigDirectory, "ignored_wait_types.json"));
+
         // Load settings. The log level goes first so it governs every line the loaders below buffer.
         LoadLogMinimumLevel();
         LoadDefaultTimeRange();
