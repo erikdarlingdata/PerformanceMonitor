@@ -1381,6 +1381,28 @@ public partial class RemoteCollectorService
         SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber);
 
     /// <summary>
+    /// The connection string for one database on an Azure SQL DB logical server: the registration's own, so a registration
+    /// with read-only intent opens a read-only connection. <paramref name="withoutReadOnlyIntent"/> forces the intent off:
+    /// the long-query trace creates its session's definition over such a connection, because a session cannot be created on
+    /// a read-only replica (#4961). The one place the string is built, so a test that reads it sees what is opened.
+    /// </summary>
+    protected string AzureDatabaseConnectionString(ServerConnection server, string databaseName, bool withoutReadOnlyIntent = false)
+    {
+        var builder = new SqlConnectionStringBuilder(_serverManager.CredentialResolver.GetConnectionString(server))
+        {
+            ConnectTimeout = ConnectionTimeoutSeconds,
+            InitialCatalog = databaseName
+        };
+
+        if (withoutReadOnlyIntent)
+        {
+            builder.ApplicationIntent = ApplicationIntent.ReadWrite;
+        }
+
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
     /// Opens a SQL connection to a specific database on an Azure SQL DB logical server.
     ///
     /// Deliberately NOT retried. This runs once per database per database-scoped collector, and the
@@ -1390,14 +1412,9 @@ public partial class RemoteCollectorService
     /// every minute. The next cycle is the retry, and it costs one minute of that database's data
     /// rather than delaying every other server's.
     /// </summary>
-    protected async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken)
+    protected async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken, bool withoutReadOnlyIntent = false)
     {
-        var baseConnStr = _serverManager.CredentialResolver.GetConnectionString(server);
-        var connStr = new SqlConnectionStringBuilder(baseConnStr)
-        {
-            ConnectTimeout = ConnectionTimeoutSeconds,
-            InitialCatalog = databaseName
-        }.ConnectionString;
+        var connStr = AzureDatabaseConnectionString(server, databaseName, withoutReadOnlyIntent);
 
         var conn = new SqlConnection(connStr);
         try

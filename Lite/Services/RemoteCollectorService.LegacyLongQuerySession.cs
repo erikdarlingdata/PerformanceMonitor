@@ -117,10 +117,12 @@ WHERE des.name = @legacy_session_name;";
 
     /// <summary>
     /// Drops the legacy session where it is not yet recorded as dropped, and records each drop right after it, so a later pass
-    /// retries only the databases that failed. On Azure SQL Database that is every listed database but master, exclusions and other
-    /// registrations included: nothing owns the legacy session any more. Server scope is the one database named with an empty
-    /// string. A failure is kept on the pass, not thrown, so this install's own session is still created. A record that cannot be
-    /// read skips the step for this pass: it is never taken for "not dropped".
+    /// retries only the databases that failed. On Azure SQL Database that is every listed database except master and the databases
+    /// monitored as their own servers, as the trace-off path lists them (<see cref="LongQueryTraceDatabases.Plan"/>); an exclusion
+    /// and another registration's session do not spare a database, because nothing owns the legacy session any more. A database
+    /// monitored as its own server runs its own legacy drop, under its own record. Server scope is the one database named with an
+    /// empty string. A failure is kept on the pass, not thrown, so this install's own session is still created. A record that
+    /// cannot be read skips the step for this pass: it is never taken for "not dropped".
     /// </summary>
     private async Task RunLegacyLongQuerySessionAsync(
         ServerConnection server, LongQueryReconcilePass pass, bool isAzureSqlDatabase, bool afterTheCap, CancellationToken cancellationToken)
@@ -136,8 +138,12 @@ WHERE des.name = @legacy_session_name;";
         {
             try
             {
+                /* The trace-off path's own plan, over the same one listing and the same separately monitored databases it reads
+                   (SeparatelyMonitoredDatabasesFor), with no exclusion and no other registration's session applied: Darling's
+                   legacy drop asks the plan the same way. */
                 var listed = await pass.ListedAsync();
-                databases = listed.Where(LongQueryTraceDatabases.CanHoldSession).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                databases = LongQueryTraceDatabases.Plan(
+                    enabled: false, listed, Array.Empty<string>(), SeparatelyMonitoredDatabasesFor(server), keptElsewhere: Array.Empty<string>()).Drop;
             }
             catch (LongQueryTraceDropException ex)
             {
