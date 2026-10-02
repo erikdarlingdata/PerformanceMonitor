@@ -167,6 +167,11 @@ public partial class RemoteCollectorService
             _longQueryTraceFaultLogged.TryRemove(server.Id, out _);
         }
 
+        if (!enabled)
+        {
+            _longQueryTraceReadOnlyRefused.TryRemove(server.Id, out _);
+        }
+
         var createRepeats = enabled && _longQueryTraceCreateWarned.ContainsKey(server.Id);
 
         try
@@ -212,7 +217,15 @@ public partial class RemoteCollectorService
 
             if (enabled)
             {
+                /* #4961: a read-only database refused the last create, and stays read-only until the registration or the
+                   database changes: not tried again for an hour. The kept fault stays, so the run still records it. */
+                if (LongQueryTraceReadOnlyRefusalHolds(server.Id, stateKey, utcNow))
+                {
+                    return;
+                }
+
                 var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, sessionName, isAzureSqlDatabase, separatelyMonitored, createRepeats, pass, afterTheCap, cancellationToken);
+                _longQueryTraceReadOnlyRefused.TryRemove(server.Id, out _);
 
                 /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
                 _longQueryTraceFault.TryRemove(server.Id, out _);
@@ -311,8 +324,16 @@ public partial class RemoteCollectorService
                never break the collection loop. #4964: the first failure of a create that cannot succeed logs at Warning;
                the cycles after it retry just the same, and keep the fault just the same below, but log at Debug until a
                create succeeds. */
+            var readOnlyRefusal = enabled && IsReadOnlyDatabaseRefusal(ex);
             var reconcileFailure = $"[{server.DisplayName}] Failed to reconcile long-query completion XE session: {ex.Message}";
-            if (createRepeats)
+            if (readOnlyRefusal)
+            {
+                /* #4961: the database's own line already said why and what to change, at Warning. This one is for the
+                   record, and the create is not tried again for an hour. */
+                AppLogger.Debug("XeSession", $"{reconcileFailure} The next attempt is in an hour.");
+                _longQueryTraceReadOnlyRefused[server.Id] = (stateKey, utcNow);
+            }
+            else if (createRepeats)
             {
                 AppLogger.Debug("XeSession", reconcileFailure);
             }
@@ -376,17 +397,28 @@ public partial class RemoteCollectorService
             var create = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
 
             /* A test replaces the work in each database (LongQueryTraceDatabaseOverrideForTests), and the shared ensure
-               still drives it: the same per-database isolation, log lines and all-refused throw as in production. */
+               still drives it: the same per-database isolation, log lines and all-refused throw as in production. Below
+               it, a test replaces each step's open and work (LongQueryTraceStepOverrideForTests), and sees the connection
+               string the step would have opened (#4961). */
             var createInDatabase = LongQueryTraceDatabaseOverrideForTests;
+            var stepInDatabase = LongQueryTraceStepOverrideForTests;
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "long query completions", sessionName,
-                (connection, token) => EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(server, connection, sessionName, token), create, cancellationToken,
+                (connection, token) => new SqlConnectionStringBuilder(connection.ConnectionString).ApplicationIntent == ApplicationIntent.ReadOnly
+                    ? EnsureLongQueryCompletionsXeSessionReadOnlyIntentAsync(connection, server, sessionName, token)
+                    : EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(server, connection, sessionName, token),
+                create, cancellationToken,
                 repeatsAtDebug: createRepeats,
-                ensureInDatabaseOverrideForTests: createInDatabase is null ? null : async (databaseName, token) =>
-                {
-                    await createInDatabase(server, databaseName, true, sessionName, token);
-                    LookForLegacyLongQuerySessionForTests(server, databaseName);
-                });
+                explainRefusal: ex => IsReadOnlyDatabaseRefusal(ex) ? LongQueryTraceDatabases.ReadOnlyDatabaseMessage() : null,
+                ensureInDatabaseOverrideForTests: createInDatabase is not null
+                    ? async (databaseName, token) =>
+                    {
+                        await createInDatabase(server, databaseName, true, sessionName, token);
+                        LookForLegacyLongQuerySessionForTests(server, databaseName);
+                    }
+                    : stepInDatabase is not null
+                        ? (databaseName, token) => RunLongQueryTraceStepsAsync(server, databaseName, sessionName, stepInDatabase, token)
+                        : null);
 
             return monitored;
         }
@@ -402,9 +434,144 @@ public partial class RemoteCollectorService
             return null;
         }
 
+        /* Below it, a test replaces the open and the work, and sees the registration's own connection string (#4961). */
+        if (LongQueryTraceStepOverrideForTests is { } stepOnServer)
+        {
+            await stepOnServer(server, string.Empty, _serverManager.CredentialResolver.GetConnectionString(server), LongQueryTraceStep.CreateAndStart, sessionName, cancellationToken);
+            return null;
+        }
+
         using var connection = await CreateConnectionAsync(server, cancellationToken);
         await EnsureLongQueryCompletionsXeSessionOnPremAsync(connection, server, sessionName, cancellationToken);
         return null;
+    }
+
+    /// <summary>
+    /// The steps one Azure SQL Database database's ensure takes for a registration, in order, with the connection string
+    /// each one opens (#4961). Pure, so the production ensure and the test seam read the same plan.
+    /// </summary>
+    internal static IReadOnlyList<(LongQueryTraceStep Step, string ConnectionString)> LongQueryTraceStepsFor(string ownConnectionString)
+    {
+        var own = new SqlConnectionStringBuilder(ownConnectionString);
+        if (own.ApplicationIntent != ApplicationIntent.ReadOnly)
+        {
+            return new[] { (LongQueryTraceStep.CreateAndStart, ownConnectionString) };
+        }
+
+        /* A session cannot be created on a read-only replica, and the definition replicates from the primary. So the
+           definition is created over a connection without the intent, and not started there; the session is started over
+           the registration's own connection, because run state is per replica. */
+        own.ApplicationIntent = ApplicationIntent.ReadWrite;
+        return new[]
+        {
+            (LongQueryTraceStep.CreateDefinition, own.ConnectionString),
+            (LongQueryTraceStep.Start, ownConnectionString),
+        };
+    }
+
+    /* #4961: the servers whose create a read-only database refused (error 3906), with the state key the refusal was made
+       under and when. A read-only database stays read-only until the registration or the database changes, so the create
+       is not tried again for an hour, or sooner when the state key changes. The kept fault stays, so every run still
+       records it. In memory, so a restart tries again. */
+    private readonly ConcurrentDictionary<string, (string StateKey, DateTime AtUtc)> _longQueryTraceReadOnlyRefused = new();
+
+    private bool LongQueryTraceReadOnlyRefusalHolds(string serverId, string stateKey, DateTime utcNow) =>
+        _longQueryTraceReadOnlyRefused.TryGetValue(serverId, out var refused)
+        && string.Equals(refused.StateKey, stateKey, StringComparison.Ordinal)
+        && utcNow - refused.AtUtc < LongQueryTraceDatabases.RetryInterval;
+
+    /// <summary>
+    /// Whether a failed create is a read-only database's refusal (error 3906): the error itself, or the one an ensure
+    /// exception wraps (#4961).
+    /// </summary>
+    internal static bool IsReadOnlyDatabaseRefusal(Exception? ex)
+    {
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sql && LongQueryTraceDatabases.IsReadOnlyDatabaseRefusal(sql.Errors.Cast<SqlError>().Select(e => e.Number)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The Azure SQL Database create for a registration with read-only intent (#4961): the definition over a connection
+    /// without the intent, which does not start it, then the start over the registration's own read-only connection.
+    /// </summary>
+    private async Task EnsureLongQueryCompletionsXeSessionReadOnlyIntentAsync(SqlConnection connection, ServerConnection server, string sessionName, CancellationToken cancellationToken)
+    {
+        using (var definition = await OpenAzureDatabaseConnectionAsync(server, connection.Database, cancellationToken, withoutReadOnlyIntent: true))
+        {
+            await CreateLongQueryCompletionsDefinitionAzureSqlDbAsync(definition, sessionName, cancellationToken);
+        }
+
+        using var startCmd = new SqlCommand($@"
+IF NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.dm_xe_database_sessions AS xes
+    WHERE xes.name = N'{sessionName}'
+)
+BEGIN
+    {LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true)}
+END;", connection);
+        startCmd.CommandTimeout = CommandTimeoutSeconds;
+        await startCmd.ExecuteNonQueryAsync(cancellationToken);
+        AppLogger.Debug("XeSession", $"[Azure SQL DB:{connection.Database}] Long-query completion XE session verified over the read-only connection (database-scoped)");
+    }
+
+    private async Task CreateLongQueryCompletionsDefinitionAzureSqlDbAsync(SqlConnection connection, string sessionName, CancellationToken cancellationToken)
+    {
+        using (var cmd = new SqlCommand(@"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* PerformanceMonitorLite */
+    session_state = des.name
+FROM sys.database_event_sessions AS des
+WHERE des.name = @session_name;", connection))
+        {
+            cmd.CommandTimeout = CommandTimeoutSeconds;
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
+            if (await cmd.ExecuteScalarAsync(cancellationToken) != null)
+            {
+                return;
+            }
+        }
+
+        try
+        {
+            using var createCmd = new SqlCommand(
+                LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds), connection);
+            createCmd.CommandTimeout = CommandTimeoutSeconds;
+            await createCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
+        {
+            return;
+        }
+
+        AppLogger.Info("XeSession", $"[Azure SQL DB:{connection.Database}] Created the long-query completion XE session's definition over a connection without read-only intent (database-scoped)");
+    }
+
+    /// <summary>
+    /// A test's stand-in for the Azure per-database ensure: each step the registration takes in the database, handed to
+    /// <see cref="LongQueryTraceStepOverrideForTests"/> with the connection string it would open.
+    /// </summary>
+    private async Task RunLongQueryTraceStepsAsync(
+        ServerConnection server,
+        string databaseName,
+        string sessionName,
+        Func<ServerConnection, string, string, LongQueryTraceStep, string, CancellationToken, Task> step,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (kind, connectionString) in LongQueryTraceStepsFor(AzureDatabaseConnectionString(server, databaseName)))
+        {
+            await step(server, databaseName, connectionString, kind, sessionName, cancellationToken);
+        }
     }
 
     private async Task EnsureLongQueryCompletionsXeSessionOnPremAsync(SqlConnection connection, ServerConnection server, string sessionName, CancellationToken cancellationToken)
@@ -587,6 +754,15 @@ END;", connection);
     /// Null in production.
     /// </summary>
     internal Func<ServerConnection, string, bool, string, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces one open-and-act step of the long-query trace's create, below
+    /// <see cref="LongQueryTraceDatabaseOverrideForTests"/>, which wins when both are set (#4961). Called with the server,
+    /// the database (empty for the server's own session), the connection string the step would open, the step, and the
+    /// session name. A test sees which connection each step uses, with or without read-only intent. The step's work is
+    /// not done. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, string, LongQueryTraceStep, string, CancellationToken, Task>? LongQueryTraceStepOverrideForTests { get; set; }
 
     /// <summary>
     /// What the last reconcile that finished applied for this server: true for on, false for off, null when no
