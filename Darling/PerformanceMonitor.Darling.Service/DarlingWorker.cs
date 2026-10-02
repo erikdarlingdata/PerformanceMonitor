@@ -4167,7 +4167,7 @@ LIMIT 1";
         }
         else if (enabled
                  && server.LongQueryTraceAppliedAtUtc is { } appliedAt
-                 && utcNow - appliedAt >= TimeSpan.MaxValue)
+                 && utcNow - appliedAt >= LongQueryTraceDatabases.RetryInterval)
         {
             pass = LongQueryTracePass.CreateOnly;
         }

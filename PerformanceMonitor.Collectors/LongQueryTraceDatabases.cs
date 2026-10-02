@@ -228,7 +228,8 @@ public static class LongQueryTraceDatabases
     public static string GiveUpWarning(IReadOnlyList<string> databases, string? retryNote = null) => (databases.Count == 0
         ? $"Stopped retrying the long-query trace cleanup after {DropAttemptCap} failed attempts in a row. The databases could not be listed, so the session may remain in any of them."
         : $"Stopped retrying the long-query trace cleanup after {DropAttemptCap} failed attempts in a row. The session may remain in: {string.Join(", ", databases)}.")
-        + " The next attempt comes after a restart or a change to the trace's settings.";
+        + " It tries again once an hour, and right away after a restart, a change to the trace's settings, or a change to another registration of these databases."
+        + retryNote;
 
     private static IEnumerable<LongQueryTraceRegistration> OtherOwners(
         string selfId, string host, IEnumerable<LongQueryTraceRegistration> registrations)
@@ -391,7 +392,7 @@ public sealed class LongQueryTraceDropRetry
             }
 
             _failures = 0;
-            _stateKey = null;
+            _nextAttemptUtc = utcNow + LongQueryTraceDatabases.RetryInterval;
             return LongQueryTraceDropOutcome.GaveUp;
         }
     }
