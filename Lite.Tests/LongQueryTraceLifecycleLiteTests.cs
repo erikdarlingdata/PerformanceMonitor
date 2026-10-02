@@ -798,7 +798,9 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
 
             lines.AddRange(Lines(rig));
             Assert.Equal(LongQueryTraceDatabases.DropAttemptCap - 1, Count(lines, "WARN", DropLine));
-            Assert.Null(rig.Applied);
+
+            /* The failed passes were not marked done: the last reconcile that finished is the one that turned it on. */
+            Assert.True(rig.Applied);
         }
         finally
         {

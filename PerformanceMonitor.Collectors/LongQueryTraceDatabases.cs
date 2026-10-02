@@ -231,6 +231,17 @@ public static class LongQueryTraceDatabases
         + " It tries again once an hour, and right away after a restart, a change to the trace's settings, or a change to another registration of these databases."
         + retryNote;
 
+    /// <summary>
+    /// <see cref="GiveUpWarning(IReadOnlyList{string}, string?)"/> for the failure the cap gave up on. Where the session is
+    /// the server's (<see cref="LongQueryTraceDropException.OnServer"/>), there are no databases to name or to list, and the
+    /// restart and the change to the trace's settings are the only other things that try again.
+    /// </summary>
+    public static string GiveUpWarning(LongQueryTraceDropException failure, string? retryNote = null) => failure.OnServer
+        ? $"Stopped retrying the long-query trace cleanup after {DropAttemptCap} failed attempts in a row. The session may remain on the server."
+            + " It tries again once an hour, and right away after a restart or a change to the trace's settings."
+            + retryNote
+        : GiveUpWarning(failure.Databases, retryNote);
+
     private static IEnumerable<LongQueryTraceRegistration> OtherOwners(
         string selfId, string host, IEnumerable<LongQueryTraceRegistration> registrations)
     {
@@ -415,10 +426,12 @@ public sealed class LongQueryTraceDropRetry
 }
 
 /// <summary>
-/// A long-query trace reconcile that could not finish its drops on Azure SQL Database: the database list could not
-/// be read, or the drop failed in some databases (the others were still dropped). The caller does not mark the
+/// A long-query trace reconcile that could not finish its drops: on Azure SQL Database, the database list could not
+/// be read or the drop failed in some databases (the others were still dropped); on every other engine
+/// (<see cref="ForServer"/>), the drop of the server's session failed. The caller does not mark the
 /// reconcile done, so the next cycle tries again, up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/> passes
-/// in a row, and then once an hour (<see cref="LongQueryTraceDropRetry"/>).
+/// in a row, and then once an hour (<see cref="LongQueryTraceDropRetry"/>). Every failure of the drop half reaches
+/// the caller as this type, which is what lets the caller's general handler stay for the create side.
 /// </summary>
 public sealed class LongQueryTraceDropException : Exception
 {
@@ -429,6 +442,22 @@ public sealed class LongQueryTraceDropException : Exception
         Databases = databases;
         CreateNote = createNote;
     }
+
+    private LongQueryTraceDropException(Exception firstFailure)
+        : base($"Could not drop the long-query trace session: {firstFailure.Message}", firstFailure)
+    {
+        Databases = Array.Empty<string>();
+        OnServer = true;
+    }
+
+    /// <summary>
+    /// Creates the exception for a drop that failed where the session is the server's, on every engine but Azure SQL
+    /// Database. There is no database to name and no list to read.
+    /// </summary>
+    public static LongQueryTraceDropException ForServer(Exception firstFailure) => new(firstFailure);
+
+    /// <summary>True when the failed drop was of the server's own session, not of a database's. <see cref="Databases"/> is empty then.</summary>
+    public bool OnServer { get; }
 
     /// <summary>The databases where the drop failed, so the session may remain there. Empty when the list could not be read.</summary>
     public IReadOnlyList<string> Databases { get; }
