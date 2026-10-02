@@ -1916,6 +1916,15 @@ public partial class MainWindow : Window
             }
         }
 
+        /* #4961: the server's long-query trace session is this install's, so it goes with the server. Awaited here, with the
+           tag clear, so the block below still awaits nothing: one attempt for the whole step, and a failure or the timeout
+           is logged by the drop and never stops the removal. */
+        if (_collectorService != null)
+        {
+            using var sessionDrop = new System.Threading.CancellationTokenSource(RemoteCollectorService.LongQueryTraceRemovalTimeout);
+            await _collectorService.DropLongQueryTraceOfRemovedServerAsync(server, sessionDrop.Token);
+        }
+
         /* #4795: from the first drop to the delete nothing is awaited, so this runs on the UI thread without a
            timer tick in between. The state used to be dropped, then the tag clear awaited, then the registry entry
            deleted by the caller: a tick during that await still found the server registered and re-created the

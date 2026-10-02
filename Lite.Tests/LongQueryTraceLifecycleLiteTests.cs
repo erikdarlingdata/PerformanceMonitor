@@ -1597,27 +1597,45 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         Assert.Empty(rig.Calls);
     }
 
+    /// <summary>The install's default is on and the other registration overrides it to off: its effective setting is off, so it keeps nothing.</summary>
     [Fact]
-    public async Task Off_OnPremises_TheOtherRegistrationsOwnSetting_NotTheRawField_DecidesWhetherItKeepsTheSession()
+    public async Task Off_OnPremises_AnotherRegistrationWithItsOwnSettingOff_KeepsNothing_WhateverTheInstallsDefault()
     {
-        /* The install's default is on, and the other registration overrides it to off: its effective setting is off. */
-        var rig = await BuildOnPremRigAsync(traceOn: false);
-        rig.Schedules.UpdateSchedule("long_query_completions", enabled: true);
+        var rig = await BuildOnPremRigAsync(traceOn: true);
         SetTrace(rig, rig.Server, traceOn: false);
         await SeedNameAsync(rig, rig.Server, InstanceName);
-        var other = await RegisterOnPremOtherAsync(rig, traceOn: false, InstanceName);
+        await RegisterOnPremOtherAsync(rig, traceOn: false, InstanceName);
 
         await rig.ReconcileAsync();
+
         Assert.Single(rig.Calls, c => !c.Create);
+    }
 
-        /* And the other way: the default is off and the other registration turns its own on. */
-        var second = await BuildOnPremRigAsync(traceOn: false);
-        await SeedNameAsync(second, second.Server, InstanceName);
-        await RegisterOnPremOtherAsync(second, traceOn: true, InstanceName);
+    /// <summary>The install's default is off and the other registration turns its own on: its effective setting is on, so it keeps the session.</summary>
+    [Fact]
+    public async Task Off_OnPremises_AnotherRegistrationWithItsOwnSettingOn_KeepsTheSession_WhateverTheInstallsDefault()
+    {
+        var rig = await BuildOnPremRigAsync(traceOn: false);
+        await SeedNameAsync(rig, rig.Server, InstanceName);
+        await RegisterOnPremOtherAsync(rig, traceOn: true, InstanceName);
 
-        await second.ReconcileAsync();
-        Assert.Empty(second.Calls);
-        Assert.NotNull(other);
+        await rig.ReconcileAsync();
+
+        Assert.Empty(rig.Calls);
+    }
+
+    /// <summary>The removal begins, and a reconcile that comes after it does not create the session again.</summary>
+    [Fact]
+    public async Task AfterTheRemovalsDrop_TheReconcile_DoesNotCreateTheSessionAgain()
+    {
+        var rig = await BuildRigAsync(traceOn: true);
+        await rig.ReconcileAsync();
+        await RemoveAsync(rig);
+        rig.Calls.Clear();
+
+        await rig.ReconcileAsync();
+
+        Assert.Empty(rig.Calls);
     }
 
     /// <summary>The service's session drop for a removed server, the way the removal calls it.</summary>
