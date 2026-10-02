@@ -5886,14 +5886,15 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// can tell its own mistake from a server that is down.</summary>
     public static class DropXeSessionsExitCode
     {
-        /// <summary>Every session found was dropped (listed, with <c>--dry-run</c>), none was there, or <c>--print-sql</c> printed.</summary>
+        /// <summary>Every session found was dropped (listed, with <c>--dry-run</c>), none was there, or <c>--print-sql</c> printed. An
+        /// excluded database that could not be searched for the long-query session is a note on stderr and does not change it.</summary>
         public const int Success = 0;
 
         /// <summary>Bad arguments, a configuration that is missing or invalid, a store setting that cannot be used, or a server name
         /// that matches no server (the message names <c>--print-sql</c>) or more than one.</summary>
         public const int UsageOrConfig = 1;
 
-        /// <summary>The server cannot be connected to, cannot be searched (all of it, or one database of it), or refused a DROP.</summary>
+        /// <summary>The server cannot be connected to, cannot be searched (all of it, or one monitored database of it), or refused a DROP.</summary>
         public const int TargetUnavailable = 2;
     }
 
@@ -5905,6 +5906,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         $"      Darling Extended Events sessions on it: {DarlingXeSessionCleanup.SessionNamesPhrase()}, server scope, and on" + Environment.NewLine +
         "      Azure SQL Database the database-scoped copies in each monitored database, and for the long query completions session in the" + Environment.NewLine +
         "      databases the server excludes too (not in a database another registration of the server keeps it in). --dry-run lists them and drops nothing." + Environment.NewLine +
+        "      An excluded database that cannot be opened is reported as a note and does not change the exit code (a session left in it needs a manual drop); a monitored database that cannot be opened exits 2." + Environment.NewLine +
         "      Run it just before you remove the server (it finds only a server this service still monitors, and stops that server's deadlock and blocked-process capture until this service reconnects); after the removal, use --print-sql." + Environment.NewLine +
         "  --drop-xe-sessions --print-sql" + Environment.NewLine +
         "      Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +

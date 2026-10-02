@@ -665,6 +665,11 @@ WHERE ses.name = @session_name;", connection))
     /// <see cref="LongQueryTraceDropException"/> after every database was tried, carrying the partial note, so
     /// the worker retries it up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/> times in a row, then once an
     /// hour. A <see cref="LongQueryTracePass.CreateOnly"/> pass stops after the create side.
+    /// <para>The create side has no cap, on purpose. Its listing failure rethrows as it is, so the worker leaves the
+    /// trace unapplied and a login that cannot read master on a logical server retries the create on every sweep, with a
+    /// warning each time: the fault is recorded again, and the run reads <c>SESSION_MISSING</c>. The CREATE path where
+    /// every database refuses has the same cadence. Only the drop side is capped, because its failures, the listing
+    /// included, arrive as <see cref="LongQueryTraceDropException"/>.</para>
     /// </summary>
     private static async Task<string?> ReconcileLongQueryCompletionsAzureAsync(
         ServerRuntime server,

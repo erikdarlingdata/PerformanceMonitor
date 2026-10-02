@@ -119,6 +119,128 @@ public sealed class DropXeSessionsVerbTests
         Assert.Equal(new[] { "alpha" }, plan.AlwaysOnDatabases);
     }
 
+    // ---- a database the search cannot open: a problem when it is monitored, a note when the registration excludes it ----------
+
+    /// <summary>The registration excludes gamma and monitors alpha as its own server: the plan visits alpha and beta for the
+    /// always-on sessions and beta and gamma for the long-query one, so gamma is searched for that session alone.</summary>
+    private static SqlServerXeSessionCleanupTarget.AzureSearchPlan ExcludedGammaPlan()
+    {
+        var self = new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"] };
+        var alphaOwnServer = new MonitoredServer { Name = "dropxe-alpha", Host = AzureHost, Database = "alpha" };
+        return AzureTarget(self, self, alphaOwnServer).PlanAzureSearch(
+            monitored: ["master", "alpha", "beta"],
+            every: ["master", "alpha", "beta", "gamma"]);
+    }
+
+    /// <summary>The target's real Azure search loop under the real executor, with the read of one database replaced: the
+    /// <paramref name="refusing"/> database refuses the connection, alpha holds the deadlock session and beta the long-query
+    /// one.</summary>
+    private sealed class AzureSearchTarget : IXeSessionCleanupTarget
+    {
+        private readonly SqlServerXeSessionCleanupTarget.AzureSearchPlan _plan;
+        private readonly string _refusing;
+
+        public AzureSearchTarget(SqlServerXeSessionCleanupTarget.AzureSearchPlan plan, string refusing)
+        {
+            _plan = plan;
+            _refusing = refusing;
+        }
+
+        public List<XeSessionDrop> Dropped { get; } = [];
+
+        public Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken) =>
+            SqlServerXeSessionCleanupTarget.SearchAzureDatabasesAsync(_plan, NamesInDatabaseAsync, cancellationToken);
+
+        public Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
+        {
+            Dropped.Add(drop);
+            return Task.CompletedTask;
+        }
+
+        private Task<IReadOnlyList<string>> NamesInDatabaseAsync(string database, CancellationToken cancellationToken)
+        {
+            if (string.Equals(database, _refusing, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("login failed");
+            }
+
+            return Task.FromResult<IReadOnlyList<string>>(database switch
+            {
+                "alpha" => new[] { Deadlock },
+                "beta" => new[] { LongQuery },
+                _ => Array.Empty<string>(),
+            });
+        }
+    }
+
+    private static async Task<(int Exit, string Error, AzureSearchTarget Target)> RunAzureSearchAsync(string refusing)
+    {
+        var target = new AzureSearchTarget(ExcludedGammaPlan(), refusing);
+        var error = new StringWriter();
+        var exit = await DarlingXeSessionCleanup.RunAsync("sql01", dryRun: false, target, new StringWriter(), error, CancellationToken.None);
+        return (exit, error.ToString(), target);
+    }
+
+    /// <summary>
+    /// The long-query search opens databases the registration excludes, which the verb never opened before it. An excluded
+    /// database the login cannot open (no user there, a paused serverless database) must not fail a verb that dropped every
+    /// session it found: a script that runs the verb and then removes the server would stop there. It is a note on stderr that
+    /// names the database, says it is excluded and says a session left there needs a manual drop.
+    /// </summary>
+    [Fact]
+    public async Task AnExcludedDatabaseTheLoginCannotOpen_IsANoteOnStderr_AndTheRunStillSucceeds()
+    {
+        var (exit, error, target) = await RunAzureSearchAsync(refusing: "gamma");
+
+        Assert.Equal(0, exit);
+        Assert.Equal(
+            [
+                ("alpha", Deadlock),
+                ("beta", LongQuery),
+            ],
+            target.Dropped.Select(drop => (drop.Session.Database!, drop.Session.Name)).ToArray());
+        Assert.Equal(
+            $"Database gamma is excluded from monitoring and could not be searched for the long-query completion session (login failed), so a {LongQuery} session left there needs a manual drop."
+                + Environment.NewLine,
+            error);
+    }
+
+    /// <summary>A database the registration monitors is searched for every session, so one the login cannot open still fails
+    /// the run with the unavailable code, as it did before the search reached excluded databases. This passes without the
+    /// exclusion rule too: it is the guard that the rule did not loosen the monitored case.</summary>
+    [Fact]
+    public async Task AMonitoredDatabaseTheLoginCannotOpen_StillFailsTheRun_WithTheUnavailableCode()
+    {
+        var (exit, error, target) = await RunAzureSearchAsync(refusing: "beta");
+
+        Assert.Equal(2, exit);
+        Assert.Equal(
+            "Could not search database beta for Extended Events sessions: login failed" + Environment.NewLine,
+            error);
+        Assert.DoesNotContain("excluded from monitoring", error, StringComparison.Ordinal);
+        Assert.Equal(new[] { ("alpha", Deadlock) }, target.Dropped.Select(drop => (drop.Session.Database!, drop.Session.Name)).ToArray());
+    }
+
+    [Fact]
+    public void ADatabaseSearchedOnlyForTheLongQuerySession_IsFiledAsANote_AndAMonitoredOneAsAProblem()
+    {
+        var plan = ExcludedGammaPlan();
+
+        var excluded = plan.Unsearched("gamma", "login failed");
+        Assert.False(excluded.IsProblem);
+        Assert.Contains("Database gamma is excluded from monitoring", excluded.Text, StringComparison.Ordinal);
+        Assert.Contains("could not be searched for the long-query completion session (login failed)", excluded.Text, StringComparison.Ordinal);
+        Assert.Contains($"{LongQuery} session left there needs a manual drop", excluded.Text, StringComparison.Ordinal);
+
+        var monitored = plan.Unsearched("beta", "login failed");
+        Assert.True(monitored.IsProblem);
+        Assert.Equal("Could not search database beta for Extended Events sessions: login failed", monitored.Text);
+
+        // Database names compare without regard to case, as the rest of the plan does.
+        Assert.True(plan.Unsearched("BETA", "login failed").IsProblem);
+        Assert.False(plan.Unsearched("GAMMA", "login failed").IsProblem);
+    }
+
     // ---- classification, help and dispatch -----------------------------------------------------------------------------
 
     [Theory]
@@ -409,6 +531,8 @@ public sealed class DropXeSessionsVerbTests
 
         public List<string> Problems { get; } = [];
 
+        public List<string> Notes { get; } = [];
+
         public Exception? SearchFails { get; set; }
 
         public HashSet<string> Refused { get; } = [];
@@ -417,7 +541,7 @@ public sealed class DropXeSessionsVerbTests
 
         public Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken) =>
             SearchFails is null
-                ? Task.FromResult(new XeSessionSearch(Found.ToList(), Problems.ToList()))
+                ? Task.FromResult(new XeSessionSearch(Found.ToList(), Problems.ToList()) { Notes = Notes.ToList() })
                 : throw SearchFails;
 
         public Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
@@ -568,6 +692,35 @@ public sealed class DropXeSessionsVerbTests
         Assert.Equal(DarlingCliCommands.DropXeSessionsExitCode.TargetUnavailable, exit);
         Assert.Contains("nothing to drop in the places searched", output, StringComparison.Ordinal);
         Assert.Contains("database hr", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ANoteFromTheSearch_IsPrintedOnStderr_AndLeavesTheExitCodeAndTheDropsAlone()
+    {
+        var target = new FakeTarget();
+        target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
+        target.Notes.Add("Database hr is excluded from monitoring and could not be searched for the long-query completion session (login failed), so a session left there needs a manual drop.");
+
+        var (exit, output, error) = await RunAsync(target, dryRun: false);
+
+        Assert.Equal(DarlingCliCommands.DropXeSessionsExitCode.Success, exit);
+        Assert.Single(target.Dropped);
+        Assert.Contains($"[DROPPED] {Deadlock}", output, StringComparison.Ordinal);
+        Assert.Equal(target.Notes[0] + Environment.NewLine, error);
+        Assert.DoesNotContain("[FAILED]", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ANoteWithNothingFound_StillSaysNothingWasDroppedOnlyInThePlacesSearched()
+    {
+        var target = new FakeTarget();
+        target.Notes.Add("Database hr is excluded from monitoring and could not be searched for the long-query completion session (login failed), so a session left there needs a manual drop.");
+
+        var (exit, output, error) = await RunAsync(target, dryRun: false);
+
+        Assert.Equal(DarlingCliCommands.DropXeSessionsExitCode.Success, exit);
+        Assert.Contains("nothing to drop in the places searched", output, StringComparison.Ordinal);
+        Assert.Contains("database hr", error, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -894,5 +1047,23 @@ public sealed class DropXeSessionsVerbTests
         var listAt = readme.IndexOf("Every other verb that opens the store (", StringComparison.Ordinal);
         Assert.True(listAt >= 0, "the README no longer lists the verbs that open the store");
         Assert.Contains("`--drop-xe-sessions <server-name>`", readme[listAt..Math.Min(readme.Length, listAt + 400)], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheUsageAndTheReadme_SayAnExcludedDatabaseThatCannotBeOpenedLeavesTheExitCodeAlone_AndAMonitoredOneExitsTwo()
+    {
+        var usage = DarlingCliCommands.DropXeSessionsUsageText();
+        Assert.Contains("An excluded database that cannot be opened is reported as a note and does not change the exit code", usage, StringComparison.Ordinal);
+        Assert.Contains("a monitored database that cannot be opened exits 2", usage, StringComparison.Ordinal);
+
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var start = readme.IndexOf("### Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the README no longer has the --drop-xe-sessions section (#4732)");
+        var end = readme.IndexOf("\n---", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the --drop-xe-sessions section no longer ends at a horizontal rule");
+        var section = readme[start..end];
+
+        Assert.Contains("is reported in a note on stderr and does not change the exit code", section, StringComparison.Ordinal);
+        Assert.Contains("a monitored database it cannot open makes the verb exit `2`", section, StringComparison.Ordinal);
     }
 }
