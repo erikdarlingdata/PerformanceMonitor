@@ -2491,7 +2491,7 @@ public sealed class DarlingStoreUpgradeTests
         var call = source.IndexOf("IsDowngradeAgainstStore(dataDirectory, runtimeZipPath)", StringComparison.Ordinal);
         Assert.True(call >= 0, "nothing calls IsDowngradeAgainstStore — a correct downgrade check that is never invoked is what #1738 already was");
 
-        var rescue = source.IndexOf("Directory.Move(pgsqlDirectory, previousPgsql)", StringComparison.Ordinal);
+        var rescue = source.IndexOf("MoveRuntimeDirectory(pgsqlDirectory, previousPgsql)", StringComparison.Ordinal);
         Assert.True(rescue > call, "the downgrade guard must run BEFORE the runtime is rescued and replaced");
 
         var noStampBranch = source.IndexOf("if (stamp is null)", StringComparison.Ordinal);
