@@ -106,8 +106,8 @@ public static class LongQueryTraceDatabases
         var owned = JoinNames(separatelyMonitoredDatabases);
         var others = string.Join(CoOwnerSeparator, coOwners.Distinct(StringComparer.Ordinal).OrderBy(owner => owner, StringComparer.Ordinal));
         return enabled
-            ? string.Join(NameSeparator, "on", JoinNames(databaseScope), JoinNames(excludedDatabases), owned, others)
-            : string.Join(NameSeparator, "off", owned, others);
+            ? string.Join(PartSeparator, "on", JoinNames(databaseScope), JoinNames(excludedDatabases), owned, others)
+            : string.Join(PartSeparator, "off", owned, others);
     }
 
     /// <summary>
@@ -225,7 +225,12 @@ public static class LongQueryTraceDatabases
     private static IEnumerable<LongQueryTraceRegistration> OtherOwners(
         string selfId, string host, IEnumerable<LongQueryTraceRegistration> registrations)
     {
-        return Enumerable.Empty<LongQueryTraceRegistration>();
+        var hostKey = host.Trim();
+        return registrations.Where(other =>
+            other.Id != selfId
+            && other.Enabled
+            && other.TraceOn
+            && string.Equals(other.Host.Trim(), hostKey, StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool Keeps(LongQueryTraceRegistration owner, string database, HashSet<string> separatelyMonitored)
