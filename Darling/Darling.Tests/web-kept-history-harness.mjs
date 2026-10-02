@@ -76,9 +76,12 @@ process.on("unhandledRejection", (e) => rejections.push(String(e && e.stack ? e.
 /* The field config an editor scenario derived, or null. */
 let vizcfg = null;
 
-/* The offeredRanges scenario's findings: the hours the server page offers, and each read it would ask for more. */
+/* The offeredRanges scenario's findings: the hours the server page offers, each read it would ask for more, every
+   ranged read it asked for (as "hours engine tool"), and each tab's note as the page renders it. */
 let offered = null;
 let beyond = null;
+let observed = null;
+let notes = null;
 
 /* The modules, unchanged, with charts.js replaced by a stand-in that records the window each chart was given. An
    editor scenario also loads the view editor (editor.js) and the modules it imports, with compose.js (the composed
@@ -87,8 +90,9 @@ let beyond = null;
    copy changes. */
 const editorScenario = scenario.startsWith("editor");
 /* The offeredRanges scenario also loads the server page (pages/server.js and the fleet page it imports). The page
-   keeps its Range presets in a module-private constant, so the scratch copy appends one line exporting
-   RANGE_OPTIONS, the same way the editor copy exports ensureFieldConfigs. */
+   keeps its Range presets, and the widest of them that it hands tabNote, in module-private constants, so the scratch
+   copy appends one line exporting RANGE_OPTIONS and WIDEST_RANGE_HOURS, the same way the editor copy exports
+   ensureFieldConfigs. */
 const serverPageScenario = scenario === "offeredRanges";
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "kept-history-"));
 let modules;
@@ -124,7 +128,7 @@ try {
     fs.copyFileSync(path.join(jsDir, "pages", "fleet.js"), path.join(scratch, "pages", "fleet.js"));
     fs.writeFileSync(
       path.join(scratch, "pages", "server.js"),
-      fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS };\n"
+      fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS, WIDEST_RANGE_HOURS };\n"
     );
   }
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
@@ -260,6 +264,8 @@ const scenarios = {
     };
     offered = modules.server.RANGE_OPTIONS.map((option) => option.hours);
     beyond = [];
+    observed = [];
+    notes = [];
     for (const option of modules.server.RANGE_OPTIONS) {
       for (const [engine, registry] of [["SQL Server", modules.tabs.SERVER_TABS], ["PostgreSQL", modules.tabs.POSTGRES_TABS]]) {
         for (const tab of registry) {
@@ -268,10 +274,21 @@ const scenarios = {
           await settleFast();
           for (const fetched of fetches.slice(before)) {
             const url = new URL(fetched, "http://viewer.test");
+            if (asked(url) !== null) {
+              observed.push(option.hours + " " + engine + " " + tool(url));
+            }
             if (Number(asked(url)) > maxHours) {
               beyond.push(option.label + ": " + engine + " " + tab.id + " tab, " + tool(url) + " asked for " + asked(url) + " hours");
             }
           }
+        }
+      }
+    }
+    for (const [engine, registry] of [["SQL Server", modules.tabs.SERVER_TABS], ["PostgreSQL", modules.tabs.POSTGRES_TABS]]) {
+      for (const tab of registry) {
+        const note = modules.tabs.tabNote(tab, modules.server.WIDEST_RANGE_HOURS);
+        if (note) {
+          notes.push(engine + " " + tab.id + ": " + note.textContent);
         }
       }
     }
@@ -307,5 +324,7 @@ console.log(JSON.stringify({
   vizcfg,
   offered,
   beyond,
+  observed,
+  notes,
   rejections,
 }));

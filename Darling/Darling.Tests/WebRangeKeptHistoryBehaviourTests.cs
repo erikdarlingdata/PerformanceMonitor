@@ -32,6 +32,10 @@ public sealed class WebRangeKeptHistoryBehaviourTests
 {
     private const string KeptNotice = "This view reads at most 168 hours (7 days) at a time, so it shows the last 7 days.";
 
+    /// <summary>How the notice ends when the retry is refused too. The second-refusal pin and the census guard both read
+    /// it, so the guard cannot drift from the text the page shows.</summary>
+    private const string PickShorter = "Pick a shorter range.";
+
     internal static bool TryRun(string scenario, out JsonElement result)
     {
         result = default;
@@ -141,7 +145,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Equal(2, Strings(r, "fetches").Length);
         /* The second refusal falls back to the #2780 notice, which names the window the read now reports. */
         Assert.Equal(
-            "This view reads at most 96 hours (4 days) at a time. Pick a shorter range.",
+            "This view reads at most 96 hours (4 days) at a time. " + PickShorter,
             Assert.Single(Strings(r, "notices")));
         Assert.Empty(Strings(r, "errors"));
     }
@@ -202,7 +206,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
     /// <summary>
     /// Every tab of both registries at 30 days, with every read refusing it: each ranged read on the page, whether
     /// a descriptor, a fanout or a hand-built composite, is asked exactly once more at 168 hours, and no panel is
-    /// left on the "pick a shorter range" notice. The picker reads (wait, counter and query trends) are in the count,
+    /// left on the "Pick a shorter range." notice. The picker reads (wait, counter and query trends) are in the count,
     /// so a composite that bypasses the shared helper fails here.
     /// </summary>
     [Fact]
@@ -227,7 +231,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
             Assert.Contains(ranged, f => f.StartsWith("/api/read/" + trend + "?", StringComparison.Ordinal) && f.Contains("hours=168", StringComparison.Ordinal));
         }
 
-        Assert.DoesNotContain(Strings(r, "notices"), n => n.Contains("pick a shorter range", StringComparison.Ordinal));
+        Assert.DoesNotContain(Strings(r, "notices"), n => n.Contains(PickShorter, StringComparison.Ordinal));
         Assert.Contains(KeptNotice, Strings(r, "notices"));
         Assert.Empty(Strings(r, "errors"));
         Assert.Empty(Strings(r, "rejections"));

@@ -42,6 +42,55 @@ public sealed class WebServerPageRangeTests
             + $" than {McpHelpers.MaxHoursBack} hours, the widest window the capped reads take:\n" + string.Join("\n", beyond.Take(40)));
 
         Assert.Empty(r.GetProperty("rejections").EnumerateArray());
+
+        /* "Nothing over-asked" must not pass because nothing was asked: each range builds the tabs of both registries,
+           and named ranged reads from each are seen at that range's hours. */
+        var observed = r.GetProperty("observed").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        foreach (var hours in offered)
+        {
+            foreach (var (engine, reads) in s_witnesses)
+            {
+                var seen = observed.Where(o => o.StartsWith($"{hours} {engine} ", System.StringComparison.Ordinal)).ToArray();
+                foreach (var read in reads)
+                {
+                    Assert.True(
+                        seen.Contains($"{hours} {engine} {read}"),
+                        $"At {hours} hours the {engine} tabs never asked {read} for a window ({seen.Length} ranged reads seen there).");
+                }
+            }
+        }
+    }
+
+    /// <summary>Ranged reads each registry's tabs make at every range: the census must see them asked.</summary>
+    private static readonly (string Engine, string[] Reads)[] s_witnesses =
+    [
+        ("SQL Server", ["get_cpu_utilization", "get_wait_trend", "get_blocking_stats", "get_current_waits_trend", "get_collection_log"]),
+        ("PostgreSQL", ["get_pg_blocking", "get_pg_io_stats", "get_collection_log"]),
+    ];
+
+    /// <summary>
+    /// The Blocking tab's note says how far back the page reaches and where the rest of the history is. Its number is
+    /// the widest preset, which the page hands to <c>tabNote</c>, so narrowing the presets cannot leave the note
+    /// wrong. <c>get_blocking_stats</c> takes any window and draws both severity charts, and its tables keep more than
+    /// the page shows. No other tab carries the pointer: the PostgreSQL tabs' only read that takes any window is the
+    /// collection log, which asks for the newest 200 runs.
+    /// </summary>
+    [Fact]
+    public void TheBlockingTabNote_NamesTheWidestOfferedRange()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("offeredRanges:" + McpHelpers.MaxHoursBack, out var r)) return;
+
+        var widest = r.GetProperty("offered").EnumerateArray().Max(e => e.GetInt32());
+        Assert.True(widest % 24 == 0, $"The widest preset is {widest} hours, not a whole number of days, so this pin needs remapping.");
+        var days = widest / 24;
+        var notes = r.GetProperty("notes").EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+        var blocking = Assert.Single(notes, n => n.StartsWith("SQL Server blocking: ", System.StringComparison.Ordinal));
+        Assert.Contains(
+            $"This page shows at most {days} day{(days == 1 ? "" : "s")}. A Custom View can show more blocking and deadlock history.",
+            blocking,
+            System.StringComparison.Ordinal);
+        Assert.Single(notes, n => n.Contains("A Custom View can show more", System.StringComparison.Ordinal));
     }
 
     /// <summary>The same rule read from <c>pages/server.js</c>: each preset is at least an hour and no wider than

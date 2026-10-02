@@ -63,6 +63,9 @@ const RANGE_OPTIONS = [
   { hours: 24 * 7, label: "last 7 days" },
 ];
 
+/** The widest preset. A tab note that names the longest window this page shows (the Blocking tab's) is given it. */
+const WIDEST_RANGE_HOURS = Math.max(...RANGE_OPTIONS.map((o) => o.hours));
+
 /* Module state, deliberately not persisted — see the header comment. `gridNode` + the current server/tab let the
    range control redraw only the panels, so changing the window does not flash the header or refetch /api/fleet. */
 let pageHours = 24;
@@ -173,7 +176,7 @@ function paintTabs(tabsSlot, server, tabId, card) {
   const tabs = serverTabsFor(card);
   const tab = findServerTab(tabId, tabs);
   current = { server, tab };
-  mount(tabsSlot, [subtabBar(server, tab, tabs), tabNote(tab)]);
+  mount(tabsSlot, [subtabBar(server, tab, tabs), tabNote(tab, WIDEST_RANGE_HOURS)]);
   redrawPanels();
   return tabs;
 }

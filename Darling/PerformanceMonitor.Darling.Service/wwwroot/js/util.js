@@ -158,7 +158,7 @@ function keptHoursOf(message) {
   return m ? Number(m[1]) : null;
 }
 
-function daysText(hours) {
+export function daysText(hours) {
   const days = Math.round(hours / 24);
   return days + " day" + (days === 1 ? "" : "s");
 }
