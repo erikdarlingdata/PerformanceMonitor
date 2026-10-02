@@ -186,6 +186,47 @@ public sealed class DarlingAlertReadAdapterTests
         Assert.True(typeof(IAlertReadAdapter).IsAssignableFrom(typeof(DarlingAlertReadAdapter)));
     }
 
+    /* ---------------- database states: "no verdict" is never the Darling store's answer ---------------- */
+
+    [Fact]
+    public void GetDatabaseStates_IsDeclaredNonNullable_AndOnlyTheInterfaceMemberIsNullable()
+    {
+        /* The compile-time half of "the Darling store never returns null": the public method's declared result
+           is a list that cannot be null, while the IAlertReadAdapter member the engine calls may be null (null
+           means "no verdict" there, and Darling has no way to say it). */
+        var context = new System.Reflection.NullabilityInfoContext();
+
+        var adapterResult = context.Create(typeof(DarlingAlertReadAdapter).GetMethod("GetDatabaseStatesAsync")!.ReturnParameter);
+        var interfaceResult = context.Create(typeof(IAlertReadAdapter).GetMethod("GetDatabaseStatesAsync")!.ReturnParameter);
+
+        Assert.Equal(System.Reflection.NullabilityState.NotNull, adapterResult.GenericTypeArguments[0].ReadState);
+        Assert.Equal(System.Reflection.NullabilityState.Nullable, interfaceResult.GenericTypeArguments[0].ReadState);
+    }
+
+    [Fact]
+    public async Task GetDatabaseStates_ForAServerWithNoRows_ReturnsAnEmptyList_NeverNull()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert-read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var adapter = new DarlingAlertReadAdapter(postgres);
+
+        /* A server key no collector uses, so it has no database_states rows. */
+        var serverKey = (-717172).ToString(CultureInfo.InvariantCulture);
+        var states = await adapter.GetDatabaseStatesAsync(serverKey, ct);
+
+        Assert.NotNull(states);
+        Assert.Empty(states);
+    }
+
     /* ---------------- gated live E2E ---------------- */
 
     private const string DeadlockGraphXml = @"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""StackOverflow""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""StackOverflow""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""StackOverflow.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>";
@@ -602,5 +643,68 @@ public sealed class DarlingAlertReadAdapterTests
             $"DELETE FROM running_jobs WHERE server_id = {TestServerId};" +
             $"DELETE FROM server_properties WHERE server_id = {TestServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
+    }
+
+    /* ---------------- #4606 database-state maintenance deadlock retry ---------------- */
+
+    private static PostgresException Deadlock() =>
+        new("deadlock detected", "ERROR", "ERROR", PostgresErrorCodes.DeadlockDetected);
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_OneDeadlock_RetriesOnce_AndSucceeds()
+    {
+        /* The field case (#4606): a drop_chunks holding or waiting for an AccessExclusiveLock picks the
+           seed's AccessShareLock as the deadlock victim — the retry completes the maintenance sequence
+           instead of surfacing the failure to the alert pass. Same shape as DarlingRetentionTests'
+           DropChunksRetry_OneDeadlock_RetriesOnce_AndSucceeds. */
+        var calls = 0;
+        await DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+            () => { calls++; if (calls == 1) throw Deadlock(); return Task.CompletedTask; },
+            TestServerId, logger: null);
+
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_TwoDeadlocks_GivesUpAndSurfaces()
+    {
+        /* A second deadlock in a row is STANDING contention — the same posture as the purge's retry:
+           exactly two attempts, then the failure propagates to the caller (this method has no
+           DELETE-fallback path to fall back to; the read fails and the caller's existing catch arm
+           records it). */
+        var calls = 0;
+        await Assert.ThrowsAsync<PostgresException>(() =>
+            DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+                () => { calls++; throw Deadlock(); },
+                TestServerId, logger: null));
+
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_NonDeadlockPostgresException_DoesNotRetry()
+    {
+        /* Only 40P01 earns a retry — any other PostgresException (a missing relation, a permission
+           error) keeps the original single-shot posture, exactly like DarlingRetentionTests'
+           DropChunksRetry_NonDeadlockFailure_DoesNotRetry. */
+        var calls = 0;
+        var notADeadlock = new PostgresException("relation does not exist", "ERROR", "ERROR", "42P01");
+        await Assert.ThrowsAsync<PostgresException>(() =>
+            DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+                () => { calls++; throw notADeadlock; },
+                TestServerId, logger: null));
+
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_CleanRun_IsSingleShot()
+    {
+        var calls = 0;
+        await DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+            () => { calls++; return Task.CompletedTask; },
+            TestServerId, logger: null);
+
+        Assert.Equal(1, calls);
     }
 }

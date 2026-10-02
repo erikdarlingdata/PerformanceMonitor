@@ -409,6 +409,15 @@ public sealed class StoreMetricsSummaryFirstLivePostgresTests
     /// <summary>The issue's acceptance: the default response under ~50 KB on the largest production store.</summary>
     private const int DefaultBudgetBytes = 50 * 1024;
 
+    /// <summary>
+    /// What one whole-store growth point may cost on the wire per day of the window, the only part of the answer
+    /// that grows with it. A point is day, metric_time, span_days, partial, delta_bytes and per_server_bytes:
+    /// 146 bytes for a nine-digit delta, with room for wider numbers. It was 100 while a point was day,
+    /// delta_bytes and per_server_bytes (72 bytes); #4734 added the middle three (74 bytes), so the allowance
+    /// moved with them and the budget is still the same shape: the default response plus one point a day.
+    /// </summary>
+    private const int GrowthPointAllowanceBytes = 160;
+
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>
@@ -502,7 +511,7 @@ public sealed class StoreMetricsSummaryFirstLivePostgresTests
         var fullRetention = await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource, days_back: DarlingMcpStoreMetricsTools.MaxDaysBack);
         using var fullDocument = JsonDocument.Parse(fullRetention);
         Assert.Equal(SeededDays - 1, fullDocument.RootElement.GetProperty("store").GetProperty("daily_growth").GetArrayLength());
-        Assert.True(fullRetention.Length < DefaultBudgetBytes + (SeededDays * 100),
+        Assert.True(fullRetention.Length < DefaultBudgetBytes + (SeededDays * GrowthPointAllowanceBytes),
             $"days_back={DarlingMcpStoreMetricsTools.MaxDaysBack} is {fullRetention.Length:N0} bytes; only the whole-store series may grow with the window");
     }
 

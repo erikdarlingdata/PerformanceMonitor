@@ -67,7 +67,7 @@ public partial class ViewerServerTab
             {
                 case ActiveQueriesLiveStatus.Fetched:
                     CurrentActiveQueriesGrid.ItemsSource = result.Rows;
-                    var stamp = ViewerTimeHelper.ForDisplay(DateTime.UtcNow).ToString("yyyy-MM-dd HH:mm:ss");
+                    var stamp = ViewerTimeHelper.FormatForDisplay(DateTime.UtcNow, "yyyy-MM-dd HH:mm:ss");
                     CurrentActiveQueriesStatus.Text = result.Rows.Count == 0
                         ? $"No user requests running as of {stamp}."
                         : $"{result.Rows.Count} running request(s) as of {stamp}.";

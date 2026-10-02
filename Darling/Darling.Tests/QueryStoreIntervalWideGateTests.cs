@@ -99,4 +99,88 @@ public sealed class QueryStoreIntervalWideGateTests
         var laterFloor = WindowStart.AddHours(1);
         Assert.Equal(laterFloor, QueryStoreIntervalWide.ClampedStart(laterFloor, WindowStart));
     }
+
+    private static readonly DateTime Floor = WindowStart.AddDays(4);
+
+    [Theory]
+    [InlineData(null, 0, true)]
+    [InlineData(5, 0, true)]
+    [InlineData(60, 60, true)]
+    [InlineData(61, 5, false)]
+    [InlineData(5, 61, false)]
+    [InlineData(0, 5, false)]
+    public void CadenceAllowsBelowFloor_SixtyMinutesIsTheLimit(int? cadence, int gapMinutes, bool expected) =>
+        Assert.Equal(expected, QueryStoreIntervalWide.CadenceAllowsBelowFloor(cadence, TimeSpan.FromMinutes(gapMinutes == 0 ? 5 : gapMinutes)));
+
+    [Fact]
+    public void CadenceAllowsBelowFloor_UnknownGap_IsRefused() =>
+        Assert.False(QueryStoreIntervalWide.CadenceAllowsBelowFloor(5, null));
+
+    [Fact]
+    public void PurgeEdgeMargin_IsOneDayTwoHours() =>
+        Assert.Equal(TimeSpan.FromHours(26), QueryStoreIntervalWide.PurgeEdgeMargin);
+
+    [Fact]
+    public void ExactBelowFloorStart_NoFloorOrFloorAtOrBelowWindowStart_IsNull()
+    {
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(null, WindowStart, WindowStart, WindowStart.AddDays(-9)));
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(WindowStart, WindowStart, WindowStart, WindowStart.AddDays(-9)));
+    }
+
+    [Fact]
+    public void ExactBelowFloorStart_NoTableFloor_IsNull() =>
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart, null));
+
+    [Fact]
+    public void ExactBelowFloorStart_AllBoundsBelowWindow_IsWindowStart() =>
+        Assert.Equal(WindowStart, QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart.AddDays(-1), WindowStart.AddDays(-5))!.Value.Start);
+
+    [Fact]
+    public void ExactBelowFloorStart_FilledSinceLater_IsFilledSince() =>
+        Assert.Equal(WindowStart.AddDays(1), QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart.AddDays(1), WindowStart.AddDays(-5))!.Value.Start);
+
+    [Fact]
+    public void ExactBelowFloorStart_TableFloorPlusMarginLater_IsThatBound() =>
+        Assert.Equal(WindowStart.AddDays(2) + QueryStoreIntervalWide.PurgeEdgeMargin,
+            QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart, WindowStart.AddDays(2))!.Value.Start);
+
+    [Fact]
+    public void ExactBelowFloorStart_BoundAtOrPastTheFloor_IsNull()
+    {
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, Floor, WindowStart.AddDays(-5)));
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart, Floor));
+    }
+
+    [Fact]
+    public void WideReadPlan_EffectiveStart_IsReadStartWhenTheTableServes() =>
+        Assert.Equal(WindowStart.AddDays(1), new QueryStoreIntervalWide.WideReadPlan(true, Floor, WindowStart.AddDays(1), WindowStart.AddDays(1)).EffectiveStart);
+
+    [Fact]
+    public void WideReadPlan_EffectiveStart_IsNullWhenTheTableDoesNotServe() =>
+        Assert.Null(new QueryStoreIntervalWide.WideReadPlan(false, WindowStart, WindowStart, null).EffectiveStart);
+
+    [Fact]
+    public void ExactBelowFloorStart_NamesTheBoundThatWon()
+    {
+        var w = WindowStart;
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.Window,
+            QueryStoreIntervalWide.ExactBelowFloorStart(Floor, w, w.AddDays(-1), w.AddDays(-5))!.Value.Bound);
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.FilledSince,
+            QueryStoreIntervalWide.ExactBelowFloorStart(Floor, w, w.AddDays(1), w.AddDays(-5))!.Value.Bound);
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.TablePurgeEdge,
+            QueryStoreIntervalWide.ExactBelowFloorStart(Floor, w, w, w.AddDays(2))!.Value.Bound);
+    }
+
+    [Fact]
+    public void ExactBelowFloorStart_TiesPreferFilledSinceThenPurgeEdgeThenWindow()
+    {
+        var w = WindowStart;
+        // filled_since equals the purge edge: the coverage claim wins.
+        var edge = w.AddDays(2);
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.FilledSince,
+            QueryStoreIntervalWide.ExactBelowFloorStart(Floor, w, edge + QueryStoreIntervalWide.PurgeEdgeMargin, edge)!.Value.Bound);
+        // the purge edge equals the window start: the purge edge wins over the window.
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.TablePurgeEdge,
+            QueryStoreIntervalWide.ExactBelowFloorStart(Floor, w, w.AddDays(-5), w - QueryStoreIntervalWide.PurgeEdgeMargin)!.Value.Bound);
+    }
 }

@@ -66,16 +66,23 @@ public sealed class PgLogEventsCollector : PostgresCollectorDefinitionBase<PgLog
        PgServerLogTail for the full argument. This query's own part is one column: the body, whole. Both
        marker rows ride their own UNION ALL arm, spelled in this query's one column (#3997: the second arm
        is the csvlog/jsonlog-only gap, mutually exclusive with the first by construction). The second column is
-       the target's log_timezone, read with the body (#4046): see ReadAsync. */
+       the target's log_timezone, read with the body (#4046): see ReadAsync. The third is the target's own
+       log_line_prefix (#4501), read the same way: passed through the classifier to the assembler's forgery
+       check so it can use the prefix's own separator instead of the no-separator fallback. NULL on every
+       marker arm, which ForgeryCheckFor treats as "not collected". */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
+SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone, NULL AS log_line_prefix
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
-       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
+       " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
 FROM tail
 UNION ALL
-SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL, NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
+SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL, NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     /* The binary-route twin (#4046 part 1c), sent instead of QueryText once PgReadBinaryFileCapability
@@ -85,14 +92,18 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        marker's own UTF-8 bytes instead, and ReadAsync decodes column 0 the same way whichever arm produced
        it, so the marker comparison downstream never has to know which route ran. */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
+SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL, NULL
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
-       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
+       " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
 FROM tail
 UNION ALL
-SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL, NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT pg_catalog.convert_to('" + PgNoStderrLogFileException.Marker + @"', 'UTF8'), NULL
+SELECT pg_catalog.convert_to('" + PgNoStderrLogFileException.Marker + @"', 'UTF8'), NULL, NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     /* The csvlog pair (#4053 part a1b), sent instead of the two above once context.PgLogUsesCsvlog says the
@@ -102,25 +113,33 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        PgNoCsvlogFileException.Marker — not PgNoStderrLogFileException.Marker — for "on, but no .csv file
        yet", so the fault message this route throws names csvlog, never stderr. */
     private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
+SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone, NULL AS log_line_prefix
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
-       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
+       " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
 FROM tail
 UNION ALL
-SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL, NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT '" + PgNoCsvlogFileException.Marker + @"', NULL
+SELECT '" + PgNoCsvlogFileException.Marker + @"', NULL, NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
+SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL, NULL
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
-       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
+       " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
 FROM tail
 UNION ALL
-SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL, NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT pg_catalog.convert_to('" + PgNoCsvlogFileException.Marker + @"', 'UTF8'), NULL
+SELECT pg_catalog.convert_to('" + PgNoCsvlogFileException.Marker + @"', 'UTF8'), NULL, NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     /* The jsonlog pair (#4053 part a2), sent ahead of both the csvlog and stderr pairs once
@@ -132,25 +151,33 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        PgNoCsvlogFileException.Marker — for "on, but no .json file yet", so the fault message this route
        throws names jsonlog, never stderr or csvlog. */
     private const string JsonQueryText = PgServerLogTail.TailJsonCteSql + @"
+SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone, NULL AS log_line_prefix
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
-       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
+       " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
 FROM tail
 UNION ALL
-SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL, NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT '" + PgNoJsonlogFileException.Marker + @"', NULL
+SELECT '" + PgNoJsonlogFileException.Marker + @"', NULL, NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     private const string JsonBinaryQueryText = PgServerLogTail.TailJsonCteBinarySql + @"
+SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL, NULL
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
-       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
+       " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
 FROM tail
 UNION ALL
-SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL, NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT pg_catalog.convert_to('" + PgNoJsonlogFileException.Marker + @"', 'UTF8'), NULL
+SELECT pg_catalog.convert_to('" + PgNoJsonlogFileException.Marker + @"', 'UTF8'), NULL, NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     public override string Name => "pg_log_events";
@@ -176,12 +203,31 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         _ = RequireKey(context);
-        return new(context.PgLogUsesJsonlog
-            ? (context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText)
-            : context.PgLogUsesCsvlog
-                ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
-                : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
+        var key = RouteKey(context);
+        if (context.PgLogUsesJsonlog)
+        {
+            return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText, context, key);
+        }
+
+        if (context.PgLogUsesCsvlog)
+        {
+            return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, key);
+        }
+
+        return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context, key);
     }
+
+    /// <summary>The resume-marker key for the route <see cref="BuildQuery"/> sends and the read stages under: jsonlog wins over csvlog, then stderr.</summary>
+    internal static string RouteKey(CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.PgLogUsesJsonlog ? PgServerLogTail.ResumeStateKeyJson
+            : context.PgLogUsesCsvlog ? PgServerLogTail.ResumeStateKeyCsv
+            : PgServerLogTail.ResumeStateKey;
+    }
+
+    /// <summary>Each route keeps a resume marker under its own key (#4699).</summary>
+    public override IReadOnlyList<string> StateKeys => PgServerLogTail.ResumeStateKeys;
 
     private static PgLogHashKey RequireKey(CollectorContext context) =>
         context.LogHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
@@ -260,7 +306,14 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                 throw new PgLoggingCollectorOffException();
             }
 
+            /* The resume row (#4699), every route, under the route's own key: column 1 is NULL on it and never on a real row. */
+            if (PgServerLogTail.TryConsumeResumeRow(body, reader.FieldCount > 1 && reader.IsDBNull(1), RouteKey(context), context))
+            {
+                continue;
+            }
+
             var logTimezoneIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);
+            var logLinePrefix = PgServerLogTail.LogLinePrefix(reader, 2);
 
             if (context.PgLogUsesJsonlog)
             {
@@ -326,8 +379,10 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
             /* The whole pipeline, shared with the RDS transport. A non-UTC zone throws out of here and
                abandons the batch, which is the trade the deadlock parser argues for (#2993) — unless the
                target's own log_timezone renders UTC, when a line in another zone is not the server's and is
-               skipped and counted instead (#4046). */
-            rows.AddRange(classifier.Classify(body, logTimezoneIsUtc, out var stderrForeignZoneLines));
+               skipped and counted instead (#4046). The target's own log_line_prefix (#4501) rides the same
+               read, so the forgery check inside the assembler can use its actual separator instead of the
+               no-separator fallback. */
+            rows.AddRange(classifier.Classify(body, logTimezoneIsUtc, logLinePrefix, out var stderrForeignZoneLines));
             PgServerLogTail.MeasureForeignZoneLines(context, stderrForeignZoneLines);
         }
 

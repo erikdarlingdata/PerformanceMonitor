@@ -27,6 +27,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
@@ -133,8 +134,12 @@ public sealed class DarlingWebHostService : BackgroundService
     /// records nothing rather than needing its own instance.</summary>
     private readonly ReadLatencyAccumulator? _readLatency;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null)
+    /// <summary>The live monitored-server registry, so the read tools scope an Azure master target's blocking and deadlock facts per call.</summary>
+    private readonly MonitoredServerRegistryState? _registryState;
+
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null)
     {
+        _registryState = registryState;
         _logger = logger;
         _state = state;
         _collectorState = collectorState;
@@ -184,7 +189,7 @@ public sealed class DarlingWebHostService : BackgroundService
         string? lastOverrideReport = null;
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
+            if (config is null && CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff))
             {
                 try
                 {
@@ -234,7 +239,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
             switch (DecideWebAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
             {
-                case WebSupervisorAction.Start when DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff:
+                case WebSupervisorAction.Start when CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff):
                     if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
@@ -701,8 +706,14 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             }
 
-            /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. */
-            var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString));
+            /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. #4479:
+               the viewer-role connection string built by DarlingManagedPostgres already carries
+               WebApplicationName, but a CONFIGURED (postgres.webConnectionString) or owner-fallback login
+               never runs through that builder — set-if-absent here so every path this string can take still
+               names the surface. */
+            var postgres = NpgsqlDataSource.Create(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.WebApplicationName)));
             _appDataSource = postgres;
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A
@@ -801,7 +812,7 @@ public sealed class DarlingWebHostService : BackgroundService
             /* #4214 part 2 / round-1 review Low 3: trimmed copy, not config.Postgres itself — see the
                matching comment at DarlingMcpHostService.cs's AddSingleton(PostgresConfig) registration. */
             var storeHostPostgresConfig = new PostgresConfig { Managed = config.Postgres.Managed, DataDirectory = config.Postgres.DataDirectory };
-            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig);
+            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1006,7 +1017,8 @@ public sealed class DarlingWebHostService : BackgroundService
         string accessToken,
         DarlingWebOidcClient? oidcClient,
         string? publicBaseUrlHost = null,
-        PostgresConfig? postgresConfig = null)
+        PostgresConfig? postgresConfig = null,
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
            because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
@@ -1285,7 +1297,7 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency);
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState);
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes

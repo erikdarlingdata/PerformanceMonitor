@@ -109,7 +109,7 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
         var sos = Story("SOS_SCHEDULER_YIELD", ChainA);
         var jobStory = Story("RUNNING_JOBS", JobChain, severity: 0.5);
         var jobFact = new Fact { Key = "RUNNING_JOBS", Source = "jobs", BaseSeverity = 0.5, Severity = 0.5, ObjectName = JobName, Metadata = new() { ["running_long_count"] = 1 } };
-        RecurrenceLabeler.Label(new[] { sos, jobStory }, new[] { jobFact }, ReferenceUtc, read);
+        RecurrenceLabeler.Label(new[] { sos, jobStory }, new[] { jobFact }, read);
 
         Assert.Equal(4, RecurrenceLabeler.TryReadLabel(sos.StoryText)!.RecurrenceWeeks);
         Assert.Contains("10:00 Tuesday, server local time", FactAdvice.TryReadStoryText(sos.StoryText)!.Investigation, StringComparison.Ordinal);
@@ -136,7 +136,7 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
         Assert.Equal(new[] { Local(2026, 9, 1, 14), Local(2026, 9, 8, 14) }, read.Occurrences.Select(o => o.LocalBucket).OrderBy(x => x).ToArray());
 
         var sos = Story("SOS_SCHEDULER_YIELD", ChainA);
-        RecurrenceLabeler.Label(new[] { sos }, null, ReferenceUtc, read);
+        RecurrenceLabeler.Label(new[] { sos }, null, read);
         var investigation = FactAdvice.TryReadStoryText(sos.StoryText)!.Investigation;
         Assert.Contains("14:00 Tuesday UTC", investigation, StringComparison.Ordinal);
         Assert.Contains("the store carries no UTC offset for this server", investigation, StringComparison.Ordinal);
@@ -156,13 +156,89 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
 
         var sos = Story("SOS_SCHEDULER_YIELD", ChainA);
         var before = sos.StoryText;
-        RecurrenceLabeler.Label(new[] { sos }, null, ReferenceUtc, read);
+        RecurrenceLabeler.Label(new[] { sos }, null, read);
         Assert.Equal(before, sos.StoryText);
+    }
+
+    /* ---------------- #4737 item 1: the target's clock is a zone, not one offset ---------------- */
+
+    private const int DstServerId = 47370001;
+    private const string DstServerName = "recurrence-read-lite-dst";
+    private const string DstJobChain = "rl-lite-dst-job-chain";
+    private const string DstJobName = "Weekly Reporting Extract";
+    private const string EasternWindowsId = "Eastern Standard Time";
+
+    /// <summary>
+    /// A weekly job that starts at 14:10 local on a US Eastern server, as the UTC instant it is stamped with: 19:10Z
+    /// while the server is on standard time, 18:10Z once the clocks have moved (Sunday 2026-03-08 02:00).
+    /// </summary>
+    private static DateTime EasternJobStartUtc(DateTime tuesday) =>
+        new DateTime(tuesday.Year, tuesday.Month, tuesday.Day, 14, 10, 0, DateTimeKind.Utc)
+            .AddHours(tuesday >= new DateTime(2026, 3, 8) ? 4 : 5);
+
+    /// <summary>The job's row from each of the three weeks before <paramref name="referenceUtc"/> (two passes in the hour, one bucket).</summary>
+    private static List<AnalysisFinding> WeeklyJobRows(DateTime referenceUtc)
+    {
+        var rows = new List<AnalysisFinding>();
+        for (var weeksAgo = 1; weeksAgo <= 3; weeksAgo++)
+        {
+            var start = EasternJobStartUtc(referenceUtc.Date.AddDays(-7 * weeksAgo));
+            rows.Add(Finding(DstJobChain, "RUNNING_JOBS", start, JobCard(DstJobName), DstServerId, DstServerName));
+            rows.Add(Finding(DstJobChain, "RUNNING_JOBS", start.AddMinutes(30), JobCard(DstJobName), DstServerId, DstServerName));
+        }
+
+        return rows;
+    }
+
+    [Theory]
+    [InlineData(10)] // the first Tuesday after the change: every prior week is on the other side of it
+    [InlineData(17)] // the second: the two older weeks are
+    public async Task AWeeklyJobAtTwoPmLocal_WithASpringForwardInsideTheWindow_IsLabelledRecurring_AndNeverMoved(int referenceDay)
+    {
+        var referenceUtc = new DateTime(2026, 3, referenceDay, 18, 37, 12, DateTimeKind.Utc); // 14:37 EDT
+        var store = new FindingStore(_duckDb);
+        var context = new AnalysisContext { ServerId = DstServerId, ServerName = DstServerName, TimeRangeStart = referenceUtc.AddHours(-4), TimeRangeEnd = referenceUtc };
+        await SeedServerPropertiesAsync(DstServerId, DstServerName, -240, EasternWindowsId, referenceUtc.AddDays(-1));
+        await store.InsertFindingsAsync(WeeklyJobRows(referenceUtc), context);
+
+        var read = await store.GetPriorOccurrencesAsync(context, referenceUtc);
+
+        var story = Story("RUNNING_JOBS", DstJobChain, severity: 0.5);
+        var jobFact = new Fact { Key = "RUNNING_JOBS", Source = "jobs", BaseSeverity = 0.5, Severity = 0.5, ObjectName = DstJobName, Metadata = new() { ["running_long_count"] = 1 } };
+        RecurrenceLabeler.Label(new[] { story }, new[] { jobFact }, read);
+
+        var label = RecurrenceLabeler.TryReadLabel(story.StoryText);
+        Assert.NotNull(label);
+        Assert.Equal(4, label!.RecurrenceWeeks);
+        Assert.False(label.MaintenanceWindowMoved);
+        var investigation = FactAdvice.TryReadStoryText(story.StoryText)!.Investigation;
+        Assert.Contains("14:00 Tuesday, server local time", investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, investigation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ATargetWithNoTimeZoneId_KeepsTheOneFixedOffset_AcrossASpringForward()
+    {
+        /* SQL Server before 2022 records the offset but no zone id, so nothing says when the offset changed and the
+           read keeps the one offset for every row - the behaviour before the zone was read. The older weeks' 14:10
+           EST rows (19:10Z) therefore land at 15:00. */
+        var referenceUtc = new DateTime(2026, 3, 10, 18, 37, 12, DateTimeKind.Utc);
+        var store = new FindingStore(_duckDb);
+        var context = new AnalysisContext { ServerId = DstServerId, ServerName = DstServerName, TimeRangeStart = referenceUtc.AddHours(-4), TimeRangeEnd = referenceUtc };
+        await SeedServerPropertiesAsync(DstServerId, DstServerName, -240, timeZoneId: null, collectionTime: referenceUtc.AddDays(-1));
+        await store.InsertFindingsAsync(WeeklyJobRows(referenceUtc), context);
+
+        var read = await store.GetPriorOccurrencesAsync(context, referenceUtc);
+
+        Assert.Equal(-240, read.UtcOffsetMinutes);
+        Assert.Equal(
+            new[] { Local(2026, 2, 17, 15), Local(2026, 2, 24, 15), Local(2026, 3, 3, 15) },
+            read.Occurrences.Select(o => o.LocalBucket).OrderBy(x => x).ToArray());
     }
 
     /* ---------------- helpers ---------------- */
 
-    private async Task SeedServerPropertiesAsync(int serverId, string serverName, int offsetMinutes)
+    private async Task SeedServerPropertiesAsync(int serverId, string serverName, int offsetMinutes, string? timeZoneId = null, DateTime? collectionTime = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
@@ -171,13 +247,14 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
         cmd.CommandText = @"
 INSERT INTO server_properties
     (collection_id, collection_time, server_id, server_name, edition, product_version, product_level,
-     engine_edition, utc_offset_minutes)
-VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5)";
+     engine_edition, utc_offset_minutes, time_zone_id)
+VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5, $6)";
         cmd.Parameters.Add(new DuckDBParameter { Value = CollectionIdGenerator.Next() });
-        cmd.Parameters.Add(new DuckDBParameter { Value = ReferenceUtc.AddDays(-1) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime ?? ReferenceUtc.AddDays(-1) });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
         cmd.Parameters.Add(new DuckDBParameter { Value = offsetMinutes });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)timeZoneId ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 

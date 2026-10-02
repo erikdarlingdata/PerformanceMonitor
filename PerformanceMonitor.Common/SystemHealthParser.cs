@@ -438,7 +438,10 @@ namespace PerformanceMonitor.Common
             return new SignificantWaitRecord
             {
                 EventTime = ParseTimestamp(ev),
-                WaitType = DataText(ev, "wait_type"),
+                /* Trimmed like every other wait name read from the server (the collectors use
+                   PerformanceMonitor.Collectors.WaitTypeName, which this assembly cannot reference): the
+                   significance gate matches this against an exact-match ignore set. */
+                WaitType = DataText(ev, "wait_type")?.TrimEnd(),
                 DurationMs = ParseLong(DataValue(ev, "duration")),
                 SignalDurationMs = ParseLong(DataValue(ev, "signal_duration")),
                 WaitResource = DataValue(ev, "wait_resource"),

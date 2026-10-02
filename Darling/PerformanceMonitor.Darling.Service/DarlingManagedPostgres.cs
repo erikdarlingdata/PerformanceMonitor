@@ -128,6 +128,25 @@ public sealed class DarlingManagedPostgres
     public const string McpApplicationName = "PerformanceMonitorDarling-Mcp";
 
     /// <summary>
+    /// The <c>ApplicationName</c> the SERVICE's own collection-loop store connection presents (#4479, the
+    /// rest of #4442's pattern): the worker's data source, set through
+    /// <see cref="Storage.DarlingStoreConnection.WithApplicationName"/> when the resolved connection string
+    /// does not already carry one. Distinguishes the collection loop's own backends from the web/MCP pools'
+    /// in the store's own <c>pg_stat_activity</c> — all four surfaces open store connections independently,
+    /// and only the role name told them apart before this.
+    /// </summary>
+    public const string ServiceApplicationName = "PerformanceMonitorDarling-Service";
+
+    /// <summary>The CLI verbs' store connections (#4479) — <c>darling.exe --add-server</c> and friends,
+    /// each a one-shot process distinct from the running service.</summary>
+    public const string CliApplicationName = "PerformanceMonitorDarling-Cli";
+
+    /// <summary>The managed-runtime bootstrap/upgrade's own store connections (#4479) — the migration
+    /// snapshot read, the TimescaleDB bridge/update, and the pg_upgrade identity read, all of which open a
+    /// connection before the collection loop's own data source exists.</summary>
+    public const string UpgradeApplicationName = "PerformanceMonitorDarling-Upgrade";
+
+    /// <summary>
     /// The search path (schemas in resolution order) the managed connection strings carry, so pooled
     /// connections resolve the bare table names to collect/config even if the database default was
     /// not (or could not be) set. Same schemas, same order as the SQL-side
@@ -442,8 +461,8 @@ public sealed class DarlingManagedPostgres
     /// bring-your-own store's WAL is its owner's to size, consistent with the BYO posture everywhere else in
     /// this class.</para>
     ///
-    /// <para><b>What it does when the disk cannot be read.</b> Nothing — the v8 rule. An unreadable
-    /// <c>DriveInfo</c> is not evidence the headroom is unchanged, it is the absence of evidence either way,
+    /// <para><b>What it does when the disk cannot be read.</b> Nothing — the v8 rule. An unreadable data
+    /// volume is not evidence the headroom is unchanged, it is the absence of evidence either way,
     /// and re-deriving the WAL ceiling from a figure this service could not read is worse than leaving the
     /// last good block (or v4's 4 GB, on a store that has never healed) in force. The skip is logged as a
     /// warning naming what stays in force.</para>
@@ -574,6 +593,38 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV16 = "# Managed by PerformanceMonitor Darling (v16 checkpoint interval) -- do not remove this block";
 
     /// <summary>
+    /// The v17 marker: <c>log_line_prefix = '%m [%p] %a '</c>, adding the session's <c>application_name</c>
+    /// after the existing <c>%m [%p] </c> pair. Since #4486, every store session sets its own
+    /// <c>application_name</c> (<c>PerformanceMonitorDarling-Service</c>, <c>-Viewer</c>, and the rest), so a
+    /// prefix that renders it lets the store's own log say WHICH of this service's connections wrote each
+    /// line — the checkpoint and stall work this store's log already carries needs that to tell one session's
+    /// lines from another's.
+    ///
+    ///
+    /// <para><b>PostgreSQL's own default is <c>'%m [%p] '</c></b> — no <c>%a</c>. Darling has never set
+    /// <c>log_line_prefix</c> itself before this block, so a store this reaches gains the setting for the
+    /// first time. Two boxes already carry <c>'%m [%p] %a '</c> through <c>ALTER SYSTEM</c>
+    /// (<c>postgresql.auto.conf</c> wins over <c>postgresql.conf</c>), so this block changes nothing there.</para>
+    ///
+    /// <para><b>The risk this carries.</b> <c>application_name</c> is client-set, free text: empty, containing
+    /// spaces, brackets, colons, or text that LOOKS like a log field (<c>LOG:</c>) or another session's name.
+    /// Every reader of the store's OWN log — <see cref="StoreLogClassifier"/>, the store-log tail this class's
+    /// own start-up log reads, the <c>get_store_log</c> MCP read, and the self-hosted-target collectors that
+    /// read a store's own stderr log (<c>PgLogEntryAssembler</c>, <c>PgPlanCaptureCollector</c>) — has to keep
+    /// working with an application name sitting between the pid and the severity, including the empty one this
+    /// prefix itself renders as two spaces (<c>'%m [%p]  LOG:'</c>). Each of those readers carries its own pin
+    /// or a written argument for why the new field cannot reach it.</para>
+    ///
+    /// <para><c>log_line_prefix</c> is <c>sighup</c>-context, so a running store could take it from a reload
+    /// alone — but like the other <c>sighup</c> settings this service manages, this append runs before
+    /// <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes the block, the
+    /// v9-v11 story. Managed stores only; a bring-your-own store keeps whatever <c>log_line_prefix</c> its
+    /// owner set. A later change to this value needs a NEW marker (the v11/v14/v15/v16 precedent): this block
+    /// heals by its marker's absence, so an edited value in an already-marked file would never be seen.</para>
+    /// </summary>
+    public const string ConfMarkerV17 = "# Managed by PerformanceMonitor Darling (v17 log line prefix) -- do not remove this block";
+
+    /// <summary>
     /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
     /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
     /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
@@ -586,7 +637,7 @@ public sealed class DarlingManagedPostgres
     [
         ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
         ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
-        ConfMarkerV15, ConfMarkerV16,
+        ConfMarkerV15, ConfMarkerV16, ConfMarkerV17,
     ];
 
     /// <summary>
@@ -665,6 +716,12 @@ public sealed class DarlingManagedPostgres
     /// <summary>What the runtime probe did with the shipped zip this start (#1706) — non-null only when a
     /// newer runtime was extracted, and its PreviousBinDirectory is pg_upgrade's --old-bindir.</summary>
     private DarlingStoreUpgrade.RuntimeAdvance? _runtimeAdvance;
+
+    /// <summary>Whether this instance has run the retained-copy sweep. A service start is one instance, and the
+    /// worker re-enters <see cref="EnsureRunningAsync"/> on the same instance when a retryable failure sends it
+    /// round again, so the sweep runs once per instance or a retried start would count as two of the starts a
+    /// rollback copy is kept for.</summary>
+    private bool _retainedSweepDone;
 
     /// <summary>The bundled runtime's identity, read once the runtime is settled and used by the post-start
     /// verification and the same-major TimescaleDB update.</summary>
@@ -2301,6 +2358,67 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
+    /* ===================== v17 log line prefix ===================== */
+
+    /// <summary>
+    /// The v17 block: <c>log_line_prefix = '%m [%p] %a '</c> only. See <see cref="ConfMarkerV17"/> for why
+    /// <c>%a</c>, PostgreSQL's own default, and the reader risk it carries. Carries no fingerprint or stamp
+    /// line, so the v8 and v12 staleness checks are untouched by this block.
+    /// </summary>
+    public static string BuildLogLinePrefixConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV17).Append('\n');
+        builder.Append("log_line_prefix = '%m [%p] %a '\n");
+        return builder.ToString();
+    }
+
+    /* ===================== planner page cost ===================== */
+
+    /// <summary>The setting <see cref="BuildPlannerPageCostConfAppend"/> writes.</summary>
+    internal const string RandomPageCostSetting = "random_page_cost";
+
+    /// <summary>The value <see cref="BuildPlannerPageCostConfAppend"/> writes: <c>1.1</c>.</summary>
+    internal const string RandomPageCostValue = "1.1";
+
+    /// <summary>
+    /// The planner page-cost block: <c>random_page_cost = 1.1</c> only. Rendered into
+    /// <c>darling-managed.conf</c> by <see cref="ManagedConfFile.RenderBody"/> and NOT appended to
+    /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker. A store whose conf still carries the
+    /// legacy blocks gets the line in <c>darling-managed.conf</c> when that conf migrates
+    /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), written at the same start as the rest of the file, so the
+    /// next start finds the file unchanged. That migration runs after the start and never reloads, so on such a
+    /// store the value is in force from the following start; every store already on the managed file has the line
+    /// written before <c>pg_ctl start</c>, so it is in force on the start that writes it.
+    ///
+    /// <para><b>Why.</b> The store lives on SSD-backed volumes (EBS gp3 at 3,000 to 6,000 provisioned IOPS in the
+    /// measured case). With PostgreSQL's default of 4 the planner prices a BRIN index's lossy heap pages as
+    /// random reads, and on a large production store it chose a sequential scan over the whole
+    /// <c>query_store_interval_wide</c> table for a 12-hour window (3.2 million blocks) even with a BRIN index
+    /// on <c>collection_time</c>. <c>SET LOCAL random_page_cost = 1.1</c> moved the 6-hour, 12-hour and 48-hour
+    /// windows onto the BRIN index: a 24-hour read took 4.3 s warm (about 37 s cold, at the volume's throughput cap) instead of 98.8 s cold on the full scan.</para>
+    ///
+    /// <para><b>Why 1.1 and not 1.0.</b> <c>seq_page_cost</c> stays at its default of 1.0. The PostgreSQL 18
+    /// documentation says the default of 4.0 assumes most random reads (indexed reads) are cached, that
+    /// network-attached storage latency shrinks the relative cost of random access, and that decreasing the
+    /// value is appropriate when data is largely cached or latency is high; it also says a value below
+    /// <c>seq_page_cost</c> is not physically sensible, and that setting the two equal only makes sense for a
+    /// database entirely in RAM. This store is on SSD-backed network volumes and is not entirely cached, so it
+    /// stays just above <c>seq_page_cost</c>. 1.1 is the measured figure, not a documented one.</para>
+    ///
+    /// <para><c>random_page_cost</c> is <c>user</c>-context, so a reload applies it. A value set
+    /// with <c>ALTER SYSTEM</c> lives in <c>postgresql.auto.conf</c> and wins over this file; nothing here reads
+    /// or writes that file.</para>
+    /// </summary>
+    public static string BuildPlannerPageCostConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(RandomPageCostSetting).Append(" = ").Append(RandomPageCostValue).Append('\n');
+        return builder.ToString();
+    }
+
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
 
     /// <summary>1 GB — the floor under the derived <c>max_wal_size</c>, and PostgreSQL's own default for it:
@@ -2675,8 +2793,13 @@ public sealed class DarlingManagedPostgres
 
         /* Age out any pre-upgrade rollback copy BEFORE this start's own upgrade can create a new one.
            Running it afterwards would bump the brand-new copy's counter on the very start that produced
-           it, costing it one of the two starts it is supposed to survive. */
-        _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
+           it, costing it one of the two starts it is supposed to survive. Once per instance, for the same
+           reason: a re-entry after a retryable failure is the same start, not another one. */
+        if (!_retainedSweepDone)
+        {
+            _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
+            _retainedSweepDone = true;
+        }
 
         /* The install directory's own housekeeping report, beside the store's. Deliberately adjacent: the
            two answer the same operator question about two different parents, and a field instance proved
@@ -2696,6 +2819,18 @@ public sealed class DarlingManagedPostgres
         var existingCluster = File.Exists(Path.Combine(_dataDirectory, "PG_VERSION"));
         if (!existingCluster)
         {
+            /* No cluster at the data directory, but one beside it under a name the upgrade's directory swap
+               gives a moved-aside store: the store is that sibling, not a fresh install. Initializing here
+               would write a new superuser credential over the store's own, and the retention sweep would
+               later delete the store as an expired rollback copy. Refused for good, not retried: nothing
+               changes between attempts but an operator's hand. The credential file alone is not evidence
+               either way, because it is written before initdb (see InitializeClusterAsync). */
+            var displaced = DarlingStoreUpgrade.FindDisplacedStoreCopies(_dataDirectory);
+            if (displaced.Count > 0)
+            {
+                throw new InvalidOperationException(DarlingStoreUpgrade.DescribeDisplacedStore(_dataDirectory, displaced));
+            }
+
             await InitializeClusterAsync(binDirectory, cancellationToken);
 
             /* Read here too, so this first start records the new store's TimescaleDB state under this runtime and
@@ -3026,8 +3161,11 @@ public sealed class DarlingManagedPostgres
                             "resume: no backup file found for a PendingVerify conf");
                     }
 
+                    /* The NEWEST backup. An attempt that finds postgresql.conf edited since the last
+                       snapshot takes another one (ManagedConfMigrationSteps.BackupOriginal), and a restore
+                       from an older backup would put the file back as it was before those edits. */
                     Array.Sort(backupPath, StringComparer.Ordinal);
-                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[0], cancellationToken, _logger);
+                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[^1], cancellationToken, _logger);
                     break;
                 }
 
@@ -3037,23 +3175,15 @@ public sealed class DarlingManagedPostgres
                        same here: migrated, no pending file, stale stamp.
                        Re-verify against what is on disk NOW: no new error row may come from darling-managed.conf
                        relative to the file's own current bytes — the file itself is the ground truth once no
-                       pending snapshot survives to compare against. */
+                       pending snapshot survives to compare against. Except DarlingStoreHostProfile.CommandLineOnlyKeys
+                       (port, listen_addresses): an exposed store always starts PostgreSQL with both forced onto
+                       the pg_ctl command line, which outranks the file unconditionally, so the rendered
+                       (always loopback-only) listen_addresses line reports an error row here on every start of
+                       an exposed store even though nothing is actually wrong — same trap and same fix as
+                       ManagedConfMigrationRunner.VerifyStepB below. */
                     var rows = await snapshot(cancellationToken);
                     var managedConfPath = Path.Combine(_dataDirectory, ManagedConfFile.FileName);
-                    var newErrorFromManagedFile = false;
-                    var mismatchedKeys = new List<string>();
-                    foreach (var row in rows)
-                    {
-                        if (row.Error is not null && row.SourceFile is not null
-                            && string.Equals(Path.GetFileName(row.SourceFile), ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            newErrorFromManagedFile = true;
-                            if (row.Name is not null)
-                            {
-                                mismatchedKeys.Add(row.Name);
-                            }
-                        }
-                    }
+                    var (newErrorFromManagedFile, mismatchedKeys) = ManagedConfMigrationRunner.FindUnstampedManagedFileErrors(rows);
 
                     if (newErrorFromManagedFile)
                     {
@@ -3205,6 +3335,12 @@ public sealed class DarlingManagedPostgres
         var pgsqlDirectory = Path.Combine(_runtimeRoot, "pgsql");
         var binDirectory = Path.Combine(pgsqlDirectory, "bin");
         var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
+
+        /* #4934: a runtime update that died between the rescue and a good extract leaves no pg_ctl.exe here
+           and the store's own runtime in pg-runtime-prev. Put it back first, so the branch below takes the
+           normal path (and retries the update) instead of the first-run extract. */
+        await _storeUpgrade.TryRestoreRescuedRuntimeAsync(_runtimeRoot, _runtimeZipPath, _dataDirectory, cancellationToken);
+
         if (File.Exists(pgCtl))
         {
             /* #1706: an extracted runtime is NOT refreshed by a deploy — this early return is exactly why a
@@ -3624,7 +3760,7 @@ public sealed class DarlingManagedPostgres
            upgrade's callback (#1706) sizes the freshly-initdb'd cluster from ITS volume and ITS major.
            The major comes from PG_VERSION — readable without executing anything, the DarlingStoreUpgrade rule
            — and an unreadable one derives as 0, which pins the checkpoint target (a no-op on 14+, the fix
-           on anything older). The disk figure is the gate: without an authoritative DriveInfo reading this does NOTHING,
+           on anything older). The disk figure is the gate: without an authoritative reading of the data volume this does NOTHING,
            exactly as v8 does without an authoritative RAM reading, because re-deriving a production WAL ceiling
            from a figure we could not read is worse than leaving the block in force. All three settings are
            SIGHUP-context and this runs before pg_ctl start, so a service-owned start applies them at once. */
@@ -3729,6 +3865,19 @@ public sealed class DarlingManagedPostgres
             File.AppendAllText(confPath, BuildCheckpointIntervalConfAppend());
             _logger.LogInformation(
                 "Appended v16 checkpoint interval to postgresql.conf (checkpoint_timeout = 15min): a longer interval re-images each hot page less often, cutting write-ahead log volume. Effective on this start when the service owns it.");
+        }
+
+        /* v17: keyed on its marker's absence like v9-v11, v13, v15 and v16, and placed last so it stays the
+           block this method appends LAST on any start that fires it, matching its place at the end of
+           AllManagedConfMarkers. Carries no fingerprint or stamp line, so v8 and v12 read exactly what they
+           did before this block existed. log_line_prefix is sighup-context, but like the other sighup
+           settings this service manages, this is appended before pg_ctl start, so a service-owned start
+           applies it on the very start that writes the block. */
+        if (!conf.Contains(ConfMarkerV17, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildLogLinePrefixConfAppend());
+            _logger.LogInformation(
+                "Appended v17 log line prefix to postgresql.conf (log_line_prefix = '%m [%p] %a '): the store's own log now names the application behind each line. Effective on this start when the service owns it.");
         }
 
         LogStatementStatisticsPreloadCoverage(dataDirectory);
@@ -4017,37 +4166,34 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// The AUTHORITATIVE free/total read of the volume holding <paramref name="dataDirectory"/> (#3802): the
-    /// same <c>DriveInfo</c>-on-the-path-root idiom the store upgrade's headroom check and the disk-pressure
-    /// self-alert already use, so three readers of one volume cannot disagree about which volume.
-    /// <c>AvailableFreeSpace</c> rather than <c>TotalFreeSpace</c>: it honours a quota on the service account,
-    /// and the WAL is written by the postmaster running AS that account, so it is the figure that bounds what
-    /// the server can actually write — the upgrade's headroom decision makes the same choice.
+    /// The AUTHORITATIVE free/total read of the volume holding <paramref name="dataDirectory"/> (#3802), made
+    /// for the directory's own volume through <see cref="DarlingStoreUpgrade.ReadVolumeSpace"/>, the call the
+    /// store upgrade's headroom check makes. A data directory on a volume mounted at a folder is sized from that
+    /// volume, not from the one behind its drive letter. The free figure is the one available to the caller
+    /// rather than the volume's total free space: it honours a quota on the service account, and the WAL is
+    /// written by the postmaster running AS that account, so it is the figure that bounds what the server can
+    /// actually write — the upgrade's headroom decision makes the same choice.
     ///
-    /// <para>False, with both figures zero, when the root cannot be resolved, the drive is not ready, or the
-    /// read throws — and false is the v8 discipline's "do nothing" signal, not a value to size from. Logged at
-    /// Warning here so the skip in <see cref="EnsureConfAppended"/> has its cause beside it.</para>
+    /// <para>False, with both figures zero, when the directory cannot be asked, the volume reports no size, or
+    /// the read throws — and false is the v8 discipline's "do nothing" signal, not a value to size from. Logged
+    /// at Warning here so the skip in <see cref="EnsureConfAppended"/> has its cause beside it.
+    /// <paramref name="readVolumeSpace"/> replaces the read, so a test can say what the volume holds and what
+    /// a failed read looks like.</para>
     /// </summary>
-    private bool TryReadDataVolumeSpace(string dataDirectory, out long freeBytes, out long totalBytes)
+    [SupportedOSPlatform("windows")]
+    internal bool TryReadDataVolumeSpace(
+        string dataDirectory, out long freeBytes, out long totalBytes,
+        Func<string, (long AvailableFreeBytes, long TotalBytes)>? readVolumeSpace = null)
     {
         try
         {
-            var root = Path.GetPathRoot(Path.GetFullPath(dataDirectory));
-            if (!string.IsNullOrEmpty(root))
+            (freeBytes, totalBytes) = (readVolumeSpace ?? DarlingStoreUpgrade.ReadVolumeSpace)(dataDirectory);
+            if (freeBytes >= 0 && totalBytes > 0)
             {
-                var drive = new DriveInfo(root);
-                if (drive.IsReady)
-                {
-                    freeBytes = drive.AvailableFreeSpace;
-                    totalBytes = drive.TotalSize;
-                    if (freeBytes >= 0 && totalBytes > 0)
-                    {
-                        return true;
-                    }
-                }
+                return true;
             }
 
-            _logger.LogWarning("Could not read the free space on the volume holding {DataDirectory} (root {Root} not ready or reported no size).", dataDirectory, root ?? "(unresolved)");
+            _logger.LogWarning("Could not read the free space on the volume holding {DataDirectory} (the volume reported no size).", dataDirectory);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -4258,15 +4404,22 @@ public sealed class DarlingManagedPostgres
                 "Install the newer package again, or restore the store from a backup taken with a matching runtime.");
         }
 
-        var previousBin = _runtimeAdvance?.PreviousBinDirectory;
+        /* The runtime advance reports a previous runtime only on the start that swapped. After an interrupted
+           upgrade (the process died between the stamp write and the commit, or the revert was refused), the
+           next start's stamp matches the package and nothing is reported, although the store's binaries are
+           still in the rescued copy. Ask for them there before declaring them gone; a runtime restored by
+           hand at that path is found the same way, which is what the refusal below tells the operator to do. */
+        var previousBin = _runtimeAdvance?.PreviousBinDirectory
+            ?? await _storeUpgrade.FindRescuedRuntimeBinAsync(_runtimeRoot, _dataDirectory, cancellationToken);
         if (previousBin is null || !File.Exists(Path.Combine(previousBin, "pg_ctl.exe")))
         {
             throw new InvalidOperationException(
                 $"The store data directory {_dataDirectory} was created by PostgreSQL {dataMajor} and this package bundles PostgreSQL {bundledMajor}, " +
                 $"but the PostgreSQL {dataMajor} binaries are not on this host, so an in-place upgrade is impossible " +
                 "(pg_upgrade needs both runtimes). This happens when the pg-runtime directory was deleted before the upgrade ran. " +
-                $"Restore a PostgreSQL {dataMajor} runtime at {PreviousRuntimeHint()}, then restart the service to upgrade; " +
-                "or restore the store from backup.");
+                $"Put a PostgreSQL {dataMajor} runtime at {PreviousRuntimeHint()}, so that {Path.Combine(PreviousRuntimeHint(), "bin", "pg_ctl.exe")} runs; " +
+                "every start looks there for the store's own binaries when the live runtime is newer than the store, and the next one upgrades from them. " +
+                "Or restore the store from backup.");
         }
 
         var outcome = await _storeUpgrade.UpgradeDataDirectoryAsync(
@@ -4294,6 +4447,16 @@ public sealed class DarlingManagedPostgres
             cancellationToken);
 
         LastUpgradeOutcome = outcome;
+
+        /* A failure that could not put the data directory back, or could not revert the runtime, leaves no
+           store this start can run: going on would reach the first-run initdb with the store sitting beside
+           an empty data directory, or start the new binaries on the old cluster. Stop here, and for good: a
+           retry in the same process would reach the same two places. The worker does not retry an
+           InvalidOperationException, and the message names the hand step. */
+        if (DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(outcome, _dataDirectory, _runtimeRoot) is { } unrecovered)
+        {
+            throw new InvalidOperationException(unrecovered);
+        }
 
         if (outcome.Status == DarlingStoreUpgrade.StoreUpgradeStatus.Failed)
         {
@@ -4426,11 +4589,39 @@ public sealed class DarlingManagedPostgres
 
         if (exitCode != 0)
         {
-            throw new InvalidOperationException(
-                BuildStartFailureMessage(exitCode, pgCtl, _dataDirectory, ReadServerLogTail()));
+            var message = BuildStartFailureMessage(exitCode, pgCtl, _dataDirectory, ReadServerLogTail());
+            var interrupted = InterruptedRuntimeUpdateHint(_runtimeRoot);
+            if (interrupted is not null)
+            {
+                _logger.LogError("pg_ctl start failed while a runtime update is unfinished.{Hint}", interrupted);
+                message += interrupted;
+            }
+
+            throw new InvalidOperationException(message);
         }
 
         _logger.LogInformation("Managed Postgres started");
+    }
+
+    /// <summary>
+    /// When the rescue marker exists, a previous runtime update never finished, and a failed start is most
+    /// likely its consequence. Names the marker to delete and the runtime that last opened the store.
+    /// Read-only: it changes no state. Null when there is no marker.
+    /// </summary>
+    internal static string? InterruptedRuntimeUpdateHint(string runtimeRoot)
+    {
+        /* The two path helpers are pure string math; their class carries the platform attribute for its other members. */
+#pragma warning disable CA1416
+        var marker = DarlingStoreUpgrade.RescueMarkerPath(runtimeRoot);
+        if (!File.Exists(marker))
+        {
+            return null;
+        }
+
+        var previous = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+#pragma warning restore CA1416
+        return $"\nAn earlier runtime update did not finish; the runtime that last opened the store is at {previous}. "
+            + $"Delete {marker} to let the next start clear it and re-extract.";
     }
 
     /// <summary>
@@ -5529,10 +5720,17 @@ public sealed class DarlingManagedPostgres
     /// <paramref name="timeout"/> is optional and defaults to the shared status timeout
     /// (<see cref="s_statusTimeout"/>); the <c>--configure-network</c> wizard passes a longer one for a
     /// service restart, which routinely exceeds the status budget. Existing callers are unaffected.
+    /// A token that is already cancelled when the call is made throws before powershell.exe starts (see
+    /// <see cref="RunToolAsync"/>).
     /// </summary>
     internal static async Task<(int ExitCode, string Output)> RunPowerShellAsync(
         string command, CancellationToken cancellationToken, TimeSpan? timeout = null)
     {
+        /* WaitForExitAsync does not check its token for a child that has already exited, so a cancellation
+           that came before this call is checked here, before anything starts. A cancelled caller now fails
+           the same way whether its child is instant or slow. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         /* Full path (not the bare name) — avoid a PATH/CWD hijack of "powershell.exe", matching the house
            style of full-pathing every PG tool. */
         var powershellPath = Path.Combine(
@@ -5627,6 +5825,12 @@ public sealed class DarlingManagedPostgres
     /// without a password prompt. <c>internal</c> for the same reason: <see cref="DarlingStoreUpgrade"/>
     /// runs the same class of tool and must not grow a second process runner with its own timeout,
     /// cancellation and capture semantics.</para>
+    ///
+    /// <para>A token that is already cancelled when the call is made throws
+    /// <see cref="OperationCanceledException"/> before anything starts, whether the child would have been
+    /// instant or slow: the wait on a child that has already exited does not look at its token, so the check
+    /// is made here first. A stop, put-back or other cleanup that runs while a cancellation unwinds therefore
+    /// passes <c>CancellationToken.None</c> or a fresh timeout token, never its method's own.</para>
     /// </summary>
     internal static async Task<(int ExitCode, string Output)> RunToolAsync(
         string exePath,
@@ -5636,6 +5840,11 @@ public sealed class DarlingManagedPostgres
         IReadOnlyDictionary<string, string>? environment = null,
         string? workingDirectory = null)
     {
+        /* WaitForExitAsync does not check its token for a child that has already exited, so a cancellation
+           that came before this call is checked here, before anything starts. A cancelled caller now fails
+           the same way whether its child is instant or slow. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!File.Exists(exePath))
         {
             throw new InvalidOperationException(
@@ -5730,6 +5939,9 @@ public sealed class DarlingManagedPostgres
     /// cluster's postmaster through pg_ctl, so redirecting its output inherits the handles into servers that
     /// hold them open for their lifetime. Its diagnostics come from the log files it writes under the new
     /// data directory, which is why they are read on failure instead of captured here.</para>
+    ///
+    /// <para>The same early check as <see cref="RunToolAsync"/>: a token that is already cancelled when the
+    /// call is made throws before the process starts.</para>
     /// </summary>
     internal static async Task<int> RunDetachingToolAsync(
         string exePath,
@@ -5739,6 +5951,11 @@ public sealed class DarlingManagedPostgres
         IReadOnlyDictionary<string, string>? environment = null,
         string? workingDirectory = null)
     {
+        /* WaitForExitAsync does not check its token for a child that has already exited, so a cancellation
+           that came before this call is checked here, before anything starts. A cancelled caller now fails
+           the same way whether its child is instant or slow. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!File.Exists(exePath))
         {
             throw new InvalidOperationException(

@@ -226,12 +226,13 @@ public sealed record AlertDelivery
     /// alert can be folded on one and throttled on the other; the fold is the stronger statement, since a
     /// folded alert was owed a delivery and is named on another one.</para>
     ///
-    /// <para><b><see cref="ChannelUndelivered"/> is unreachable from here for a new row.</b> It is the
-    /// fall-through for a shape the send core cannot emit — every channel reporting
-    /// <see cref="AlertChannelOutcome.NotAttempted"/> while
-    /// <see cref="EmailFanoutResult.AnyChannelConfigured"/> says one is set up — because a configured
-    /// channel is always consulted unless the alert is muted, and muted is decided above. Rows retained
-    /// from before the split still carry it and still mean all three at once.</para>
+    /// <para><b><see cref="ChannelUndelivered"/> is the fall-through for a configured channel nothing
+    /// consulted.</b> Every channel reports <see cref="AlertChannelOutcome.NotAttempted"/> while
+    /// <see cref="EmailFanoutResult.AnyChannelConfigured"/> says one is set up. Without notification routes
+    /// that cannot happen, because a configured channel is always consulted unless the alert is muted, and
+    /// muted is decided above. With routes it can (#4751): an alert no route covers, on a deployment whose
+    /// email (or webhooks) are set up only through routes, has no destination on any channel, and stores
+    /// this value. Rows retained from before the split also carry it and still mean all three at once.</para>
     /// </remarks>
     public static AlertDelivery FromFanout(EmailFanoutResult result, bool muted, bool trayChannelPresent)
     {

@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -93,6 +94,8 @@ public sealed class DarlingMcpFleetTools
         [Description("\"summary\" (default): rollup, band counts, worst_servers, no cards array. \"cards\": adds every server's full card, this tool's shape before #4198. See tool guide.")] string detail = "summary",
         [Description("Cards-only: keep only cards already in worst_servers (the needs-attention list). No effect under detail=\"summary\". Default false.")] bool worst_only = false,
         [Description("Cards-only filter: keep only cards at this FleetHealthBand — \"healthy\", \"warning\", \"critical\", or \"offline\" (case-insensitive). Ignored under detail=\"summary\". Omit for every band.")] string? band = null,
+        MonitoredServerRegistryState? registryState = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var validation = McpHelpers.ValidateHoursBack(hours_back);
@@ -118,7 +121,14 @@ public sealed class DarlingMcpFleetTools
         try
         {
             var now = DateTime.UtcNow;
-            var result = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-hours_back), now, now, cancellationToken: cancellationToken);
+            var result = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-hours_back), now, now,
+                /* The live registry, injected like the analysis service's: an Azure master's card skips the events of
+                   databases monitored as their own targets. Null (the web mirror, tests) keeps the unscoped counts. */
+                separatelyMonitored: registryState is null
+                    ? null
+                    : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
+                cancellationToken: cancellationToken,
+                logger: logger);
 
             if (result.TotalServers == 0)
             {

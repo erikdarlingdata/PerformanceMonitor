@@ -28,7 +28,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// UTC; the DMV snapshot stamps the collector's UTC collection time), so <see cref="EventTimeLocal"/>
 /// converts to viewer-local like every other collection_time — Lite's per-server
 /// <c>ServerTimeHelper.FormatServerTime</c> becomes <see cref="ViewerTimeHelper.ForDisplay"/> (the
-/// viewer's one machine-local convention; the same swap the trend charts already document).
+/// viewer's mode-aware Server/Local/UTC text conversion).
 /// </summary>
 public sealed class ViewerBlockedProcessRow : BlockedProcessAlertRow
 {
@@ -63,7 +63,7 @@ public sealed class ViewerBlockedProcessRow : BlockedProcessAlertRow
 
     /// <summary>The stored naive-UTC event time in the viewer machine's local time (Lite's grid format).</summary>
     public string EventTimeLocal
-        => EventTime is { } eventTime ? ViewerTimeHelper.ForDisplay(eventTime).ToString("yyyy-MM-dd HH:mm:ss") : "";
+        => EventTime is { } eventTime ? ViewerTimeHelper.FormatForDisplay(eventTime, "yyyy-MM-dd HH:mm:ss") : "";
 
     /// <summary>Lite's wait-time rendering: sub-second in ms, else one-decimal seconds.</summary>
     public string WaitTimeFormatted => ViewerDataService.FormatWaitTime(WaitTimeMs);
@@ -107,7 +107,11 @@ public sealed partial class ViewerDataService
     /// view would not expose the plan columns and this read would fail. The plan columns are Darling-only
     /// (Lite's DuckDB view has no such column), so a plan-carrying read was never twinnable with Lite
     /// anyway. The shared alert read (<c>DarlingAlertReadAdapter</c>) already reads this base table.</para>
-    /// $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 database filter. Windows on the report's
+    /// own <c>event_time</c> (when it happened), like <see cref="BlockingPairRowsSql"/> and Lite, so "last 4
+    /// hours" lists the same reports everywhere. $5 is the <see cref="EventWindowFloor"/> for $2 — the table is
+    /// a hypertable partitioned on <c>collection_time</c>, and an event collected late is still inside the
+    /// window, so the floor has no upper bound.
     /// </summary>
     public const string BlockedProcessReportsSql = """
         SELECT
@@ -152,8 +156,9 @@ public sealed partial class ViewerDataService
             blocking_query_plan_xml
         FROM blocked_process_reports
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   event_time >= $2
+        AND   event_time <= $3
+        AND   collection_time >= $5
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ORDER BY event_time DESC
         LIMIT 200
@@ -252,6 +257,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

@@ -212,9 +212,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         var sql = DarlingTrendReader.PerfmonTrendSql;
         Assert.Contains("FROM v_perfmon_stats", sql, StringComparison.Ordinal);
         Assert.Contains("counter_name = $2", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(SUM(cntr_value) AS bigint)", sql, StringComparison.Ordinal);       /* PG SUM(bigint) is numeric */
-        Assert.Contains("CAST(SUM(delta_cntr_value) AS bigint)", sql, StringComparison.Ordinal);
+        /* #4476: the SUMs exclude an isolated single-sample Wait Statistics artifact row before casting. */
+        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);       /* PG SUM(bigint) is numeric */
+        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(artifacts) AS artifacts_set_aside", DarlingTrendReader.PerfmonTrendBucketedSql, StringComparison.Ordinal);
 
         var distinct = DarlingTrendReader.DistinctPerfmonCountersSql;
         Assert.Contains("SELECT DISTINCT counter_name", distinct, StringComparison.Ordinal);
@@ -413,7 +415,10 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.DoesNotContain("FROM " + rawTable + "\n", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
         Assert.Contains("bucket >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("bucket <= $3", sql, StringComparison.Ordinal);
+        /* A bucket is stamped at its START, so the window end is exclusive: `bucket <= $3` would take the whole
+           hour that begins at an end falling on the hour (RollupWindowEndBoundTests pins the same for every rollup read). */
+        Assert.Contains("bucket < $3", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("bucket <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY bucket", sql, StringComparison.Ordinal);
 
         /* Since #3897 the rollup's hours are gathered into $4-minute buckets on the shared origin; the columns and

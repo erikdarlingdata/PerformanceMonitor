@@ -89,6 +89,15 @@ public partial class App : Application
     public static string ArchiveDirectory { get; private set; } = string.Empty;
 
     /// <summary>
+    /// #4535: the plan analyzer's per-rule config, read from settings.json's optional "analyzer" key
+    /// (the same shape darling.json's "analyzer" section takes) alongside the other UI defaults
+    /// <see cref="LoadDefaultTimeRange"/> reads. Never null; a missing key or malformed settings.json
+    /// is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>.
+    /// </summary>
+    public static PerformanceMonitor.PlanAnalysis.AnalyzerConfig AnalyzerConfig { get; set; } =
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
+
+    /// <summary>
     /// Gets the default time range in hours for new server tabs.
     /// </summary>
     public static int DefaultTimeRangeHours { get; set; } = 4;
@@ -109,6 +118,14 @@ public partial class App : Application
     /// to the XAML default, so a hand-edited 45 cannot pick a fourth interval into existence.
     /// </summary>
     public static int AutoRefreshIntervalSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// How far a plan operator's actual row count may diverge from its estimate before the plan viewer
+    /// colors the edge feeding it (#4579), matching PerformanceStudio's <c>AccuracyRatioDivergenceLimit</c>
+    /// setting. The viewer floors this at <see cref="PerformanceMonitor.PlanAnalysis.PlanEdgeColour.MinDivergenceLimit"/>
+    /// when it renders, so a hand-edited settings.json value below that has no effect.
+    /// </summary>
+    public static double AccuracyRatioDivergenceLimit { get; set; } = PerformanceMonitor.PlanAnalysis.PlanEdgeColour.DefaultDivergenceLimit;
 
     /* Alert settings */
     public static bool AlertsEnabled { get; set; } = true;
@@ -482,16 +499,17 @@ public partial class App : Application
             ConfigDirectory,
             new[] { "ignored_wait_types.json", "collection_schedule.json" });
 
+        // An install upgraded from an earlier release keeps its per-user ignored_wait_types.json, which the
+        // seeder above never touches. Merge the bundled defaults that file has not seen yet (a no-op once merged), before
+        // anything calls IgnoredWaitTypes.Load.
+        Services.IgnoredWaitTypes.MergeNewDefaults(
+            Path.Combine(AppContext.BaseDirectory, "config", "ignored_wait_types.json"),
+            Path.Combine(ConfigDirectory, "ignored_wait_types.json"));
+
         // Load settings. The log level goes first so it governs every line the loaders below buffer.
         LoadLogMinimumLevel();
         LoadDefaultTimeRange();
         LoadAlertSettings();
-
-        // Wire the shared-UI time conversion hook before any chart/crosshair can
-        // render. The lambda reads CurrentDisplayMode at call time, so later
-        // display-mode switches are honored. Must precede the first window/chart.
-        PerformanceMonitor.Ui.UiTimeContext.ConvertForDisplay =
-            t => Services.ServerTimeHelper.ConvertForDisplay(t, Services.ServerTimeHelper.CurrentDisplayMode);
 
         /* #3577: the operator's per-theme color overrides live beside settings.json, in the same per-user
            config directory, and are read by ThemeManager on every Apply — so the path and the log hooks
@@ -985,6 +1003,19 @@ public partial class App : Application
             if (read.TryGetProperty("auto_refresh_interval_seconds", out var refreshSeconds))
             {
                 AutoRefreshIntervalSeconds = refreshSeconds.WholeNumber(AutoRefreshIntervalSeconds);
+            }
+
+            /* #4535: "analyzer" is a JSON OBJECT, not a scalar the SettingsReader's Bool/WholeNumber
+               helpers handle — read its raw text (when present) through ConfigLoader.Parse, which already
+               falls back to AnalyzerConfig.Default on anything malformed. */
+            if (read.TryGetProperty("analyzer", out var analyzerValue))
+            {
+                AnalyzerConfig = PerformanceMonitor.PlanAnalysis.ConfigLoader.Parse(analyzerValue.Element.GetRawText());
+            }
+
+            if (read.TryGetProperty("accuracy_ratio_divergence_limit", out var divergenceLimit))
+            {
+                AccuracyRatioDivergenceLimit = divergenceLimit.Number(AccuracyRatioDivergenceLimit, 2.0, 1000000.0);
             }
 
             /* #2444: this loader named its keys even when it had only one, which is the behaviour

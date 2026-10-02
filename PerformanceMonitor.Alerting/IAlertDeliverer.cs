@@ -105,17 +105,22 @@ public interface IAlertDeliverer
     /// install night three service restarts re-announced both documents on every store, six re-posts among
     /// ~23 channel posts, while the one pair whose delivery had genuinely FAILED was correctly re-attempted
     /// after the restart. Distinguishing those two cases needs the disposition at the fire site, and
-    /// nothing else on the engine's side does; so the report rides a separate method that the two askers
-    /// call and every other caller ignores.</para>
+    /// nothing else on the engine's side does; so the report rides a separate method. The two
+    /// document-class self-alerts needed the answer first, for the reason above. Since #4752 the engine's
+    /// own <c>AlertEngine.FireAsync</c> asks on every fire too, so a fire that no channel delivered can be
+    /// tried again: a condition-class family reads a fire whose every channel failed
+    /// (<see cref="AlertDelivery.Sent"/> false with a <see cref="AlertDelivery.SendError"/> set) and retries
+    /// it after 1, 2, 4 ... minutes, never later than the family's own cooldown. <c>null</c> still reads as
+    /// delivered, and <see cref="DeliverAsync"/> stays for a caller that needs no answer.</para>
     ///
     /// <para><b>Required, not defaulted — CONTRIBUTING's Two-Store Parity rule, which names this interface.</b>
     /// A default body here would have compiled, and would have left Lite's deliverer and fourteen test fakes
     /// quietly inheriting an answer nobody wrote down. So every implementer states its answer: Darling's
-    /// deliverer reports the disposition its history row was written with; Lite's, whose send seam returns
-    /// no disposition and which hosts neither daily document, returns <c>null</c> by hand and says why; each
-    /// fake does the same. <c>null</c> means "unreported", never "failed" — the askers treat it the way every
+    /// deliverer reports the disposition its history row was written with, and since #4752 Lite's reports the
+    /// disposition its send returned, though Lite hosts neither daily document; each fake states its own
+    /// answer. <c>null</c> means "unreported", never "failed" — every asker treats it the way every
     /// fire before #3580 was treated, as delivered — and a deliverer that KNOWS a send failed reports
-    /// <see cref="AlertDelivery.ChannelFailed"/>, the one disposition the askers withhold their
+    /// <see cref="AlertDelivery.ChannelFailed"/>, the one disposition the two document askers withhold their
     /// delivered-today stamp on.</para>
     /// </summary>
     Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default);

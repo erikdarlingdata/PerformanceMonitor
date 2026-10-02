@@ -32,11 +32,11 @@ public partial class ServerTab : UserControl
     private ChartHoverHelper? _latchStatsHover;
     private ChartHoverHelper? _spinlockStatsHover;
 
-    /* One shared grouped-trend renderer serves BOTH the latch and spinlock charts; built lazily with
-       Lite's UTC-offset display projection (mirrors the CpuScheduler renderer's per-app wiring). */
+    /* One shared grouped-trend renderer serves BOTH the latch and spinlock charts; built lazily and bound to the
+       tab's display zone (GetPickerZone). */
     private GroupedTrendChartRenderer? _latchSpinlockRendererField;
     private GroupedTrendChartRenderer LatchSpinlockRenderer =>
-        _latchSpinlockRendererField ??= new GroupedTrendChartRenderer(_chartHelper, t => t.AddMinutes(UtcOffsetMinutes));
+        _latchSpinlockRendererField ??= new GroupedTrendChartRenderer(_chartHelper, t => t, GetPickerZone);
 
     /// <summary>Applies the shared chrome + hover to the latch/spinlock charts up front (constructor),
     /// so they don't flash white before the tab's first load — matching the CPU/Memory charts.</summary>
@@ -47,8 +47,8 @@ public partial class ServerTab : UserControl
         ApplyTheme(SpinlockStatsChart);
         SpinlockStatsChart.Refresh();
 
-        _latchStatsHover = new ChartHoverHelper(LatchStatsChart, "ms/sec");
-        _spinlockStatsHover = new ChartHoverHelper(SpinlockStatsChart, "/sec");
+        _latchStatsHover = new ChartHoverHelper(LatchStatsChart, "ms/sec", displayZone: GetPickerZone);
+        _spinlockStatsHover = new ChartHoverHelper(SpinlockStatsChart, "/sec", displayZone: GetPickerZone);
     }
 
     /// <summary>
@@ -91,8 +91,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         LatchSpinlockRenderer.Render(LatchStatsChart, _latchStatsHover, data,
@@ -113,8 +112,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,

@@ -63,8 +63,11 @@ public sealed class McpServiceParameterDiSeatCensusTests
             .ToList();
 
         var missing = serviceParameterTypeNames
+            /* #4726: AddTransient<T> is a seat too - DarlingAnalysisService is registered per call, not shared. A transient
+               seat satisfies the property this census guards (the parameter is resolved from DI, never served as a client argument). */
             .Where(name => !hostServiceSource.Contains($"AddSingleton<{name}>", StringComparison.Ordinal)
-                && !hostServiceSource.Contains($"AddSingleton(new {name}", StringComparison.Ordinal))
+                && !hostServiceSource.Contains($"AddSingleton(new {name}", StringComparison.Ordinal)
+                && !hostServiceSource.Contains($"AddTransient<{name}>", StringComparison.Ordinal))
             .ToList();
 
         Assert.True(
@@ -75,13 +78,18 @@ public sealed class McpServiceParameterDiSeatCensusTests
             "argument instead of resolved from DI.");
 
         /* A change worth knowing about even when nothing is missing: today's distinct complex service types are
-           exactly these five (NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
-           StoreHostProfileCache) — pin the set so a sixth type appearing here is a deliberate, reviewed
+           exactly these eight (AnalyzerConfig, MonitoredServerRegistryState (get_fleet_overview's Azure master scope), NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
+           StoreHostProfileCache, ReadLatencyRecorder) — pin the set so an eighth type appearing here is a deliberate
            addition rather than a silent one. StoreHostProfileCache added deliberately (#4214 round-1 review,
            Medium 2): get_store_host's 5-minute shared cache, registered via the typed-generic
-           AddSingleton<StoreHostProfileCache> overload this test's own Contains check requires. */
+           AddSingleton<StoreHostProfileCache> overload this test's own Contains check requires. AnalyzerConfig
+           added by #4535: the plan analyzer's per-rule config, registered via the typed-generic
+           AddSingleton<AnalyzerConfig> overload the same way. ReadLatencyRecorder added by #4782:
+           run_custom_view_panel's read-latency seat (the composed-panel run is recorded into the host's
+           accumulator), registered via the typed-generic AddSingleton<ReadLatencyRecorder> overload the same
+           way. */
         Assert.Equal(
-            new List<string> { "DarlingAnalysisService", "ILogger", "NpgsqlDataSource", "PostgresConfig", "StoreHostProfileCache" },
+            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "ILogger", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadLatencyRecorder", "StoreHostProfileCache" },
             serviceParameterTypeNames);
     }
 

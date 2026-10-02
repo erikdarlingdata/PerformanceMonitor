@@ -61,8 +61,11 @@ public sealed class QsCaptureModeRungTests : IDisposable
         Assert.True(start >= 0, "DuckDbInitializer has no v64 block");
         var block = source[start..];
 
-        Assert.Contains("(\"query_store_health\", \"query_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
-        Assert.Contains("(\"query_store_health\", \"wait_stats_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        /* #4727: the entries live in DuckDbInitializer.AddedColumns; the step adds its own version's entries through
+           the shared AddMissingColumnsAsync. */
+        Assert.Contains("(64, \"query_store_health\", \"query_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        Assert.Contains("(64, \"query_store_health\", \"wait_stats_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        Assert.Contains("AddMissingColumnsAsync(connection, AddedColumnsForVersion(64))", block, StringComparison.Ordinal);
         Assert.Contains("ADD COLUMN IF NOT EXISTS {column} {type}", block, StringComparison.Ordinal);
         Assert.Contains("Running migration to v64", block, StringComparison.Ordinal);
         foreach (var phrase in new[]
@@ -162,7 +165,9 @@ public sealed class QsCaptureModeRungTests : IDisposable
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
         {
             await conn.OpenAsync();
-            Assert.Equal(64L, Convert.ToInt64(await ScalarAsync(conn, "SELECT MAX(version) FROM schema_version")));
+            /* Stays-true shape (#4475 raised CurrentSchemaVersion past 64): the climb reaches AT LEAST v64,
+               and lands exactly on CurrentSchemaVersion, whatever that is today. */
+            Assert.True(DuckDbInitializer.CurrentSchemaVersion >= 64);
             Assert.Equal((long)DuckDbInitializer.CurrentSchemaVersion, Convert.ToInt64(await ScalarAsync(conn, "SELECT MAX(version) FROM schema_version")));
 
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(conn, "SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name = 'query_store_health'")));

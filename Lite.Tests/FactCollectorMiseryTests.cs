@@ -567,7 +567,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
         using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
-        await seeder.SeedServerEditionAsync(edition: 2, majorVersion: 16);
         await seeder.SeedDiskSpaceAsync(("D:\\", 500_000, 0)); // 0% free
 
         var collector = new DuckDbFactCollector(_duckDb);

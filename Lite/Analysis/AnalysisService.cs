@@ -28,13 +28,20 @@ public class AnalysisService
     private readonly DrillDownCollector _drillDown;
     private readonly AnomalyDetector _anomalyDetector;
     private readonly BaselineProvider _baselineProvider;
+
+    /// <summary>
+    /// #4726: the shared baseline tier this instance was handed (null when it keeps a private one). The MCP host
+    /// builds one service per call, so a test reads this to prove every one of them shares the store's ONE cache.
+    /// </summary>
+    internal BaselineCache? SharedBaselineCache { get; }
+
     /// <summary>
     /// Minimum hours of collected data required before analysis will run.
     /// Short collection windows distort fraction-of-period calculations —
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
     /// 24 hours has been validated empirically as sufficient.
     /// </summary>
-    internal double MinimumDataHours { get; set; } = 24;
+    internal double MinimumDataHours { get; set; } = AnalysisHistoryGate.MinimumDataHours;
 
     /// <summary>
     /// Raised after each analysis run completes, providing the findings for UI display.
@@ -126,6 +133,7 @@ public class AnalysisService
         BaselineCache? baselineCache = null)
     {
         _duckDb = duckDb;
+        SharedBaselineCache = baselineCache;
         _findingStore = new FindingStore(duckDb);
         _collector = new DuckDbFactCollector(duckDb, collectorFrequencyMinutes);
         _scorer = new FactScorer();
@@ -176,12 +184,39 @@ public class AnalysisService
     }
 
     /// <summary>
+    /// Set once by the app, where the server list lives: for a server id, the databases monitored as their
+    /// own targets when that server is an Azure SQL Database <c>master</c> target (the list the alert sweep
+    /// uses), else null. Null provider or a null result leaves analysis exactly as it was.
+    /// </summary>
+    internal static Func<int, IReadOnlyList<string>?>? SeparatelyMonitoredDatabasesProvider { get; set; }
+
+    /// <summary>
+    /// Asks the provider for the scope. A provider that throws degrades to unscoped (null) with a warning,
+    /// so a fault in the server list cannot fail the whole pass. Tests that set the provider must reset it to null in a finally.
+    /// </summary>
+    internal static IReadOnlyList<string>? ResolveSeparatelyMonitoredDatabases(int serverId)
+    {
+        try
+        {
+            return SeparatelyMonitoredDatabasesProvider?.Invoke(serverId);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("AnalysisService", $"Separately monitored databases lookup failed for server {serverId}; analysing unscoped: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Runs the full analysis pipeline with a specific context.
     /// </summary>
     public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)
     {
         if (IsAnalyzing)
             return [];
+
+        /* Filled once per pass at the one door every path goes through. */
+        context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(context.ServerId);
 
         IsAnalyzing = true;
         InsufficientDataMessage = null;
@@ -208,18 +243,9 @@ public class AnalysisService
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
             var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.CancellationToken);
-            if (dataSpanHours < MinimumDataHours)
+            if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
-                var needed = MinimumDataHours >= 24
-                    ? $"{MinimumDataHours / 24:F1} days"
-                    : $"{MinimumDataHours:F0} hours";
-                var have = dataSpanHours >= 24
-                    ? $"{dataSpanHours / 24:F1} days"
-                    : $"{dataSpanHours:F1} hours";
-
-                InsufficientDataMessage =
-                    $"Not enough data for reliable analysis. Need {needed} of collected data, " +
-                    $"have {have}. Keep the collector running and try again later.";
+                InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
 
                 AppLogger.Info("AnalysisService",
                     $"Skipping analysis for {context.ServerName}: {dataSpanHours:F1}h data, need {MinimumDataHours}h");
@@ -406,7 +432,7 @@ public class AnalysisService
             // so an exploratory pass is labelled relative to the instant it explores. A read the store could
             // not make labels nothing and costs the pass nothing (FindingStore.GetPriorOccurrencesAsync).
             var priorOccurrences = await _findingStore.GetPriorOccurrencesAsync(context, context.TimeRangeEnd);
-            RecurrenceLabeler.Label(stories, facts, context.TimeRangeEnd, priorOccurrences);
+            RecurrenceLabeler.Label(stories, facts, priorOccurrences);
 
             context.CancellationToken.ThrowIfCancellationRequested();
 
@@ -531,7 +557,7 @@ public class AnalysisService
     /// callers' unobserved envelope keeps describing exactly the point-in-time facts it names.</para>
     /// </summary>
     public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
-        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null)
+        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -542,8 +568,10 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
-            AsOfUtc = asOfUtc
+            AsOfUtc = asOfUtc,
+            CancellationToken = cancellationToken
         };
+        context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
 
         try
         {
@@ -560,8 +588,10 @@ public class AnalysisService
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault. */
             AppLogger.Error("AnalysisService", $"Fact collection or anomaly detection failed for {serverName}: {ex.Message}");
             return ([], null, CollectionCaveatState.From(context));
         }
@@ -574,7 +604,7 @@ public class AnalysisService
     /// already, so the full pass was paying for, and this skips, every other family plus the detector's
     /// baseline reads.
     /// </summary>
-    public async Task<List<Fact>> CollectConfigAuditFactsAsync(int serverId, string serverName, DateTime? asOfUtc = null)
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(int serverId, string serverName, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var context = new AnalysisContext
@@ -583,15 +613,18 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = timeRangeEnd.AddHours(-1),
             TimeRangeEnd = timeRangeEnd,
-            AsOfUtc = asOfUtc
+            AsOfUtc = asOfUtc,
+            CancellationToken = cancellationToken
         };
 
         try
         {
             return await _collector.CollectConfigAuditFactsAsync(context);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault. */
             AppLogger.Error("AnalysisService", $"Config-audit fact collection failed for {serverName}: {ex.Message}");
             return [];
         }
@@ -618,14 +651,16 @@ public class AnalysisService
     public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
-        DateTime comparisonStart, DateTime comparisonEnd)
+        DateTime comparisonStart, DateTime comparisonEnd,
+        CancellationToken cancellationToken = default)
     {
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = baselineStart,
-            TimeRangeEnd = baselineEnd
+            TimeRangeEnd = baselineEnd,
+            CancellationToken = cancellationToken
         };
 
         var comparisonContext = new AnalysisContext
@@ -633,8 +668,11 @@ public class AnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
-            TimeRangeEnd = comparisonEnd
+            TimeRangeEnd = comparisonEnd,
+            CancellationToken = cancellationToken
         };
+        baselineContext.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
+        comparisonContext.SeparatelyMonitoredDatabases = baselineContext.SeparatelyMonitoredDatabases;
 
         try
         {
@@ -644,12 +682,14 @@ public class AnalysisService
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
 
-            var dispersion = await LookUpDispersionAsync(serverId, serverName, baselineFacts, comparisonFacts, comparisonStart);
+            var dispersion = await LookUpDispersionAsync(serverId, serverName, baselineFacts, comparisonFacts, comparisonStart, cancellationToken);
 
             return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault. */
             AppLogger.Error("AnalysisService", $"Period comparison failed for {serverName}: {ex.Message}");
             return ([], [], null, null, new Dictionary<string, BaselineBucket>());
         }
@@ -661,16 +701,18 @@ public class AnalysisService
     /// degrades to "no dispersion" rather than failing the comparison.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, BaselineBucket>> LookUpDispersionAsync(
-        int serverId, string serverName, List<Fact> baselineFacts, List<Fact> comparisonFacts, DateTime comparisonStart)
+        int serverId, string serverName, List<Fact> baselineFacts, List<Fact> comparisonFacts, DateTime comparisonStart, CancellationToken cancellationToken = default)
     {
         var dispersion = new Dictionary<string, BaselineBucket>(StringComparer.Ordinal);
         try
         {
             foreach (var metric in ComparisonBanding.DispersionMetricsFor(baselineFacts, comparisonFacts))
-                dispersion[metric] = await _baselineProvider.GetBaselineAsync(serverId, metric, comparisonStart);
+                dispersion[metric] = await _baselineProvider.GetBaselineAsync(serverId, metric, comparisonStart, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault. */
             AppLogger.Warn("AnalysisService", $"Baseline dispersion lookup failed for {serverName}; compare_analysis bands every key by the absolute rule: {ex.Message}");
             dispersion.Clear();
         }
@@ -808,39 +850,30 @@ AND   capture_time >= COALESCE(
 ORDER BY capture_time, trace_flag";
 
     /// <summary>
-    /// This server's collected UTC offset for the trace-anchor read (#3740) — the same statement
-    /// <c>LocalDataService.GetServerUtcOffsetMinutesAsync</c> runs, inlined because the analysis pass holds a
-    /// DuckDB connection and not a <c>LocalDataService</c>. Skips NULL offsets rather than taking the newest
-    /// row blindly: the column arrived in schema v42 and a store migrated from earlier holds pre-v42
-    /// snapshots that predate it. <c>$1</c> server_id. No row means no offset yet, and the caller treats
-    /// local as UTC — <c>McpServerLocalWindow</c>'s decision, for the same reason (a server with no offset
-    /// almost always has no server-local rows either).
+    /// How much wider than the exact span the trace-anchor read's first filter is, on each side (#4821). SQL
+    /// filters the server-local <c>event_time</c> against the span's bounds shifted into the server's frame;
+    /// a line near a daylight-saving change can sit up to an hour from where that shift puts it, so the bounds
+    /// are opened by an hour and the exact span is applied in C# after each row is converted.
     /// </summary>
-    internal const string ServerUtcOffsetForAttributionSql = @"
-SELECT utc_offset_minutes
-FROM v_server_properties
-WHERE server_id = $1
-AND   utc_offset_minutes IS NOT NULL
-ORDER BY collection_time DESC
-LIMIT 1";
+    private const int RoughFilterMarginMinutes = 60;
 
     /// <summary>
     /// The default trace's sp_configure lines for the attribution's trace anchor (#3740): every stored
     /// <c>ErrorLog</c> row carrying msg 15457 (<see cref="ConfigChangeAttribution.ReconfigureMessageNumber"/>)
-    /// whose event time falls in <c>($2, $3]</c>. Selected on <c>error_number</c>, not on the text — the number
+    /// whose event time falls in <c>($2, $3]</c> (the caller's rough bounds, see below). Selected on <c>error_number</c>, not on the text — the number
     /// is populated on the row and does not change with the instance's language; the attribution parses the
     /// text afterwards. Reads the <c>v_default_trace_events</c> archive view (hot UNION parquet) like the
     /// System Events read does, so a line that has already aged into parquet still anchors.
     ///
     /// <para><b>The stored <c>event_time</c> is the monitored server's LOCAL wall clock</b> —
     /// <c>fn_trace_gettable</c>'s <c>StartTime</c>, stored raw — while the capture times this span is made of
-    /// are naive UTC. Lite de-skews in C# rather than SQL, exactly as <c>LocalDataService.GetDefaultTraceEventsAsync</c>
-    /// does: the caller shifts BOTH bounds into the server's frame by the collected offset before binding
-    /// them, and subtracts the same offset from each returned row, so the bounds and the values can never
-    /// disagree about whose clock they are in (<c>ServerLocalReadFrameDisciplineTests</c> pins the row
-    /// de-skew). The Darling twin, <c>DarlingAnalysisService.ReconfigureTraceLinesForAttributionSql</c>, spells
-    /// the same de-skew in SQL. One offset covers the span, so a span straddling a DST transition is off by an
-    /// hour on its far side — the single-snapshot approximation every reader of this column makes.</para>
+    /// are naive UTC. Lite converts in C# rather than SQL, as <c>LocalDataService.GetDefaultTraceEventsAsync</c>
+    /// does: the caller shifts BOTH bounds into the server's frame by the server's clock
+    /// (<see cref="ServerClock"/>), opened by <see cref="RoughFilterMarginMinutes"/> on each side so this
+    /// statement is only a first filter, then converts each returned row to UTC with the offset in force at
+    /// that row and keeps the lines inside the exact span (#4821). A single collected offset put a line stamped
+    /// across a daylight-saving change an hour off. The Darling twin,
+    /// <c>DarlingAnalysisService.ReconfigureTraceLinesForAttributionSql</c>, spells the same de-skew in SQL.</para>
     /// </summary>
     internal const string ReconfigureTraceLinesForAttributionSql = @"
 SELECT event_time, text_data
@@ -953,7 +986,8 @@ ORDER BY event_time";
             var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
                 context.ServerId, context.ServerName,
                 windows.BeforeStart, windows.BeforeEnd,
-                windows.AfterStart, windows.AfterEnd);
+                windows.AfterStart, windows.AfterEnd,
+                context.CancellationToken);
 
             /* Both coverages null is ComparePeriodsAsync's own catch (collection threw); an empty compare
                over OBSERVED windows is the "nothing moved" answer and is banded like any other. */
@@ -961,14 +995,21 @@ ORDER BY event_time";
                 ? null
                 : ComparisonBanding.Compare(before, after, dispersion, ConfigChangeAttribution.CoverageCaveatFor(beforeCoverage, afterCoverage));
 
-            facts.Add(ConfigChangeAttribution.BuildFact(
-                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor));
+            var attributionFact = ConfigChangeAttribution.BuildFact(
+                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor);
+            facts.Add(attributionFact);
+
+            /* The log reports the CARD's counts, not the compare's raw ones: a pass whose card says "not yet
+               comparable" must not log "1 better" for the same row (#4729). Stable stays the compare's. */
+            var worse = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaWorse);
+            var better = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaBetter);
+            var notYetComparable = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
 
             AppLogger.Info("AnalysisService",
                 $"Configuration change attributed for {context.ServerName} ({latest.Families}): {string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name))} " +
                 $"{(anchor is null ? "first observed at" : "changed at")} {anchorTime:u} ({(anchor is null ? "configuration snapshot" : "default trace, msg 15457")}), " +
                 $"compare over ±{ConfigChangeAttribution.CompareWindowHours} h ({windows.AfterHoursObserved:0.#} h after so far) — " +
-                $"{compare?.Worse ?? 0} worse, {compare?.Better ?? 0} better, {compare?.Stable ?? 0} stable{(compare is null ? " (compare unavailable this pass)" : string.Empty)}");
+                $"{worse} worse, {better} better{(notYetComparable > 0 ? $", {notYetComparable} not yet comparable" : string.Empty)}, {compare?.Stable ?? 0} stable{(compare is null ? " (compare unavailable this pass)" : string.Empty)}");
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -1057,12 +1098,14 @@ ORDER BY event_time";
     /// already true without it, so a store fault here is logged at Warning and costs only the anchor. An
     /// abandonment still propagates to the caller's classified line (#2443).
     ///
-    /// <para>The offset is read first and used twice — to shift both span bounds into the server's local
-    /// frame and to de-skew each returned row back to UTC — off the ONE resolved value, so the bounds and
-    /// the values cannot disagree about which clock they are in (the discipline
-    /// <c>LocalDataService.GetDefaultTraceEventsAsync</c> states for its own parameter).</para>
+    /// <para>The server's clock is read first and used twice — to shift both span bounds into the server's local
+    /// frame for the first filter, and to convert each returned row back to UTC — off the ONE resolved clock, so
+    /// the bounds and the values cannot disagree about which clock they are in (the discipline
+    /// <c>LocalDataService.GetDefaultTraceEventsAsync</c> states for its own parameter). The clock follows the
+    /// server's time zone where SQL Server reports one, so a line on the far side of a daylight-saving change
+    /// converts with the offset that was in force then (#4821).</para>
     /// </summary>
-    private async Task<ConfigChangeAttribution.TraceAnchor?> ResolveTraceAnchorAsync(
+    internal async Task<ConfigChangeAttribution.TraceAnchor?> ResolveTraceAnchorAsync(
         AnalysisContext context, ConfigChangeAttribution.ChangeEvent change)
     {
         try
@@ -1073,31 +1116,32 @@ ORDER BY event_time";
             {
                 await connection.OpenAsync(context.CancellationToken);
 
-                var offset = 0;
-                using (var offsetCmd = connection.CreateCommand())
-                {
-                    offsetCmd.CommandText = ServerUtcOffsetForAttributionSql;
-                    offsetCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-                    var scalar = await offsetCmd.ExecuteScalarAsync(context.CancellationToken);
-                    if (scalar is not null and not DBNull)
-                        offset = Convert.ToInt32(scalar);
-                }
+                /* The server's clock (#4821): its time zone where SQL Server reports one, else the collected
+                   fixed offset, else UTC. One offset for the whole span put a line stamped on the far side of a
+                   daylight-saving change an hour off. */
+                var (utcOffsetMinutes, timeZoneId) = await BaselineProvider.ReadServerClockAsync(
+                    connection, context.ServerId, context.CancellationToken);
+                var clock = ServerClock.Resolve(timeZoneId, utcOffsetMinutes);
 
                 using var cmd = connection.CreateCommand();
                 cmd.CommandText = ReconfigureTraceLinesForAttributionSql;
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-                /* Server-local bounds: the stored event_time is the server's wall clock, so the UTC span is
-                   shifted INTO that frame by the collected offset (local = UTC + offset). */
-                cmd.Parameters.Add(new DuckDBParameter { Value = change.PreviousCaptureTime.AddMinutes(offset) });
-                cmd.Parameters.Add(new DuckDBParameter { Value = change.ChangeTime.AddMinutes(offset) });
+                /* Rough server-local bounds: the stored event_time is the server's wall clock, so the UTC span
+                   is shifted INTO that frame, and an hour wider on each side so a line near a daylight-saving
+                   change cannot fall out of the first filter. The exact span is applied below, on UTC. */
+                cmd.Parameters.Add(new DuckDBParameter { Value = clock.ToServerLocal(change.PreviousCaptureTime).AddMinutes(-RoughFilterMarginMinutes) });
+                cmd.Parameters.Add(new DuckDBParameter { Value = clock.ToServerLocal(change.ChangeTime).AddMinutes(RoughFilterMarginMinutes) });
 
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
                     if (reader.IsDBNull(0))
                         continue;
-                    /* De-skew server-local StartTime -> naive-UTC, the same subtraction the System Events read makes. */
-                    var eventTimeUtc = reader.GetDateTime(0).AddMinutes(-offset);
+                    /* Server-local StartTime -> naive UTC with the offset in force at that row, then the exact
+                       span, the same (previous capture, change time] the anchor join applies. */
+                    var eventTimeUtc = clock.ToUtc(reader.GetDateTime(0));
+                    if (eventTimeUtc <= change.PreviousCaptureTime || eventTimeUtc > change.ChangeTime)
+                        continue;
                     lines.Add(new ConfigChangeAttribution.TraceLine(
                         eventTimeUtc,
                         reader.IsDBNull(1) ? null : reader.GetString(1)));
@@ -1115,6 +1159,22 @@ ORDER BY event_time";
     }
 
     /// <summary>
+    /// The insufficient-history message for <paramref name="serverId"/>, or null when it has enough history
+    /// OR when the span could not be read: a failed read says nothing about history, so it must not be
+    /// reported as "have 0.0 hours".
+    /// </summary>
+    internal async Task<string?> GetInsufficientHistoryMessageAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var hours = await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken);
+        if (hours is null)
+            return null;
+
+        return AnalysisHistoryGate.HasEnoughHistory(hours.Value, MinimumDataHours)
+            ? null
+            : AnalysisHistoryGate.InsufficientDataMessage(hours.Value, MinimumDataHours);
+    }
+
+    /// <summary>
     /// Returns the total span of collected data for a server (no time range filter).
     /// This answers "has this server been monitored long enough?" — separate from
     /// the analysis window. A server with 100 hours of total history can safely
@@ -1123,6 +1183,12 @@ ORDER BY event_time";
     /* Internal for AnalysisDataSpanTests (#1809): the span must survive an archive/reset, which is
        only observable with a real DuckDB + parquet fixture. */
     internal async Task<double> GetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
+        => await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken) ?? 0;
+
+    /// <summary>
+    /// The same span, but null when the read failed (as opposed to 0 for a server with no rows).
+    /// </summary>
+    internal async Task<double?> TryGetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -1150,7 +1216,7 @@ WHERE server_id = $1";
                allowed to masquerade as a 0-hour history (#2443). That would turn a cancelled pass
                into an insufficient-data SKIP, which is a different and far calmer-looking answer
                than the one the caller is about to log. */
-            return 0;
+            return null;
         }
     }
 

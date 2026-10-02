@@ -459,8 +459,9 @@ public partial class SettingsWindow : Window
         var port = McpPortTextBox.Text;
         var command = $"claude mcp add --transport http --scope user sql-monitor http://localhost:{port}/";
         /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
-        Clipboard.SetDataObject(command, false);
-        McpStatusText.Text = "Copied to clipboard!";
+        McpStatusText.Text = ClipboardText.TrySetDataObject(command)
+            ? "Copied to clipboard!"
+            : "Couldn't copy: the clipboard is in use.";
     }
 
     private async void AutoPortButton_Click(object sender, RoutedEventArgs e)

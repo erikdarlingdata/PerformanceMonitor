@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
 
@@ -121,31 +122,41 @@ AND   v.delta_execution_count > 0";
         }
     }
 
+    /// <summary>
+    /// How many parameter-sensitive plans the fact counts and how many the read reports: the <c>LIMIT</c> this
+    /// statement carried until the compiled-before-the-window test moved to the reader (#4821), which has to run
+    /// BEFORE the cap for the cap to keep the same plans.
+    /// </summary>
+    internal const int ParameterSensitivityMaxOffenders = 20;
+
     public const string ParameterSensitivitySql = @"
-WITH svr AS
+WITH newest AS
 (
     -- creation_time is the MONITORED SERVER's local wall clock -- QueryStatsCollector ships the
     -- dm_exec_query_stats value verbatim -- while the window bound is naive UTC off DateTime.UtcNow.
-    -- De-skewing the column by the collected offset is what lets the compiled-before-the-window test
-    -- compare a single frame. Untranslated, a negative offset admits exactly the in-window plans this
-    -- predicate exists to exclude, and a positive one discards plans that legitimately predate the
-    -- window; either way a wide min/max worker-time spread stops being evidence of parameter
-    -- sensitivity and becomes an artefact of plan age. COALESCE to 0 because server_properties is an
-    -- on-load collector, so an absent offset is the state every server passes through on its first
-    -- cycle -- refusing the read there would pre-empt the two answers that outrank any window. The
-    -- CTE returns exactly one row, so no plan is lost to it.
-    SELECT COALESCE
-    (
-        (
-            SELECT sp.utc_offset_minutes
-            FROM server_properties AS sp
-            WHERE sp.server_id = $1
-            AND   sp.utc_offset_minutes IS NOT NULL
-            ORDER BY sp.collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+    -- The compiled-before-the-window test has to compare a single frame, so the reader converts each plan's
+    -- creation_time to UTC through the server's ServerClock (#4821): the zone where the newest snapshot
+    -- reports one, its fixed offset otherwise. One offset for every plan put a plan compiled before the
+    -- zone's last daylight saving change an hour off, and a wide min/max worker-time spread stops being
+    -- evidence of parameter sensitivity when plan age is off. This CTE is that newest snapshot's zone id
+    -- and offset from the SAME server_properties row, handed back on every row. The SQL keeps the newest
+    -- offset only as a rough filter an hour wider than the window bound; the reader applies the exact test
+    -- and the cap. svr below is exactly one row even when server_properties has not
+    -- been collected yet (an on-load collector, so an absent offset is the state every server passes
+    -- through on its first cycle -- refusing the read there would pre-empt the two answers that outrank
+    -- any window): offset 0 and no zone, which is UTC.
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+),
+svr AS
+(
+    SELECT
+        COALESCE((SELECT utc_offset_minutes FROM newest), 0) AS offset_minutes,
+        (SELECT time_zone_id FROM newest) AS time_zone_id
 ),
 latest AS
 (
@@ -154,7 +165,7 @@ latest AS
         query_plan_hash,
         database_name,
         execution_count,
-        creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,
+        creation_time,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -166,7 +177,7 @@ latest AS
             PARTITION BY database_name, query_hash, query_plan_hash
             ORDER BY collection_time DESC
         ) AS rn
-    FROM v_query_stats, svr
+    FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
@@ -177,16 +188,18 @@ SELECT
     max_worker_time,
     max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
     max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
-    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence
-FROM latest
+    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
+    creation_time AS creation_time_local,
+    svr.offset_minutes,
+    svr.time_zone_id
+FROM latest, svr
 WHERE rn = 1
 AND   min_worker_time >= 10000
 AND   max_worker_time >= 250000
 AND   execution_count >= 20
-AND   creation_time_utc <= $2
+AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC
-LIMIT 20";
+ORDER BY worker_ratio DESC";
 
     /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose
@@ -206,6 +219,8 @@ LIMIT 20";
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
+            var windowStart = AsNaive(context.TimeRangeStart);
+            ServerClock? clock = null;
             var offenderCount = 0;
             var worstRatio = 0.0;
             var worstMinWorker = 0L;
@@ -216,7 +231,15 @@ LIMIT 20";
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
-                // Rows arrive ordered by worker_ratio DESC — the first row is the worst offender.
+                /* #4821: the compiled-before-the-window test on each plan's own converted creation time. Every
+                   row carries the same newest-snapshot zone and offset, so the clock is built once. */
+                clock ??= ServerLocalTimes.ClockFrom(
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(6) ? null : reader.GetInt32(6));
+                if (!ServerLocalTimes.CreatedByWindowStart(clock, reader.IsDBNull(5) ? null : reader.GetDateTime(5), windowStart))
+                    continue;
+
+                // Rows arrive ordered by worker_ratio DESC — the first row kept is the worst offender.
                 if (offenderCount == 0)
                 {
                     worstMinWorker = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
@@ -226,6 +249,8 @@ LIMIT 20";
                     worstSpillDivergence = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4));
                 }
                 offenderCount++;
+                if (offenderCount >= ParameterSensitivityMaxOffenders)
+                    break;
             }
 
             if (offenderCount == 0) return;
@@ -758,7 +783,7 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var summary = PlanAdvisoryAggregator.Summarize(planXmls);
+            var summary = PlanAdvisoryAggregator.SummarizeCancellable(planXmls, _analyzerConfig, context.CancellationToken);
 
             if (summary.MissingIndexCount > 0)
             {

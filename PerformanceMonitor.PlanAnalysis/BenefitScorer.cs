@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -21,23 +22,102 @@ public static class BenefitScorer
         "Scan With Predicate",  // Rule 11
         "Non-SARGable Predicate", // Rule 12
         "Scan Cardinality Misestimate", // Rule 32
+        "Bare Scan",            // Rule 34
     };
 
-    public static void Score(ParsedPlan plan)
+    /// <summary>
+    /// #4512 follow-up: measured directly against a depth-999 tree shaped like this walk's own
+    /// recursion (<see cref="ScoreNodeTree"/>), the same way <see cref="PlanAnalyzer.Analyze"/>
+    /// was measured. It survives on a 1 MB caller thread (the plan viewer's WPF UI thread size)
+    /// down to roughly 68 KB of stack, and on a 1.5 MB caller (the Darling service's
+    /// analysis-pass thread size) with the same margin — well over 2x below either real caller
+    /// size, so the analyze-then-score step needs no dedicated thread of its own. (No caller
+    /// wires this in yet; the margin holds regardless of which thread eventually calls it,
+    /// since it is measured against caller thread SIZE, not a specific call site.)
+    /// </summary>
+    public static void Score(ParsedPlan plan, CancellationToken cancellationToken = default)
     {
-        foreach (var batch in plan.Batches)
+        /* #4514: PlanAnalyzer.Analyze creates findings on statements inside a stored procedure
+           or UDF body via the same PlanStatements.EnumerateAll walk. Without it here, those
+           findings would never get a MaxBenefitPercent or wait-stat score.
+           #4512: cancellationToken is checked per statement and down the node-tree walk, the
+           same shape as PlanAnalyzer.Analyze. */
+        foreach (var stmt in PlanStatements.EnumerateAll(plan))
         {
-            foreach (var stmt in batch.Statements)
-            {
-                ScoreStatementWarnings(stmt);
+            cancellationToken.ThrowIfCancellationRequested();
+            ScoreStatementWarnings(stmt);
 
-                if (stmt.RootNode != null)
-                    ScoreNodeTree(stmt.RootNode, stmt);
+            if (stmt.RootNode != null)
+                ScoreNodeTree(stmt.RootNode, stmt, cancellationToken);
+            if (stmt.WaitStats.Count > 0 && stmt.QueryTimeStats != null)
+                ScoreWaitStats(stmt);
 
-                if (stmt.WaitStats.Count > 0 && stmt.QueryTimeStats != null)
-                    ScoreWaitStats(stmt);
-            }
+            if (stmt.WaitStats.Count > 0)
+                EmitWaitStatWarnings(stmt);
         }
+    }
+
+    /// <summary>
+    /// Emits a PlanWarning per wait stat entry, merging the per-wait benefit % from
+    /// ScoreWaitStats with display flags and the curated description from WaitStatsConfig.
+    /// The existing wait-stats card/chart stays as a complementary view.
+    /// </summary>
+    private static void EmitWaitStatWarnings(PlanStatement stmt)
+    {
+        // Lookup benefit % by wait type (populated by ScoreWaitStats)
+        var benefitByType = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        foreach (var wb in stmt.WaitBenefits)
+            benefitByType[wb.WaitType] = wb.MaxBenefitPercent;
+
+        foreach (var wait in stmt.WaitStats)
+        {
+            if (wait.WaitTimeMs <= 0) continue;
+
+            double? benefitPct = benefitByType.TryGetValue(wait.WaitType, out var b) ? b : null;
+
+            var msg = new System.Text.StringBuilder();
+            msg.Append(wait.WaitType);
+            msg.Append(" Observed ").Append(wait.WaitTimeMs.ToString("N0")).Append(" ms");
+            if (wait.WaitCount > 0)
+                msg.Append(" across ").Append(wait.WaitCount.ToString("N0")).Append(" wait").Append(wait.WaitCount == 1 ? "" : "s");
+            msg.Append('.');
+
+            if (WaitStatsConfig.ShowAverageWaitTime(wait.WaitType) && wait.WaitCount > 0)
+            {
+                var effLatency = (double)wait.WaitTimeMs / wait.WaitCount;
+                msg.Append(" Effective latency: ")
+                   .Append(FormatWaitLatency(effLatency))
+                   .Append(" per wait.");
+            }
+
+            var description = WaitStatsConfig.Description(wait.WaitType);
+            if (!string.IsNullOrEmpty(description))
+                msg.Append(' ').Append(description);
+
+            var severity = benefitPct switch
+            {
+                >= 50 => PlanWarningSeverity.Critical,
+                >= 10 => PlanWarningSeverity.Warning,
+                _ => PlanWarningSeverity.Info,
+            };
+
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "Wait: " + wait.WaitType,
+                Message = msg.ToString(),
+                Severity = severity,
+                MaxBenefitPercent = benefitPct,
+                ActionableFix = null
+            });
+        }
+    }
+
+    private static string FormatWaitLatency(double ms)
+    {
+        if (ms >= 1000) return $"{ms / 1000:N2} s";
+        if (ms >= 10) return $"{ms:N0} ms";
+        if (ms >= 1) return $"{ms:N1} ms";
+        return $"{ms * 1000:N0} \u00b5s";
     }
 
     private static void ScoreStatementWarnings(PlanStatement stmt)
@@ -48,44 +128,18 @@ public static class BenefitScorer
         {
             switch (warning.WarningType)
             {
-                case "Ineffective Parallelism":   // Rule 25
-                case "Parallel Wait Bottleneck":  // Rule 31
-                    // These are meta-findings about parallelism efficiency.
-                    // The benefit is the gap between actual and ideal elapsed time.
-                    if (elapsedMs > 0 && stmt.QueryTimeStats != null)
-                    {
-                        var cpu = stmt.QueryTimeStats.CpuTimeMs;
-                        var dop = stmt.DegreeOfParallelism;
-                        if (dop > 1 && cpu > 0)
-                        {
-                            // Ideal elapsed = CPU / DOP. Benefit = (actual - ideal) / actual
-                            var idealElapsed = (double)cpu / dop;
-                            var benefit = Math.Max(0, (elapsedMs - idealElapsed) / elapsedMs * 100);
-                            warning.MaxBenefitPercent = Math.Min(100, Math.Round(benefit, 1));
-                        }
-                    }
-                    break;
-
                 case "Serial Plan": // Rule 3
-                    // Can't know how fast a parallel plan would be, but estimate:
-                    // CPU-bound: benefit up to (1 - 1/maxDOP) * 100%
-                    if (elapsedMs > 0 && stmt.QueryTimeStats != null)
+                    // Benefit = (cpu * (DOP - 1) / DOP) / elapsed * 100, assuming DOP 4 when
+                    // the plan doesn't say otherwise. No benefit for a trivial statement
+                    // (StatementSubTreeCost < 1) — it wouldn't gain anything from parallelism.
+                    if (elapsedMs > 0 && stmt.QueryTimeStats != null && stmt.StatementSubTreeCost >= 1.0)
                     {
                         var cpu = stmt.QueryTimeStats.CpuTimeMs;
-                        // Assume server max DOP — use a conservative 4 if unknown
                         var potentialDop = 4;
-                        if (cpu >= elapsedMs)
+                        if (cpu > 0)
                         {
-                            // CPU-bound: parallelism could help significantly
-                            var benefit = (1.0 - 1.0 / potentialDop) * 100;
-                            warning.MaxBenefitPercent = Math.Round(benefit, 1);
-                        }
-                        else
-                        {
-                            // Not CPU-bound: parallelism helps less
-                            var cpuRatio = (double)cpu / elapsedMs;
-                            var benefit = cpuRatio * (1.0 - 1.0 / potentialDop) * 100;
-                            warning.MaxBenefitPercent = Math.Round(Math.Min(50, benefit), 1);
+                            var benefit = ((double)cpu * (potentialDop - 1) / potentialDop) / elapsedMs * 100;
+                            warning.MaxBenefitPercent = Math.Round(Math.Min(100, benefit), 1);
                         }
                     }
                     break;
@@ -114,12 +168,13 @@ public static class BenefitScorer
         }
     }
 
-    private static void ScoreNodeTree(PlanNode node, PlanStatement stmt)
+    private static void ScoreNodeTree(PlanNode node, PlanStatement stmt, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ScoreNodeWarnings(node, stmt);
 
         foreach (var child in node.Children)
-            ScoreNodeTree(child, stmt);
+            ScoreNodeTree(child, stmt, cancellationToken);
     }
 
     private static void ScoreNodeWarnings(PlanNode node, PlanStatement stmt)
@@ -164,7 +219,7 @@ public static class BenefitScorer
             // Parallel Skew (Rule 8 — will be integrated per-operator later),
             // Data Type Mismatch (Rule 13),
             // Lazy Spool Ineffective (Rule 14), Join OR Clause (Rule 15),
-            // Many-to-Many Merge Join (Rule 17), CTE Multiple References (Rule 21),
+            // Many-to-Many Merge Join (Rule 17),
             // Table Variable (Rule 22), Table-Valued Function (Rule 23),
             // Top Above Scan (Rule 24), Row Goal (Rule 26),
             // NOT IN with Nullable Column (Rule 28), Implicit Conversion (Rule 29),
@@ -454,13 +509,12 @@ public static class BenefitScorer
 
         var isParallel = stmt.DegreeOfParallelism > 1 && stmt.RootNode != null;
 
-        // Collect all operators with per-thread stats for parallel benefit calculation
-        List<OperatorWaitProfile>? operatorProfiles = null;
-        if (isParallel)
-        {
-            operatorProfiles = new List<OperatorWaitProfile>();
-            CollectOperatorWaitProfiles(stmt.RootNode!, operatorProfiles);
-        }
+        // Collect all operators with per-thread stats for parallel benefit calculation.
+        // Collect operator profiles even for serial plans — the external-wait formula
+        // uses sum-of-max-thread-cpu across operators and works for both.
+        var operatorProfiles = new List<OperatorWaitProfile>();
+        if (stmt.RootNode != null)
+            CollectOperatorWaitProfiles(stmt.RootNode, operatorProfiles);
 
         foreach (var wait in stmt.WaitStats)
         {
@@ -469,7 +523,15 @@ public static class BenefitScorer
             var category = ClassifyWaitType(wait.WaitType);
             double benefitPct;
 
-            if (category == "Parallelism" && isParallel)
+            if (IsExternalWait(wait.WaitType) && operatorProfiles.Count > 0)
+            {
+                // External / preemptive waits (MEMORY_ALLOCATION_*, PREEMPTIVE_*): the worker
+                // is CPU-busy in kernel, so operator elapsed ≈ operator cpu and the wait
+                // barely shows in the per-thread (elapsed - cpu) calculation. Joe's formula:
+                //   benefit = (wait_ms / total_cpu_ms) * Σ max_thread_cpu_per_operator / elapsed
+                benefitPct = CalculateExternalWaitBenefit(wait, operatorProfiles, stmt.QueryTimeStats!.CpuTimeMs, elapsedMs);
+            }
+            else if (category == "Parallelism" && isParallel)
             {
                 // CXPACKET/CXCONSUMER/CXSYNC: benefit is the parallelism efficiency gap,
                 // not the raw wait time. Threads waiting for other threads is a symptom
@@ -486,7 +548,7 @@ public static class BenefitScorer
                     benefitPct = (double)wait.WaitTimeMs / elapsedMs * 100;
                 }
             }
-            else if (!isParallel || operatorProfiles == null || operatorProfiles.Count == 0)
+            else if (!isParallel || operatorProfiles.Count == 0)
             {
                 // Serial plan or no operator data: simple ratio
                 benefitPct = (double)wait.WaitTimeMs / elapsedMs * 100;
@@ -547,6 +609,48 @@ public static class BenefitScorer
     }
 
     /// <summary>
+    /// Joe's formula for external/preemptive waits where the worker is CPU-busy in kernel
+    /// (MEMORY_ALLOCATION_*, PREEMPTIVE_*). The standard (elapsed-cpu) per-thread
+    /// wait accounting misses these because elapsed ≈ cpu for those threads. Use the
+    /// wait's share of total CPU, scaled by the plan's critical-path CPU.
+    ///   wait_cpu_share = wait_ms / total_cpu_ms
+    ///   sum_max_cpu = Σ max_thread_cpu across operators
+    ///   benefit_ms  = wait_cpu_share * sum_max_cpu
+    /// Then convert to % of statement elapsed.
+    /// </summary>
+    private static double CalculateExternalWaitBenefit(
+        WaitStatInfo wait, List<OperatorWaitProfile> profiles,
+        long stmtCpuMs, long stmtElapsedMs)
+    {
+        if (stmtCpuMs <= 0 || stmtElapsedMs <= 0)
+            return (double)wait.WaitTimeMs / Math.Max(1, stmtElapsedMs) * 100;
+
+        long sumMaxCpu = 0;
+        foreach (var p in profiles)
+            sumMaxCpu += p.MaxThreadCpuMs;
+
+        if (sumMaxCpu <= 0)
+            return (double)wait.WaitTimeMs / stmtElapsedMs * 100;
+
+        var waitCpuShare = (double)wait.WaitTimeMs / stmtCpuMs;
+        var benefitMs = waitCpuShare * sumMaxCpu;
+        return benefitMs / stmtElapsedMs * 100;
+    }
+
+    /// <summary>
+    /// External / preemptive waits where the worker is CPU-busy in kernel rather than
+    /// descheduled. Their wait time counts toward the query's CPU time, so the usual
+    /// (elapsed - cpu) per-thread wait math misses them entirely.
+    /// </summary>
+    public static bool IsExternalWait(string waitType)
+    {
+        if (string.IsNullOrEmpty(waitType)) return false;
+        var wt = waitType.ToUpperInvariant();
+        return wt.Contains("MEMORY_ALLOCATION", StringComparison.Ordinal)
+            || wt.StartsWith("PREEMPTIVE_", StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Determines if an operator is relevant for a given wait category.
     /// </summary>
     private static bool IsOperatorRelevantForCategory(OperatorWaitProfile profile, string category)
@@ -585,13 +689,18 @@ public static class BenefitScorer
                     maxThreadWait = threadWait;
             }
 
-            if (totalWait > 0 || maxThreadWait > 0)
+            // Max per-thread SELF CPU (non-cumulative) — critical-path CPU contribution
+            // from this operator. Used by the external-wait formula.
+            var maxThreadCpu = PlanAnalyzer.GetOperatorMaxThreadOwnCpuMs(node);
+
+            if (totalWait > 0 || maxThreadWait > 0 || maxThreadCpu > 0)
             {
                 profiles.Add(new OperatorWaitProfile
                 {
                     Node = node,
                     MaxThreadWaitMs = maxThreadWait,
                     TotalWaitMs = totalWait,
+                    MaxThreadCpuMs = maxThreadCpu,
                     HasPhysicalReads = node.ActualPhysicalReads > 0,
                     HasCpuWork = node.ActualCPUMs > 0,
                     IsExchange = node.PhysicalOp == "Parallelism",
@@ -642,6 +751,8 @@ public static class BenefitScorer
         public PlanNode Node { get; init; } = null!;
         public long MaxThreadWaitMs { get; init; }
         public long TotalWaitMs { get; init; }
+        /// <summary>Max CPU time among this operator's threads (critical-path CPU for external-wait formula).</summary>
+        public long MaxThreadCpuMs { get; init; }
         public bool HasPhysicalReads { get; init; }
         public bool HasCpuWork { get; init; }
         public bool IsExchange { get; init; }

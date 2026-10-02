@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Threading;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
@@ -259,7 +261,7 @@ public sealed class McpAnalysisTools
                 })
             }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("analyze_server", ex);
         }
@@ -273,7 +275,8 @@ public sealed class McpAnalysisTools
         [Description("Hours of data to analyze. Default 4.")] int hours_back = 4,
         [Description(FactSourceFilterDescription)] string? source = null,
         [Description("Minimum severity to include. Default 0 (all facts). Use 0.5 to see only significant facts.")] double min_severity = 0,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -293,7 +296,7 @@ public sealed class McpAnalysisTools
         try
         {
             var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
-                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor);
+                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken);
 
             /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
@@ -393,7 +396,7 @@ public sealed class McpAnalysisTools
                 facts = result
             }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_analysis_facts", ex);
         }
@@ -406,7 +409,8 @@ public sealed class McpAnalysisTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours back for the comparison (recent) period. Default 4.")] int hours_back = 4,
         [Description("Hours back for the baseline period start, measured from the end of the comparison window (now, or as_of). Default 28 (yesterday same time).")] int baseline_hours_back = 28,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -432,7 +436,8 @@ public sealed class McpAnalysisTools
             var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion) = await analysisService.ComparePeriodsAsync(
                 resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
-                comparisonStart, comparisonEnd);
+                comparisonStart, comparisonEnd,
+                cancellationToken);
 
             /* The COLLECTION_GAP context fact (#3538 A2) is an observation of the COLLECTOR, not of the
                server, and it is reported through the coverage blocks and caveat below. Left in the
@@ -556,7 +561,7 @@ public sealed class McpAnalysisTools
                 facts = comparison.Rows.Select(r => r.ToPayload()).ToList()
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("compare_analysis", ex);
         }
@@ -565,8 +570,10 @@ public sealed class McpAnalysisTools
     [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns current values, recommended values, and reasoning. Edition is reported for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). Darling also audits PostgreSQL targets. <<GUIDE>> Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based).")]
     public static async Task<string> AuditConfig(
         AnalysisService analysisService,
+        LocalDataService dataService,
         ServerManager serverManager,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -579,7 +586,7 @@ public sealed class McpAnalysisTools
                and database size are the newest sample within a day of now, #3896 — an hour missed is
                still inside that.) #4192: the narrow read, not the full collect + detect + score pass. */
             var facts = await analysisService.CollectConfigAuditFactsAsync(
-                resolved.ServerId, resolved.ServerName);
+                resolved.ServerId, resolved.ServerName, asOfUtc: null, cancellationToken);
 
             var factsByKey = facts.ToFactLookup();
 
@@ -587,22 +594,10 @@ public sealed class McpAnalysisTools
             var totalMemoryMb = factsByKey.TryGetValue("MEMORY_TOTAL_PHYSICAL_MB", out var memFact) ? memFact.Value : 0;
             var totalDbSizeMb = factsByKey.TryGetValue("DATABASE_TOTAL_SIZE_MB", out var dbFact) ? dbFact.Value : 0;
 
-            // Edition names: 3 = Enterprise, 2 = Standard, 4 = Express
-            var editionName = edition switch
-            {
-                1 => "Personal",
-                2 => "Standard",
-                3 => "Enterprise",
-                4 => "Express",
-                5 => "Azure SQL Database",
-                6 => "Azure SQL Managed Instance",
-                8 => "Azure SQL Managed Instance (HADR)",
-                9 => "Azure SQL Edge",
-                11 => "Azure Synapse serverless",
-                _ => "Unknown"
-            };
-            var coresPerSocket = factsByKey.TryGetValue("SERVER_HARDWARE", out var hwFact)
-                && hwFact.Metadata.TryGetValue("cores_per_socket", out var cps) ? (int)cps : 0;
+            var editionName = AuditEditionName(edition);
+            /* The recommended MAXDOP follows the cores per socket the SERVER_HARDWARE fact carries. On an Azure SQL Database the fact carries its vCores instead, because the stored
+               cores_per_socket is the host's (see FactRemediation.MaxdopBasisFrom). */
+            var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);
 
             var recommendations = new List<ConfigRecommendation>();
 
@@ -635,11 +630,11 @@ public sealed class McpAnalysisTools
                 }
             }
 
-            // MAXDOP audit — topology-based (min(cores-per-socket, 8)), NOT edition-based.
+            // MAXDOP audit — topology-based (min(cores-per-socket, 8); min(vCores, 8) on an Azure SQL Database), NOT edition-based.
             if (factsByKey.TryGetValue("CONFIG_MAXDOP", out var maxdopFact))
             {
                 var maxdop = (int)maxdopFact.Value;
-                var recommended = (int)FactRemediation.RecommendedMaxdop(coresPerSocket);
+                var recommended = (int)FactRemediation.RecommendedMaxdop(maxdopBasis.Cores);
 
                 if (maxdop == 0)
                 {
@@ -647,7 +642,7 @@ public sealed class McpAnalysisTools
                         $"MAXDOP is 0 (unlimited). This lets one query fan out across all schedulers, " +
                         $"leading to CXPACKET waits and thread exhaustion under load. Microsoft's guidance is " +
                         $"topology-based: keep MAXDOP at or under the logical processors in a single NUMA node, capped at 8. " +
-                        $"Start with {recommended} (this server's cores-per-socket, capped at 8) and adjust to the workload."));
+                        $"Start with {recommended} ({(maxdopBasis.FromVcores ? "this database's vCores" : "this server's cores-per-socket")}, capped at 8) and adjust to the workload."));
                 }
                 else if (maxdop == 1 && recommended > 1)
                 {
@@ -750,12 +745,15 @@ public sealed class McpAnalysisTools
 
             if (recommendations.Count == 0)
             {
-                return JsonSerializer.Serialize(new
-                {
-                    server = resolved.ServerName,
-                    status = "no_config_data",
-                    message = "No configuration data found. The config collector may not have run yet."
-                }, McpHelpers.JsonOptions);
+                /* Same engine question get_server_config asks on its miss: an engine that never collects
+                   server_config (Azure SQL Database) gets the permanent-gap answer, not "may not have run yet". */
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_config")
+                    ?? JsonSerializer.Serialize(new
+                    {
+                        server = resolved.ServerName,
+                        status = "no_config_data",
+                        message = "No configuration data found. The config collector may not have run yet."
+                    }, McpHelpers.JsonOptions);
             }
 
             return JsonSerializer.Serialize(new
@@ -780,11 +778,23 @@ public sealed class McpAnalysisTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("audit_config", ex);
         }
     }
+
+    /// <summary>
+    /// The <c>edition</c> word audit_config echoes: <see cref="CollectorEngineCapability.DescribeEngineEdition"/>'s
+    /// table, which every other surface uses, so this tool cannot name an EngineEdition differently from them
+    /// (its own switch called 6 Managed Instance and 8 "Managed Instance (HADR)" — 6 is Azure Synapse Analytics,
+    /// 8 is Managed Instance, and there is no HADR edition). <c>0</c> stays "Unknown": it is the absence of a
+    /// probed edition, not an edition, and the shared table would render it "Unknown (0)".
+    /// </summary>
+    internal static string AuditEditionName(int engineEdition) =>
+        engineEdition == CollectorEngineCapability.UnknownEngineEdition
+            ? "Unknown"
+            : CollectorEngineCapability.DescribeEngineEdition(engineEdition);
 
     /// <summary>See Darling's <c>DarlingMcpTools.DefaultFindingLimit</c> twin for the #4198 measurement this was sized from.</summary>
     private const int DefaultFindingLimit = 18;
@@ -983,7 +993,7 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded). story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
+    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded). server_name resolves by an exact match on the server, display or storage name, else a partial match on the server or display name, and unlike the read tools it never takes the first of several matches: a name that matches more than one server answers \"ambiguous\" with the candidates (pass a candidate's server value back to pick it), and one that matches none, or a blank one, answers \"not_found\" with the servers that exist (omit server_name to mute across all servers); either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
     public static async Task<string> MuteAnalysisFinding(
         AnalysisService analysisService,
         ServerManager serverManager,
@@ -998,13 +1008,20 @@ public sealed class McpAnalysisTools
                 return McpHelpers.Refusal("story_path_hash", "story_path_hash is required.");
             }
 
-            int? serverId = null;
+            /* #4734: the scope is resolved to EXACTLY ONE server with the shared rule (exact match, else partial, and
+               a tie or a miss refuses), the one the read tools match with too. This write persists a mute row
+               against whichever server the name resolved to, so a name two servers answer to used to mute the
+               pattern on whichever sorted first and say so only afterwards, echoing the caller's spelling. Unlike
+               a read, it answers a tie with its own `ambiguous` status and the candidates, since nothing was
+               written. The enabled list is read once and handed to the pure decision. */
+            var scope = MuteScope.All;
             if (server_name != null)
             {
-                var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
-                if (error != null) return error;
-                serverId = resolved.ServerId;
+                scope = ResolveMuteScope(serverManager.GetEnabledServers(), server_name, story_path_hash);
+                if (scope.Answer != null) return scope.Answer;
             }
+
+            var serverId = scope.ServerId;
 
             /* StoryPath is left EMPTY on purpose (#3653 A15/A16): this entry point holds only the hash, and the
                pre-#3653 code wrote that hash into the registry's story_path column — a row claiming to name a
@@ -1036,7 +1053,8 @@ public sealed class McpAnalysisTools
                 status = !registered ? "already_muted" : matchedNow > 0 ? "muted" : "muted_unmatched",
                 story_path_hash,
                 story_path = write.StoryPath,
-                server = server_name ?? "(all servers)",
+                server = scope.Label,
+                kind = scope.Kind,
                 reason,
                 registered,
                 already_muted = !registered,
@@ -1052,6 +1070,76 @@ public sealed class McpAnalysisTools
         {
             return McpHelpers.FormatError("mute_analysis_finding", ex);
         }
+    }
+
+    /// <summary>
+    /// Where a <c>mute_analysis_finding</c> call writes: either the fleet-wide scope (<see cref="All"/>), a single
+    /// enabled server (<see cref="ServerId"/>, the storage name to echo as <see cref="Label"/> and which kind of
+    /// registration it is as <see cref="Kind"/>: plain, read-only or per-database), or a ready-to-return
+    /// <see cref="Answer"/> that refuses the write because the name matched no server or more than one.
+    /// </summary>
+    internal sealed record MuteScope(int? ServerId, string Label, string? Answer, string? Kind = null)
+    {
+        /// <summary>The scope of a call that names no server: the mute row is written for every server.</summary>
+        internal static readonly MuteScope All = new(null, "(all servers)", null);
+    }
+
+    /// <summary>
+    /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> to EXACTLY ONE enabled server, with the rule the read
+    /// tools and Darling's twin apply (<see cref="ServerResolver.MatchCandidates"/>): the one registration whose
+    /// storage name matches exactly (case-sensitive) if there is one, else every exact match if there is one,
+    /// otherwise every partial match, servers counted by storage identity, and anything other than one server is
+    /// refused with nothing written. #4734: the tool used <see cref="ServerResolver.ResolveOrError"/> when that took
+    /// the registration the list holds first, so a partial name (or a display name that several registrations of one
+    /// machine share) muted the pattern on an arbitrary sibling and echoed the caller's spelling, not the server it had
+    /// picked. The read tools now refuse such a name too and list the candidates, and alone also take the storage
+    /// name in another letter case; this write answers with its own <c>ambiguous</c> status, since nothing was written.
+    ///
+    /// <para><b>Pure.</b> It takes the enabled-server list (the tool reads it once) and returns the decision, so the rule
+    /// unit-tests without a store. The tool writes only when <see cref="MuteScope.Answer"/> is null, and echoes
+    /// <see cref="MuteScope.Label"/> — the RESOLVED storage name — in every answer that follows.</para>
+    ///
+    /// <para><b>A name that matches nothing is <c>not_found</c></b>, with the read tools' own listing of the servers that
+    /// exist. A blank name matches nothing here too, even when exactly one server exists (the read resolver takes a
+    /// blank name as the only server): omit <c>server_name</c> to mute across all servers.</para>
+    /// </summary>
+    internal static MuteScope ResolveMuteScope(
+        IReadOnlyList<Models.ServerConnection> servers,
+        string? serverName,
+        string storyPathHash)
+    {
+        var match = ServerResolver.MatchCandidates(servers, serverName);
+
+        if (match.Candidates.Count == 1)
+        {
+            var resolved = match.Candidates[0];
+            return new MuteScope(resolved.ServerId, resolved.ServerName, null, resolved.Kind);
+        }
+
+        if (match.Candidates.Count == 0)
+        {
+            return new MuteScope(null, string.Empty, JsonSerializer.Serialize(new
+            {
+                status = "not_found",
+                message = $"Could not resolve server. Available servers:\n{ServerResolver.ListAvailableServers(servers)}",
+                story_path_hash = storyPathHash,
+                registered = false,
+                already_muted = false,
+            }, McpHelpers.JsonOptions));
+        }
+
+        return new MuteScope(null, string.Empty, JsonSerializer.Serialize(new
+        {
+            status = "ambiguous",
+            message = $"'{serverName}' matches {match.Candidates.Count} registered servers " +
+                      $"({(match.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); " +
+                      "nothing was muted. Re-issue mute_analysis_finding with ONE candidate's full server name.",
+            matched_by = match.MatchedBy,
+            story_path_hash = storyPathHash,
+            registered = false,
+            already_muted = false,
+            candidates = match.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+        }, McpHelpers.JsonOptions));
     }
 }
 
@@ -1204,7 +1292,7 @@ internal static class ToolRecommendations
         ["PARAMETER_SENSITIVITY"] =
         [
             new("get_top_queries_by_cpu", "Find the sensitive query in the plan cache and see its current cached parameters"),
-            new("analyze_query_plan", "Examine the plan for the operators driving the runtime variance (seek vs scan, grant size, join type)"),
+            new("analyze_plan_xml", "Pass the query's plan XML to examine the operators driving the runtime variance (seek vs scan, grant size, join type)"),
             new("get_query_trend", "Confirm the bimodal duration pattern across executions over time"),
             new("get_memory_grants", "Check whether the bad-parameter executions are also blowing up memory grants")
         ],
@@ -1294,7 +1382,7 @@ internal static class ToolRecommendations
         [
             new("get_query_duration_trend", "Confirm the duration shift across the analysis window"),
             new("get_top_queries_by_cpu", "Find the queries whose runtime moved the average"),
-            new("analyze_query_plan", "Examine the plan for the queries that slowed down")
+            new("analyze_plan_xml", "Pass the plan XML of a query that slowed down to examine it")
         ],
         ["ANOMALY_MEMORY_PRESSURE"] =
         [
@@ -1312,7 +1400,7 @@ internal static class ToolRecommendations
         ["BAD_ACTOR"] =
         [
             new("get_top_queries_by_cpu", "See full query stats for this query"),
-            new("analyze_query_plan", "Analyze the execution plan for optimization opportunities"),
+            new("analyze_plan_xml", "Pass the query's plan XML to look for optimization opportunities"),
             new("get_query_trend", "Track this query's performance over time")
         ],
         ["DISK_SPACE"] =

@@ -24,6 +24,7 @@ using static PerformanceMonitor.Ui.FileSaveHelper;
 using static PerformanceMonitor.Ui.DataGridHelpers;
 using PerformanceMonitor.PlanAnalysis;
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Controls;
 
 public partial class ServerTab : UserControl
@@ -252,9 +253,13 @@ public partial class ServerTab : UserControl
     private async Task OpenPlanTab(string planXml, string label, string? queryText = null)
     {
         HidePlanLoading();
-        var viewer = new PlanViewerControl();
+        var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = App.AccuracyRatioDivergenceLimit };
+        viewer.AnalyzerConfig = App.AnalyzerConfig;
         try
         {
+            /* #4530: the server's edition/MAXDOP for rule 38, best-effort (null on a missing row or a
+               read failure, same as GetServerMetadataForPlanAnalysisAsync's own contract). */
+            viewer.ServerMetadata = await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId);
             /* LoadPlan parses+analyzes off the UI thread; it throws XmlException for malformed
                plan XML, replacing the redundant up-front XDocument.Parse validation. */
             await viewer.LoadPlan(planXml, label, queryText);
@@ -281,6 +286,8 @@ public partial class ServerTab : UserControl
         }
 
         var header = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+        /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only, so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
+        header.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
         header.Children.Add(new TextBlock
         {
             Text = label.Length > 30 ? label[..30] + "…" : label,

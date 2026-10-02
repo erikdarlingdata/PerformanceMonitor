@@ -92,6 +92,9 @@
     <!-- Legible warning amber for content text/borders (block-chain longest-wait, flag banner).
          Darker on light themes so it clears >=4.5:1 as TEXT on content backgrounds; any control may adopt it. -->
     <SolidColorBrush x:Key="WarningTextBrush" Color="#92400E"/>
+    <!-- #4629/#4635: critical-tier text (plan viewer, status bar). A literal hex like WarningTextBrush
+         above, so it stays out of the user-overridable palette. -->
+    <SolidColorBrush x:Key="CriticalTextBrush" Color="#A83A0D"/>
     <!-- Apex (lead-blocker) node + legend border. Darker blue on light themes so it clears >=3:1 as a
          graphical border on the light node card (bright #4FA3FF is only ~2.6:1 on white). The LEAD BLOCKER
          badge fill keeps the bright ApexBrush constant so the apex still pops. -->
@@ -615,6 +618,49 @@
                             <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentHoverBrush}"/>
                             <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}"/>
                         </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============================================ -->
+    <!-- ListBox Style                                -->
+    <!-- ============================================ -->
+    <!-- #4683: the stock (Aero2) ListBox template's IsEnabled=False trigger sets its inner border "Bd" to a
+         white Background (#FFFFFF) and a light-gray BorderBrush (#D9D9D9) BY TargetName, which beats anything
+         a style or the list itself sets. A disabled list therefore rendered as a solid white box in every
+         theme (the sidebar server list while the store is unavailable, #4648). Only the Template can fix that,
+         so this style carries a copy of the stock template with a different disabled trigger: the list keeps
+         its own Background and BorderBrush and only dims. It sets nothing else, so the stock theme style still
+         supplies every other ListBox default, and an enabled list renders exactly as before. The dimming is
+         this theme's own disabled Opacity (the implicit Button, AccentButton, SuccessButton and PasswordBox
+         styles above). -->
+    <Style TargetType="ListBox">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ListBox">
+                    <Border x:Name="Bd"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            Padding="1"
+                            SnapsToDevicePixels="True">
+                        <ScrollViewer Padding="{TemplateBinding Padding}" Focusable="False">
+                            <ItemsPresenter SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                        </ScrollViewer>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.5"/>
+                        </Trigger>
+                        <MultiTrigger>
+                            <MultiTrigger.Conditions>
+                                <Condition Property="IsGrouping" Value="True"/>
+                                <Condition Property="VirtualizingPanel.IsVirtualizingWhenGrouping" Value="False"/>
+                            </MultiTrigger.Conditions>
+                            <Setter Property="ScrollViewer.CanContentScroll" Value="False"/>
+                        </MultiTrigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
@@ -1410,10 +1456,10 @@
     <SolidColorBrush x:Key="PlanPanelMutedBrush" Color="{StaticResource ForegroundMutedColor}"/>
     <SolidColorBrush x:Key="PlanSectionHeaderBrush" Color="{StaticResource AccentPressedColor}"/>
     <SolidColorBrush x:Key="PlanPropSeparatorBrush" Color="{StaticResource BorderColor}"/>
-    <SolidColorBrush x:Key="PlanMissingIndexBgBrush" Color="#FFF8E1"/>
-    <SolidColorBrush x:Key="PlanMissingIndexBorderBrush" Color="#FFD54F"/>
-    <SolidColorBrush x:Key="PlanMissingIndexHeaderBrush" Color="#E65100"/>
-    <SolidColorBrush x:Key="PlanWaitStatsBgBrush" Color="#E3F2FD"/>
-    <SolidColorBrush x:Key="PlanWaitStatsHeaderBrush" Color="#1565C0"/>
-
+    <!-- Plan Insights card accents: one neutral surface (BackgroundLightBrush) for every card,
+         identity carried by a 3px accent edge plus the header in that colour. -->
+    <SolidColorBrush x:Key="InsightIndexBrush" Color="#E65100"/>
+    <SolidColorBrush x:Key="InsightWaitsBrush" Color="#1565C0"/>
+    <SolidColorBrush x:Key="InsightParamsBrush" Color="#2E7D32"/>
+    <SolidColorBrush x:Key="InsightServerBrush" Color="#5E35B1"/>
 </ResourceDictionary>

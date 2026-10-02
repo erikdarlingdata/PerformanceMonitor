@@ -16,6 +16,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -81,6 +82,31 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
     }
 
     /* ───────────────────────── the contract, per tool ───────────────────────── */
+
+    /// <summary>
+    /// A deadlock row carries the database it was captured for, so a row read from an Azure SQL Database
+    /// <c>master</c> target says whose deadlock it is. A row with no database comes back as JSON null.
+    /// </summary>
+    [Fact]
+    public async Task GetDeadlocks_NamesTheDatabase_AndNullStaysNull()
+    {
+        var now = WholeSecondsNow();
+        await ExecAsync(@"
+INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            _nextId--, Naive(now), _serverId, ServerName, "GP", Naive(now), "process1", "DELETE FROM Posts");
+        await ExecAsync(@"
+INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            _nextId--, Naive(now.AddMinutes(-10)), _serverId, ServerName, null, Naive(now.AddMinutes(-10)), "process2", "DELETE FROM Posts");
+
+        var rows = Parse(await McpBlockingTools.GetDeadlocks(_dataService, _serverManager, ServerName, 24, 10))
+            .GetProperty("deadlocks").EnumerateArray().ToList();
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal("GP", rows[0].GetProperty("database_name").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, rows[1].GetProperty("database_name").ValueKind);
+    }
 
     [Fact]
     public async Task GetDeadlocks_TruncationIsObservedAtTheBoundary_AndTheOldestStampIsTheReach()
@@ -217,6 +243,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
 
         var whole = Parse(await McpBlockingTools.GetBlockedProcessReports(_dataService, _serverManager, ServerName, 24, 4));
         AssertPage(whole, "reports", "reports_returned", returned: 4, truncated: false);
+    }
+
+    /// <summary>
+    /// Every row names where it came from, on the labels Darling's get_blocking publishes. A report and a DMV
+    /// snapshot of a block no report covers land on the same page, and without the field the two read alike.
+    /// </summary>
+    [Fact]
+    public async Task GetBlockedProcessReports_EveryRowNamesItsSource()
+    {
+        var now = WholeSecondsNow();
+        await SeedBlockedProcessReportAsync(now, blockedSpid: 50, withXml: true);
+        await SeedDmvBlockingSnapshotAsync(now.AddMinutes(-5), blockedSpid: 70);
+
+        var page = Parse(await McpBlockingTools.GetBlockedProcessReports(_dataService, _serverManager, ServerName));
+        var sources = page.GetProperty("reports").EnumerateArray()
+            .ToDictionary(r => r.GetProperty("blocked_spid").GetInt32(), r => r.GetProperty("source").GetString());
+
+        Assert.Equal(2, sources.Count);
+        Assert.Equal(BlockedProcessAlertRow.XeReportSource, sources[50]);
+        Assert.Equal(BlockedProcessAlertRow.DmvSnapshotSource, sources[70]);
     }
 
     [Fact]
@@ -380,6 +426,31 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var quiet = Parse(await McpAlertTools.GetAlertHistory(_dataService, 24, 50));
         Assert.Equal("empty", quiet.GetProperty("status").GetString());
         Assert.DoesNotContain("dismissed", quiet.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4766: the desktop grid's Time column converts an alert in the selected display mode, on its server's clock
+    /// (<c>AlertHistoryRow.TimeLocal</c>, <c>AlertHistoryRow.Clock</c>). The tool serializes a projection of the row
+    /// with named fields, not the row, so none of that display frame reaches an agent: the list of fields is exactly
+    /// this one, and <c>alert_time</c> stays the stored UTC instant in round-trip form.
+    /// </summary>
+    [Fact]
+    public async Task GetAlertHistory_ListsOnlyItsNamedFields_AndAlertTimeStaysTheStoredUtcInstant()
+    {
+        var now = WholeSecondsNow();
+        await SeedAlertAsync(now, dismissed: false);
+
+        var alert = Parse(await McpAlertTools.GetAlertHistory(_dataService, 24, 5)).GetProperty("alerts").EnumerateArray().Single();
+
+        Assert.Equal(
+            new[]
+            {
+                "alert_time", "server_id", "server_name", "metric_name", "current_value", "threshold_value", "alert_sent",
+                "notification_type", "send_error", "muted", "dismissed", "severity", "severity_source", "route", "routing",
+                "routing_reason", "detail_text",
+            },
+            alert.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal(Stamp(now), alert.GetProperty("alert_time").GetString());
     }
 
     /// <summary>

@@ -33,6 +33,21 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpAgTools
 {
+    /// <summary>
+    /// #4471/#4474: the fleet-wide page cap ARGUMENT default on groups (one card per reporting server's view of
+    /// one AG), the same shape as <c>get_analysis_findings</c>' <c>limit</c>. It no longer decides how many
+    /// groups come back on its own: <see cref="DarlingAgReader.Build"/> fills the page most-severe-first while
+    /// the SERIALIZED response stays under the shared <see cref="McpResponseBudget.DefaultBytes"/> (32 KB),
+    /// stopping before the group that would cross it (always keeping at least one group, even an oversized one).
+    /// A fixed count could not do that: #4471 sized 11 from a 2.7 KB/group fixture, and a real 42-group
+    /// production fleet (2 replicas plus 6-14 databases per group, ~6 KB/group) measured 63,333 characters at
+    /// that cap — about 2x over budget, because real groups ran more than double the fixture's assumed size.
+    /// This constant now only bounds <c>limit</c>'s own default and range (1-1000, see <see cref="McpHelpers.MaxTop"/>);
+    /// the byte budget still applies underneath it. See <c>DarlingMcpAgToolsTests</c> / <c>DarlingAgReaderTests</c>
+    /// for the measured before/after.
+    /// </summary>
+    public const int DefaultGroupLimit = 11;
+
     [McpServerTool(Name = "get_ag_health"), Description(
         "AG health fleet-wide from each server's latest collection: replica role/state and per-database " +
         "secondary state (queue KB, rate KB/s, lag sec, drain min, suspended+why). One row per REPLICA's view: " +
@@ -55,12 +70,22 @@ public sealed class DarlingMcpAgTools
         "movement is suspended). Each group carries its collection_time: the collectors write NO row for a server " +
         "with no AGs, so a server whose AGs were dropped keeps returning its last non-empty snapshot until then — " +
         "an old collection_time on a group is that case, not a live reading. Returns an empty result on a fleet " +
-        "with no Availability Groups.")]
+        "with no Availability Groups. Groups come back MOST SEVERE FIRST then by the largest " +
+        "secondary_lag_seconds/queue depth in the group, so a cut never hides a problem — an uncapped fleet-wide " +
+        "call measured 265,794 characters on a 43-server production fleet with several many-database AGs, well " +
+        "over an MCP client's typical per-result limit. Default: as many groups as fit ~32 KB, most-severe-first, " +
+        "tracking each group's actual width instead of a fixed count; limit is an upper bound on top of that. " +
+        "groups_truncated (with groups_truncated_note) flags when the scope held more than came back — " +
+        "groups_total/groups_returned say how many, and the fix is to scope by server_name or raise limit.")]
     public static async Task<string> GetAgHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name to limit the topology to one monitored server's view. Optional — omit for the whole fleet.")] string? server_name = null,
+        [Description("Upper bound on groups, most severe first. Default/range 11/1-1000; also capped to ~32 KB, whichever is smaller. groups_truncated flags either cut.")] int limit = DefaultGroupLimit,
         CancellationToken cancellationToken = default)
     {
+        var limitError = McpHelpers.ValidateTop(limit);
+        if (limitError != null) return limitError;
+
         /* Fleet-wide by default: only resolve when a name was actually supplied. The shared resolver auto-selects
            a sole registered server for an omitted name, which is right for a per-server tool and wrong here — it
            would silently narrow the fleet view on a one-server store. */
@@ -76,7 +101,7 @@ public sealed class DarlingMcpAgTools
 
         try
         {
-            var result = await DarlingAgReader.GetAgHealthAsync(postgres, serverIdFilter, cancellationToken: cancellationToken);
+            var result = await DarlingAgReader.GetAgHealthAsync(postgres, serverIdFilter, cancellationToken: cancellationToken, limit: limit);
 
             if (result.AvailabilityGroupCount == 0)
             {

@@ -9,6 +9,7 @@
 using System.Collections.Generic;
 using System.Windows;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Windows;
@@ -80,14 +81,7 @@ public partial class AlertDetailWindow : Window
     {
         if (sender is FrameworkElement { DataContext: DetailItemView view } && !string.IsNullOrEmpty(view.Body))
         {
-            try
-            {
-                Clipboard.SetText(view.Body);
-            }
-            catch
-            {
-                /* Clipboard can be locked by another process — swallow contention. */
-            }
+            ClipboardText.TrySetText(view.Body);
         }
     }
 

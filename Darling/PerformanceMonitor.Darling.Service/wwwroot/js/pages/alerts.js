@@ -163,33 +163,47 @@ function detailBody(a) {
   return body;
 }
 
+/* One parsed pair -> a grid row of the two-column .detail-fields grid. A section heading (no label) is its own
+ * full-width row: a lone value in the label/value grid would take the label column's cell and shift every later
+ * label and value over by one, which put the labels in the wide value column's far edge, out of sight, leaving
+ * bare values (Alert History's blocking and incident details, where every other row is label: value). */
 function fieldRow([k, v]) {
+  if (!k) return el("div", { class: "detail-heading", text: v });
   return el("div", { class: "detail-field" }, [
-    k ? el("span", { class: "fk", text: k }) : null,
+    el("span", { class: "fk", text: k }),
     el("span", { class: "fv", text: v }),
   ]);
 }
 
 /* Parse an indented "Key: value" detail block into [key, value] pairs; returns null (=> render as raw) unless
- * at least two lines match, so a plain one-sentence detail stays a plain block. A non-matching continuation
- * line folds into the previous field's value (wrapped story text). */
+ * at least two lines match, so a plain one-sentence detail stays a plain block. The flattened alert context
+ * writes each item as an unindented heading line ("Blocking chain (x2)", "Incident 1 of 2") over its indented
+ * "Label: value" lines, with a blank line between items: an unindented non-matching line that opens a block
+ * (the first line, or the first after a blank one) is a section heading, kept as its own [null, heading] entry
+ * instead of being folded onto the previous value ("24.1s-34.9s Incident 1 of 2"). Any other non-matching line
+ * is a continuation and folds into the previous field's value (wrapped story text). */
 function parseDetailFields(text) {
-  const lines = String(text)
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
   const fields = [];
   let matched = 0;
-  for (const line of lines) {
+  let blockStart = true;
+  for (const rawLine of String(text).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      blockStart = true;
+      continue;
+    }
     const m = /^([A-Za-z][A-Za-z ]{0,28}):\s*(.*)$/.exec(line);
     if (m) {
       fields.push([m[1], m[2]]);
       matched++;
+    } else if (blockStart && !/^\s/.test(rawLine)) {
+      fields.push([null, line]);
     } else if (fields.length) {
       fields[fields.length - 1][1] += " " + line;
     } else {
-      fields.push(["", line]);
+      fields.push([null, line]);
     }
+    blockStart = false;
   }
   return matched >= 2 ? fields : null;
 }

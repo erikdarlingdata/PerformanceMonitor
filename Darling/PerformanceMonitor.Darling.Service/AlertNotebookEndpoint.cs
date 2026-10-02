@@ -52,6 +52,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Degrade, never error (#2710).</b> A stale or empty firing — no matching history row, no sections
 /// with data — still answers 200 with honest empty cells and a note, exactly like the triage page it sits
 /// beside.</para>
+///
+/// <para><b><c>scope_server</c> is the REGISTRY name, never a display name.</b> A chart (panel) cell names no
+/// server, so the page scopes it by this field. The matched alert row's <c>server_name</c> is the display name
+/// the snapshot stored, and the compose runner filters on the registry's <c>server_name</c>, so a chart scoped
+/// by the display name returned nothing on every server whose two names differ. <see cref="ScopeServerOf"/>
+/// resolves the row's <c>server_id</c> (else the link's <c>server</c>) to the registry key; when neither
+/// resolves the field is left out and the page says the chart has no server to scope to.</para>
 /// </summary>
 internal static partial class AlertNotebookEndpoint
 {
@@ -59,7 +66,7 @@ internal static partial class AlertNotebookEndpoint
     /// the mechanical conversion below changes; a new metric added to <see cref="DarlingTriageEndpoint.SectionsByMetric"/>
     /// does not bump it, because the conversion rule — not the per-metric read list — is what "mechanical/…"
     /// versions.</summary>
-    internal const int MechanicalTemplateVersion = 1;
+    internal const int MechanicalTemplateVersion = 2;
 
     /// <summary>Test-only seam (#4425): counts every call into <see cref="PrefetchAsync"/>, so a unit test can
     /// pin "a no-context family makes zero pre-fetch calls" against the SAME <see cref="ShouldPrefetch"/> gate
@@ -158,46 +165,29 @@ internal static partial class AlertNotebookEndpoint
                 notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
             }
 
-            /* F1 (#4366 review): the match window above ends at anchor+15m, so a resolution or re-fire that
-               lands later than that is invisible to the status arms below unless they see a second, wider
-               read. This one runs [anchor, min(anchor + AlertMatchLookback, now)] -- forward-looking, where
-               the match read above is centered on `anchor` and mostly backward-looking -- bounded by the SAME
-               row cap and cancellable the SAME way. */
-            List<DarlingAlertReader.AlertHistoryReadRow> statusRows = new();
+            /* The registry name the page scopes the charts by. matchedRow.ServerName is the snapshot's display
+               name, which the compose runner's server_name filter does not match; resolve the row's server_id
+               (else the link's server) to servers.server_name here and send that. */
+            var scopeServer = await ResolveScopeServerAsync(
+                postgres, matchedRow, fleetLevelStore ? null : serverQuery, notes, logger, context.RequestAborted);
+
+            /* #4755: status arms 1 and 2 read the FIRST resolution row and the FIRST later firing straight from
+               the store -- two targeted reads with no window and no shared row cap (see ReadStatusRowsAsync) --
+               instead of scanning the 24-hour, 200-row, newest-first, dismissed-excluded window the match read
+               above uses. That window missed a resolution that landed later than 24 hours, one that sat behind
+               200 newer rows (a fleet-level alert has no server id, so one cap covered every server), and one
+               the viewer's "Dismiss all" had hidden. The match read above stays for the alert match. */
+            List<DarlingAlertReader.AlertHistoryReadRow> statusHistoryRows = new();
             var statusHistoryStopwatch = Stopwatch.StartNew();
             try
             {
-                var statusUntil = anchor + DarlingTriageEndpoint.AlertMatchLookback;
-                if (statusUntil > now)
-                {
-                    statusUntil = now;
-                }
-
-                statusRows = anchor < statusUntil
-                    ? await DarlingAlertReader.GetAlertHistoryAsync(
-                        postgres, anchor, statusUntil, serverId, 200, context.RequestAborted)
-                    : new();
+                statusHistoryRows = await ReadStatusRowsAsync(
+                    postgres, serverId, fleetLevelStore, metric, anchor, now, matchedRow, context.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 DarlingWebFailureLog.Report(logger, "/api/alert-notebook:status-history", statusHistoryStopwatch.ElapsedMilliseconds, ex);
                 notes.Add((JsonNode)"Status lookup failed. The service log names what failed.");
-            }
-
-            List<DarlingAlertReader.AlertHistoryReadRow> statusHistoryRows;
-            if (historyRows.Count == 0)
-            {
-                statusHistoryRows = statusRows;
-            }
-            else if (statusRows.Count == 0)
-            {
-                statusHistoryRows = historyRows;
-            }
-            else
-            {
-                statusHistoryRows = new List<DarlingAlertReader.AlertHistoryReadRow>(historyRows.Count + statusRows.Count);
-                statusHistoryRows.AddRange(historyRows);
-                statusHistoryRows.AddRange(statusRows);
             }
 
             var status = await ResolveStatusAsync(
@@ -229,8 +219,8 @@ internal static partial class AlertNotebookEndpoint
             else
             {
                 (cells, templateId, templateVersion) = await BuildCellsAsync(
-                    metric, serverName, asOf, windowEnd, serverId, anchor, postgres, analysis, context.RequestAborted,
-                    logger, notes, matchedIncident, matchedRow, status, lookbackHours);
+                    metric, serverName, asOf, windowEnd, serverId, anchor, postgres, analysis,
+                    logger, notes, matchedIncident, matchedRow, status, lookbackHours, context.RequestAborted);
             }
 
             var body = new JsonObject
@@ -250,8 +240,77 @@ internal static partial class AlertNotebookEndpoint
                 },
             };
 
+            if (scopeServer is not null)
+            {
+                body["scope_server"] = scopeServer;
+            }
+
             return Results.Text(body.ToJsonString(), "application/json");
         });
+    }
+
+    /// <summary>The registry name (<c>servers.server_name</c>) the page scopes this notebook's chart cells by, or
+    /// null when nothing resolves. The matched alert row's <c>server_id</c> names its server exactly, so that
+    /// wins: the row's <c>server_name</c> is the display name the snapshot stored, not the registry key the
+    /// compose runner filters on. With no matched row the link's own <c>server</c> is resolved the way every
+    /// other server-scoped web read resolves one (<see cref="DarlingServerResolver"/>: the registry name or the
+    /// display name, then a partial match). A name several servers answer to resolves to nothing here: the resolver
+    /// refuses it, and no scope beats the wrong scope, so the page leaves <c>scope_server</c> out instead of
+    /// scoping the charts to whichever of them sorts first (what it did before the resolver refused such a name).
+    /// A blank link server resolves to nothing here, never to the only registered server.</summary>
+    internal static string? ScopeServerOf(
+        IReadOnlyList<DarlingServerResolver.RegisteredServer> registry,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow,
+        string? linkServer)
+    {
+        if (matchedRow is not null)
+        {
+            return registry.FirstOrDefault(s => s.ServerId == matchedRow.ServerId)?.ServerName;
+        }
+
+        if (string.IsNullOrWhiteSpace(linkServer))
+        {
+            return null;
+        }
+
+        var (resolved, error) = DarlingServerResolver.ResolveOrError(registry, linkServer);
+        return error is null ? resolved.ServerName : null;
+    }
+
+    /// <summary>Reads the enabled registry once and hands it to <see cref="ScopeServerOf"/>. No matched row and
+    /// no link server means nothing to resolve, so no registry read. A failed registry read degrades to "no
+    /// scope server" with the same note the server lookup above gives, once, so the charts say they cannot be
+    /// scoped rather than drawing an unscoped fleet.</summary>
+    internal static async Task<string?> ResolveScopeServerAsync(
+        NpgsqlDataSource postgres,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow,
+        string? linkServer,
+        JsonArray notes,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (matchedRow is null && string.IsNullOrWhiteSpace(linkServer))
+        {
+            return null;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+        if (fault is not null)
+        {
+            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:scope-server", stopwatch.ElapsedMilliseconds, fault);
+            var note = DarlingWebFailureLog.IsStatementTimeoutSentence(fault)
+                ? DarlingWebFailureLog.TimeoutMessage
+                : DarlingWebFailureLog.GenericMessage;
+            if (!notes.Any(n => n is JsonValue v && v.TryGetValue<string>(out var text) && text == note))
+            {
+                notes.Add((JsonNode)note);
+            }
+
+            return null;
+        }
+
+        return ScopeServerOf(servers, matchedRow, linkServer);
     }
 
     /// <summary>The decide-and-build step <see cref="Map"/>'s handler delegates to (extracted for #4425 so a
@@ -263,9 +322,9 @@ internal static partial class AlertNotebookEndpoint
     /// before this extraction.</summary>
     internal static async Task<(JsonArray Cells, string TemplateId, int TemplateVersion)> BuildCellsAsync(
         string? metric, string? serverName, string? asOf, DateTime windowEnd, int? serverId, DateTime anchor,
-        NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct,
+        NpgsqlDataSource postgres, DarlingAnalysisService analysis,
         ILogger? logger, JsonArray? notes, AlertIncident? matchedIncident,
-        DarlingAlertReader.AlertHistoryReadRow? matchedRow, string status, string lookbackHours)
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow, string status, string lookbackHours, CancellationToken ct)
     {
         var trimmedMetric = string.IsNullOrWhiteSpace(metric) ? null : metric.Trim();
         var resolvedAuthored = ResolveAuthored(trimmedMetric);
@@ -275,7 +334,7 @@ internal static partial class AlertNotebookEndpoint
             var (authored, kind) = resolvedAuthored.Value;
             var windowStart = windowEnd - AuthoredLookback(trimmedMetric!);
             var authoredContext = ShouldPrefetch(authored, kind)
-                ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, ct, logger, notes)
+                ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, logger, notes, ct)
                 : AuthoredContext.Empty;
             var authoredCells = authored.Invoke(
                 metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status, authoredContext);
@@ -379,7 +438,7 @@ internal static partial class AlertNotebookEndpoint
             ["type"] = "read",
             ["read"] = section.Read,
             ["params"] = parameters,
-            ["viz"] = "table",
+            ["viz"] = ReadVizFor(section.Read),
             ["title"] = section.Title,
         };
     }
@@ -610,7 +669,7 @@ internal static partial class AlertNotebookEndpoint
         AuthoredContextKind kind, string metric, int? serverId, DateTime anchor,
         NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct)
     {
-        return await PrefetchAsync(kind, metric, serverId, anchor, postgres, analysis, ct, logger: null, notes: null);
+        return await PrefetchAsync(kind, metric, serverId, anchor, postgres, analysis, logger: null, notes: null, ct);
     }
 
     /// <summary>The full pre-fetch, with the optional logger/notes the endpoint's call site passes so a store
@@ -618,8 +677,8 @@ internal static partial class AlertNotebookEndpoint
     /// AND surfaces as a note on the response instead of vanishing silently.</summary>
     internal static async Task<AuthoredContext> PrefetchAsync(
         AuthoredContextKind kind, string metric, int? serverId, DateTime anchor,
-        NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct,
-        ILogger? logger, JsonArray? notes)
+        NpgsqlDataSource postgres, DarlingAnalysisService analysis,
+        ILogger? logger, JsonArray? notes, CancellationToken ct)
     {
         Interlocked.Increment(ref s_prefetchCallsForTest);
 
@@ -629,10 +688,10 @@ internal static partial class AlertNotebookEndpoint
                 return AuthoredContext.Empty;
 
             case AuthoredContextKind.CustomRule:
-                return await PrefetchCustomRuleAsync(metric, postgres, ct, logger, notes);
+                return await PrefetchCustomRuleAsync(metric, postgres, logger, notes, ct);
 
             case AuthoredContextKind.AnalysisFinding:
-                return await PrefetchAnalysisFindingAsync(metric, serverId, anchor, analysis, ct, logger, notes);
+                return await PrefetchAnalysisFindingAsync(metric, serverId, anchor, analysis, logger, notes, ct);
 
             default:
                 return AuthoredContext.Empty;
@@ -643,7 +702,7 @@ internal static partial class AlertNotebookEndpoint
     /// <see cref="CustomAlertEvaluator.MetricNameFor"/>) and reads the rule. A bad parse or a store
     /// <c>NotFound</c>/null-<c>Ok</c> row is an honest missing context, not an error.</summary>
     private static async Task<AuthoredContext> PrefetchCustomRuleAsync(
-        string metric, NpgsqlDataSource postgres, CancellationToken ct, ILogger? logger, JsonArray? notes)
+        string metric, NpgsqlDataSource postgres, ILogger? logger, JsonArray? notes, CancellationToken ct)
     {
         var idText = metric.Length > "Custom:".Length ? metric["Custom:".Length..] : string.Empty;
         if (!long.TryParse(idText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ruleId))
@@ -679,8 +738,8 @@ internal static partial class AlertNotebookEndpoint
     /// so two findings sharing a shorter prefix but differing at the 8th are never confused. None found (aged
     /// past retention, muted, or the parse itself failed) is an honest missing context.</summary>
     private static async Task<AuthoredContext> PrefetchAnalysisFindingAsync(
-        string metric, int? serverId, DateTime anchor, DarlingAnalysisService analysis, CancellationToken ct,
-        ILogger? logger, JsonArray? notes)
+        string metric, int? serverId, DateTime anchor, DarlingAnalysisService analysis,
+        ILogger? logger, JsonArray? notes, CancellationToken ct)
     {
         var openBracket = metric.LastIndexOf('[');
         var closeBracket = metric.LastIndexOf(']');
@@ -765,7 +824,7 @@ internal static partial class AlertNotebookEndpoint
     /// and every fixed param the call declares, PLUS an explicit <c>hours</c> when the call did not, PLUS an
     /// explicit <c>limit</c> when the call did not AND the read is not one of
     /// <see cref="s_authoredLimitlessTrendReads"/> (a bucketed trend read has no <c>limit</c> param to
-    /// carry). <c>viz</c> is always "table" — these are drill-down reads, not charts.</summary>
+    /// carry). <c>viz</c> is "table" for a drill-down read and "line" for a trend read (<see cref="s_lineReads"/>).</summary>
     private static JsonObject AuthoredReadCell(
         string read, string title, string? serverName, string? asOf, params (string Key, string Value)[] fixedParams)
     {
@@ -804,10 +863,25 @@ internal static partial class AlertNotebookEndpoint
             ["type"] = "read",
             ["read"] = read,
             ["params"] = parameters,
-            ["viz"] = "table",
+            ["viz"] = ReadVizFor(read),
             ["title"] = title,
         };
     }
+
+    /// <summary>The reads whose cell is a chart: a bucketed trend read is a series over time, so its cell draws as a
+    /// line (the page fills the series from its field catalog, <c>read-fields.js</c>). Every other read is a table.</summary>
+    internal static readonly IReadOnlySet<string> s_lineReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_deadlock_trend",
+        "get_wait_trend",
+        "get_tempdb_trend",
+        "get_cpu_utilization",
+        "get_pg_cpu_utilization",
+        "get_blocking_stats",
+        "get_lock_wait_trend",
+    };
+
+    private static string ReadVizFor(string read) => s_lineReads.Contains(read) ? "line" : "table";
 
     /// <summary>Ports the <c>blocking-rca</c> / <c>deadlock-postmortem</c> time-series panel spec
     /// (<c>notebook.js</c>'s <c>tsPanel</c>, <c>aggregate: "count"</c>, a deadlock/blocking annotation) into a
@@ -912,6 +986,11 @@ internal static partial class AlertNotebookEndpoint
     /// else a later same-metric firing -&gt; "Fired again at T"; else, if the metric's collector has run since
     /// <c>at</c> -&gt; "No resolution recorded"; else "Unknown (not collected since T)". NEVER "ongoing" — an
     /// absence of rows is not evidence while the instrument is down.
+    ///
+    /// <para>A fleet-level store alert skips the last two arms (#4756): a store self-alert has no collector,
+    /// and the process that evaluates it also serves this page, so the "instrument is down" reading that
+    /// "Unknown" carries cannot apply. With no resolution row and no later firing it reads "No resolution
+    /// recorded".</para>
     /// </summary>
     internal static async Task<string> ResolveStatusAsync(
         NpgsqlDataSource postgres, int? serverId, bool fleetLevelStore, string? metric, DateTime anchor, DateTime now,
@@ -933,6 +1012,14 @@ internal static partial class AlertNotebookEndpoint
            directly here — a fleet-level store metric has no server, so a null serverId reads "not collected"
            honestly rather than faking a server scope. */
         var anchorStamp = anchor.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        if (fleetLevelStore)
+        {
+            /* #4756: a store self-alert has no collector to have stopped, so "Unknown (not collected since ...)"
+               would tell the reader the instrument is down when the very process that evaluates the alert is
+               serving this page. No resolution row and no later firing is all that is known. */
+            return "No resolution recorded";
+        }
+
         if (serverId is null)
         {
             return "Unknown (not collected since " + anchorStamp + ")";
@@ -1051,11 +1138,86 @@ internal static partial class AlertNotebookEndpoint
         ("Server Unreachable", "Server Restored"),
     };
 
+    /// <summary>The stored <c>metric_name</c>s that resolve <paramref name="metric"/> (#4755): every alias in
+    /// <see cref="DarlingTriageEndpoint.ResolutionAliases"/> whose canonical name is this metric, plus the
+    /// recovery name of every <see cref="NotebookRecoveryEdges"/> pair whose firing is this metric. The INPUT
+    /// metric is matched to the canonical or firing name case-insensitively, but the names come back exactly
+    /// as the product writes them, because the store read compares them with <c>=</c>. Empty when the metric
+    /// has no resolution edge (a failover is an event, not a condition that clears). Both the store read and
+    /// <see cref="StatusFromHistory"/>'s classification use this one list, so they cannot disagree about
+    /// what counts as a resolution row.</summary>
+    internal static IReadOnlyList<string> ResolutionRowNames(string metric)
+    {
+        var trimmedMetric = metric.Trim();
+        var names = new List<string>();
+        foreach (var (alias, canonical) in DarlingTriageEndpoint.ResolutionAliases)
+        {
+            if (string.Equals(canonical, trimmedMetric, StringComparison.OrdinalIgnoreCase)
+                && !names.Contains(alias, StringComparer.Ordinal))
+            {
+                names.Add(alias);
+            }
+        }
+
+        foreach (var (firing, recovery) in NotebookRecoveryEdges)
+        {
+            if (string.Equals(firing, trimmedMetric, StringComparison.OrdinalIgnoreCase)
+                && !names.Contains(recovery, StringComparer.Ordinal))
+            {
+                names.Add(recovery);
+            }
+        }
+
+        return names;
+    }
+
+    /// <summary>The rows status arms 1 and 2 read (#4755): the FIRST resolution row after the alert and, when
+    /// there is none, the FIRST later firing of the same metric — each one targeted store read with no window
+    /// and no shared row cap, dismissed rows included, scoped to <paramref name="serverId"/> only when it is
+    /// known. The list holds at most one row (arm 1 wins whenever it has a row, so the re-fire read only runs
+    /// without one), in the shape <see cref="StatusFromHistory"/> already classifies. Empty, with no store
+    /// round trip, when the answer cannot depend on a row: a blank metric, an unresolved server that is not a
+    /// fleet-level alert (both answer "Unknown" before any row is looked at), or an anchor that is not before
+    /// <paramref name="now"/>.</summary>
+    internal static async Task<List<DarlingAlertReader.AlertHistoryReadRow>> ReadStatusRowsAsync(
+        NpgsqlDataSource postgres, int? serverId, bool fleetLevelStore, string? metric, DateTime anchor, DateTime now,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow, System.Threading.CancellationToken cancellationToken)
+    {
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow>();
+        if (string.IsNullOrWhiteSpace(metric) || (serverId is null && !fleetLevelStore) || anchor >= now)
+        {
+            return rows;
+        }
+
+        var trimmedMetric = metric.Trim();
+        var resolution = await DarlingAlertReader.GetFirstResolutionAfterAsync(
+            postgres, anchor, now, serverId, ResolutionRowNames(trimmedMetric), cancellationToken);
+        if (resolution is not null)
+        {
+            rows.Add(resolution);
+            return rows;
+        }
+
+        /* The re-fire read compares the stored name with `=`, so it uses the matched row's own spelling when
+           there is a match, and the trimmed input otherwise. The matched row itself is not its own re-fire. */
+        var firingName = matchedRow is not null && !string.IsNullOrWhiteSpace(matchedRow.MetricName)
+            ? matchedRow.MetricName
+            : trimmedMetric;
+        var refire = await DarlingAlertReader.GetFirstRefireAfterAsync(
+            postgres, anchor, now, serverId, firingName, matchedRow?.AlertTime, cancellationToken);
+        if (refire is not null)
+        {
+            rows.Add(refire);
+        }
+
+        return rows;
+    }
+
     /// <summary>Status arms 1 and 2 (#4222), extracted as a pure seam (#4366 review F4) over whatever rows the
-    /// caller has already gathered — the caller is responsible for the window (#4366 F1: the caller now
-    /// passes rows from BOTH the backward match read and a forward-looking read so a late resolution or
-    /// re-fire is visible here). Returns null when neither arm fires, meaning the caller should fall through
-    /// to the collector-freshness arms.
+    /// caller has already gathered — the caller is responsible for the window. The endpoint passes the rows
+    /// <see cref="ReadStatusRowsAsync"/> returns: the first resolution row and the first later firing, read
+    /// straight from the store with no window (#4755). Returns null when neither arm fires, meaning the caller
+    /// should fall through to the collector-freshness arms.
     ///
     /// <para><b>F2 fix.</b> When the caller has no resolved server id and the alert is not a fleet-level
     /// metric, this returns Unknown immediately rather than scanning fleet-wide rows — an unresolved
@@ -1081,6 +1243,7 @@ internal static partial class AlertNotebookEndpoint
            search is over every alias that folds onto this metric plus the metric's own resolved-title
            siblings the alert engine may write directly. */
         DateTime? resolvedAt = null;
+        var resolutionNames = ResolutionRowNames(trimmedMetric);
         foreach (var row in scoped)
         {
             if (row.AlertTime <= anchor)
@@ -1088,29 +1251,7 @@ internal static partial class AlertNotebookEndpoint
                 continue;
             }
 
-            var isResolutionRow = false;
-            foreach (var (alias, canonical) in DarlingTriageEndpoint.ResolutionAliases)
-            {
-                if (string.Equals(canonical, trimmedMetric, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(row.MetricName, alias, StringComparison.OrdinalIgnoreCase))
-                {
-                    isResolutionRow = true;
-                    break;
-                }
-            }
-
-            if (!isResolutionRow)
-            {
-                foreach (var (firing, recovery) in NotebookRecoveryEdges)
-                {
-                    if (string.Equals(firing, trimmedMetric, StringComparison.OrdinalIgnoreCase)
-                        && string.Equals(row.MetricName, recovery, StringComparison.OrdinalIgnoreCase))
-                    {
-                        isResolutionRow = true;
-                        break;
-                    }
-                }
-            }
+            var isResolutionRow = resolutionNames.Contains(row.MetricName, StringComparer.OrdinalIgnoreCase);
 
             if (isResolutionRow && (resolvedAt is null || row.AlertTime < resolvedAt))
             {

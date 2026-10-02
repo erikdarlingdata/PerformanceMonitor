@@ -38,7 +38,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class PgTargetConfigSnapshotBoundTests
 {
-    /// <summary>The five statements: the const, the file that executes it, and the parameter its lower bound takes.</summary>
+    /// <summary>The six statements: the const, the file that executes it, and the parameter its lower bound takes.</summary>
     private static readonly (string Name, string File, string LowerBound)[] s_reads =
     {
         (nameof(PgTargetFactCollector.PgTargetConfigSnapshotSql), "PgTargetFactCollector.Config.cs", "$3"),
@@ -46,6 +46,7 @@ public sealed class PgTargetConfigSnapshotBoundTests
         (nameof(PgTargetFactCollector.PgTargetBlockingSettingsSql), "PgTargetFactCollector.Blocking.cs", "$3"),
         (nameof(PgTargetFactCollector.PgTargetMemoryConfigSql), "PgTargetFactCollector.Memory.cs", "$3"),
         (nameof(PgTargetBaselineProvider.PgTargetClockSql), "PgTargetBaselineProvider.Clock.cs", "$3"),
+        (nameof(PgTargetFactCollector.StatementsMaxEntriesSql), "PgTargetStatementsEvictionRead.cs", "$3"),
     };
 
     public static TheoryData<string, string> Statements()
@@ -180,11 +181,14 @@ public sealed class PgTargetConfigSnapshotBoundLiveTests
     [Fact]
     public async Task TheDayPlansOnlyItsOwnChunks_AndTheNewestSnapshotStillWins_AgainstDevPostgres()
     {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the PostgreSQL-target config plan-shape test.");
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the PostgreSQL-target config plan-shape test (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        // #4650: a scratch database, so no other class's leftover chunks shape the plan under test.
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -194,6 +198,11 @@ public sealed class PgTargetConfigSnapshotBoundLiveTests
         if (timescaleEnabled)
         {
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            /* No background policy job reshapes the chunks under the plan assertion. */
+            await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+            {
+                await stop.ExecuteNonQueryAsync(ct);
+            }
         }
 
         var bodySucceeded = false;

@@ -428,6 +428,11 @@ public static class DarlingManagedRoles
     /// copy of the formula. Re-deriving it here would be the same "two things must agree or the ceiling
     /// silently disagrees" hazard this single-renderer design exists to remove — applied to the SQL text but
     /// not to the bounds feeding it, which is not a coherent place to stop.</para>
+    ///
+    /// <para>The <c>temp_file_limit</c> backstop (#4605, <see cref="ComposeLimits.TempFileLimit"/>) that caps
+    /// the on-disk spill a runaway read may write is NOT rendered here: it does not derive from the compose
+    /// timeout, so an unreadable timeout must not drop it. It has its own renderer,
+    /// <see cref="BuildComposeTempFileLimitSql"/>.</para>
     /// </summary>
     public static string BuildComposeStatementTimeoutSql(int composeStatementTimeoutSeconds)
     {
@@ -441,6 +446,25 @@ public static class DarlingManagedRoles
 ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';
 ALTER ROLE {viewer} SET log_min_duration_statement = '{slowStatement}';
 ALTER ROLE {mcp}    SET log_min_duration_statement = '{slowStatement}';";
+    }
+
+    /// <summary>
+    /// The <c>temp_file_limit</c> backstop on the two composed-query identities (#4605,
+    /// <see cref="ComposeLimits.TempFileLimit"/>), as SQL: the cap on the on-disk spill a runaway read may
+    /// write before the store cancels it with SQLSTATE 53400. A CONSTANT, unlike
+    /// <see cref="BuildComposeStatementTimeoutSql"/>'s lines: it does not derive from the operator's compose
+    /// timeout, so it has its own renderer and is emitted regardless of whether that timeout could be read —
+    /// <see cref="BuildProvisioningSql"/> embeds it unconditionally at startup and
+    /// <see cref="ReassertComposeStatementTimeoutAsync"/> runs it alongside the timeout lines on a
+    /// control-plane reload (#2918), so the two paths cannot disagree about the ceiling.
+    /// </summary>
+    public static string BuildComposeTempFileLimitSql()
+    {
+        const string viewer = DarlingManagedPostgres.ViewerRoleName;
+        const string mcp = DarlingManagedPostgres.McpRoleName;
+
+        return $@"ALTER ROLE {viewer} SET temp_file_limit = '{ComposeLimits.TempFileLimit}';
+ALTER ROLE {mcp}    SET temp_file_limit = '{ComposeLimits.TempFileLimit}';";
     }
 
     /// <summary>
@@ -547,19 +571,21 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(
-                BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds), connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+                BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds) + "\n" + BuildComposeTempFileLimitSql(),
+                connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             logger.LogInformation(
-                "Compose statement_timeout re-asserted on the viewer/mcp roles at {Seconds}s, with slow-statement logging at {SlowMs} ms — takes effect on each role's next session (an already-connected viewer keeps the old ceiling until it reconnects)",
+                "Compose statement_timeout re-asserted on the viewer/mcp roles at {Seconds}s, with slow-statement logging at {SlowMs} ms and a temp_file_limit of {TempFileLimit} — takes effect on each role's next session (an already-connected viewer keeps the old ceiling until it reconnects)",
                 StoreConfigProvider.ClampComposeStatementTimeoutSeconds(composeStatementTimeoutSeconds),
-                SlowStatementThresholdMs(composeStatementTimeoutSeconds));
+                SlowStatementThresholdMs(composeStatementTimeoutSeconds),
+                ComposeLimits.TempFileLimit);
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(
-                "Could not re-assert the compose statement_timeout on the viewer/mcp roles ({Message}) — the live ceiling is whatever the last successful provisioning set, and the next service start will converge it.",
+                "Could not re-assert the compose statement_timeout/temp_file_limit on the viewer/mcp roles ({Message}) — the live ceilings are whatever the last successful provisioning set, and the next service start will converge them.",
                 ex.Message);
             return false;
         }
@@ -773,6 +799,9 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         var composeTimeoutStatements = composeStatementTimeoutSeconds is int composeSeconds
             ? BuildComposeStatementTimeoutSql(composeSeconds)
             : "--     LEFT AS-IS this start: config_service.compose_statement_timeout_seconds could not be read.";
+        /* #4610: temp_file_limit is a CONSTANT, not derived from composeStatementTimeoutSeconds, so it is
+           rendered unconditionally — an unreadable compose timeout must not drop the spill guard too. */
+        var composeTempFileLimitStatements = BuildComposeTempFileLimitSql();
 
         /* The fail-closed viewer column-ACL carve for the secret-bearing config tables (see
            ViewerRestrictedConfigTables). Runs AFTER the blanket config GRANT below, so it strips
@@ -836,6 +865,12 @@ ALTER ROLE {mcp}    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBY
 --     the ceiling: a viewer or mcp statement past it is written to the store's own log, where the store-log
 --     sweep keeps it, so a slow read is named instead of guessed at.
 {composeTimeoutStatements}
+
+-- 1c-ii. temp_file_limit backstop on the same two roles (#4605, #4610): a CONSTANT ceiling on the on-disk
+--        spill a runaway read may write before the store cancels it with SQLSTATE 53400. Rendered
+--        unconditionally, unlike 1c above: it does not derive from the compose timeout, so an unreadable
+--        timeout must not drop this guard too.
+{composeTempFileLimitStatements}
 
 -- 1d. No bind parameters on those slow-statement lines (#3899): the mcp role also writes alert settings, whose
 --     values include secrets. admin gets no line. Same non-migration reason as 1c.

@@ -19,7 +19,11 @@ namespace Darling.Tests;
 /// <summary>
 /// <see cref="ManagedConfMigrationRunner"/> (#4336): <c>RunStepA</c> and <c>ResumePending</c> over
 /// fake snapshot delegates, no database.
+///
+/// <para>One test here sets <c>ManagedConfMigrationSteps.FailBetweenSteps</c>, a static shared by the whole test
+/// process, so this class shares a non-parallel collection with the other class that sets it (#4773).</para>
 /// </summary>
+[Collection("managed-conf-crash-hook")]
 public sealed class ManagedConfMigrationRunnerTests : IDisposable
 {
     private readonly string _dataDir;
@@ -37,9 +41,10 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         {
             Directory.Delete(_dataDir, recursive: true);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Best-effort cleanup; leftover temp dirs don't fail the run.
+            // Best-effort cleanup; leftover temp dirs don't fail the run (a file the OS still
+            // maps surfaces as UnauthorizedAccessException on Windows).
         }
     }
 
@@ -101,6 +106,78 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
     }
 
+    /// <summary>Pin: a store still on the legacy blocks reports every legacy key before the migration but not
+    /// <c>random_page_cost</c> (no legacy block wrote it). The after-snapshot reports it from the managed file. Step A
+    /// verifies, the file it wrote already carries the line, and a fresh render over that file finds nothing to
+    /// replace, so the next start leaves the file alone.</summary>
+    [Fact]
+    public async Task RunStepA_LegacyStoreWithoutPageCost_ConvergesInOneStart()
+    {
+        WriteConf("# base conf\n");
+        var inputs = SampleInputs();
+        var derived = DerivedValues(inputs);
+        Assert.Equal("1.1", derived["random_page_cost"]);
+
+        var beforeRows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            if (kvp.Key != "random_page_cost")
+            {
+                beforeRows.Add(Applied(kvp.Key, kvp.Value));
+            }
+        }
+
+        var afterRows = new List<FileSettingRow>(beforeRows) { Applied("random_page_cost", "1.1", ManagedConfFile.FileName) };
+        var calls = 0;
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(++calls == 1 ? beforeRows : afterRows);
+
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, new CapturingTestLogger(), CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Empty(outcome.MismatchedKeys);
+        var written = File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName));
+        Assert.Contains("random_page_cost = '1.1'", written, StringComparison.Ordinal);
+        Assert.False(ManagedConfFile.IsHandEdited(written));
+        Assert.False(ManagedConfFile.ShouldReplaceManagedConf(written, ManagedConfFile.Render(inputs)));
+    }
+
+    /// <summary>Pin: only the page-cost addition is accepted. If the after-snapshot also gains any other key the
+    /// before did not have, Step A still fails and restores.</summary>
+    [Fact]
+    public async Task RunStepA_LegacyStoreWithoutPageCost_AnotherAddedKey_StillFails()
+    {
+        WriteConf("# base conf\n");
+        var inputs = SampleInputs();
+        var derived = DerivedValues(inputs);
+
+        var beforeRows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            if (kvp.Key is not ("random_page_cost" or "work_mem"))
+            {
+                beforeRows.Add(Applied(kvp.Key, kvp.Value));
+            }
+        }
+
+        var afterRows = new List<FileSettingRow>(beforeRows)
+        {
+            Applied("random_page_cost", "1.1", ManagedConfFile.FileName),
+            Applied("work_mem", derived["work_mem"], ManagedConfFile.FileName),
+        };
+        var calls = 0;
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(++calls == 1 ? beforeRows : afterRows);
+
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, new CapturingTestLogger(), CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
+        Assert.Equal(new[] { "work_mem" }, outcome.MismatchedKeys);
+        Assert.False(ManagedConfMigrationSteps.IsVerified(_dataDir));
+    }
+
     /// <summary>Pin: a mismatch — the after-snapshot disagrees with the before on one key. The conf is
     /// byte-equal to the backup, no stamp, and Failed lists the key.</summary>
     [Fact]
@@ -139,6 +216,54 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.NotNull(outcome.BackupPath);
         Assert.Equal(File.ReadAllText(outcome.BackupPath!), File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf")));
         Assert.False(ManagedConfMigrationSteps.IsVerified(_dataDir));
+        Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
+    }
+
+    /// <summary>A failed attempt, an edit to postgresql.conf, and a second failed attempt: the second
+    /// restore puts back the EDITED file, not the first attempt's snapshot. The second attempt's backup is
+    /// a new file holding the edit, and the first attempt's stays as it was. It used to restore the first
+    /// snapshot, and every edit made between attempts was lost.</summary>
+    [Fact]
+    public async Task RunStepA_FailsTwice_ConfEditedBetweenAttempts_RestoreKeepsTheEdit()
+    {
+        const string original = "# base conf\nwork_mem = '16MB'\n";
+        WriteConf(original);
+        var inputs = SampleInputs();
+        var derived = DerivedValues(inputs);
+
+        var callCount = 0;
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+        {
+            callCount++;
+            var rows = new List<FileSettingRow>();
+            foreach (var kvp in derived)
+            {
+                /* Odd calls are an attempt's before-snapshot, even calls its after-snapshot; every
+                   after-snapshot disagrees on work_mem, so every attempt fails and restores. */
+                var value = kvp.Key == "work_mem" ? (callCount % 2 == 1 ? "16MB" : "9999MB") : kvp.Value;
+                rows.Add(Applied(kvp.Key, value));
+            }
+
+            return Task.FromResult<IReadOnlyList<FileSettingRow>>(rows);
+        };
+
+        var logger = new CapturingTestLogger();
+        var first = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, logger, CancellationToken.None);
+        Assert.Equal(ManagedConfVerificationStatus.Failed, first.Status);
+        Assert.Equal(original, File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf")));
+
+        const string edited = original + "# added between attempts\nwork_mem = '32MB'\n";
+        WriteConf(edited);
+
+        var second = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow.AddDays(1), logger, CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, second.Status);
+        Assert.Equal(edited, File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf")));
+        Assert.NotEqual(first.BackupPath, second.BackupPath);
+        Assert.Equal(original, File.ReadAllText(first.BackupPath!));
+        Assert.Equal(edited, File.ReadAllText(second.BackupPath!));
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
     }
 
@@ -501,6 +626,155 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
 
         Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
         Assert.Contains("work_mem", outcome.MismatchedKeys);
+    }
+
+    /// <summary>Pin: <see cref="ManagedConfMigrationRunner.FindUnstampedManagedFileErrors"/> is the
+    /// <c>MigratedUnstamped</c> re-verification's own scan (<c>DarlingManagedPostgres.MigrateManagedConfAsync</c>),
+    /// which must skip the same <see cref="DarlingStoreHostProfile.CommandLineOnlyKeys"/> as
+    /// <see cref="ManagedConfMigrationRunner.VerifyStepB"/> does, for the same reason: an exposed store's
+    /// <c>listen_addresses</c> is always overridden by the command line, so darling-managed.conf's rendered
+    /// (always loopback-only) line reports <c>error = "setting could not be applied"</c> on every start even
+    /// though nothing needs healing. <c>192.0.2.10</c> (RFC 5737) stands in for the store's own address.
+    /// </summary>
+    [Fact]
+    public void FindUnstampedManagedFileErrors_ListenAddressesOverriddenByCommandLine_IsNotAnError()
+    {
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "listen_addresses", Setting: "127.0.0.1", Applied: false, Error: "setting could not be applied"),
+            Applied("work_mem", "16MB", file: managedPath, line: 2),
+        };
+
+        var (hasError, mismatchedKeys) = ManagedConfMigrationRunner.FindUnstampedManagedFileErrors(rows);
+
+        Assert.False(hasError);
+        Assert.Empty(mismatchedKeys);
+    }
+
+    /// <summary>Pin: the same skip for <c>port</c> — also command-line-owned
+    /// (<see cref="DarlingStoreHostProfile.CommandLineOnlyKeys"/>).</summary>
+    [Fact]
+    public void FindUnstampedManagedFileErrors_PortOverriddenByCommandLine_IsNotAnError()
+    {
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "port", Setting: "5555", Applied: false, Error: "setting could not be applied"),
+            Applied("work_mem", "16MB", file: managedPath, line: 2),
+        };
+
+        var (hasError, mismatchedKeys) = ManagedConfMigrationRunner.FindUnstampedManagedFileErrors(rows);
+
+        Assert.False(hasError);
+        Assert.Empty(mismatchedKeys);
+    }
+
+    /// <summary>Pin: a REAL error row on another key (not command-line-owned) still reports as an error,
+    /// with that key named — the skip is narrow, not a blanket "ignore darling-managed.conf errors".</summary>
+    [Fact]
+    public void FindUnstampedManagedFileErrors_RealErrorOnOtherKey_StillReportsError()
+    {
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "listen_addresses", Setting: "127.0.0.1", Applied: false, Error: "setting could not be applied"),
+            new(SourceFile: managedPath, SourceLine: 2, Name: "work_mem", Setting: "16MB", Applied: false, Error: "invalid value"),
+        };
+
+        var (hasError, mismatchedKeys) = ManagedConfMigrationRunner.FindUnstampedManagedFileErrors(rows);
+
+        Assert.True(hasError);
+        Assert.DoesNotContain("listen_addresses", mismatchedKeys);
+        Assert.Contains("work_mem", mismatchedKeys);
+    }
+
+    /// <summary>Pin: a store with a configured network endpoint always starts PostgreSQL with
+    /// <c>listen_addresses</c> forced onto the command line (<see cref="DarlingManagedPostgres.BuildServerRuntimeOptions"/>).
+    /// The rendered <c>darling-managed.conf</c> line stays loopback-only, so PostgreSQL reports THAT file
+    /// row with <c>error = "setting could not be applied"</c> once its command-line value differs —
+    /// confirmed against a live PostgreSQL 18 instance. <see cref="ManagedConfMigrationRunner.VerifyStepB"/>
+    /// must not treat that as a mismatch: <c>listen_addresses</c> is skipped, but a REAL mismatch on another
+    /// key in the same batch still fails.</summary>
+    [Fact]
+    public void VerifyStepB_ListenAddressesOverriddenByCommandLine_IsNotAMismatch_OtherKeyStillFails()
+    {
+        var rendered = "listen_addresses = '127.0.0.1'\nwork_mem = '16MB'\n";
+        WriteManaged(rendered);
+
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "listen_addresses", Setting: "127.0.0.1", Applied: false, Error: "setting could not be applied"),
+            new(SourceFile: managedPath, SourceLine: 2, Name: "work_mem", Setting: "8MB", Applied: true, Error: null),
+        };
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText: null);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
+        Assert.DoesNotContain("listen_addresses", outcome.MismatchedKeys);
+        Assert.Contains("work_mem", outcome.MismatchedKeys);
+    }
+
+    /// <summary>Pin: when EVERY other key matches and the only rendered key that doesn't is
+    /// <c>listen_addresses</c> — overridden by the command line, same as above — Step B now completes
+    /// (<c>Verified</c>), writes the verified stamp against the rendered text, and leaves the managed file
+    /// in place (no restore of <paramref name="previousText"/>). Before this fix, this row alone drove Step
+    /// B to <c>Failed</c> on every start of any store with a configured network endpoint. The row's exact
+    /// shape (<c>setting</c> reads the file's rendered value, not the command line's; <c>error</c> reads
+    /// <c>"setting could not be applied"</c>; <c>applied</c> is <c>false</c>) was captured from a real
+    /// <c>pg_file_settings</c> row on a PostgreSQL 18 container started with a command-line
+    /// <c>listen_addresses</c> set to loopback plus the container's own address (<c>docker run
+    /// timescale/timescaledb:2.30.1-pg18 -c listen_addresses=127.0.0.1,&lt;container address&gt;</c>, with an
+    /// included conf file rendering the product's usual loopback-only <c>listen_addresses = '127.0.0.1'</c>
+    /// line), then querying <see cref="ManagedConfFileSettings.SnapshotSql"/> directly against it. The address
+    /// below (<c>192.0.2.10</c>) is the RFC 5737 documentation range, standing in for the container's own
+    /// address — the captured row shape does not depend on which address is used.</summary>
+    [Fact]
+    public void VerifyStepB_OnlyListenAddressesOverriddenByCommandLine_Verifies()
+    {
+        var rendered = "listen_addresses = '127.0.0.1'\nwork_mem = '16MB'\nmax_connections = '200'\n";
+        WriteManaged(rendered);
+
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "listen_addresses", Setting: "127.0.0.1", Applied: false, Error: "setting could not be applied"),
+            Applied("work_mem", "16MB", file: managedPath, line: 2),
+            Applied("max_connections", "200", file: managedPath, line: 3),
+        };
+
+        var previousText = "work_mem = '8MB'\n";
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Equal(ManagedConfMigrationStep.B, outcome.Step);
+        Assert.True(ManagedConfMigrationSteps.IsVerified(_dataDir));
+        Assert.Equal(rendered, File.ReadAllText(managedPath));
+    }
+
+    /// <summary>Pin: the same completion for <c>port</c> — also command-line-owned
+    /// (<see cref="DarlingStoreHostProfile.CommandLineOnlyKeys"/>) — whose file row is overridden the same
+    /// way when the command line pins a different port than the rendered file line.</summary>
+    [Fact]
+    public void VerifyStepB_OnlyPortOverriddenByCommandLine_Verifies()
+    {
+        var rendered = "port = '5555'\nwork_mem = '16MB'\n";
+        WriteManaged(rendered);
+
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "port", Setting: "5555", Applied: false, Error: "setting could not be applied"),
+            Applied("work_mem", "16MB", file: managedPath, line: 2),
+        };
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText: null);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Equal(ManagedConfMigrationStep.B, outcome.Step);
+        Assert.True(ManagedConfMigrationSteps.IsVerified(_dataDir));
     }
 
     /// <summary>Pin (#4336): the exact change-log line for two changed keys.</summary>

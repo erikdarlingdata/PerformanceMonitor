@@ -104,6 +104,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>ALTER TABLE</c> losing a race with live traffic, reachable on any store carrying a role- or
 /// database-level <c>lock_timeout</c>. The blocker is by definition a session that finishes, and the
 /// rung's transaction rolled back whole.</description></item>
+/// <item><description><b><c>53300</c> — too many connections (#4733).</b> A store at its connection limit
+/// when the service starts. A bring-your-own or compose store can be briefly full: after a restart storm,
+/// while the previous instance's connections are still closing, or while another application holds them.
+/// The count falls by itself as those connections close, which no other state in class <c>53</c> does. A
+/// store that stays full is not silent: the sustained arm logs its critical line once when the fast budget
+/// runs out and a warning on every attempt after it, so an operator who has to raise the limit still sees
+/// why.</description></item>
 /// </list>
 ///
 /// <para><b>Terminal, including the ones that are close calls.</b> Class <c>42</c> is a rung that cannot
@@ -111,9 +118,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// old code was right about. Class <c>23</c> is a rung whose constraint is violated by data already in
 /// the store, which is V62's exact shape, and no amount of waiting changes the rows. <c>28P01</c> /
 /// <c>28000</c> is a credential, <c>3D000</c> a database that does not exist, <c>55000</c> a database
-/// somebody set <c>datallowconn = false</c> on. Class <c>53</c> — disk full, out of memory, too many
-/// connections — is a capacity finding an operator has to see now, and two minutes does not clear any of
-/// them; class <c>58</c> is the filesystem underneath the store. Two deserve naming because a
+/// somebody set <c>datallowconn = false</c> on. Class <c>53</c> is split state by state, the way class
+/// <c>57</c> is (#4733). <c>53300</c> (too many connections) is retried, above, because the connections
+/// filling the store close on their own. <c>53100</c> (disk full), <c>53200</c> (out of memory) and
+/// <c>53400</c> (configuration limit exceeded) stay terminal: each is a capacity finding an operator has
+/// to see now, and two minutes does not clear any of them. Class <c>58</c> is the filesystem underneath
+/// the store. Two deserve naming because a
 /// class-level rule would have swept them in with their neighbours: <c>57014</c> is somebody else's
 /// <c>statement_timeout</c> cancelling a rung, which will cancel the identical rung identically on every
 /// attempt, and <c>57P04</c> is the database having been dropped — both sit in the same class <c>57</c>
@@ -234,6 +244,22 @@ internal static class StartupFailureTriage
     internal static readonly TimeSpan RetryBudget = TimeSpan.FromSeconds(120);
 
     /// <summary>
+    /// Pause between attempts once <see cref="RetryBudget"/> has already run out on a <see cref="IsRetryable"/>
+    /// failure (#4508). The fast budget above answers "is this an ordinary blip"; once it is spent the
+    /// question has already been answered NO for that meaning, and what is left is a store outage nobody
+    /// has fixed yet. Retrying forever, but slower, is right here for the same reason <see cref="Attempts"/>'s
+    /// own remarks give for NOT making the fast path a supervisor loop: the caller is a straight-line
+    /// startup step that must eventually succeed, not a tick with nothing else to do — except that
+    /// "eventually" for a two-minute store outage is provably wrong, because the old behaviour after the
+    /// fast budget was to give up and never collect again for the life of the process, silently, with the
+    /// host staying up and reporting healthy. A minute is slow enough that a store still down does not get
+    /// hammered by a service that is, by construction, no longer in a hurry, and fast enough that a store
+    /// that comes back is noticed within the span an operator paged for the outage would already be
+    /// watching.
+    /// </summary>
+    internal static readonly TimeSpan SustainedRetryDelay = TimeSpan.FromSeconds(60);
+
+    /// <summary>
     /// <c>SqlState</c>s that mean "not yet" rather than "no" — see the class remarks for what each one was
     /// observed doing. An allowlist: a state absent from it is terminal, which is what keeps a rung that
     /// can never apply from being retried into silence.
@@ -258,6 +284,11 @@ internal static class StartupFailureTriage
         PostgresErrorCodes.DeadlockDetected,
         PostgresErrorCodes.LockNotAvailable,
         PostgresErrorCodes.ObjectInUse,
+
+        /* The store is at its connection limit right now and stops being at it when other connections
+           close (#4733). The one state in class 53 that is retried; see the class remarks for why the other
+           three stay terminal. */
+        PostgresErrorCodes.TooManyConnections,
     };
 
     /// <summary>
@@ -318,4 +349,70 @@ internal static class StartupFailureTriage
 
         return exception is NpgsqlException;
     }
+
+    /// <summary>
+    /// What one of the three collection-blocking startup steps' loops does about a caught
+    /// <paramref name="exception"/> on <paramref name="attempt"/>, having already run <paramref name="elapsed"/>
+    /// since its first attempt (#4508). The whole retry DECISION lives here, pulled out of the loop, so it can
+    /// be pinned without a store, a config file or a migration to fail: given the same three inputs the loop
+    /// itself would have seen, this returns exactly what the loop should do next.
+    ///
+    /// <para><b>The defect this replaces.</b> Before #4508, once <see cref="Attempts"/> or
+    /// <see cref="RetryBudget"/> ran out on a failure <see cref="IsRetryable"/> still accepted, the loop fell
+    /// through to the bare terminal catch — the same <c>LogCritical</c> / <c>PublishStopped</c> / <c>return</c>
+    /// a NON-retryable failure gets, byte for byte. A store outage that outlasted two minutes and a rung that
+    /// can never apply became indistinguishable again, one layer up from the distinction
+    /// <see cref="IsRetryable"/> exists to draw: the process stayed up, reporting healthy, and never collected
+    /// again until a human restarted it.</para>
+    ///
+    /// <para><see cref="RetrySustained"/> is the new third outcome: the fast budget is spent, but the failure
+    /// is still one <see cref="IsRetryable"/> accepts, so the loop keeps going on <see cref="SustainedRetryDelay"/>
+    /// instead of stopping. <paramref name="attempt"/> and <paramref name="elapsed"/> only distinguish
+    /// <see cref="RetryFast"/> from <see cref="RetrySustained"/> for a retryable failure; a NON-retryable one is
+    /// always <see cref="Stop"/>, at any attempt, on any elapsed time — the caller does not need to spend the
+    /// fast budget to learn that a rung that cannot apply will not start applying.</para>
+    /// </summary>
+    /// <param name="attempt">The 1-based attempt that just failed.</param>
+    /// <param name="elapsed">Wall clock since the loop's first attempt.</param>
+    /// <param name="exception">The failure the attempt caught. <see cref="OperationCanceledException"/> is the
+    /// caller's to filter out first — it means shutdown, and this method is never reached for it.</param>
+    internal static NextStartupAction NextAction(int attempt, TimeSpan elapsed, Exception? exception)
+    {
+        if (!IsRetryable(exception))
+        {
+            return new NextStartupAction(StartupRetryDecision.Stop, TimeSpan.Zero);
+        }
+
+        if (attempt < Attempts && elapsed < RetryBudget)
+        {
+            return new NextStartupAction(StartupRetryDecision.RetryFast, RetryDelay);
+        }
+
+        return new NextStartupAction(StartupRetryDecision.RetrySustained, SustainedRetryDelay);
+    }
 }
+
+/// <summary>
+/// What a collection-blocking startup loop should do next, decided by <see cref="StartupFailureTriage.NextAction"/>
+/// (#4508).
+/// </summary>
+internal enum StartupRetryDecision
+{
+    /// <summary>Retry inside the fast budget, after <see cref="StartupFailureTriage.RetryDelay"/>.</summary>
+    RetryFast,
+
+    /// <summary>The fast budget is spent, but the failure is still one <see cref="StartupFailureTriage.IsRetryable"/>
+    /// accepts — keep retrying, slower, after <see cref="StartupFailureTriage.SustainedRetryDelay"/>, rather than
+    /// standing down and never collecting.</summary>
+    RetrySustained,
+
+    /// <summary>The failure is terminal — stop, publish, and return, exactly as before #4508.</summary>
+    Stop,
+}
+
+/// <summary>
+/// One verdict from <see cref="StartupFailureTriage.NextAction"/>: what to do, and how long to wait first.
+/// <see cref="Delay"/> is <see cref="TimeSpan.Zero"/> for <see cref="StartupRetryDecision.Stop"/>, which never
+/// waits.
+/// </summary>
+internal readonly record struct NextStartupAction(StartupRetryDecision Decision, TimeSpan Delay);

@@ -29,7 +29,7 @@ namespace Darling.Tests;
 /// budget. <b>After:</b> the default call groups measures by source and keeps only key/displayName/kind/
 /// unitFamily/validAggregates per measure (measured below, well under budget); <c>source=&lt;name&gt;</c> and
 /// <c>full_detail=true</c> reach everything the compact default leaves out, and <c>full_detail=true</c> alone
-/// reproduces the original 98,173-byte shape byte-for-byte.</para>
+/// serves the original shape plus the #4653 <c>labelSuffix</c> on ratio measures, pinned to the measured size.</para>
 /// </summary>
 public sealed class DarlingMcpCustomViewCatalogSizeTests
 {
@@ -39,8 +39,12 @@ public sealed class DarlingMcpCustomViewCatalogSizeTests
     /// full_detail's shape is caught here, not by a caller getting refused inline again.</summary>
     private const int PreFixFullDetailBytes = 98_173;
 
+    /// <summary>#4653: +275 bytes over <see cref="PreFixFullDetailBytes"/>, which is 11 ratio measures times the
+    /// 25 bytes of one <c>,"labelSuffix":" (ratio)"</c> entry.</summary>
+    private const int CurrentFullDetailBytes = PreFixFullDetailBytes + 275;
+
     [Fact]
-    public async Task FullDetail_MatchesThePreFixMeasurement()
+    public async Task FullDetail_MatchesTheMeasuredShape()
     {
         var result = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(full_detail: true);
         var bytes = Encoding.UTF8.GetByteCount(result);
@@ -48,7 +52,7 @@ public sealed class DarlingMcpCustomViewCatalogSizeTests
         /* Exact match, not a ceiling: full_detail is the #4198 escape hatch and must keep serving EXACTLY what
            this tool always returned, so a drift here is either a real catalog change (update the constant, with
            the reason) or a regression in the compaction logic leaking into the full-detail path. */
-        Assert.Equal(PreFixFullDetailBytes, bytes);
+        Assert.Equal(CurrentFullDetailBytes, bytes);
     }
 
     [Fact]

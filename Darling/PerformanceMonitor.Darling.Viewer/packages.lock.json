@@ -22,9 +22,9 @@
       },
       "Velopack": {
         "type": "Direct",
-        "requested": "[1.2.0, )",
-        "resolved": "1.2.0",
-        "contentHash": "Rz67gJL619fSBS6omaSINUxyDuwhIxkm5mmubf7uLd5Qgi6LLKaKCha+QFP6n+Bw/UjA0vutnH4JQfYzn6ANtw=="
+        "requested": "[1.2.158, )",
+        "resolved": "1.2.158",
+        "contentHash": "wQN38beVrAf0WzFMnZtl7UmwxqwaJ7xVYypqITdOI4YUTYch2UvE+xAjg9msfaitVDtgfWeIcGsjRNQ65C03ZQ=="
       },
       "Azure.Core": {
         "type": "Transitive",
@@ -472,7 +472,10 @@
         "type": "Project"
       },
       "performancemonitor.collectors": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "PerformanceMonitor.Common": "[3.8.0, )"
+        }
       },
       "performancemonitor.common": {
         "type": "Project",
@@ -493,8 +496,7 @@
           "PerformanceMonitor.Common": "[3.8.0, )",
           "PerformanceMonitor.Darling.Storage": "[3.8.0, )",
           "PerformanceMonitor.Notifications": "[3.8.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.8.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "PerformanceMonitor.PlanAnalysis": "[3.8.0, )"
         }
       },
       "performancemonitor.darling.storage": {
@@ -502,7 +504,8 @@
         "dependencies": {
           "Npgsql": "[10.0.3, )",
           "PerformanceMonitor.Collectors": "[3.8.0, )",
-          "PerformanceMonitor.Common": "[3.8.0, )"
+          "PerformanceMonitor.Common": "[3.8.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.8.0, )"
         }
       },
       "performancemonitor.notifications": {
@@ -516,8 +519,7 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.0, )",
-          "PerformanceMonitor.Common": "[3.8.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "PerformanceMonitor.Common": "[3.8.0, )"
         }
       },
       "performancemonitor.ui": {
@@ -594,12 +596,6 @@
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "10.0.0"
         }
-      },
-      "System.Security.Cryptography.ProtectedData": {
-        "type": "CentralTransitive",
-        "requested": "[10.0.12, )",
-        "resolved": "10.0.11",
-        "contentHash": "PNoxCTPb+Tlux+GJyq4c89ddYdpioVSqfGx8pqOF6shCSKwUNNctXhQtRkCICjbJmGrJJsW8NY52kVYO/b8mlQ=="
       }
     }
   }

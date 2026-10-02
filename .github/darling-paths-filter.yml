@@ -52,6 +52,33 @@ darling:
 # these two jobs add over that is a live TimescaleDB cluster and a linux-x64 publish, neither of which
 # a Lite XAML edit can affect, so putting Lite/** here would buy a ~4-minute cluster and no signal.
 
+# The store-upgrade E2Es (#1706, #3906) construct DarlingManagedPostgres and DarlingStoreUpgrade over a
+# real store: schema, TOAST, a continuous aggregate, a compressed chunk. Nightly builds the upgrade
+# fixture and sets DARLING_TEST_PGRUNTIME_OLD/_NEWZIP/_PREVIOUS so those tests run every night; on a pull
+# request they were silently skipped instead — the fixture was never built and the vars were never set — so
+# no PR ever ran the only coverage of an in-place major upgrade or a same-major runtime swap. This filter is
+# the paths those two E2Es actually exercise, so build.yml's darling-pg job can build the fixture and set the
+# vars only when a change could move their answer, not on every PR (the fixture download and build cost real
+# minutes nightly already pays and PRs should not, unless the change is in scope for them):
+#   - the store schema itself, which the upgrade checksum-compares before and after;
+#   - PerformanceMonitor.Darling.Service, which is where DarlingManagedPostgres and DarlingStoreUpgrade
+#     (the two types the E2Es construct) live, along with the managed-conf migration machinery
+#     (ManagedConfMigration/ManagedConfMigrationRunner/ManagedConfMigrationSteps/ManagedConfMigrationState/
+#     ManagedConfFile/ManagedConfFileSettings) the upgrade path drives through DarlingWorker;
+#   - the two fixture scripts the upgrade tests are gated on, and fetch-pg-runtime.ps1, which builds the
+#     runtime new-upgraded-store-fixture.ps1 diffs against;
+#   - the two workflow files and this filter file itself, for the same self-validating reason the `darling`
+#     filter above lists build.yml and itself.
+# Same '!(*.md)' extglob form as the `darling` filter, for the same dorny v4 quantifier reason.
+store-upgrade:
+  - 'Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)'
+  - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
+  - 'Darling/tools/new-upgraded-store-fixture.ps1'
+  - 'Darling/tools/fetch-pg-runtime.ps1'
+  - '.github/workflows/build.yml'
+  - '.github/workflows/nightly.yml'
+  - '.github/darling-paths-filter.yml'
+
 # The changed-file COUNTER the two gate-decision steps report against, so a skip notice can say how
 # many files it classified and name them rather than assert a cause for the classification. Never a
 # boolean gate: every changed file matches '**', so this filter can only ever be true — the same

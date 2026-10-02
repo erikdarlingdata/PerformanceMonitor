@@ -209,8 +209,9 @@ public sealed class DarlingAgReaderTests
         string? connected = "CONNECTED",
         string? operational = "ONLINE",
         string? recoveryHealth = "ONLINE",
-        bool? isLocal = null) =>
-        new(serverId, serverName, At(1), agName, replicaName, role, isLocal, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022");
+        bool? isLocal = null,
+        string? groupId = null) =>
+        new(serverId, serverName, At(1), agName, replicaName, role, isLocal, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022", groupId);
 
     private static Reader.DatabaseRow Database(
         int serverId,
@@ -221,8 +222,9 @@ public sealed class DarlingAgReaderTests
         string state = "SYNCHRONIZED",
         bool isSuspended = false,
         long? lagSeconds = 0,
-        int minutesAgo = 1) =>
-        new(serverId, serverName, At(minutesAgo), agName, databaseName, replicaName, true, state, "0x00", "0x00", 0, 0, 1024, 1024, isSuspended, isSuspended ? "USER_ACTION" : null, "SYNCHRONOUS_COMMIT", lagSeconds);
+        int minutesAgo = 1,
+        string? groupId = null) =>
+        new(serverId, serverName, At(minutesAgo), agName, databaseName, replicaName, true, state, "0x00", "0x00", 0, 0, 1024, 1024, isSuspended, isSuspended ? "USER_ACTION" : null, "SYNCHRONOUS_COMMIT", lagSeconds, groupId);
 
     [Fact]
     public void Build_OneAgSeenFromTwoServers_StaysTwoGroupsEachNamingItsReporter()
@@ -396,4 +398,272 @@ public sealed class DarlingAgReaderTests
        copy moved to DarlingAgStatesReaderTests (#4228) along with the statement text itself — see
        DarlingAgStatesReader in PerformanceMonitor.Darling.Storage, now the one implementation ReadReplicasAsync
        and ReadDatabasesAsync above map into this file's ReplicaRow / DatabaseRow. */
+
+    /* ────────────────── #4475: DistinctAgCount by identity (name + replica set), not name alone ────────────────── */
+
+    [Fact]
+    public void DistinctAgCount_FortyTwoSameNamedAgsWithDistinctReplicaSets_IsFortyTwo()
+    {
+        /* Every Amazon RDS for SQL Server Multi-AZ instance's internal AG is named RDSAG0; each instance's
+           replica set is distinct, so identity (name + replica set) must count 42, not 1. */
+        var replicas = new List<Reader.ReplicaRow>();
+        for (var i = 1; i <= 42; i++)
+        {
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}A", "PRIMARY"));
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}B", "SECONDARY"));
+        }
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(42, result.DistinctAgCount);
+        Assert.Equal(42, result.AvailabilityGroupCount);
+        Assert.Equal(42, result.ReportingServerCount);
+    }
+
+    [Fact]
+    public void DistinctAgCount_TwoReplicasOfTheSameAg_IsOne()
+    {
+        /* Two monitored replicas of the SAME real AG report the SAME replica set, so identity still collapses
+           them to one — the pre-existing case Build_OneAgSeenFromTwoServers_StaysTwoGroupsEachNamingItsReporter
+           already covers for AvailabilityGroupCount; this is the same fixture asserted on DistinctAgCount. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY", operational: null),
+            Replica(2, "NODE2", "AG1", "NODE1", "PRIMARY", operational: null),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(1, result.DistinctAgCount);
+        Assert.Equal(2, result.AvailabilityGroupCount);
+    }
+
+    [Fact]
+    public void DistinctAgCount_SameAgSeenFromItsPrimaryAndItsSecondary_IsOne()
+    {
+        /* The blocking #4475 follow-up case, proved through this reader's own public entry point: a monitored
+           SECONDARY's replica-states view returns only its own local information, so its card carries only
+           {S} while the primary's carries {P,S}. Exact-set identity counted this as 2, which this pin proves
+           wrong. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY"),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(1, result.DistinctAgCount);
+        Assert.Equal(2, result.AvailabilityGroupCount);
+    }
+
+    [Fact]
+    public void DistinctAgCount_TwoSecondariesOfOneAgSameGroupId_DisjointReplicaSets_IsOne()
+    {
+        /* (a), through this reader's own public entry point rather than calling AgTopology.CountDistinctGroups
+           directly: two monitored SECONDARIES of one real AG, its primary unmonitored, each reporting only
+           itself (so their replica sets are disjoint), carrying the SAME group_id. Without the id, the
+           name+overlap rule alone counts 2 (see DistinctAgCount_SameAgSeenFromItsPrimaryAndItsSecondary_IsOne's
+           companion below for the id-less shape) -- with it, they collapse to 1. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "SECONDARY", groupId: "GROUP-GUID-1"),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY", groupId: "GROUP-GUID-1"),
+        };
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(1, result.DistinctAgCount);
+        Assert.Equal(2, result.AvailabilityGroupCount);
+    }
+
+    [Fact]
+    public void DistinctAgCount_TwoSecondariesOfOneAg_NoGroupId_DisjointReplicaSets_IsTwo()
+    {
+        /* The id-LESS companion to the pin above, proving the RED this branch closes: the SAME two disjoint-
+           replica-set secondaries, with NO group_id on either row, count as 2 under the name+overlap rule
+           alone -- exactly the gap #4475's follow-up (V151) exists to close. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "SECONDARY"),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(2, result.DistinctAgCount);
+        Assert.Equal(2, result.AvailabilityGroupCount);
+    }
+
+    /* ─────────────────────── #4474: fill by measured serialized bytes, not a fixed count ─────────────────────── */
+
+    /// <summary>A realistic wide group: 2 replicas plus <paramref name="databaseCount"/> databases, with
+    /// field widths like a real fleet's (LSN strings the shape SQL Server actually reports, endpoint URLs,
+    /// suspend reasons on the unhealthy path) rather than the thin fixture #4471's original DefaultGroupLimit=11
+    /// was sized from.</summary>
+    private static (Reader.ReplicaRow[] Replicas, Reader.DatabaseRow[] Databases) WideGroup(
+        int serverId, string agName, int databaseCount, bool critical = false)
+    {
+        var serverName = $"NODE{serverId:D3}A";
+        var replicas = new[]
+        {
+            Replica(serverId, serverName, agName, serverName, "PRIMARY"),
+            Replica(serverId, serverName, agName, $"NODE{serverId:D3}B", "SECONDARY", syncHealth: critical ? "NOT_HEALTHY" : "HEALTHY"),
+        };
+
+        var databases = new Reader.DatabaseRow[databaseCount];
+        for (var i = 0; i < databaseCount; i++)
+        {
+            databases[i] = new Reader.DatabaseRow(
+                serverId, serverName, At(1), agName, $"AppDatabase_{agName}_{i:D2}", $"NODE{serverId:D3}B", true,
+                critical && i == 0 ? "NOT SYNCHRONIZING" : "SYNCHRONIZED",
+                "00000029000A6B4C000100AE", "00000029000A6B4B00010098",
+                critical && i == 0 ? 9500L : 12L, critical && i == 0 ? 3800L : 4L, 1024L, 1024L,
+                critical && i == 0, critical && i == 0 ? "SUSPEND_FROM_USER" : null,
+                "SYNCHRONOUS_COMMIT", critical && i == 0 ? 4820L : 0L, null);
+        }
+
+        return (replicas, databases);
+    }
+
+    /// <summary>
+    /// #4474: the RUNTIME RED this branch closes. A 42-group fleet shaped like the field report (2 replicas
+    /// plus 10 databases/group, realistic field widths) overshoots the 32 KB budget by close to 2x at the OLD
+    /// fixed DefaultGroupLimit=11 count-cap — the exact failure mode a byte-measured fill replaces. This pin
+    /// asserts the NEW behavior (fits the budget, returns fewer than all 42, flags truncation) and is also the
+    /// vehicle for the mutation: reverting <c>Build</c>'s fill loop to the old <c>groups.Take(limit)</c> shape
+    /// turns this red (see the PR body for the measured before/after).
+    /// </summary>
+    [Fact]
+    public void Build_FortyTwoWideGroups_FillsToTheByteBudgetMostSevereFirst()
+    {
+        var allReplicas = new List<Reader.ReplicaRow>();
+        var allDatabases = new List<Reader.DatabaseRow>();
+        for (var i = 0; i < 42; i++)
+        {
+            var (replicas, databases) = WideGroup(i + 1, $"AG_FLEET_{i:D2}", 10);
+            allReplicas.AddRange(replicas);
+            allDatabases.AddRange(databases);
+        }
+
+        var result = Reader.Build(allReplicas, allDatabases, At(0), limit: 100);
+        var json = JsonSerializer.Serialize(result, Reader.JsonOptions);
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+
+        Assert.True(bytes <= McpResponseBudget.DefaultBytes, $"response was {bytes} bytes, over the {McpResponseBudget.DefaultBytes} budget");
+        Assert.Equal(42, result.GroupsTotal);
+        Assert.True(result.GroupsReturned < 42, "a byte-fit page over a 42-group wide fleet must not return every group");
+        Assert.Equal(result.GroupsReturned, result.AvailabilityGroups.Count);
+        Assert.True(result.GroupsTruncated);
+        Assert.NotNull(result.GroupsTruncatedNote);
+        Assert.Contains("byte", result.GroupsTruncatedNote, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>#4474 (b): a small fleet (3 databases/group, well under the byte budget on its own) still gets
+    /// every group back — no regression from the byte-fit walk on the common case the old fixed cap of 11
+    /// already handled fine.</summary>
+    [Fact]
+    public void Build_SmallFleet_ReturnsEveryGroupUnderTheByteBudget()
+    {
+        var allReplicas = new List<Reader.ReplicaRow>();
+        var allDatabases = new List<Reader.DatabaseRow>();
+        for (var i = 0; i < 5; i++)
+        {
+            var (replicas, databases) = WideGroup(i + 1, $"AG_SMALL_{i:D2}", 3);
+            allReplicas.AddRange(replicas);
+            allDatabases.AddRange(databases);
+        }
+
+        var result = Reader.Build(allReplicas, allDatabases, At(0), limit: 100);
+
+        Assert.Equal(5, result.GroupsTotal);
+        Assert.Equal(5, result.GroupsReturned);
+        Assert.False(result.GroupsTruncated);
+        Assert.Null(result.GroupsTruncatedNote);
+    }
+
+    /// <summary>#4474 (c): a single group so wide it alone exceeds the budget still comes back — exactly 1
+    /// group, never 0 — with the note saying the budget, not the count, was the reason.</summary>
+    [Fact]
+    public void Build_OneOversizedGroup_ReturnsExactlyOneGroupNeverZero()
+    {
+        var (replicas, databases) = WideGroup(1, "AG_HUGE", 400);
+
+        var result = Reader.Build(replicas, databases, At(0), limit: 100);
+        var json = JsonSerializer.Serialize(result, Reader.JsonOptions);
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+
+        Assert.True(bytes > McpResponseBudget.DefaultBytes, $"fixture must itself exceed the budget to prove the floor; measured {bytes}");
+        Assert.Equal(1, result.GroupsTotal);
+        Assert.Equal(1, result.GroupsReturned);
+        Assert.Single(result.AvailabilityGroups);
+        Assert.False(result.GroupsTruncated, "a single group, even oversized, is not itself a cut");
+        Assert.Null(result.GroupsTruncatedNote);
+    }
+
+    /// <summary>
+    /// #4568: the tail-correction pin. This fixture's 12-group page fits the byte budget WITHOUT the
+    /// <c>groups_truncated_note</c> field (32,638 bytes, measured off a bare envelope the same way the old
+    /// fill loop measured it) but goes OVER budget once the real, final note text is counted (32,810 bytes) —
+    /// exactly the gap #4568 found: the fill loop's stopping point ignored the note it was about to add. Asserts
+    /// the ACTUAL RETURNED response (the one a caller receives) fits the budget regardless. RED before the tail
+    /// correction, because the fill loop's page (12 groups) is the one returned unmodified.
+    /// </summary>
+
+
+    [Fact]
+    public void Build_NoteItselfWouldPushPastBudget_TailCorrectionDropsAGroupToFit()
+    {
+        var allReplicas = new List<Reader.ReplicaRow>();
+        var allDatabases = new List<Reader.DatabaseRow>();
+        for (var i = 0; i < 20; i++)
+        {
+            /* The single extra 'X' in every name (over the #4474 fixture's shape) is what makes the note's
+               own byte cost tip a page that fits without the note over budget with it — see the PR body for
+               the measured before/after this fixture was tuned from. */
+            var (replicas, databases) = WideGroup(i + 1, $"AG_TAIL_{i:D2}XX", 3);
+            allReplicas.AddRange(replicas);
+            allDatabases.AddRange(databases);
+        }
+
+        var result = Reader.Build(allReplicas, allDatabases, At(0), limit: 21);
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(result, Reader.JsonOptions));
+
+        Assert.True(result.GroupsTruncated);
+        Assert.NotNull(result.GroupsTruncatedNote);
+        Assert.True(bytes <= McpResponseBudget.DefaultBytes,
+            $"the response actually returned (note included) must itself fit the budget; measured {bytes}");
+        Assert.Equal(result.GroupsReturned, result.AvailabilityGroups.Count);
+        /* The note's own group count must match what's actually returned -- the tail correction rebuilds the
+           note after every group it drops, so a stale count (naming a page one group larger than what's back)
+           would mean the correction dropped a group without re-wording the note that describes it. */
+        Assert.Contains($"only {result.GroupsReturned} fit", result.GroupsTruncatedNote);
+    }
+
+    /// <summary>#4474 (d): an explicit limit smaller than what the byte budget would allow still caps at
+    /// exactly that limit — limit stays an upper bound underneath the budget, not just a suggestion the budget
+    /// walk can override upward.</summary>
+    [Fact]
+    public void Build_ExplicitLimitSmallerThanBudgetFit_CapsAtExactlyTheLimit()
+    {
+        var allReplicas = new List<Reader.ReplicaRow>();
+        var allDatabases = new List<Reader.DatabaseRow>();
+        for (var i = 0; i < 10; i++)
+        {
+            var (replicas, databases) = WideGroup(i + 1, $"AG_CAP_{i:D2}", 3);
+            allReplicas.AddRange(replicas);
+            allDatabases.AddRange(databases);
+        }
+
+        var result = Reader.Build(allReplicas, allDatabases, At(0), limit: 4);
+
+        Assert.Equal(10, result.GroupsTotal);
+        Assert.Equal(4, result.GroupsReturned);
+        Assert.Equal(4, result.AvailabilityGroups.Count);
+        Assert.True(result.GroupsTruncated);
+        Assert.Contains("top 4", result.GroupsTruncatedNote);
+    }
 }

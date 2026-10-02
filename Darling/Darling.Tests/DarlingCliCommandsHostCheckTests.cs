@@ -174,6 +174,23 @@ public sealed class DarlingCliCommandsHostCheckTests
         var root = Directory.CreateTempSubdirectory("darling-checksettings-stale-");
         try
         {
+            /* Migrate "darling" itself, whether this test just created it or found it there. Creating the
+               database is not enough: the managed path ends in DarlingStoreHostProfile.ReadStoredManagedConf
+               VerdictsAsync, which reads collect.managed_conf_verdicts (V146), and an empty database throws
+               42P01 before any verdict is judged. CI never showed it only because darling-pg's DARLING_TEST_PG
+               names Database=darling: the live-postgres collection fixture migrates that very database before
+               the first test runs. On a rig whose suite database has any other name (darlingtest, say) nothing
+               ever migrated "darling", so the test passed only after some other test had. MigrateAsync is
+               idempotent (the fixture makes the same call), so this is a no-op where the store is already
+               established and the whole setup where it is not — no dependency on another test or on order.
+               Pooling=false: this connection must not pin the database against the DROP in the finally. */
+            var darlingBuilder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "darling", Pooling = false };
+            await using (var darling = new NpgsqlConnection(darlingBuilder.ConnectionString))
+            {
+                await darling.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(darling, ct);
+            }
+
             var dataDirectory = Path.Combine(root.FullName, "data");
             Directory.CreateDirectory(dataDirectory);
 

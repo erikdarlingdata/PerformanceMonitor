@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -68,6 +70,11 @@ namespace PerformanceMonitor.Alerting;
 /// <c>suppressPopups</c> — edge-trigger watermarks don't advance where Lite's don't. Lite forwards
 /// its per-server acknowledge/silence state here; Darling always passes false.
 /// </param>
+/// <param name="SeparatelyMonitoredDatabases">
+/// The databases monitored as their own targets on this target's server. Non-empty only for an Azure SQL
+/// Database <c>master</c> target: those databases' blocking and deadlock events alert on their own targets,
+/// so this target skips them. Null or empty changes nothing.
+/// </param>
 public sealed record AlertServerSnapshot(
     string ServerKey,
     string ServerName,
@@ -76,4 +83,22 @@ public sealed record AlertServerSnapshot(
     double? TotalCpuPercent,
     bool IsAzureSqlDb,
     bool Suppressed,
-    DateTime? CpuSampleTimeUtc);
+    DateTime? CpuSampleTimeUtc,
+    IReadOnlyList<string>? SeparatelyMonitoredDatabases = null)
+{
+    /// <summary>The server's store id, when the host has one. Darling sets it so a mute rule keyed on the id
+    /// can tell two servers apart that share a display name (a blank name falls back to the host, so two
+    /// databases on one Azure SQL Database logical server read identically). Lite and Dashboard leave it
+    /// null: their rules never carry an id, so their name-keyed match is the only one that applies.</summary>
+    public int? ServerId { get; init; }
+
+    /// <summary>True when another registration carries the same display name (ordinal), blank-on-host, host-equal
+    /// or typed alike. Darling sets it from the registry snapshot; Lite and the Dashboard never do, so their
+    /// dedup keys do not change.</summary>
+    public bool ServerNameIsShared { get; init; }
+
+    /// <summary>The server string the dedup fingerprint hashes: the display name, plus the store id when the
+    /// name is shared with another registration (see <see cref="AlertFingerprint.ServerIdentity"/>). Mute contexts and
+    /// everything shown keep <see cref="ServerName"/>; only fingerprint inputs use this.</summary>
+    public string FingerprintServerName => AlertFingerprint.ServerIdentity(ServerName, ServerId, ServerNameIsShared);
+}

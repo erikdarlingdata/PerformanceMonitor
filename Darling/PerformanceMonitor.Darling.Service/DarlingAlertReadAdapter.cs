@@ -7,13 +7,18 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -155,6 +160,7 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     private readonly Func<int, int>? _blockingSnapshotCadenceMinutes;
     private readonly AlertReadFailureCounter? _readFailures;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
+    private readonly ILogger? _logger;
 
     /// <param name="runningJobsCadenceMinutes">
     /// Resolves a server's EFFECTIVE running_jobs collection cadence (minutes) for the #1812
@@ -171,6 +177,10 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// engine takes it — a test constructs its own and cannot pollute the shared one. Null (most test call
     /// sites) retries exactly the same way and counts nothing.
     /// </param>
+    /// <param name="queryStoreWriteFence">
+    /// #4659: the fence the collector runner brackets every Query Store write with. Null = the forced-plan
+    /// failure read saves and reuses nothing: every pass runs the full read (any other construction site).
+    /// </param>
     /// <param name="delay">
     /// The pause between a read's two attempts, injectable so a pin can assert the seam WAITED
     /// <see cref="AlertPassRetryDelaySeconds"/> without spending two seconds of test time doing it.
@@ -181,13 +191,17 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
         Func<int, int>? runningJobsCadenceMinutes = null,
         Func<int, int>? blockingSnapshotCadenceMinutes = null,
         AlertReadFailureCounter? readFailures = null,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
+        Func<TimeSpan, CancellationToken, Task>? delay = null,
+        ILogger? logger = null,
+        QueryStoreWriteFence? queryStoreWriteFence = null)
     {
+        _queryStoreWriteFence = queryStoreWriteFence;
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runningJobsCadenceMinutes = runningJobsCadenceMinutes;
         _blockingSnapshotCadenceMinutes = blockingSnapshotCadenceMinutes;
         _readFailures = readFailures;
         _delay = delay ?? Task.Delay;
+        _logger = logger;
     }
 
     /* ---------------- the retry seam (#3848) ---------------- */
@@ -423,6 +437,9 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// shared alert row's fields (same WHERE / ORDER BY event_time DESC / LIMIT 200 semantics).
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
+    /// <remarks>Deliberately windows on <c>collection_time</c>, NOT <c>event_time</c>: the alert sweep is a
+    /// delivery cursor ("rows collected since the last sweep"). On the event time, a report collected seconds
+    /// late, or hours late after an outage, would fall before the window and never alert.</remarks>
     public const string BlockedProcessReportsSql = @"
 SELECT
     event_time,
@@ -628,6 +645,8 @@ GROUP BY collection_time";
     /* ---------------- deadlocks ---------------- */
 
     /// <summary>Lite's deadlock read (column list trimmed to the shared alert row's fields).</summary>
+    /// <remarks>Deliberately windows on <c>collection_time</c>, NOT <c>deadlock_time</c>: the alert sweep is a
+    /// delivery cursor ("rows collected since the last sweep"), so a deadlock collected late must still alert.</remarks>
     public const string DeadlocksSql = @"
 SELECT
     victim_process_id,
@@ -1017,6 +1036,15 @@ LIMIT $3";
     /// binds do not move. #3579's <c>observed_at</c> on the forced-plan read is the same column for the same
     /// reason.</para>
     ///
+    /// <para>A row stored before the allocated/used fix for another database on an Azure SQL Database server holds
+    /// that database's USED space as its total, where every later row holds the ALLOCATED size
+    /// (<see cref="AzureSiblingDatabaseSize"/>). Set beside a later row, it would read as a rise of the whole
+    /// allocation: 10,121 MB for a Hyperscale database that did not grow. Both CTEs leave those rows out, at read
+    /// time, so the read covers history collected before the change without rewriting it, and the newest row and
+    /// the baseline always come from the same shape. The database then reads like one with a single sample in the
+    /// window, growth 0, until a second sample in the new shape is inside it. Until the first collection after the
+    /// upgrade the window holds only old-shape rows, so the database is not listed at all.</para>
+    ///
     /// <para>$1 server_id, $2 window start (naive UTC).</para>
     /// </summary>
     public const string DatabaseFileGrowthSql = @"
@@ -1028,6 +1056,7 @@ WITH current_files AS (
     FROM database_size_stats
     WHERE server_id = $1
     AND   collection_time >= $2
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
     ORDER BY database_name, file_name, collection_time DESC
 ),
 baseline AS (
@@ -1036,6 +1065,7 @@ baseline AS (
     FROM database_size_stats
     WHERE server_id = $1
     AND   collection_time >= $2
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
     ORDER BY database_name, file_name, collection_time ASC
 )
 SELECT
@@ -1046,9 +1076,9 @@ SELECT
     COALESCE(c.total_size_mb, 0) AS total_size_mb,
     COALESCE(c.total_size_mb, 0) - COALESCE(b.total_size_mb, c.total_size_mb, 0) AS growth_mb,
     COALESCE(EXTRACT(EPOCH FROM (c.collection_time - b.collection_time)) / 60.0, 0) AS growth_window_minutes,
-    COALESCE(c.volume_mount_point, '') AS volume_mount_point,
-    COALESCE(c.volume_total_mb, 0) AS volume_total_mb,
-    COALESCE(c.volume_free_mb, 0) AS volume_free_mb,
+    c.volume_mount_point,
+    c.volume_total_mb,
+    c.volume_free_mb,
     c.auto_growth_mb,
     COALESCE(c.is_percent_growth, false) AS is_percent_growth,
     c.growth_pct,
@@ -1102,9 +1132,9 @@ ORDER BY c.database_name, c.file_name";
                 TotalSizeMb = Convert.ToDouble(reader.GetValue(4)),
                 GrowthMb = Convert.ToDouble(reader.GetValue(5)),
                 GrowthWindowMinutes = Convert.ToDouble(reader.GetValue(6)),
-                VolumeMountPoint = reader.GetString(7),
-                VolumeTotalMb = Convert.ToDouble(reader.GetValue(8)),
-                VolumeFreeMb = Convert.ToDouble(reader.GetValue(9)),
+                VolumeMountPoint = reader.IsDBNull(7) ? null : reader.GetString(7),
+                VolumeTotalMb = reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
+                VolumeFreeMb = reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
                 AutoGrowthMb = reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
                 IsPercentGrowth = !reader.IsDBNull(11) && reader.GetBoolean(11),
                 GrowthPct = reader.IsDBNull(12) ? null : Convert.ToDouble(reader.GetValue(12)),
@@ -1335,13 +1365,26 @@ LIMIT 1";
     /// <summary>
     /// Lite's anomalous-jobs read verbatim (running_jobs table). $2 is the threshold percent
     /// (multiplier x 100, as numeric — percent_of_average is numeric(10,1)).
-    /// <para><c>start_time</c> is the monitored server's own clock, so the server's collected UTC offset
-    /// is projected beside it — NOT <c>COALESCE(..., 0)</c>: the alert body renders an absent offset as an
+    /// <para><c>start_time</c> is the monitored server's own clock, so the newest snapshot's collected UTC
+    /// offset and time zone id (one <c>server_properties</c> row, so the two describe one snapshot) are
+    /// projected beside it — NOT <c>COALESCE(..., 0)</c>: the alert body renders an absent offset as an
     /// explicitly unconverted server-clock instant rather than as UTC (see
     /// <c>AlertTimestamp</c>), and coalescing here would take that choice away from it. Rides on this
     /// statement rather than a second command so the pass's command count is unchanged.</para>
+    /// <para>The reader turns that pair into the offset in force at EACH job's <c>start_time</c>
+    /// (<see cref="ServerLocalTimes.JobStartOffsetMinutes"/>, #4821), because the newest offset alone puts a
+    /// job that started before the zone's last daylight saving change an hour off in
+    /// <c>AnomalousJobInfo.StartTimeUtc</c> and in the alert's "Started" label.</para>
     /// </summary>
     public const string AnomalousJobsSql = @"
+WITH svr AS (
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+)
 SELECT
     job_name,
     job_id,
@@ -1350,14 +1393,8 @@ SELECT
     p95_duration_seconds,
     percent_of_average,
     start_time,
-    (
-        SELECT sp.utc_offset_minutes
-        FROM server_properties AS sp
-        WHERE sp.server_id = $1
-        AND   sp.utc_offset_minutes IS NOT NULL
-        ORDER BY sp.collection_time DESC
-        LIMIT 1
-    ) AS utc_offset_minutes
+    (SELECT utc_offset_minutes FROM svr) AS utc_offset_minutes,
+    (SELECT time_zone_id FROM svr) AS time_zone_id
 FROM running_jobs
 WHERE server_id = $1
 AND collection_time = (SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1)
@@ -1412,9 +1449,14 @@ LIMIT 5";
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdPercent);
 
+        ServerClock? clock = null;
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var startTime = reader.IsDBNull(6) ? DateTime.MinValue : reader.GetDateTime(6);
+            var snapshotOffset = reader.IsDBNull(7) ? (int?)null : reader.GetInt32(7);
+            /* #4821: every row carries the same newest-snapshot zone and offset, so the clock is built once. */
+            clock ??= ServerLocalTimes.ClockFrom(reader.IsDBNull(8) ? null : reader.GetString(8), snapshotOffset);
             items.Add(new AnomalousJobInfo
             {
                 JobName = reader.GetString(0),
@@ -1423,8 +1465,10 @@ LIMIT 5";
                 AvgDurationSeconds = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 P95DurationSeconds = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 PercentOfAverage = reader.IsDBNull(5) ? null : reader.GetDecimal(5),
-                StartTime = reader.IsDBNull(6) ? DateTime.MinValue : reader.GetDateTime(6),
-                UtcOffsetMinutes = reader.IsDBNull(7) ? null : reader.GetInt32(7)
+                StartTime = startTime,
+                /* The offset in force when THIS job started, so StartTimeUtc and the "Started" label are right for a
+                   job from before the last daylight saving change; a null offset stays null. */
+                UtcOffsetMinutes = ServerLocalTimes.JobStartOffsetMinutes(clock, startTime, snapshotOffset)
             });
         }
 
@@ -1620,6 +1664,16 @@ ORDER BY l.database_name";
             cancellationToken);
     }
 
+    /* The shared interface returns null for "no verdict" (Lite's store has too little evidence to judge). This
+       host always has a verdict, so the public method above stays non-nullable and the compiler keeps it that
+       way: this explicit member is the only place the two shapes meet, and it passes the list through
+       unchanged. */
+    async Task<List<DatabaseStateInfo>?> IAlertReadAdapter.GetDatabaseStatesAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        return await GetDatabaseStatesAsync(serverKey, cancellationToken);
+    }
+
     private async Task<List<DatabaseStateInfo>> GetDatabaseStatesCoreAsync(
         string serverKey, CancellationToken cancellationToken)
     {
@@ -1628,37 +1682,50 @@ ORDER BY l.database_name";
         var items = new List<DatabaseStateInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-        using (var seed = new NpgsqlCommand(SeedDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+        /* #4606: the seed/heal/prune/clear-recovered maintenance run ahead of the deviation read is wrapped
+           in its OWN deadlock retry — the narrowest seam that covers the victim statement — rather than
+           widened inside ExecuteWithOneRetryAsync above, because that seam's other eleven callers include
+           reads with no such idempotence argument and PostgresException is excluded there on purpose
+           ("an identical second attempt gets an identical answer"). This sequence is the one exception:
+           every statement in it is safe to repeat whole, the same property #2143's drop_chunks retry
+           (ExecuteDropChunksWithDeadlockRetryAsync in DarlingRetention.cs) relies on for the chunk-drop side
+           of this exact deadlock. Repeat-safety here: the seed is INSERT ... ON CONFLICT DO NOTHING; the
+           heal and prune are an UPDATE/DELETE keyed off the newest snapshot, each idempotent against its own
+           output; clear-recovered is an UPDATE to a fixed NULL. */
+        await ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(async () =>
         {
-            seed.Parameters.AddWithValue(serverId);
-            await seed.ExecuteNonQueryAsync(cancellationToken);
-        }
+            using (var seed = new NpgsqlCommand(SeedDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            {
+                seed.Parameters.AddWithValue(serverId);
+                await seed.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-        /* Beside the seed because it is the same job from the other end (#2189): the seed learns a baseline
-           for a database that has none, this un-learns one the database has since outgrown. Both run before
-           the read, so a poisoned expectation is corrected on the cycle that notices it rather than firing
-           once more first. */
-        using (var heal = new NpgsqlCommand(HealDatabaseStateBaselineToOnlineSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
-        {
-            heal.Parameters.AddWithValue(serverId);
-            await heal.ExecuteNonQueryAsync(cancellationToken);
-        }
+            /* Beside the seed because it is the same job from the other end (#2189): the seed learns a
+               baseline for a database that has none, this un-learns one the database has since outgrown.
+               Both run before the read, so a poisoned expectation is corrected on the cycle that notices it
+               rather than firing once more first. */
+            using (var heal = new NpgsqlCommand(HealDatabaseStateBaselineToOnlineSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            {
+                heal.Parameters.AddWithValue(serverId);
+                await heal.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-        using (var prune = new NpgsqlCommand(PruneDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
-        {
-            prune.Parameters.AddWithValue(serverId);
-            await prune.ExecuteNonQueryAsync(cancellationToken);
-        }
+            using (var prune = new NpgsqlCommand(PruneDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            {
+                prune.Parameters.AddWithValue(serverId);
+                await prune.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-        /* Before the read, so this cycle judges against a memory the store has already healed rather than
-           one carried over from a restart (#2166). A database cleared here is one that is back at its
-           expected state, so it cannot appear in the deviation read below either way — the ordering matters
-           for the NEXT deviation, not this one. */
-        using (var clearRecovered = new NpgsqlCommand(ClearRecoveredDatabaseStateAlertsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
-        {
-            clearRecovered.Parameters.AddWithValue(serverId);
-            await clearRecovered.ExecuteNonQueryAsync(cancellationToken);
-        }
+            /* Before the read, so this cycle judges against a memory the store has already healed rather
+               than one carried over from a restart (#2166). A database cleared here is one that is back at
+               its expected state, so it cannot appear in the deviation read below either way — the
+               ordering matters for the NEXT deviation, not this one. */
+            using (var clearRecovered = new NpgsqlCommand(ClearRecoveredDatabaseStateAlertsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            {
+                clearRecovered.Parameters.AddWithValue(serverId);
+                await clearRecovered.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }, serverId, _logger);
 
         using (var command = new NpgsqlCommand(DatabaseStateDeviationsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
@@ -1677,6 +1744,43 @@ ORDER BY l.database_name";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Runs the database-state seed/heal/prune/clear-recovered sequence with a SINGLE immediate retry on
+    /// <see cref="PostgresErrorCodes.DeadlockDetected"/> (40P01) — #4606, the same shape as
+    /// <see cref="DarlingRetention.ExecuteDropChunksWithDeadlockRetryAsync"/>. A <c>drop_chunks</c> holding
+    /// or waiting for an AccessExclusiveLock can pick this sequence's AccessShareLock as its deadlock victim
+    /// (measured on a production store, #4606); the partner clears within milliseconds, so one immediate
+    /// retry converts a wasted alert-pass cycle into a completed one. Exactly ONE retry, for the same reason
+    /// the purge takes exactly one: a second deadlock in a row is standing contention, and surfacing the
+    /// failure — propagating, this method's only other exit — is the right posture rather than camping a
+    /// retry loop on a lock queue. Any non-deadlock <see cref="PostgresException"/>, and any other
+    /// exception, propagates unchanged on the first attempt. The caller's own
+    /// <see cref="ExecuteWithOneRetryAsync{T}"/> command-timeout retry is untouched — this method sits
+    /// entirely inside the read that seam wraps, so a deadlock retried here never also counts there.
+    /// Internal, delegate-seamed like the purge's, so the retry/give-up/no-retry arms pin without a store.
+    /// </summary>
+    internal static async Task ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+        Func<Task> maintenance, int serverId, ILogger? logger)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await maintenance();
+                return;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected && attempt == 1)
+            {
+                /* Logged once, at Information — this is the expected transient the retry exists to absorb,
+                   not a fault: the naming (SQLSTATE + statement family) matches DarlingRetention's own
+                   deadlock-retry log so the two halves of this deadlock read the same way in a log search. */
+                logger?.LogInformation(
+                    "Alert pass database-state maintenance deadlocked ({SqlState}) for server {ServerId} — retrying once (the partner clears in milliseconds)",
+                    ex.SqlState, serverId);
+            }
+        }
     }
 
     /// <summary>How far back <see cref="ForcePlanFailuresSql"/> looks for a plan's two most recent
@@ -1715,6 +1819,11 @@ ORDER BY l.database_name";
     /// the seven ordinals the reader already binds do not move. It is <c>n.collection_time</c>, already in
     /// <c>per_collection</c>'s GROUP BY and already carried by the covering index: no new <c>qs.</c> column,
     /// so the access path below is untouched (the access-path pins re-derive the list from this text).</para>
+    ///
+    /// <para><b>The older sighting's <c>collection_time</c> is the ninth column (#4659)</b>, <c>prior_observed_at</c>:
+    /// <c>p.collection_time</c>, another <c>per_collection</c> GROUP BY key, so no new <c>qs.</c> reference. It lets
+    /// a pass reuse the previous answer while the server's newest collection is unchanged: the window's lower
+    /// edge can only drop a row whose older collection it passes.</para>
     ///
     /// <para><b>The access path is a covering index, and the column list here is what it covers (#3573).</b>
     /// <c>PgTableTuning.ForcePlanFailuresIndexName</c> is <c>(server_id, collection_time DESC) INCLUDE</c>
@@ -1760,7 +1869,8 @@ SELECT
     n.reason,
     n.failures - p.failures AS failure_delta,
     n.failures AS total_failures,
-    n.collection_time AS observed_at
+    n.collection_time AS observed_at,
+    p.collection_time AS prior_observed_at
 FROM ranked AS n
 JOIN ranked AS p
   ON  p.database_name = n.database_name
@@ -1771,6 +1881,48 @@ WHERE n.rn = 1
 AND   n.forced = 1
 AND   n.failures > p.failures
 ORDER BY n.database_name, n.query_id, n.plan_id";
+
+    /// <summary>#4659's probe: the server's newest collection inside the window. An Index Only Scan on the same
+    /// covering index (<c>server_id, collection_time DESC</c>) that reads one tuple.</summary>
+    public const string ForcePlanFailuresNewestCollectionSql = @"
+SELECT MAX(qs.collection_time)
+FROM query_store_stats AS qs
+WHERE qs.server_id = $1
+AND   qs.collection_time > $2";
+
+    /// <summary>#4659: one server's last full answer, keyed by the newest collection it was computed at and by the
+    /// write-fence generation it was read under. Each row carries its older (rn = 2) collection so a later pass can
+    /// drop the rows the sliding window has since excluded.</summary>
+    private sealed record ForcePlanFailuresMemo(DateTime NewestCollection, long Generation, IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> Rows);
+
+    private readonly ConcurrentDictionary<int, ForcePlanFailuresMemo> _forcePlanFailuresMemo = new();
+
+    private readonly QueryStoreWriteFence? _queryStoreWriteFence;
+
+    /// <summary>Test seam: awaited after the full read has read its rows and before the fence is checked for the
+    /// save.</summary>
+    internal Func<Task>? BeforeMemoStoreForTests { get; set; }
+
+    /// <summary>Number of times the full forced-plan failure read has run on this adapter (#4659).</summary>
+    internal int ForcePlanFailuresFullReads;
+
+    /// <summary>#4659: keeps the entry read under the higher generation, so a slow pass never overwrites a newer memo.</summary>
+    internal void StoreMemoForTests(int serverId, long generation, DateTime newest) =>
+        StoreMemo(serverId, new ForcePlanFailuresMemo(newest, generation, Array.Empty<(ForcePlanFailureInfo, DateTime)>()));
+
+    internal long? MemoGenerationForTests(int serverId) =>
+        _forcePlanFailuresMemo.TryGetValue(serverId, out var m) ? m.Generation : null;
+
+    private void StoreMemo(int serverId, ForcePlanFailuresMemo fresh) =>
+        _forcePlanFailuresMemo.AddOrUpdate(serverId, fresh, (_, existing) => existing.Generation > fresh.Generation ? existing : fresh);
+
+    /// <summary>#4659, PURE: the previous answer at a later window start. Exactly the full read's answer while the
+    /// server's newest collection is unchanged: the window's lower edge can only remove a plan whose older
+    /// collection it passes, never add one. The returned rows are the memo's own objects, shared across passes and
+    /// with the engine: callers must not mutate them.</summary>
+    internal static List<ForcePlanFailureInfo> ReuseForWindow(
+        IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> rows, DateTime windowStartNaive) =>
+        rows.Where(r => r.PriorObservedAt > windowStartNaive).Select(r => r.Info).ToList();
 
     public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default)
@@ -1793,16 +1945,49 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
     {
         var serverId = ParseServerKey(serverKey);
 
-        var items = new List<ForcePlanFailureInfo>();
+        /* One value, whole microseconds, for the probe, the SQL and the trim: Npgsql sends a timestamp at
+           microsecond precision, so the trim compares against exactly what the store compared against. */
+        var windowStart = FloorToMicrosecond(NaiveUtcNow() - ForcePlanFailureWindow);
+        var fence = _queryStoreWriteFence;
+        var before = fence?.Snapshot(serverId);
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        DateTime? newest;
+        using (var probe = new NpgsqlCommand(ForcePlanFailuresNewestCollectionSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+        {
+            probe.Parameters.AddWithValue(serverId);
+            probe.Parameters.AddWithValue(windowStart);
+            var scalar = await probe.ExecuteScalarAsync(cancellationToken);
+            newest = scalar is DateTime stamp ? stamp : null;
+        }
+
+        if (newest is null)
+        {
+            _forcePlanFailuresMemo.TryRemove(serverId, out _);
+            return new List<ForcePlanFailureInfo>();
+        }
+
+        /* Reused only when no Query Store write was in flight when this pass began, the memo was read under the
+           same generation, and nothing began since. A live fan-out commits one database at a time under one
+           collection_time, so the newest collection alone cannot say a later database's rows are still to come. */
+        if (before is { Quiet: true } b
+            && _forcePlanFailuresMemo.TryGetValue(serverId, out var memo)
+            && memo.Generation == b.Generation
+            && memo.NewestCollection == newest.Value
+            && fence!.Snapshot(serverId) == (b.Generation, true))
+        {
+            return ReuseForWindow(memo.Rows, windowStart);
+        }
+
+        Interlocked.Increment(ref ForcePlanFailuresFullReads);
+        var rows = new List<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)>();
         using var command = new NpgsqlCommand(ForcePlanFailuresSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(NaiveUtcNow() - ForcePlanFailureWindow);
-
+        command.Parameters.AddWithValue(windowStart);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new ForcePlanFailureInfo
+            var info = new ForcePlanFailureInfo
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
@@ -1816,10 +2001,28 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
                    The engine only ever compares one plan's stamps with each other, so the Kind is honesty
                    rather than arithmetic. */
                 ObservedAtUtc = reader.IsDBNull(7) ? null : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)
-            });
+            };
+            rows.Add((info, reader.GetDateTime(8)));
         }
 
-        return items;
+        if (BeforeMemoStoreForTests is { } beforeStore)
+        {
+            await beforeStore();
+        }
+
+        /* Saved only if the fence was quiet at both ends and did not move: a write that began, committed or
+           ended during the read may or may not be in what was read. */
+        var after = fence?.Snapshot(serverId);
+        if (before is { Quiet: true } b0 && after is { Quiet: true } a0 && a0.Generation == b0.Generation)
+        {
+            StoreMemo(serverId, new ForcePlanFailuresMemo(newest.Value, b0.Generation, rows));
+        }
+
+        /* Not quiet, or the generation moved: nothing is stored and nothing is removed. A memo that cannot be
+           reused is harmless, because reuse needs an equal generation and a quiet fence; removing here could evict
+           a newer valid memo a concurrent pass just stored. */
+
+        return rows.Select(r => r.Info).ToList();
     }
 
     private int ResolveRunningJobsCadence(int serverId) =>
@@ -1843,6 +2046,10 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
     }
 
     /* ---------------- helpers ---------------- */
+
+    /// <summary>#4659: the value truncated to whole microseconds (10 ticks), the precision a Postgres timestamp holds.</summary>
+    internal static DateTime FloorToMicrosecond(DateTime value) =>
+        DateTime.SpecifyKind(new DateTime(value.Ticks - value.Ticks % 10), value.Kind);
 
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>
     private static DateTime NaiveUtcNow() =>

@@ -46,12 +46,16 @@ public partial class PlanViewerControl
 
         // Update banners
         ShowMissingIndexes(statement.MissingIndexes);
-        ShowWaitStats(statement.WaitStats, statement.QueryTimeStats != null);
+        ShowParameters(statement);
+        ShowWaitStats(statement.WaitStats, statement.PlanWarnings, statement.QueryTimeStats != null);
         ShowRuntimeSummary(statement);
+        ShowServerContext();
         UpdateInsightsHeader();
 
         // Update cost text
         CostText.Text = $"Statement Cost: {statement.StatementSubTreeCost:F4}";
+
+        RenderMinimap();
     }
 
     #region Node Rendering
@@ -216,9 +220,11 @@ public partial class PlanViewerControl
             HorizontalAlignment = HorizontalAlignment.Center
         });
 
-        // Cost percentage
-        var costColor = node.CostPercent >= 50 ? Brushes.OrangeRed
-            : node.CostPercent >= 25 ? Brushes.Orange
+        // Cost percentage. #4629: the fixed Brushes.OrangeRed/Brushes.Orange both failed WCAG AA on
+        // Light (3.44:1 / 1.97:1 on white); CriticalOrangeBrush/WarningBrush are theme resources tuned
+        // per theme instead.
+        var costColor = node.CostPercent >= 50 ? CriticalOrangeBrush
+            : node.CostPercent >= 25 ? WarningBrush
             : (Brush)FindResource("ForegroundBrush");
 
         stack.Children.Add(new TextBlock
@@ -237,7 +243,7 @@ public partial class PlanViewerControl
 
             // Elapsed time — red if >= 1 second
             var elapsedSec = node.ActualElapsedMs / 1000.0;
-            var elapsedBrush = elapsedSec >= 1.0 ? Brushes.OrangeRed : fgBrush;
+            var elapsedBrush = elapsedSec >= 1.0 ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock
             {
                 Text = $"{elapsedSec:F3}s",
@@ -249,7 +255,7 @@ public partial class PlanViewerControl
 
             // CPU time — red if >= 1 second
             var cpuSec = node.ActualCPUMs / 1000.0;
-            var cpuBrush = cpuSec >= 1.0 ? Brushes.OrangeRed : fgBrush;
+            var cpuBrush = cpuSec >= 1.0 ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock
             {
                 Text = $"CPU: {cpuSec:F3}s",
@@ -259,19 +265,20 @@ public partial class PlanViewerControl
                 HorizontalAlignment = HorizontalAlignment.Center
             });
 
-            // Actual rows per execution vs Estimated rows (accuracy %) — red if off by 10x+.
-            // EstimateRows is per-execution, so normalize ActualRows by ActualExecutions before
-            // comparing (otherwise multi-execution operators, e.g. an NL inner side, always look off).
-            var estRows = node.EstimateRows;
-            var actualRowsPerExec = node.ActualExecutions > 0 ? node.ActualRows / (double)node.ActualExecutions : node.ActualRows;
-            var accuracyRatio = estRows > 0 ? actualRowsPerExec / estRows : (actualRowsPerExec > 0 ? double.MaxValue : 1.0);
-            var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? Brushes.OrangeRed : fgBrush;
-            var accuracy = estRows > 0
-                ? $" ({accuracyRatio * 100:F0}%)"
-                : "";
+            // Actual rows vs EXPECTED rows (accuracy %) — orange if off by 10x+. ActualRows is a total:
+            // across every execution of the operator and, in a parallel zone, across every thread.
+            // EstimateRows is per execution, so the total is set against RowEstimateHelper.GetExpectedRows,
+            // which multiplies the estimate by ActualExecutions only on the inner side of a Nested Loops
+            // join (a real loop count there) and leaves it alone everywhere else (a thread count there,
+            // which would inflate the expectation by the DOP). The brush takes its ratio from the same
+            // RowEstimateHelper, so an accurate operator is never orange at any DOP (#4627).
+            var accuracyRatio = RowEstimateHelper.GetRowAccuracyRatio(node);
+            var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock
             {
-                Text = $"{actualRowsPerExec:N0} of {estRows:N0}{accuracy}",
+                // The totals as "609 of 2,983 (20%)", with just enough decimals that the numbers and the
+                // percentage agree: a Key Lookup that ran 117 times for 1 row reads "1 of 1.128 (89%)".
+                Text = PlanRowAccuracy.FormatActualOfExpected(node.ActualRows, RowEstimateHelper.GetExpectedRows(node)),
                 FontSize = 9,
                 Foreground = rowBrush,
                 TextAlignment = TextAlignment.Center,
@@ -297,7 +304,10 @@ public partial class PlanViewerControl
             });
         }
 
-        // Total warning count badge on root node
+        // Total warning count badge on root node. #4629: was the fixed OrangeBrush (hex FFB347), 1.78:1
+        // on Light's white node background — well under WCAG AA's 4.5:1 floor for text. WarningBrush
+        // is the theme token Light/Dark/CoolBreeze each already tune to pass 4.5:1 on their own
+        // backgrounds, so the badge keeps its orange/warning meaning in every theme.
         if (totalWarningCount > 0)
         {
             var badgeRow = new StackPanel
@@ -310,7 +320,7 @@ public partial class PlanViewerControl
             {
                 Text = "\u26A0",
                 FontSize = 13,
-                Foreground = OrangeBrush,
+                Foreground = WarningBrush,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 4, 0)
             });
@@ -319,7 +329,7 @@ public partial class PlanViewerControl
                 Text = $"{totalWarningCount} warning{(totalWarningCount == 1 ? "" : "s")}",
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = OrangeBrush,
+                Foreground = WarningBrush,
                 VerticalAlignment = VerticalAlignment.Center
             });
             stack.Children.Add(badgeRow);
@@ -371,11 +381,35 @@ public partial class PlanViewerControl
         return new WpfPath
         {
             Data = geometry,
-            Stroke = EdgeBrush,
+            Stroke = GetLinkColorBrush(child),
             StrokeThickness = thickness,
             StrokeLineJoin = PenLineJoin.Round,
             ToolTip = BuildEdgeTooltipContent(child),
             SnapsToDevicePixels = true
+        };
+    }
+
+    /// <summary>
+    /// Returns the brush for the edge feeding <paramref name="child"/>, colored by how far its actual
+    /// row count diverged from the rows it was expected to return (#4627). The node is handed to
+    /// <see cref="PlanEdgeColour"/> whole: <see cref="RowEstimateHelper"/> decides from its place in the
+    /// tree whether ActualExecutions is a real loop count (Nested Loops inner side) or a parallel zone's
+    /// thread count, which no caller here can judge from the numbers alone. Only actual plans get
+    /// non-default colors. The pure ratio-to-tier logic lives in <see cref="PlanEdgeColour"/> so it can
+    /// be pinned without WPF.
+    /// </summary>
+    private SolidColorBrush GetLinkColorBrush(PlanNode child)
+    {
+        var key = PlanEdgeColour.ForChild(child, AccuracyRatioDivergenceLimit);
+        return key switch
+        {
+            PlanEdgeColourKey.LightOrange => EdgeLightOrangeBrush,
+            PlanEdgeColourKey.FluoOrange => EdgeFluoOrangeBrush,
+            PlanEdgeColourKey.FluoRed => EdgeFluoRedBrush,
+            PlanEdgeColourKey.Blue => EdgeBlueBrush,
+            PlanEdgeColourKey.LightBlue => EdgeLightBlueBrush,
+            PlanEdgeColourKey.FluoBlue => EdgeFluoBlueBrush,
+            _ => EdgeBrush,
         };
     }
 
@@ -447,6 +481,32 @@ public partial class PlanViewerControl
         if (bytes < 1024 * 1024) return $"{bytes / 1024:N0} KB";
         if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024 * 1024):N0} MB";
         return $"{bytes / (1024L * 1024 * 1024):N1} GB";
+    }
+
+    /// <summary>
+    /// Turns a warning header into a link to the operator it came from (#4534), when the warning
+    /// knows one. Findings with no operator origin are left as plain text rather than given a link
+    /// that would go somewhere arbitrary, because a reader would believe it.
+    /// </summary>
+    private void AttachOriginNavigation(TextBlock header, string headerText, List<int> originNodeIds)
+    {
+        var nav = PlanWarningDisplay.OriginNavigationText(originNodeIds);
+        if (nav == null)
+            return;
+
+        header.Text = headerText + nav.Value.Suffix;
+        header.Cursor = Cursors.Hand;
+        /* Text with no background only hit-tests the pixels its glyphs drew, so both the hand cursor
+           and the click below would die in the gaps between words. This is a navigation target; it
+           needs the whole line to be clickable. */
+        header.Background = Brushes.Transparent;
+        ToolTipService.SetToolTip(header, nav.Value.Tooltip);
+
+        header.MouseLeftButtonDown += (_, e) =>
+        {
+            if (TryNavigateToNode(originNodeIds[0]))
+                e.Handled = true;
+        };
     }
 
     #endregion

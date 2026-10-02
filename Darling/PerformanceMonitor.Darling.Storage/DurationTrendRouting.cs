@@ -158,7 +158,8 @@ public static class DurationTrendRouting
     /// <para>With <paramref name="withDatabaseFilter"/>, $4 is the viewer's guarded <c>text[]</c> database
     /// filter (#1319) — both hourly rollups group by <c>database_name</c>, so the filter survives the routing.
     /// Without it the text is the MCP reader's constant byte for byte, which is what its pin asserts.
-    /// $1 server_id, $2/$3 window (naive UTC).</para>
+    /// $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a bucket is stamped at its START, so the hour
+    /// that begins at $3 lies after the window and is not read).</para>
     /// </summary>
     public static string BuildHourlyTrendSql(string hourlyView, bool withDatabaseFilter)
     {
@@ -176,7 +177,7 @@ public static class DurationTrendRouting
             FROM {hourlyView}
             WHERE server_id = $1
             AND   bucket >= $2
-            AND   bucket <= $3{filter}
+            AND   bucket < $3{filter}
             GROUP BY bucket
             ORDER BY bucket
             """;
@@ -342,7 +343,8 @@ public static class DurationTrendRouting
     /// not read low for hours it does not contain. The rollup keeps hourly sums, not the collections inside them,
     /// so the peak on this tier is the bucket's busiest HOUR — the finest grain the rollup holds, and at 60 minutes
     /// the point's own rate; nor is any hour unrated, because its denominator is known. $1 server_id, $2/$3 window
-    /// (naive UTC), $4 the bucket width in minutes.
+    /// (naive UTC; $3 is EXCLUSIVE — a bucket is stamped at its START, so the hour that begins at $3 lies after
+    /// the window and is not read), $4 the bucket width in minutes.
     /// </summary>
     public static string BuildBucketedHourlyTrendSql(string hourlyView)
     {
@@ -358,7 +360,7 @@ public static class DurationTrendRouting
                 FROM {hourlyView}
                 WHERE server_id = $1
                 AND   bucket >= $2
-                AND   bucket <= $3
+                AND   bucket < $3
                 GROUP BY bucket
             )
             SELECT

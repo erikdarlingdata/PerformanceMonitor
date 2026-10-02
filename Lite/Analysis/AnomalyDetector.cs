@@ -329,13 +329,20 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
             using var cmd = connection.CreateCommand();
             /* #3653 A8 option B (lane L4a): one row per target-local hour tile — arg_max replaces the
                ORDER BY … LIMIT 1 peak-time subquery, DuckDB's per-tile twin of Darling's array_agg. $4..$6
-               bind BaselineLocalClock's window clock (map.WindowClock), never the cached baseline clock. */
+               bind BaselineLocalClock's window clock (map.WindowClock), never the cached baseline clock.
+
+               #4731: the peak time orders by value, then collection_time DESC - Darling's
+               array_agg(collection_time ORDER BY value DESC NULLS LAST, collection_time DESC)[1], so two rows
+               tied on the peak report the later time on every run, and a row with no value is never the peak
+               time. The key is a STRUCT; DuckDB compares STRUCTs
+               field by field, and treats a NULL field as LARGER than any value. The FILTER keeps a row with a NULL
+               value out of the aggregate, as arg_max(arg, val) itself always ignored it. */
             cmd.CommandText = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(sqlserver_cpu_utilization) AS peak_cpu,
        AVG(sqlserver_cpu_utilization) AS avg_cpu,
        COUNT(*) AS sample_count,
-       arg_max(collection_time, sqlserver_cpu_utilization) AS peak_time
+       arg_max(collection_time, (sqlserver_cpu_utilization, collection_time)) FILTER (WHERE sqlserver_cpu_utilization IS NOT NULL) AS peak_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2 AND collection_time < $3
@@ -434,6 +441,50 @@ ORDER BY local_hour";
         {
             AppLogger.Error("AnomalyDetector", $"CPU anomaly detection failed: {ex.Message}");
         }
+    }
+
+    private static async Task<bool> IsAzureSqlDatabaseAsync(DuckDBConnection connection, AnalysisContext context)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT engine_edition
+FROM v_server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        var edition = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return edition is not null and not DBNull
+            && Convert.ToInt32(edition) == PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
+    }
+
+    /// <summary>
+    /// The young-baseline bar's peak: the same window and per-collection shape as the rate read, with the
+    /// numerator leaving out <see cref="AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase"/>.
+    /// </summary>
+    private static async Task<double> ReadYoungBaselineBarPeakAsync(DuckDBConnection connection, AnalysisContext context)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+WITH per_collection AS (
+    SELECT collection_time,
+           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_wait_time_ms >= 0
+    GROUP BY collection_time
+)
+SELECT MAX(CASE WHEN interval_sec > 0 THEN bar_wait_ms / interval_sec END)
+FROM per_collection";
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        var peak = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return peak is null or DBNull ? 0.0 : Convert.ToDouble(peak);
     }
 
     /// <summary>
@@ -562,6 +613,9 @@ ORDER BY local_hour";
                scored: the worst tile's on the tiled path, the start bucket's (and whole-window peak/mean)
                on every other arm. */
             bool isNew;
+            // True only when the young-baseline bar fired with the Azure exclusion applied: the contributors it left out
+            // are stamped so the finding's text can say they did not count toward the threshold.
+            var barExcludedApplied = false;
             double ratio;
             double reportPeak;
             double reportAvg;
@@ -625,7 +679,15 @@ ORDER BY local_hour";
                 bucketUsed = baseline;
                 reportPeak = whole.Peak;
                 reportAvg = whole.Mean;
-                ratio = peakRate >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
+                // On an Azure SQL Database the bar leaves out YoungBaselineBarExcludedWaitsAzureSqlDatabase
+                // (a steady platform timer); the reported rates stay the all-types figures.
+                var barPeak = peakRate;
+                if (await IsAzureSqlDatabaseAsync(connection, context))
+                {
+                    barPeak = await ReadYoungBaselineBarPeakAsync(connection, context);
+                    barExcludedApplied = true;
+                }
+                ratio = barPeak >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
                 if (ratio < DefaultRatioThreshold) return;
                 modifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportPeak);
                 meanModifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportAvg);
@@ -663,13 +725,15 @@ ORDER BY local_hour";
             // the type name in the value), value = the type's total wait ms in the window.
             using (var contribCmd = connection.CreateCommand())
             {
+                /* Keyed on rtrim(wait_type), as the wait facts are: a name stored with the DMV's trailing space
+                   is one contributor with its clean name. */
                 contribCmd.CommandText = @"
-SELECT wait_type,
+SELECT rtrim(wait_type) AS wait_type,
        SUM(delta_wait_time_ms)::BIGINT AS total_ms
 FROM v_wait_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   delta_wait_time_ms > 0
-GROUP BY wait_type
+GROUP BY rtrim(wait_type)
 ORDER BY total_ms DESC
 LIMIT 6";
                 contribCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -681,6 +745,8 @@ LIMIT 6";
                 {
                     var waitType = contribReader.GetString(0);
                     metadata[$"contrib_{waitType}"] = Convert.ToDouble(contribReader.GetValue(1));
+                    if (barExcludedApplied && AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase.Contains(waitType))
+                        metadata[$"{AnomalyThresholds.BarExcludedMetadataPrefix}{waitType}"] = 1;
                 }
             }
 
@@ -717,28 +783,46 @@ LIMIT 6";
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
+            /* On an Azure SQL Database master target, events of databases monitored as their own targets
+               are skipped (their findings come from those targets). Only the current-window counts are
+               filtered; the baseline stays server-wide, which can only make a master spike less likely,
+               an accepted trade because master is not those databases' alerting home.
+               The DMV arm below stays on collection_time because a snapshot's event_time IS its collection time. */
+            var scopeList = context.SeparatelyMonitoredDatabases;
+            var scoped = scopeList is { Count: > 0 };
+            var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
             /* current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
                snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
                overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
-            cmd.CommandText = @"
+            cmd.CommandText = (@"
 SELECT
     COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3), 0),
+        (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3{SCOPE}") + @" AS ev), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS current_blocking,
-    (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS current_deadlocks";
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3{SCOPE})) AS current_blocking,
+    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks")
+                .Replace("{SCOPE}", rowScope);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            SeparatelyMonitoredScope.AddParameters(cmd, scopeList);
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            long currentBlocking;
+            long currentDeadlocks;
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                if (!await reader.ReadAsync(context.CancellationToken)) return;
+                currentBlocking = Convert.ToInt64(reader.GetValue(0));
+                currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            }
 
-            var currentBlocking = Convert.ToInt64(reader.GetValue(0));
-            var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            if (scoped)
+            {
+                currentDeadlocks = await SeparatelyMonitoredScope.CountDeadlocksAsync(
+                    connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                    inclusiveEnd: false, scopeList!, context.CancellationToken);
+            }
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),
@@ -753,6 +837,9 @@ SELECT
             // SampleCount>0): a thin/zero-history baseline falls back to the absolute event count rather
             // than an inflated ratio. is_new marks that fallback so the composer renders it honestly as
             // a first occurrence — never the dishonest "spiked to 100×" the sentinel used to render.
+            // #4731: CountFamilyMetadata (one function for both products) assembles the fact's keys, and beside
+            // is_new it stamps baseline_zero_history, so a MEASURED zero is worded as one rather than as a
+            // first occurrence. The firing rule below is unchanged.
             var blockingTrust = blockingBaseline.IsTrustworthy;
             var deadlockTrust = deadlockBaseline.IsTrustworthy;
             var baselineBlockingRate = blockingBaseline.SampleCount > 0 ? blockingBaseline.Mean : 0;
@@ -762,14 +849,7 @@ SELECT
             // baseline; untrustworthy → fire on the count alone).
             if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
-                var isNew = !blockingTrust;
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_count"] = currentBlocking,
-                    ["baseline_rate"] = baselineBlockingRate,
-                    ["ratio"] = isNew ? NoBaselineRatio : currentBlockingPerHour / baselineBlockingRate,
-                    ["is_new"] = isNew ? 1 : 0
-                };
+                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline);
                 AddBaselineContext(metadata, blockingBaseline);
 
                 anomalies.Add(new Fact
@@ -786,14 +866,7 @@ SELECT
             // baseline; untrustworthy → fire on the count alone).
             if (currentDeadlocks >= 3 && (!deadlockTrust || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
             {
-                var isNew = !deadlockTrust;
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_count"] = currentDeadlocks,
-                    ["baseline_rate"] = baselineDeadlockRate,
-                    ["ratio"] = isNew ? NoBaselineRatio : currentDeadlocksPerHour / baselineDeadlockRate,
-                    ["is_new"] = isNew ? 1 : 0
-                };
+                var metadata = CountFamilyMetadata.Build(currentDeadlocks, currentDeadlocksPerHour, baselineDeadlockRate, deadlockBaseline);
                 AddBaselineContext(metadata, deadlockBaseline);
 
                 anomalies.Add(new Fact
@@ -849,7 +922,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat,
        COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count
 FROM v_file_io_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   (delta_reads > 0 OR delta_writes > 0)
 GROUP BY local_hour
 ORDER BY local_hour";
@@ -1048,7 +1121,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
        COUNT(*) AS sample_count
 FROM v_perfmon_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   counter_name = 'Batch Requests/sec'
 AND   delta_cntr_value >= 0
 AND   sample_interval_seconds > 0
@@ -1177,7 +1250,7 @@ WITH per_collection AS (
     SELECT collection_time,
            SUM(connection_count)::DOUBLE PRECISION AS total_connections
     FROM v_session_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY collection_time
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
@@ -1311,7 +1384,7 @@ WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_elapsed_time)::DOUBLE PRECISION AS total_elapsed
     FROM v_query_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_execution_count > 0
     AND   delta_elapsed_time >= 0
     GROUP BY collection_time
@@ -1447,7 +1520,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS avg_pressure,
        COUNT(*) AS sample_count
 FROM v_memory_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   target_server_memory_mb > 0
 GROUP BY local_hour
 ORDER BY local_hour";

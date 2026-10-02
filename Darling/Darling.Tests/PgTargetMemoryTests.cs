@@ -168,7 +168,7 @@ public sealed class PgTargetMemoryTests
 
         new FactScorer().ScoreAll(facts);
         Assert.Equal(0, pressure.BaseSeverity);
-        Assert.Equal(0, pressure.Metadata["threshold_lineage"]);
+        Assert.Equal(1, pressure.Metadata["threshold_lineage"]);
         var advice = PgTargetAdvice.Compose(PgTargetFactKeys.HostMemoryPressure, facts.ToFactLookup())!;
         Assert.Contains("not collected for this target", advice.Headline, StringComparison.Ordinal);
         Assert.Contains("no row for this server", advice.Investigation, StringComparison.Ordinal);
@@ -353,7 +353,7 @@ public sealed class PgTargetMemoryTests
         var doubled = Sum(2.0);
         Assert.Equal(PgTargetScorer.ConfigAdvisoryBase, PgTargetScorer.ScoreBase(doubled));  // still the advisory base — D5
         Assert.Equal(1, doubled.Metadata[PgTargetScorer.MemoryOvercommitCriticalBandKey]);
-        Assert.Equal(0, doubled.Metadata["threshold_lineage"]);  // the chosen band participated
+        Assert.Equal(1, doubled.Metadata["threshold_lineage"]);  // the measured band participated
 
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(new Fact { Source = PgTargetSources.MemorySource, Key = "PG_MEMORY_SOMETHING_ELSE", Value = 9 }));
     }
@@ -375,7 +375,7 @@ public sealed class PgTargetMemoryTests
         /* A single dip to 1 % with no three-sample run: min 0.01, nothing sustained → 0. */
         var dip = Pressure(sustained: null, min: 0.01);
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(dip));
-        Assert.Equal(0, dip.Metadata["threshold_lineage"]);
+        Assert.Equal(1, dip.Metadata["threshold_lineage"]);
 
         var unavailable = Pressure(sustained: 0.0);
         unavailable.Metadata["unavailable"] = 1;
@@ -510,10 +510,10 @@ public sealed class PgTargetMemoryTests
         var lifted = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMemoryOvercommit, pressured.ToFactLookup())!;
         Assert.EndsWith("— more than double", lifted.Headline, StringComparison.Ordinal);
         Assert.Contains("PG_HOST_MEMORY_PRESSURE co-fires", lifted.Investigation, StringComparison.Ordinal);
-        Assert.Contains("2× band is a chosen line", lifted.Investigation, StringComparison.Ordinal);
+        Assert.Contains("2× band is measured against the dogfood fleet", lifted.Investigation, StringComparison.Ordinal);
         var pressure = PgTargetAdvice.Compose(PgTargetFactKeys.HostMemoryPressure, pressured.ToFactLookup())!;
         Assert.Contains("fell to 5% of total and stayed under 10% for 3 consecutive samples", pressure.Headline, StringComparison.Ordinal);
-        Assert.Contains("threshold_lineage = 0", pressure.Investigation, StringComparison.Ordinal);
+        Assert.Contains("threshold_lineage = 1", pressure.Investigation, StringComparison.Ordinal);
         Assert.Contains("CONFIG_PG_MEMORY_OVERCOMMIT fired in the same window", pressure.Investigation, StringComparison.Ordinal);
 
         /* Serverless framing on the sum. */
@@ -766,7 +766,7 @@ public sealed class PgTargetMemoryTests
                 Assert.Equal(0.4, sum.GetProperty("base_severity").GetDouble(), precision: 6);
                 Assert.Equal(worst / (16.0 * GiB), sum.GetProperty("value").GetDouble(), precision: 6);
                 Assert.Equal(1, sum.GetProperty("metadata").GetProperty(PgTargetScorer.MemoryOvercommitCriticalBandKey).GetDouble());
-                Assert.Equal(0, sum.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
+                Assert.Equal(1, sum.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());  // the measured 2x band participated
                 Assert.True(sum.GetProperty("severity").GetDouble() >= 0.6, "both co-fires plus the band");
                 var pressure = facts.Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.HostMemoryPressure);
                 Assert.Equal(0.05, pressure.GetProperty("metadata").GetProperty(PgTargetScorer.HostMemorySustainedMinReclaimableShareKey).GetDouble(), precision: 3);

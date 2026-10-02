@@ -921,11 +921,12 @@ public sealed class ServerPageTabsTests
            DOM-shim run, so a table panel that forgot one cannot reach a browser. */
         /* The WHOLE signature, so emptyText is asserted to be a declared parameter rather than something
            read off an options object. #3278 appended `noteKey = null` - an opt-in server-supplied caveat,
-           unrelated to this guard - and the literal is spelled out here rather than truncated at emptyText
+           unrelated to this guard - and #4925 appended `moreNoteKeys = null` after it (further caveat fields
+           rendered the same way). The literal is spelled out here rather than truncated at emptyText
            because a prefix match would stop noticing a parameter inserted BEFORE it. */
         Assert.Contains(
             "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
-            + "noteKey = null)",
+            + "noteKey = null, moreNoteKeys = null)",
             js,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -1177,9 +1178,23 @@ public sealed class ServerPageTabsTests
     /// <summary>Every top-level <c>const NAME = [ ... ];</c> descriptor array in the module, by name. These are
     /// the column and stat vocabularies the panels bind to (<c>*_COLUMNS</c>, <c>*_STATS</c>, <c>*_SERIES</c>);
     /// the body is the text between the brackets, comments included.</summary>
-    private static Dictionary<string, string> DescriptorArraysIn(string js) =>
-        Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
+    private static Dictionary<string, string> DescriptorArraysIn(string js)
+    {
+        var arrays = Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
             .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
+
+        /* A set that lives in the read catalog is a top-level const that points into it; its text is the catalog
+           entry for that read. */
+        var catalog = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js");
+        foreach (Match m in Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = READ_FIELDS\.(\w+)\.", RegexOptions.Multiline))
+        {
+            var entry = Regex.Match(catalog, @"^  " + m.Groups[2].Value + @": \{.*?^  \},?\r?$", RegexOptions.Multiline | RegexOptions.Singleline);
+            Assert.True(entry.Success, $"{m.Groups[2].Value} has no READ_FIELDS entry");
+            arrays[m.Groups[1].Value] = entry.Value;
+        }
+
+        return arrays;
+    }
 
     /// <summary>
     /// The (read, descriptor-array names) pairs the module's panel helpers bind: <c>stat("T", "read", {...},

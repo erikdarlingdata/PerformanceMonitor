@@ -106,7 +106,7 @@ public sealed class WebFetchLayerTests
 
         // route() and refresh() each check the latch as their own first act.
         var routeGuard = app.IndexOf("function route(opts) {", StringComparison.Ordinal);
-        var refreshGuard = app.IndexOf("function refresh() {", StringComparison.Ordinal);
+        var refreshGuard = app.IndexOf("function refresh(force) {", StringComparison.Ordinal);
         Assert.True(routeGuard >= 0, "route(opts) not found");
         Assert.True(refreshGuard >= 0, "refresh() not found");
 
@@ -205,16 +205,13 @@ public sealed class WebFetchLayerTests
     {
         var app = AppJs;
 
-        Assert.Contains("|| hasInFlightReads();", app, StringComparison.Ordinal);
-        Assert.Contains("route({ poll: true });", app, StringComparison.Ordinal);
-
-        // The guard is computed before refreshSidebar/refreshViewList/refreshAgNav start this tick's OWN reads.
-        var refreshAt = app.IndexOf("function refresh() {", StringComparison.Ordinal);
-        Assert.True(refreshAt >= 0, "refresh() not found");
-        var skipRouteAt = app.IndexOf("hasInFlightReads();", refreshAt, StringComparison.Ordinal);
-        var sidebarAt = app.IndexOf("refreshSidebar();", refreshAt, StringComparison.Ordinal);
-        Assert.True(skipRouteAt >= 0 && sidebarAt >= 0, "expected both anchors inside refresh()");
-        Assert.True(skipRouteAt < sidebarAt, "the in-flight check must run before this tick's own reads start");
+        // The guard lives in refreshPage(): the four no-poll routes and an outstanding render both return
+        // before route({ poll: true }) runs.
+        var pageAt = app.IndexOf("function refreshPage() {", StringComparison.Ordinal);
+        Assert.True(pageAt >= 0, "refreshPage() not found");
+        var guardAt = app.IndexOf("hasInFlightReads()) return;", pageAt, StringComparison.Ordinal);
+        var routeAt = app.IndexOf("route({ poll: true });", pageAt, StringComparison.Ordinal);
+        Assert.True(guardAt >= 0 && routeAt > guardAt, "the in-flight check must run before the page is re-rendered");
     }
 
     /* ---------------------------------------------------------------------------------------------------
@@ -230,12 +227,16 @@ public sealed class WebFetchLayerTests
         var app = AppJs;
 
         Assert.Contains("routeName === \"triage\"", app, StringComparison.Ordinal);
+        Assert.Contains("routeName === \"editor\" || routeName === \"notebookEditor\" || routeName === \"alertEditor\"", app, StringComparison.Ordinal);
 
-        var refreshAt = app.IndexOf("function refresh() {", StringComparison.Ordinal);
-        Assert.True(refreshAt >= 0, "refresh() not found");
-        var triageAt = app.IndexOf("routeName === \"triage\"", refreshAt, StringComparison.Ordinal);
-        var sidebarAt = app.IndexOf("refreshSidebar();", refreshAt, StringComparison.Ordinal);
-        Assert.True(triageAt >= 0 && triageAt < sidebarAt, "triage must join the skip guard, computed before this tick's own reads start");
+        var skipAt = app.IndexOf("function isNoPollRoute(routeName) {", StringComparison.Ordinal);
+        Assert.True(skipAt >= 0, "isNoPollRoute() not found");
+        var triageAt = app.IndexOf("routeName === \"triage\"", skipAt, StringComparison.Ordinal);
+        Assert.True(triageAt >= 0 && triageAt < skipAt + 400, "triage must join the no-poll routes");
+
+        // refreshPage() consults it before re-rendering.
+        var pageAt = app.IndexOf("function refreshPage() {", StringComparison.Ordinal);
+        Assert.True(app.IndexOf("isNoPollRoute(currentRoute().name)", pageAt, StringComparison.Ordinal) > pageAt);
     }
 
     /// <summary>The shell-level play/pause control (#4222d): a real, keyboard-reachable button whose state is
@@ -253,20 +254,12 @@ public sealed class WebFetchLayerTests
         Assert.Contains("function setAutoRefreshPaused(paused) {", app, StringComparison.Ordinal);
         Assert.Contains("function initAutoRefreshToggle() {", app, StringComparison.Ordinal);
         Assert.Contains("document.getElementById(\"auto-refresh-toggle\")", app, StringComparison.Ordinal);
-        Assert.Contains("if (!paused) refresh();", app, StringComparison.Ordinal);
+        Assert.Contains("if (!paused) refresh(true);", app, StringComparison.Ordinal);
 
-        // Both poll paths — the interval tick and the visibility-change handler — check the paused flag,
+        // Both paths — the scheduler tick and the visibility-change handler — check the paused flag,
         // not just document.hidden; pausing must stop the tick even on a visible tab.
-        Assert.Contains("if (!document.hidden && !isAutoRefreshPaused()) refresh();", app, StringComparison.Ordinal);
-        var occurrences = 0;
-        var idx = 0;
-        const string gate = "if (!document.hidden && !isAutoRefreshPaused()) refresh();";
-        while ((idx = app.IndexOf(gate, idx, StringComparison.Ordinal)) >= 0)
-        {
-            occurrences++;
-            idx += 1;
-        }
-        Assert.Equal(2, occurrences);
+        Assert.Contains("if (document.hidden || isAutoRefreshPaused() || isSessionExpired()) {", app, StringComparison.Ordinal);
+        Assert.Contains("if (!document.hidden && !isAutoRefreshPaused()) refresh(false);", app, StringComparison.Ordinal);
     }
 
     /// <summary>The button itself lives in the shell chrome (index.html's sidebar brand block), not inside any

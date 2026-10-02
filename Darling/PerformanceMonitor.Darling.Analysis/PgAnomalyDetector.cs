@@ -194,13 +194,17 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
        (WindowTiles.LocalHourSql, $4..$6 bound from the ANALYSIS window's clock, never the cached
        baseline clock — see the recipe doc). The peak-time subquery is dropped for a per-tile
        array_agg ORDER BY, which the correlated LIMIT-1 subquery cannot express per group. Column
-       order (0 local_hour, 1 peak, 2 avg, 3 count, 4 peak_time) is the reader's ordinal contract. */
+       order (0 local_hour, 1 peak, 2 avg, 3 count, 4 peak_time) is the reader's ordinal contract.
+       #4731: every peak-time array_agg in the anomaly detectors orders `<value> DESC NULLS LAST,
+       collection_time DESC`. PostgreSQL sorts NULLs first under DESC, and the MAX beside it ignores
+       them, so without NULLS LAST a sample with no value could be reported as the peak time; the
+       collection_time key makes two samples tied on the peak report the later one. */
     public const string CpuTileWindowSql = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(sqlserver_cpu_utilization) AS peak_cpu,
        AVG(sqlserver_cpu_utilization) AS avg_cpu,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY sqlserver_cpu_utilization DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY sqlserver_cpu_utilization DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2 AND collection_time < $3
@@ -248,29 +252,100 @@ FROM per_collection
 GROUP BY local_hour
 ORDER BY local_hour";
 
-    /* Top 6 wait-type contributors in the window (named in the metadata KEY). */
+    /* Young-baseline bar read: the same window and per-collection shape as WaitRateTileWindowSql, with the
+       bar's numerator leaving out AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase. Returns the
+       whole-window peak (NULL when no collection is rated). */
+    public static readonly string YoungBaselineBarPeakSql = @"
+WITH per_collection AS (
+    SELECT collection_time,
+           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_wait_time_ms >= 0
+    GROUP BY collection_time
+)
+SELECT MAX(CASE WHEN interval_sec > 0 THEN bar_wait_ms / interval_sec END) AS bar_peak_ms_per_sec
+FROM per_collection";
+
+    /* The newest server-properties row's engine edition, read only by the young-baseline arm. */
+    public const string EngineEditionSql = @"
+SELECT engine_edition
+FROM server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /* Top 6 wait-type contributors in the window (named in the metadata KEY). A wait stored with and without the
+       trailing space the collector trims from #4884 on is one contributor: the inner query sums per stored
+       spelling, the outer query merges the spellings on rtrim(wait_type), once per group rather than per row. */
     public const string WaitContribWindowSql = @"
-SELECT wait_type,
-       SUM(delta_wait_time_ms)::BIGINT AS total_ms
-FROM v_wait_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   delta_wait_time_ms > 0
-GROUP BY wait_type
+SELECT rtrim(wait_type) AS wait_type,
+       SUM(spelling_ms)::BIGINT AS total_ms
+FROM (
+    SELECT wait_type,
+           SUM(delta_wait_time_ms) AS spelling_ms
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_wait_time_ms > 0
+    GROUP BY wait_type
+) AS per_spelling
+GROUP BY rtrim(wait_type)
 ORDER BY total_ms DESC
 LIMIT 6";
 
     /* current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
        snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
-       overview/alert path (Lite LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
+       overview/alert path (Lite LocalDataService.Overview.cs / LocalDataService.Blocking.cs).
+
+       the CURRENT window counts report and deadlock events by when they HAPPENED (event_time /
+       deadlock_time), so the spike counts the events the grids show; $4 is the EventWindowFloor for $2, the
+       partition-column bound with no upper side. The DMV snapshot arm stays on collection_time because a
+       snapshot's event_time IS its collection time. The BASELINE this count is judged against comes from the
+       continuous aggregates, which bucket the hypertable's own column (collection_time) by design. */
     public const string BlockingWindowSql = @"
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3), 0),
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3)) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS current_deadlocks";
+     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $4) AS current_deadlocks";
+
+    /* The same read for an Azure SQL Database master target ($4 = the names of the databases monitored as their
+       own targets, skipped on both arms, a NULL database still counting; $5 = the event-window floor, which takes
+       the number after the list so the scoped read keeps the list where it was). The deadlock count comes from DeadlockGraphsCountSql through the every-process
+       rule, so this read carries no deadlock column. */
+    public const string BlockingSkippingSeparateCountSql = @"
+SELECT
+    COALESCE(NULLIF(
+        (SELECT COUNT(*) FROM v_blocked_process_reports
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $5
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))), 0),
+        (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))))) AS current_blocking,
+    0::bigint AS current_deadlocks";
+
+    /* $4 is the raw scoped list and $5 the event-window floor, as in BlockingSkippingSeparateCountSql. */
+    public const string DeadlockGraphsCountSql = @"
+SELECT deadlock_graph_xml FROM v_deadlocks
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $5
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>Deadlocks whose row names a database that is not separately monitored (the event's database on the telemetry arm;
+    /// master is the connection's fallback stamp, so it goes to the graph check): counted without reading their graphs.
+    /// $4 is the raw list, $5 the event-window floor.</summary>
+    public const string DeadlockOutsideCountSql = @"
+SELECT COUNT(*) FROM v_deadlocks
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $5
+AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
     /* #3653 (A8): the I/O window read hands the gate the PEAK and the MEAN per-file-row latency, like every
        sibling family. Until this slice it read AVG ALONE — the one z-score detector judging a window average
@@ -282,17 +357,23 @@ SELECT
     /* #3653 A8 option B (lane L2a): the tiled I/O window read — ONE read feeds both the read-latency
        and write-latency gates, each scored through EvaluateTiles with its own WindowTile list built
        from this one row set (design's I/O row: "ONE tiled read feeds both gates"). Column order
-       (0 local_hour, 1 peak_read, 2 avg_read, 3 peak_write, 4 avg_write, 5 count) is the reader's
-       ordinal contract. $4..$6 bind from the ANALYSIS window's clock. */
+       (0 local_hour, 1 peak_read, 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write,
+       6 write_sample_count) is the reader's ordinal contract. $4..$6 bind from the ANALYSIS window's clock.
+
+       #4731: each side counts its OWN samples, as Lite's twin does. The one COUNT(*) over the (reads OR
+       writes) rows counted a write-only row as a read sample (its read peak and mean NULL, read as 0), so the
+       read gate admitted tiles Lite rejects and window_samples differed between the products. A tile whose
+       side has no rows now carries 0 samples for that side and never enters that side's gate. */
     public const string IoTileWindowSql = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
        AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
+       COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count,
        MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat,
        AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat,
-       COUNT(*) AS sample_count
+       COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count
 FROM v_file_io_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   (delta_reads > 0 OR delta_writes > 0)
 GROUP BY local_hour
 ORDER BY local_hour";
@@ -309,9 +390,9 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS peak_batch,
        AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM v_perfmon_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   counter_name = 'Batch Requests/sec'
 AND   delta_cntr_value >= 0
 AND   sample_interval_seconds > 0
@@ -327,14 +408,14 @@ WITH per_collection AS (
     SELECT collection_time,
            SUM(connection_count)::DOUBLE PRECISION AS total_connections
     FROM v_session_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY collection_time
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_connections) AS peak_connections,
        AVG(total_connections) AS avg_connections,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY total_connections DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY total_connections DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM per_collection
 GROUP BY local_hour
 ORDER BY local_hour";
@@ -348,7 +429,7 @@ WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_elapsed_time)::DOUBLE PRECISION AS total_elapsed
     FROM v_query_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_execution_count > 0
     AND   delta_elapsed_time >= 0
     GROUP BY collection_time
@@ -357,7 +438,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_elapsed) AS peak_elapsed,
        AVG(total_elapsed) AS avg_elapsed,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY total_elapsed DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY total_elapsed DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM per_collection
 GROUP BY local_hour
 ORDER BY local_hour";
@@ -370,9 +451,9 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS peak_pressure,
        AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS avg_pressure,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM v_memory_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   target_server_memory_mb > 0
 GROUP BY local_hour
 ORDER BY local_hour";
@@ -725,6 +806,9 @@ ORDER BY ms_delta DESC LIMIT 1";
                DefaultRatioThreshold). The no-baseline arm stays on the peak's absolute bar alone — there
                is no z to trust on either statistic there, and the ruling keeps that bar where it was. */
             bool isNew;
+            // True only when the young-baseline bar fired with the Azure exclusion applied: the contributors it left out
+            // are stamped so the finding's text can say they did not count toward the threshold.
+            var barExcludedApplied = false;
             double ratio;
             double scoredPeakRate = peakRate;
             double scoredAvgRate = avgRate;
@@ -775,7 +859,15 @@ ORDER BY ms_delta DESC LIMIT 1";
             else
             {
                 isNew = true;
-                ratio = peakRate >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
+                // On an Azure SQL Database the bar leaves out YoungBaselineBarExcludedWaitsAzureSqlDatabase
+                // (a steady platform timer); the reported rates below stay the all-types figures.
+                var barPeak = peakRate;
+                if (await IsAzureSqlDatabaseAsync(connection, context))
+                {
+                    barPeak = await ReadYoungBaselineBarPeakAsync(connection, context);
+                    barExcludedApplied = true;
+                }
+                ratio = barPeak >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
                 if (ratio < DefaultRatioThreshold) return;
                 fireThreshold = 0;
             }
@@ -828,6 +920,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 {
                     var waitType = contribReader.GetString(0);
                     metadata[$"contrib_{waitType}"] = Convert.ToDouble(contribReader.GetValue(1));
+                    if (barExcludedApplied && AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase.Contains(waitType))
+                        metadata[$"{AnomalyThresholds.BarExcludedMetadataPrefix}{waitType}"] = 1;
                 }
             }
 
@@ -861,16 +955,28 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(BlockingWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+            /* The baselines above stay server-wide: a server-wide baseline against a filtered count can only
+               make a master spike less likely, which is accepted. */
+            var separate = PgFactCollector.SeparateDatabases(context);
+            using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
+            if (separate is not null) cmd.Parameters.AddWithValue(separate);
+            cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-            var currentBlocking = Convert.ToInt64(reader.GetValue(0));
-            var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            long currentBlocking, currentDeadlocks;
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                if (!await reader.ReadAsync(context.CancellationToken)) return;
+                currentBlocking = Convert.ToInt64(reader.GetValue(0));
+                currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            }
+            if (separate is not null)
+                currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
+                    connection, DeadlockOutsideCountSql, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                    separate, context.CancellationToken, DarlingAnalysisService.AnalysisCommandTimeoutSeconds);
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),
@@ -885,6 +991,9 @@ ORDER BY ms_delta DESC LIMIT 1";
             // SampleCount>0): a thin/zero-history baseline falls back to the absolute event count rather
             // than an inflated ratio. is_new marks that fallback so the composer renders it honestly as
             // a first occurrence — never the dishonest "spiked to 100×" the sentinel used to render.
+            // #4731: CountFamilyMetadata (one function for both products) assembles the fact's keys, and beside
+            // is_new it stamps baseline_zero_history, so a MEASURED zero is worded as one rather than as a
+            // first occurrence. The firing rule below is unchanged.
             var blockingTrust = blockingBaseline.IsTrustworthy;
             var deadlockTrust = deadlockBaseline.IsTrustworthy;
             var baselineBlockingRate = blockingBaseline.SampleCount > 0 ? blockingBaseline.Mean : 0;
@@ -894,14 +1003,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             // baseline; untrustworthy → fire on the count alone).
             if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
-                var isNew = !blockingTrust;
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_count"] = currentBlocking,
-                    ["baseline_rate"] = baselineBlockingRate,
-                    ["ratio"] = isNew ? NoBaselineRatio : currentBlockingPerHour / baselineBlockingRate,
-                    ["is_new"] = isNew ? 1 : 0
-                };
+                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline);
                 AddBaselineContext(metadata, blockingBaseline);
 
                 anomalies.Add(new Fact
@@ -918,14 +1020,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             // baseline; untrustworthy → fire on the count alone).
             if (currentDeadlocks >= 3 && (!deadlockTrust || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
             {
-                var isNew = !deadlockTrust;
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_count"] = currentDeadlocks,
-                    ["baseline_rate"] = baselineDeadlockRate,
-                    ["ratio"] = isNew ? NoBaselineRatio : currentDeadlocksPerHour / baselineDeadlockRate,
-                    ["is_new"] = isNew ? 1 : 0
-                };
+                var metadata = CountFamilyMetadata.Build(currentDeadlocks, currentDeadlocksPerHour, baselineDeadlockRate, deadlockBaseline);
                 AddBaselineContext(metadata, deadlockBaseline);
 
                 anomalies.Add(new Fact
@@ -945,6 +1040,18 @@ ORDER BY ms_delta DESC LIMIT 1";
     }
 
     /// <summary>
+    /// #4731: turns one <see cref="IoTileWindowSql"/> row into the read tile and the write tile, each with its
+    /// OWN sample count (ordinals 3 and 6) - Lite's twin makes the same two <see cref="WindowTiles.ReadTile"/>
+    /// calls, and the parity pin in <c>DarlingAnomalyBaselineTests</c> holds the two products to it. Static and
+    /// internal so a unit test can feed it a hand-built row with unequal read and write counts.
+    /// </summary>
+    internal static void ReadIoTiles(System.Data.IDataRecord reader, List<WindowTile> readTiles, List<WindowTile> writeTiles)
+    {
+        readTiles.Add(WindowTiles.ReadTile(reader, 0, 1, 2, 3));
+        writeTiles.Add(WindowTiles.ReadTile(reader, 0, 4, 5, 6));
+    }
+
+    /// <summary>
     /// Detects I/O latency anomalies using z-score against time-bucketed baseline.
     /// </summary>
     private async Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies)
@@ -959,7 +1066,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             // #3653 A8 option B (lane L2a): ONE tiled read feeds both gates (design's I/O row) — each
             // family builds its own WindowTile list from the same rows (0 local_hour, 1 peak_read,
-            // 2 avg_read, 3 peak_write, 4 avg_write, 5 count).
+            // 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write, 6 write_sample_count - #4731).
             var readTiles = new List<WindowTile>();
             var writeTiles = new List<WindowTile>();
             using (var cmd = new NpgsqlCommand(IoTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
@@ -968,18 +1075,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
-                    var localHour = reader.GetDateTime(0);
-                    var samples = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5));
-                    readTiles.Add(new WindowTile(
-                        localHour,
-                        reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
-                        reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2)),
-                        samples));
-                    writeTiles.Add(new WindowTile(
-                        localHour,
-                        reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3)),
-                        reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4)),
-                        samples));
+                    ReadIoTiles(reader, readTiles, writeTiles);
                 }
             }
 
@@ -1538,6 +1634,27 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// <summary>Kind-Unspecified for query bounds — Npgsql 6+ rejects Kind-Utc against <c>timestamp</c>.</summary>
     private static DateTime AsNaive(DateTime value) =>
         DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
+
+    /// <summary>True when the newest server_properties row says Azure SQL Database (engine edition 5).</summary>
+    private static async Task<bool> IsAzureSqlDatabaseAsync(NpgsqlConnection connection, AnalysisContext context)
+    {
+        using var cmd = new NpgsqlCommand(EngineEditionSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        var edition = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return edition is not null and not DBNull
+            && Convert.ToInt32(edition) == PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
+    }
+
+    /// <summary>Peak ms/sec across the window's collections with the young-baseline excluded waits left out.</summary>
+    private static async Task<double> ReadYoungBaselineBarPeakAsync(NpgsqlConnection connection, AnalysisContext context)
+    {
+        using var cmd = new NpgsqlCommand(YoungBaselineBarPeakSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        var peak = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return peak is null or DBNull ? 0.0 : Convert.ToDouble(peak);
+    }
 
     /// <summary>
     /// #3653 A8 option B (lane L2a): binds a tiled window statement's six parameters — $1 server id, $2/$3 the

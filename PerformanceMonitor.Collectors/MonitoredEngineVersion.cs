@@ -37,6 +37,17 @@ namespace PerformanceMonitor.Collectors;
 /// has not been taught yet (SQL Server ships one every two years) is genuinely a SQL Server of unknown
 /// vintage, and a bare version tag is the honest label for it. Deleting it to fix PostgreSQL would have
 /// traded a wrong label on one engine for a missing one on the other.</para>
+///
+/// <para><b>On Azure the major is not a product year.</b> Azure SQL Database (Hyperscale included) and Azure
+/// SQL Managed Instance report the engine's internal <c>ProductMajorVersion</c>, and at an Azure SQL Database
+/// that is <c>12</c>, which is also SQL Server 2014's. The year table therefore labelled an Azure SQL Database
+/// "SQL Server 2014", and nothing on the row said Azure. What separates them is the engine EDITION
+/// (<c>collect.servers.sql_engine_edition</c>): <c>5</c> is Azure SQL Database and <c>8</c> is Azure SQL
+/// Managed Instance. On those two the label is the platform's own name with no year, worded by
+/// <see cref="CollectorEngineCapability.DescribeEngineEdition"/> so this product keeps one copy of those words.
+/// Every other edition (Express, Standard, Enterprise, an Amazon RDS instance, and anything this build has not
+/// been taught) keeps the year table exactly as it was. The edition is a required parameter, like the majors,
+/// so a render site that forgets it fails to compile instead of quietly publishing a year.</para>
 /// </summary>
 public static class MonitoredEngineVersion
 {
@@ -57,20 +68,36 @@ public static class MonitoredEngineVersion
     /// written by a NEWER build knows an engine this one does not, and neither major column can be trusted to
     /// belong to a vocabulary we cannot name. Same choice, and the same reasoning, as
     /// <c>FleetServerCard.EngineDescription</c>.</item>
+    /// <item><b>Known SQL Server, or NO claim at all, on an Azure edition</b> (<paramref name="sqlEngineEdition"/>
+    /// <c>5</c> or <c>8</c>) → the platform's name, <see cref="CollectorEngineCapability.DescribeEngineEdition"/>'s
+    /// "Azure SQL Database" or "Azure SQL Managed Instance", with no year. Tested before the year table
+    /// because the major at those two platforms is an internal number that happens to equal an old product's
+    /// (<c>12</c> is SQL Server 2014's), so it cannot be trusted to name a year; and it needs no major at all,
+    /// because the platform is a fact about the edition and not about the version.</item>
     /// <item><b>Known SQL Server, or NO claim at all</b> → the SQL Server table. Absence falls here on
     /// purpose: it is the pre-#2530 behaviour and the only safe default for rows no connect has stamped since
     /// the engine-kind rung landed, exactly as <see cref="MonitoredEngineKind.IsPostgres"/>'s asymmetry
     /// requires. "Not known to be PostgreSQL" is not a claim of SQL Server, but it is the surface those rows
-    /// already get.</item>
+    /// already get. Every edition other than the two Azure ones, and an edition of <c>0</c> or null, reads the
+    /// table exactly as before.</item>
     /// </list>
     /// </summary>
     /// <param name="engineKind">The raw <c>collect.servers.engine_kind</c> token, or null when the store
     /// makes no claim.</param>
     /// <param name="sqlMajorVersion">The raw <c>collect.servers.sql_major_version</c>. Consulted only on the
-    /// SQL Server arm, so its <c>0</c>-for-PostgreSQL value can no longer be read as a version.</param>
+    /// SQL Server arm, so its <c>0</c>-for-PostgreSQL value can no longer be read as a version, and not at
+    /// all when <paramref name="sqlEngineEdition"/> is an Azure edition.</param>
     /// <param name="postgresMajorVersion">The raw <c>collect.servers.postgres_major_version</c> (V100,
     /// #2653). Consulted only on the PostgreSQL arm.</param>
-    public static string DescribeEngineVersion(string? engineKind, int? sqlMajorVersion, int? postgresMajorVersion)
+    /// <param name="sqlEngineEdition">The raw <c>collect.servers.sql_engine_edition</c>
+    /// (<c>SERVERPROPERTY('EngineEdition')</c>), or null when the store or the probe reply has none. Required,
+    /// so a caller cannot forget it. Consulted only on the SQL Server arm, and only for the two Azure editions
+    /// (<see cref="CollectorEngineCapability.AzureSqlDatabaseEngineEdition"/> and
+    /// <see cref="CollectorEngineCapability.AzureManagedInstanceEngineEdition"/>); <c>0</c>, null and every
+    /// other edition leave the answer to <paramref name="sqlMajorVersion"/>. The PostgreSQL arm and the
+    /// unrecognised-token arm ignore it, so a PostgreSQL row can never be labelled Azure SQL.</param>
+    public static string DescribeEngineVersion(
+        string? engineKind, int? sqlMajorVersion, int? postgresMajorVersion, int? sqlEngineEdition)
     {
         if (MonitoredEngineKind.IsPostgres(engineKind))
         {
@@ -87,6 +114,15 @@ public static class MonitoredEngineVersion
         if (!string.IsNullOrWhiteSpace(engineKind) && !MonitoredEngineKind.IsKnown(engineKind))
         {
             return engineKind.Trim();
+        }
+
+        /* The two Azure platforms answer with their own name before the year table is asked: their major is
+           not a product year (12 at an Azure SQL Database is SQL Server 2014's number), and the edition is
+           the one fact that tells them from the SQL Server that shares it. No major needed. */
+        if (sqlEngineEdition is CollectorEngineCapability.AzureSqlDatabaseEngineEdition
+                             or CollectorEngineCapability.AzureManagedInstanceEngineEdition)
+        {
+            return CollectorEngineCapability.DescribeEngineEdition(sqlEngineEdition.Value);
         }
 
         return DescribeSqlServerVersion(sqlMajorVersion);

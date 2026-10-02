@@ -42,6 +42,279 @@ public static class PgMigrations
         public string Sql { get; }
     }
 
+    /// <summary>
+    /// V152 (#4503) — drops the auto-created per-column GROUP BY index TimescaleDB builds on six Query Store
+    /// rollups' materialization hypertables, on every store that upgrades through this rung, the same way
+    /// #3597 did for <see cref="TimescaleSupport.QueryStoreStatsIntervalHourlyView"/>'s materialization at
+    /// CREATE time. A production catalog read found the same shape repeated on
+    /// <see cref="TimescaleSupport.QueryStoreStatsHourlyView"/>, <see cref="TimescaleSupport.QueryStoreStatsCorrectedHourlyView"/>,
+    /// <see cref="TimescaleSupport.QueryStoreStatsDailyView"/>, <see cref="TimescaleSupport.QueryStoreStatsCorrectedDailyView"/>,
+    /// <see cref="TimescaleSupport.QueryStoreStatsIntervalDailyView"/> and
+    /// <see cref="TimescaleSupport.QueryStoreStatsDayGrainDailyView"/>: five group indexes apiece
+    /// (<c>database_name</c>, <c>module_name</c>, <c>query_hash</c>, <c>server_id</c>, <c>server_name</c>, each
+    /// paired with <c>bucket DESC</c>) on the first five, eleven on the interval-daily view, and lifetime
+    /// <c>idx_scan</c> of ZERO on every one of them except <c>server_id</c> (kept) and <c>server_name</c> (kept
+    /// on the two hourly views only, where reads measurably use it) — the reader check this rung's PR body
+    /// carries in full.
+    ///
+    /// <para><b>Resolved by view name and by the indexed COLUMN, never by a string-built index name
+    /// (#4503).</b> A continuous aggregate's materialization hypertable id is assigned at CREATE time and
+    /// differs per store — the production catalog this rung read from happened to number them
+    /// 103/106/109/110/112/113, but a fresh or differently-ordered store would not; that part was already
+    /// handled by resolving <c>materialization_hypertable_name</c> from
+    /// <c>timescaledb_information.continuous_aggregates</c>. What was NOT safe is building the auto-created
+    /// index's NAME as a string and passing it to <c>DROP INDEX IF EXISTS</c>: PostgreSQL truncates an
+    /// identifier at 63 bytes with no hash suffix, and
+    /// <c>_materialized_hypertable_112_runtime_stats_interval_id_bucket_idx</c> is 68 characters, so the name
+    /// actually on disk is the 63-byte truncation, not the string this rung would have built — the DROP
+    /// would have silently no-op'd against a name nothing wears, leaving the real index in place. The
+    /// <c>DO</c> block below never builds that name: for each view it resolves the materialization's OID,
+    /// then reads <c>pg_index</c>/<c>pg_attribute</c> directly for a two-key btree whose FIRST key column is
+    /// one of that view's drop-list columns and whose SECOND key column is <c>bucket</c> — the exact shape
+    /// <c>create_group_indexes</c>'s default builds — and drops whatever index actually carries that shape,
+    /// by its real (possibly-truncated) name via <c>::regclass</c>. A single-column index (the kept
+    /// <c>bucket_idx</c>) and a two-key index whose kept column ISN'T in the drop list both fail the match
+    /// and are never touched. A plain-PostgreSQL store, which has never created the extension, has no
+    /// <c>timescaledb_information</c> catalog to read at all, so the whole block returns before the loop —
+    /// a no-op there, not a per-view skip. A TimescaleDB store missing one of the six CAGGs (one that never
+    /// enabled a given rollup) skips just that view rather than erroring, and re-running the block after the
+    /// indexes are already gone is a no-op — the catalog read finds nothing to drop.</para>
+    ///
+    /// <para><b><c>SET LOCAL lock_timeout</c>, derived from <see cref="MigrationCommandTimeoutSeconds"/>.</b>
+    /// <c>DROP INDEX</c> takes <c>AccessExclusiveLock</c> on the materialization hypertable and on every one
+    /// of its chunks, across six hypertables in one transaction, while a background refresh policy can hold
+    /// the same lock for as long as its own run takes — measured around 264 s on the hourly rollups, well
+    /// past a flat 5 s. Rather than fail the rung on the very refresh it is racing, the lock_timeout here is
+    /// set to <see cref="MigrationCommandTimeoutSeconds"/> minus a 20 s margin (280 s): long enough to wait
+    /// out one whole refresh cycle, but still short enough that the server's own clean, retryable
+    /// <c>55P03</c> always fires before the client-side <see cref="MigrationCommandTimeoutSeconds"/> command
+    /// timeout would cancel the statement out from under it — if a refresh somehow outlasts even that, the
+    /// failure is still retryable (lock-not-available is already in the retryable set the service's startup
+    /// triage carries), so the next start retries the same rung, still at V151, rather than blocking
+    /// collection. This is a per-STATEMENT wait inside one rung, smaller by construction than
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/>, the whole-SESSION budget a sibling migrator polls
+    /// against; V152 spending up to 280 s of its own command timeout still leaves that budget's other
+    /// multiples for the rest of the ladder.</para>
+    /// </summary>
+    private static readonly string V152Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $$
+DECLARE
+    v_view text;
+    v_drop_cols text[];
+    v_mat_schema text;
+    v_mat_table text;
+    v_mat_oid regclass;
+    r record;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created, and this runs on stores
+       where it never was -- reaching it unconditionally raises 42P01. Probed with to_regclass (NULL rather
+       than an error when absent); no extension means there are no continuous aggregates and so no rollup
+       group indexes to drop, which makes this rung a no-op there. The per-view read below goes through
+       EXECUTE so the timescaledb_information reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        RETURN;
+    END IF;
+
+    FOR v_view, v_drop_cols IN VALUES
+        ('query_store_stats_hourly',          ARRAY['database_name', 'module_name', 'query_hash']),
+        ('query_store_stats_corrected_hourly', ARRAY['database_name', 'module_name', 'query_hash']),
+        ('query_store_stats_daily',           ARRAY['database_name', 'module_name', 'query_hash', 'server_name']),
+        ('query_store_stats_corrected_daily',  ARRAY['database_name', 'module_name', 'query_hash', 'server_name']),
+        ('query_store_stats_interval_daily',   ARRAY['database_name', 'execution_type_desc', 'first_execution_time', 'module_name', 'plan_id', 'query_hash', 'query_id', 'replica_role', 'runtime_stats_interval_id', 'server_name']),
+        ('query_store_stats_daygrain_daily',   ARRAY['database_name', 'module_name', 'query_hash', 'server_name'])
+    LOOP
+        EXECUTE 'SELECT materialization_hypertable_schema, materialization_hypertable_name
+                 FROM timescaledb_information.continuous_aggregates
+                 WHERE view_schema = ''collect'' AND view_name = $1'
+        INTO v_mat_schema, v_mat_table
+        USING v_view;
+
+        IF v_mat_table IS NULL THEN
+            CONTINUE;
+        END IF;
+
+        v_mat_oid := format('%I.%I', v_mat_schema, v_mat_table)::regclass;
+
+        FOR r IN
+            SELECT i.indexrelid::regclass AS idx
+            FROM pg_index i
+            JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
+            JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
+            WHERE i.indrelid = v_mat_oid
+            AND   i.indnkeyatts = 2
+            AND   NOT i.indisunique
+            AND   a1.attname = ANY (v_drop_cols)
+            AND   a2.attname = 'bucket'
+        LOOP
+            EXECUTE format('DROP INDEX IF EXISTS %s', r.idx);
+        END LOOP;
+    END LOOP;
+END $$;";
+
+    /// <summary>
+    /// V153 (#4608, split #4615) — a plain btree on <c>first_execution_time</c> for
+    /// <see cref="PerformanceMonitor.Darling.Storage.QueryStoreIntervalLatest"/>'s <c>query_store_interval_latest</c>
+    /// (V143) only — the column both the daily retention sweep's
+    /// <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.TimeSlicedDeleteSql"/> filters on and the
+    /// read gate's per-server floor (<c>PlainTableFloorSql</c>) reads. V154 is the twin rung for
+    /// <c>query_store_interval_wide</c> (V145) — split into its own rung (#4615) so each index build gets its
+    /// own <see cref="MigrationCommandTimeoutSeconds"/> window rather than sharing one across both tables.
+    ///
+    /// <para><b>The measured cost (#4608).</b> On a rig seeded with 4M <c>query_store_interval_latest</c> rows
+    /// over 20 days: the purge's cold-cache "nothing to delete" run cost ~4.09 s (a Seq-equivalent full index
+    /// scan of the table's unique index, since neither <c>min()</c> subquery nor the outer DELETE had a
+    /// leading column to seek on) and ~211 ms warm; the same statement with this index costs ~0.56 ms cold and
+    /// ~0.12 ms warm — three to four orders of magnitude down, and it stays flat regardless of table size
+    /// because it seeks straight past the cutoff instead of walking the whole index. A one-day-to-delete run
+    /// (200 k rows) cost ~587 ms without the index and ~0.1-52 ms with it. The read gate's per-server floor
+    /// (<c>MIN(first_execution_time) WHERE server_id = $1</c>) already had an efficient plan off the existing
+    /// unique index (~9 ms) — this rung's index gives it an equally fast plan (~1.4 ms) without displacing
+    /// that path; either index serves it.</para>
+    ///
+    /// <para><b>Why a plain index, not <c>CONCURRENTLY</c>.</b> <c>MigrateAsync</c> wraps every rung in one
+    /// transaction, and <c>CREATE INDEX CONCURRENTLY</c> cannot run inside a transaction block (PostgreSQL
+    /// rejects it, 25001). The lock this takes is <c>ShareLock</c> (a plain <c>CREATE INDEX</c>, not a
+    /// rewrite of an existing index), which blocks writers to the table for the build's duration but not
+    /// readers. At the rig's 4M row size the build itself took low single-digit seconds; a field store's
+    /// two tables are kept to 15 and 9 days respectively by the same purge this index speeds up, so neither
+    /// grows unbounded between upgrades.</para>
+    ///
+    /// <para><b>Why not <see cref="UnorderedRowCappedDeleteSql"/> instead (the alternative measured for #4608).</b>
+    /// That builder exists for the two plain (non-hypertable) tables whose V149 migration deliberately
+    /// dropped their own <c>last_seen</c> btree so an unordered cap could avoid a second sort pass — it does
+    /// not apply here, where V143/V145 never had a <c>first_execution_time</c> index to drop in the first
+    /// place and the read gate needs one whether or not the purge does. Measured, <see cref="UnorderedRowCappedDeleteSql"/>
+    /// without an index still costs ~234 ms per 50 k-row-capped batch on this rig's size (it still walks the
+    /// unique index looking for rows under the cutoff before it can build the <c>ctid</c> list) — slower than
+    /// this rung's indexed <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.TimeSlicedDeleteSql"/>
+    /// and it leaves the read gate's floor scan unindexed too. The index serves both call sites from one
+    /// object, which is why it is the winner here.</para>
+    ///
+    /// <para><b><c>max_parallel_maintenance_workers = 2</c> (#4615).</b> Measured on a rig seeded to 20 M
+    /// <c>query_store_interval_latest</c> rows with the field store's own <c>maintenance_work_mem</c>
+    /// (2047 MB): a serial build (<c>max_parallel_maintenance_workers = 0</c>) took ~7.0-8.0 s; with 2
+    /// workers it took ~3.0-3.2 s, a consistent ~2.3x speed-up over three runs each way. 2 is what this
+    /// rig's own <c>max_parallel_workers</c> (15) and <c>max_worker_processes</c> (85) both allow with
+    /// headroom to spare, and it is a plain, user-settable GUC — harmless to set on a bring-your-own store
+    /// that has never heard of this service. Set inside the same <c>SET LOCAL</c> scope as
+    /// <c>lock_timeout</c>: the applier gives this rung's whole SQL ONE <c>NpgsqlCommand</c> inside ONE
+    /// transaction (see <see cref="MigrateLockedAsync"/>), and <c>SET LOCAL</c> is scoped to the
+    /// transaction, so it is in force for the <c>CREATE INDEX</c> statement below it in the same rung.</para>
+    /// </summary>
+    private static readonly string V153Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+SET LOCAL max_parallel_maintenance_workers = 2;
+CREATE INDEX IF NOT EXISTS idx_query_store_interval_latest_first_exec
+ON collect.query_store_interval_latest (first_execution_time);";
+
+    /// <summary>
+    /// V154 (#4608, split #4615) — <c>query_store_interval_wide</c>'s (V145) twin of V153's index, in its
+    /// own rung so its build gets its own <see cref="MigrationCommandTimeoutSeconds"/> window rather than
+    /// sharing V153's. See V153Sql's doc comment for the measured cost, the reason for a plain (not
+    /// <c>CONCURRENTLY</c>) index, and the <c>max_parallel_maintenance_workers</c> measurement — both hold
+    /// identically here.
+    /// </summary>
+    private static readonly string V154Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+SET LOCAL max_parallel_maintenance_workers = 2;
+CREATE INDEX IF NOT EXISTS idx_query_store_interval_wide_first_exec
+ON collect.query_store_interval_wide (first_execution_time);";
+
+    /// <summary>
+    /// V155 (#4765) — each Query Store interval's END, on <c>collect.query_store_stats</c> and on
+    /// <c>collect.query_store_interval_wide</c> (V145): <c>interval_end_time_utc</c>
+    /// (<c>sys.query_store_runtime_stats_interval.end_time</c>, converted to UTC at collection), the twin of
+    /// V41's <c>interval_start_time_utc</c>.
+    ///
+    /// <para>A rate divides an interval's totals by the interval's length. Until now the only length a read
+    /// had was the time since the previous STORED interval, and Query Store stores no row for an interval with
+    /// no executions, so an interval that follows a quiet one divided by the gap PLUS its own length and read
+    /// too low. End minus start is the interval's own length. This rung only stores the end; the reads that
+    /// turn it into a rate change separately.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, the V41 shape: a row collected before this rung never
+    /// asked the engine for the end and nothing can reconstruct it, so NULL is the honest value and a reader
+    /// treats it as "fall back to the previous-interval gap". A nullable, default-less <c>ADD COLUMN</c> is
+    /// catalog-only in PostgreSQL and TimescaleDB accepts it on a compressed hypertable, the shape
+    /// V127/V128/V132/V133/V150/V151 used.</para>
+    ///
+    /// <para><b>Appended LAST on both tables.</b> Both bulk writers are positional (the binary COPY into
+    /// <c>query_store_stats</c>, the <c>INSERT ... SELECT</c> that composes <c>query_store_interval_wide</c>),
+    /// so a fresh store and an upgraded one must share one physical column order. A fresh
+    /// <c>query_store_stats</c> gets the column from V1's generated CREATE TABLE (the collector's payload
+    /// carries it, appended last) and the ALTER no-ops there; V145's CREATE TABLE is fixed text, so the
+    /// interval-wide column always arrives here, after <c>interval_start_time_utc</c>. The trailing
+    /// <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_query_store_stats</c>' pinned <c>SELECT *</c> (Postgres
+    /// freezes it at CREATE; append-only ADDs keep the refresh legal), the V41 idiom. It is unqualified like
+    /// V41's so it resolves through the migrate session's <c>search_path = collect, config, public</c> and
+    /// stays visible to the drift guard that scans for that form.</para>
+    /// </summary>
+    private const string V155Sql = @"
+ALTER TABLE collect.query_store_stats ADD COLUMN IF NOT EXISTS interval_end_time_utc timestamp;
+ALTER TABLE collect.query_store_interval_wide ADD COLUMN IF NOT EXISTS interval_end_time_utc timestamp;
+CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
+
+    /// <summary>
+    /// V156 (#4834) — the hour's LONGEST single checkpoint sync on the store's own checkpointer row: two nullable
+    /// columns on <c>collect.store_metrics</c>, <c>checkpoint_longest_sync_ms</c> (<c>bigint</c>) and
+    /// <c>checkpoint_longest_sync_at</c> (<c>timestamp</c>, naive UTC — the sample that saw it, so the minute the
+    /// checkpoint had finished by). No new table, no new hypertable (<c>TimescaleSupport.HypertableCount</c> stays
+    /// 72), no DEFAULT, no backfill, no passthrough refresh, and <b>no Lite twin</b>: Lite stores no
+    /// <c>store_metrics</c>.
+    ///
+    /// <para><b>The gap this closes.</b> Before this rung the hourly checkpointer row held only cumulative counters.
+    /// The pressure rule (<c>CheckpointerReading.IsPressure</c>, read by <c>get_store_metrics</c> and by the Store
+    /// Checkpointer Pressure self-alert through the same reader) differenced the two newest rows to the interval's
+    /// total sync time and averaged it over the checkpoints the interval held (V140, #4037), so the alert and the tool
+    /// agreed, and both were blind to the maximum. An average spreads one long sync over the interval's short ones:
+    /// one 23.5 s sync among four checkpoints averages 5.9 s, under the 10 s bar, so an hour in which a single sync
+    /// stalled every reader read as "no pressure". The worker now samples the checkpointer's cumulative sync time
+    /// once a minute (#4823); this rung stores the largest difference that sample saw in the hour on the row the
+    /// hour's other checkpointer facts already live on, where the tool, the alert and any raw read see the same
+    /// value.</para>
+    ///
+    /// <para><b>Filled on the <c>object_kind = 'checkpointer'</c> row only</b>, NULL on every other kind by the
+    /// table's per-kind convention (V137, V139, V140). NULL on that row too when the sampler took no difference in
+    /// the hour (a service just started, or every read of the window failed): NULL is "no evidence", which the
+    /// reader judges exactly as it judged the row before this rung existed, never as a zero. <c>store_metrics</c> is a
+    /// PLAIN table and must stay one (the sweep's own retention DELETE assumes it), so a nullable, default-less
+    /// <c>ADD COLUMN</c> rewrites nothing; on a compressed hypertable it is the same catalog-only shape V127/V128/V133
+    /// /V137/V138/V139 used, but this rung touches none. It has no <c>v_</c> passthrough (V53; and
+    /// <c>PgSchemaGenerator.AllPassthroughViews</c> agrees), so the V14 frozen-column-list problem cannot arise, and
+    /// it is not a collector table, so no generator walks it and the columns live in this ALTER alone. The stamp is
+    /// written from a naive-UTC parameter, never a bare cast that would render in the session's zone.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not backfill: rows written before it cannot
+    /// know what the sampler saw. It adds no alert, knob or Viewer column. The reader's pressure rule and the tool's
+    /// block change in the same commit, but both are reads of these two columns, not schema.</para>
+    /// </summary>
+    private const string V156Sql = @"
+/* store_metrics is a plain table with no v_ passthrough (V53). Filled on the object_kind = 'checkpointer' row only,
+   NULL on every other kind by the table's per-kind convention, and NULL there too when the sampler took no
+   difference in the hour. Nullable, no DEFAULT, no backfill: a pre-rung row cannot know what the sampler saw, and
+   NULL is what the reader judges as no evidence. The stamp is naive UTC. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS checkpoint_longest_sync_ms bigint,
+    ADD COLUMN IF NOT EXISTS checkpoint_longest_sync_at timestamp;";
+
+    /// <summary>
+    /// V157 — <c>config.config_mute_rules.server_id</c>: a mute rule can name a server by its store id.
+    ///
+    /// <para>A server's display name is not an identity. A blank display name falls back to the host, so two
+    /// registrations on one logical server (two Azure SQL Database databases on one logical server) shared a
+    /// whole-server silence key: silencing one silenced the other, and unsilencing one lifted both. The store id is
+    /// the identity that is unique per registration, so a rule that carries it matches only that server and its
+    /// <c>server_name</c> becomes a label.</para>
+    ///
+    /// <para><b>NULL is a legacy name-keyed rule</b>, matched by <c>server_name</c> exactly as before, so every
+    /// stored rule keeps its effect and there is no backfill (a rule's name cannot be resolved to one id when the name
+    /// is the ambiguity). Nullable, no DEFAULT, one catalog-only <c>ADD COLUMN</c>. Needs no GRANT (the roles' table-level
+    /// grants cover a new column) and no trigger (the V117 reload beacon fires on any change to the table). The id is
+    /// deliberately NOT a foreign key: a rule outlives a removed server's registration, as a name-keyed rule always did.</para>
+    /// </summary>
+    private const string V157Sql = @"ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS server_id integer;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -228,6 +501,15 @@ public static class PgMigrations
         new Migration(146, "managed-conf-verdicts", V146Sql),
         new Migration(147, "compose-statement-timeout-sixty", V147Sql),
         new Migration(148, "read-latency", V148Sql),
+        new Migration(149, "query-store-liveness-hot-touch", V149Sql),
+        new Migration(150, "collection-log-watermark-and-job-history-indexes", V150Sql),
+        new Migration(151, "ag-group-id", V151Sql),
+        new Migration(152, "drop-unread-cagg-group-indexes", V152Sql),
+        new Migration(153, "interval-tables-first-exec-index", V153Sql),
+        new Migration(154, "interval-tables-wide-first-exec-index", V154Sql),
+        new Migration(155, "query-store-interval-end", V155Sql),
+        new Migration(156, "checkpoint-longest-sync", V156Sql),
+        new Migration(157, "mute-rule-server-id", V157Sql),
     };
 
     /// <summary>
@@ -1597,8 +1879,9 @@ ALTER TABLE collect.pg_cpu_utilization
     /// been there. These columns are for a <c>checkpointer</c> row (<c>object_kind = 'checkpointer'</c>,
     /// <c>object_name = 'pg_stat_checkpointer'</c>) the store self-metrics inventory writes once per run,
     /// carrying DELTAS since its previous run: milliseconds the checkpointer spent in the write phase, in the
-    /// sync phase, and how many REQUESTED (WAL-forced, not timed) checkpoints ran — the count that says the
-    /// store outran <c>max_wal_size</c> rather than merely reaching <c>checkpoint_timeout</c>. The source is
+    /// sync phase, and how many REQUESTED (not timed) checkpoints ran: WAL volume reaching <c>max_wal_size</c>, a
+    /// base backup and a <c>CHECKPOINT</c> statement all request one, so the count alone does not say the store
+    /// outran <c>max_wal_size</c> rather than merely reaching <c>checkpoint_timeout</c>. The source is
     /// <c>pg_stat_checkpointer</c> on PostgreSQL 17+ (<c>write_time</c>, <c>sync_time</c>, <c>num_requested</c>) and
     /// <c>pg_stat_bgwriter</c> before it (<c>checkpoint_write_time</c>, <c>checkpoint_sync_time</c>,
     /// <c>checkpoints_req</c>); the bundled store is 18, and the WRITER guards the version, not this rung.
@@ -2325,6 +2608,123 @@ CREATE TABLE IF NOT EXISTS collect.read_latency
 
 CREATE INDEX IF NOT EXISTS idx_read_latency_time
     ON collect.read_latency(metric_time);";
+
+    /// <summary>
+    /// V149 — the Query Store liveness touch becomes a HOT update on <c>collect.query_store_plan_map</c> and
+    /// <c>collect.query_store_text</c> (#4250): drops each table's <c>last_seen</c> btree index and sets
+    /// <c>fillfactor = 90</c>. <c>TouchAndProbeSql</c> on both tables (<see cref="QueryStorePlanMap"/>,
+    /// <see cref="QueryStoreTextStore"/>) only ever writes <c>last_seen</c> and, conditionally, an
+    /// unindexed hash column — so once the index is gone, no indexed column the touch changes remains, and a
+    /// page with fillfactor headroom lets the new tuple stay on its old page: both conditions Postgres's HOT
+    /// optimization needs. Confirmed by <c>git grep</c> against the service and storage code: the only other
+    /// reader of either index was each table's own <c>PruneSql</c> time-sliced <c>DELETE ... WHERE last_seen &lt;
+    /// $1</c> — no reader orders, filters, or range-scans <c>last_seen</c> for anything else. This change
+    /// replaces that prune on both tables with <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.UnorderedRowCappedDeleteSql"/>:
+    /// one capped sequential pass per batch, with no ordering or subquery over <c>last_seen</c> to lose by
+    /// dropping the index. See that builder's summary for the shape and the measured cost.
+    ///
+    /// <para>Plain <c>DROP INDEX</c> and <c>ALTER TABLE ... SET (fillfactor = ...)</c>, not <c>CONCURRENTLY</c>:
+    /// <c>MigrateAsync</c> wraps every rung in a transaction, and <c>CREATE/DROP INDEX CONCURRENTLY</c> cannot
+    /// run inside one. Both operations here are metadata-only — the index drop does not touch the heap, and
+    /// the fillfactor change only affects pages written from here on — so the short <c>ACCESS EXCLUSIVE</c>
+    /// each takes is a catalog update, not a rewrite; nothing else in the migrate session holds a competing
+    /// lock on either table at that moment.</para>
+    ///
+    /// <para>Fillfactor 90 is prospective only: existing pages, packed at the old default of 100, do not gain
+    /// HOT headroom until they are rewritten by organic churn (the tables are continuously purged) or a
+    /// deliberate rewrite. No rewrite ships in this rung.</para>
+    /// </summary>
+    private const string V149Sql = @"
+DROP INDEX IF EXISTS collect.idx_query_store_plan_map_last_seen;
+DROP INDEX IF EXISTS collect.idx_query_store_text_last_seen;
+ALTER TABLE collect.query_store_plan_map SET (fillfactor = 90);
+ALTER TABLE collect.query_store_text SET (fillfactor = 90);";
+
+    /// <summary>
+    /// V150 — two indexes, added additively for both #4469 and #4477:
+    /// <list type="bullet">
+    /// <item><c>idx_collection_log_watermark</c> on <c>collect.collection_log (server_id, collector_name,
+    /// collection_time DESC)</c> so <see cref="PerformanceMonitor.Darling.Service.DarlingWorker.ReadCollectorWatermarksSql"/>
+    /// can look up each collector's newest run with one index-only descent per collector instead of a
+    /// bitmap heap scan of the newest chunks. Measured on a rig shaped like the field (43 servers, ~40
+    /// collectors, 15M rows, 9 of 11 chunks compressed): the per-collector lookup runs ~0.65 ms against
+    /// the old statement's ~24 ms, cold and warm alike, because it turns the read from a scan of every
+    /// row in the newest chunks into one index-only descent per collector name. Costs: ~0.94 s to build
+    /// on 2.4M uncompressed rows (well inside <c>MigrationCommandTimeoutSeconds</c>), ~115 MB, and +38%
+    /// wall time on a 100,000-row bulk COPY into the newest chunk (0.353 s -&gt; 0.487 s median of 3) —
+    /// one more btree every future <c>collection_log</c> write maintains.</item>
+    /// <item><c>idx_job_history_server_run</c> on <c>collect.job_history (server_id, run_datetime DESC,
+    /// instance_id DESC)</c> for the Viewer's Job History tab
+    /// (<see cref="PerformanceMonitor.Darling.Viewer.ViewerDataService.BuildJobHistorySql"/>), matching that
+    /// read's own <c>ORDER BY run_datetime_utc DESC, instance_id DESC</c> tie-break so a per-server
+    /// top-N lookup needs no additional sort on the indexed columns. Measured on a rig shaped like the
+    /// field (43 servers, ~28,000 rows/server over 4 days, 3 of 5 chunks compressed): the base row
+    /// selection this index serves reads ~1,506 buffers cold against the unindexed scan's ~6,883 (about
+    /// 4.6x fewer), and the full Job History read (including the per-job stats aggregate this index does
+    /// not cover) runs ~721 ms cold against ~1,362 ms (about 1.9x) — the win is smaller than the
+    /// watermark index's because the read's other half, <c>job_stats</c>, still scans every matching row
+    /// in the window to compute an average/max per job and this index does not help that half.</item>
+    /// </list>
+    /// Both are plain <c>CREATE INDEX IF NOT EXISTS</c> (mirroring V149's shape): <c>MigrateAsync</c> wraps
+    /// every rung's whole SQL in one transaction, and <c>CREATE INDEX ... WITH
+    /// (timescaledb.transaction_per_chunk)</c> cannot run inside one — measured, it raises
+    /// <c>CREATE INDEX ... WITH (timescaledb.transaction_per_chunk) cannot run inside a transaction
+    /// block</c>. Each build takes a <c>ShareLock</c> for its duration (confirmed via <c>pg_locks</c>),
+    /// blocking concurrent inserts/updates/deletes to that table until the build finishes — acceptable at
+    /// the measured field-store extrapolation of well under 2 seconds each, but a store whose uncompressed
+    /// chunks have grown unusually large (a long compression-policy gap, or a raised
+    /// <c>CompressAfterDays</c>) would make this rung's lock window grow linearly with the uncompressed
+    /// row count. <c>IF NOT EXISTS</c> makes both idempotent on a FRESH store too: <c>PgSchemaGenerator</c>
+    /// does not build either index on a fresh install today, so this rung is the real create on both
+    /// paths, with no fresh-vs-upgraded shape divergence to special-case.
+    /// </summary>
+    private const string V150Sql = @"
+CREATE INDEX IF NOT EXISTS idx_collection_log_watermark
+    ON collect.collection_log (server_id, collector_name, collection_time DESC);
+CREATE INDEX IF NOT EXISTS idx_job_history_server_run
+    ON collect.job_history (server_id, run_datetime DESC, instance_id DESC);";
+
+    /// <summary>
+    /// V151 — <c>sys.availability_groups.group_id</c> on both AG collector tables (#4475): the GUID the engine
+    /// stamps identically on every replica of one Availability Group, appended LAST as text (the collector
+    /// column vocabulary has no uuid type; <c>AgDatabaseReplicaStatesCollector</c>'s <c>last_hardened_lsn</c> /
+    /// <c>last_commit_lsn</c> already store a wide identifier the same way). <see cref="AgTopology.CountDistinctGroups"/>
+    /// uses it to close the one gap the name-plus-replica-overlap rule (#4475) could not: two monitored
+    /// SECONDARIES of one AG, with its primary unmonitored, share no replica name with each other (each reports
+    /// only itself under <c>sys.dm_hadr_availability_replica_states</c>'s local-only rule) and so counted as two
+    /// groups. The group_id is the same on both replicas' rows, so a member carrying one groups by it exactly;
+    /// a member from a row collected before this rung carries none and falls back to the pre-existing name +
+    /// overlap rule among the other id-less members; and a with-id member and a without-id member of the same
+    /// name whose replica sets overlap still join (the same AG, seen before and after the upgrade landed on that
+    /// reporter). Stated in <see cref="AgTopology.CountDistinctGroups"/>'s own doc, not restated as a second
+    /// source of truth here.
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, the V127/V128/V132/V133/V150 shape for every column-adding
+    /// rung on a collector table: a row collected before this rung never asked the engine for its AG's
+    /// group_id, and NULL is the honest value — a reader treats it as "fall back to the pre-#4475 name + overlap
+    /// rule", exactly today's behavior. Both tables are compressed hypertables on the fleet; a nullable,
+    /// default-less <c>ADD COLUMN</c> is catalog-only in PostgreSQL and TimescaleDB accepts it on a compressed
+    /// hypertable with a compression policy attached, the shape V127/V128/V132/V133 used and verified live each
+    /// time. No view to refresh: the AG collector tables have been view-less since V34 (no <c>v_</c> passthrough
+    /// was ever created for either), so this rung is two ALTERs and nothing else.</para>
+    ///
+    /// <para>A fresh store gets the column from the generated CREATE TABLE
+    /// (<see cref="AgReplicaStatesCollector"/> / <see cref="AgDatabaseReplicaStatesCollector"/> carry it,
+    /// appended last in <c>PayloadColumns</c>) and the ALTER no-ops there — the V101 rule, pinned by
+    /// <c>PgSchemaGeneratorTests</c> reconstructing the current shape from V34/V36/V37/this rung and comparing it
+    /// to the generator's current output.</para>
+    ///
+    /// <para>Lite's DuckDB twin gets the same column the same way (schema version bump, additive <c>ALTER TABLE
+    /// ... ADD COLUMN IF NOT EXISTS</c>), and the shared <see cref="AgTopology.CountDistinctGroups"/> is what
+    /// both Lite's AG tab and Darling's Viewer/MCP/web reads call, so the fallback rule cannot drift apart
+    /// between stores.</para>
+    /// </summary>
+    private const string V151Sql = @"
+ALTER TABLE collect.ag_replica_states
+    ADD COLUMN IF NOT EXISTS group_id text;
+
+ALTER TABLE collect.ag_database_replica_states
+    ADD COLUMN IF NOT EXISTS group_id text;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

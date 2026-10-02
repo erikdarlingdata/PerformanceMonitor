@@ -166,7 +166,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. artifacts_set_aside counts an isolated single-sample Wait Statistics spike excluded from the sums before bucketing (notes explains it); it is not a missing-data count. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable), and each point carries it as per_second (null where the interval is 0); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetPerfmonTrend(
         NpgsqlDataSource postgres,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
@@ -196,7 +196,8 @@ public sealed class DarlingMcpTrendTools
         {
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
-            var points = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, resolved.ServerId, counter_name, start, now, bucketMinutes, cancellationToken);
+            var bucketsResult = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, resolved.ServerId, counter_name, start, now, bucketMinutes, cancellationToken);
+            var points = bucketsResult.Points;
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-counter probe, not after it. Both are on
@@ -257,7 +258,7 @@ public sealed class DarlingMcpTrendTools
 
             return TrendPayloads.PerfmonTrend(
                 resolved.ServerName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), bucketsResult.ArtifactsSetAside);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -626,7 +627,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). A point with no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut; effective_start says where the answer begins. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over the gap since the PREVIOUS point, so a raw point that is first in the window - with no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over its own stored interval, its end minus its start. A raw point with no stored end (a row collected before the end was recorded, and every legacy row) falls back to the gap since the PREVIOUS point, so only such a point, when it is first in the window and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryStoreDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -655,8 +656,13 @@ public sealed class DarlingMcpTrendTools
                 raw query_store_stats is dropped at four days only once its rollups cover it (the #1680
                 arming gate), so wherever raw is short the rollup is the tier holding the history, and a
                 raw-only route means raw is complete.
+
+                #4611: the bounds come from the coverage this call already caches (ComposeStoreAvailability),
+                not a fresh min/max(bucket) read — the probe below only runs when that coverage carries no
+                ceiling for this view.
             */
-            var route = await QueryStoreTrendRouting.ResolveAsync(postgres, cancellationToken);
+            var (_, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+            var route = await QueryStoreTrendRouting.ResolveAsync(coverage, postgres, cancellationToken);
             var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
                 postgres, resolved.ServerId, startUtc, now, route, cancellationToken);
             var disclosure = DescribeQueryStoreRoute(route, points, startUtc, now);
@@ -879,14 +885,15 @@ public sealed class DarlingMcpTrendTools
            against), and — since the plan-cache trends read the STORED interval (#3540 V128 for procedures,
            #3695 / #3653 for query_stats) — a restart collection whose interval the calculator could not
            measure (stored 0 → NULL). The hourly route divides by the bucket width and produces none, and a
-           Query Store rollup bucket is rated over its width too (#3695); only a raw Query Store point is
-           LAG-rated. The note below is the trio's shared sentence on BOTH SKUs (Lite's McpQueryTools carries
+           Query Store rollup bucket is rated over its width too (#3695); a raw Query Store point is rated over
+           its own stored interval, its end less its start (#4765), and is LAG-rated only where it stored no
+           end. The note below is the trio's shared sentence on BOTH SKUs (Lite's McpQueryTools carries
            it byte-identical, pinned by McpMissMessageParityPinTests) and names BOTH ways a denominator goes
            unknowable — the stored-0 restart (#3695 / #3700) and the first-in-window LAG (#3541 A12) — in one
            sentence, because the three tools serialize through this one helper and a per-tool note would put
-           three sentences on one shape. The Query Store trend can only hit the second arm (it stores no
-           interval), and the sentence stays true there: every one of its points is "a collection where no
-           interval was stored". */
+           three sentences on one shape. The Query Store trend can only hit the second arm (it stores no sample interval), and only for a
+           point that stored no end (#4765); the sentence stays true there: that point is the window's first
+           collection where no interval was stored. */
         var unrated = points.Count(p => !p.HasRate);
         var unratedCollections = points.Sum(p => p.UnratedCollections);
         envelope["unrated_points"] = unrated;

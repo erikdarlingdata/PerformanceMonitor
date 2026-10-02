@@ -785,7 +785,9 @@ public static class StoreLogClassifier
         {
             if (EndsAt(line, name, colon))
             {
-                return new Field(FieldKind.Primary, name, colon + 3);
+                return IsRefusedBySecondLabel(line, colon - name.Length, name, colon)
+                    ? default
+                    : new Field(FieldKind.Primary, name, colon + 3);
             }
         }
 
@@ -793,11 +795,127 @@ public static class StoreLogClassifier
         {
             if (EndsAt(line, name, colon))
             {
-                return new Field(FieldKind.Continuation, name, colon + 3);
+                return IsRefusedBySecondLabel(line, colon - name.Length, name, colon)
+                    ? default
+                    : new Field(FieldKind.Continuation, name, colon + 3);
             }
         }
 
         return default;
+    }
+
+    /// <summary>The most bytes PostgreSQL keeps of <c>application_name</c>: <c>NAMEDATALEN</c> (64) minus the
+    /// terminator. A forged label can therefore sit no more than this many characters into the field, plus one
+    /// for the separator the prefix renders after it.</summary>
+    private const int MaxApplicationNameBytes = 63;
+
+    /// <summary>Every label <see cref="FindNextKnownLabel"/> looks for as M2 (the bounded refusal rule below):
+    /// the severities, the DEBUG levels <see cref="PrimarySeverities"/> collapses to one name, and the
+    /// continuation fields — the same alternation <see cref="PgLogEntryAssembler"/>'s own label group uses.</summary>
+    private static readonly string[] RefusalLabels =
+        [.. PrimarySeverities, "DEBUG1", "DEBUG2", "DEBUG3", "DEBUG4", "DEBUG5", .. ContinuationFields];
+
+    /// <summary>
+    /// Whether the label found at <paramref name="colon"/> (named <paramref name="name"/>, starting at
+    /// <paramref name="nameStart"/>) is itself a forgery sitting ahead of the line's REAL label — a
+    /// bounded refusal rule (#4501), narrowed by the same-severity exception that follows it.
+    ///
+    /// <para><b>Why this can only happen next to a client-controlled field.</b> The store's own prefix is
+    /// Darling-managed (<c>'%m [%p] %a '</c>, or the same set by hand), so <c>application_name</c> — the one field
+    /// between the pid and the severity — is the only text in the prefix a client chooses. A name that itself
+    /// renders <c>&lt;LABEL&gt;:  </c> makes <see cref="FindField"/> read it as the line's field, with the real
+    /// label and message becoming the fake one's "message". Refusing that line is only safe because PostgreSQL
+    /// bounds what a name can hold: at most <see cref="MaxApplicationNameBytes"/> bytes, cleaned to printable
+    /// ASCII 0x20–0x7E (<c>pg_clean_ascii</c>). So a second known label appearing within that many characters,
+    /// made entirely of such characters, and separated from it by the prefix's own separator (a space) is
+    /// ambiguous — it could equally be a genuine name that ends in one — and this rule refuses it rather than
+    /// guess. A line refused here is treated exactly like one <see cref="FindField"/> never matched: it ends the
+    /// open entry, and its tab-continuation lines do not attach.</para>
+    ///
+    /// <para><b>Unless the two labels agree.</b> When L1 and M2 name the SAME severity (<c>psql ERROR:  ERROR:  x</c>
+    /// from <c>RAISE EXCEPTION 'ERROR:  x'</c>, or a forged name that happens to repeat the line's real severity),
+    /// the line reads the same severity either way, so there is nothing to refuse: kept, with L1's severity and
+    /// the message starting right after L1 as <see cref="FindField"/> already does.</para>
+    ///
+    /// <para><b>Agreement is widened to the error class.</b> <c>ERROR</c>, <c>FATAL</c> and <c>PANIC</c> also
+    /// agree with EACH OTHER, not only with themselves: a real server message can carry a libpq error inside
+    /// it — a logical-replication worker writing
+    /// <c>ERROR:  could not connect to the publisher: FATAL:  password authentication failed</c> is
+    /// PostgreSQL's own PRIMARY line, not a forgery, and it is still an error under either name. A companion
+    /// field (<c>DETAIL</c>, <c>STATEMENT</c>, …) as M2 never agrees — it carries no severity to agree
+    /// with — and pairing an error-class label with a non-error one (<c>LOG</c>, <c>WARNING</c>, …) still
+    /// disagrees and is refused. Forgery only matters when a name makes a line read as a genuinely different
+    /// severity than the one PostgreSQL wrote.</para>
+    /// </summary>
+    private static bool LabelsAgree(string name1, string name2) =>
+        string.Equals(name1, name2, StringComparison.Ordinal)
+        || (ErrorClass.Contains(name1) && ErrorClass.Contains(name2));
+
+    /// <summary>The severities that agree with each other as well as with themselves (#4501 round 2): a
+    /// server message can carry a libpq error inside it, and every member here is still an error.</summary>
+    private static readonly HashSet<string> ErrorClass = new(StringComparer.Ordinal) { "ERROR", "FATAL", "PANIC" };
+
+    private static bool IsRefusedBySecondLabel(ReadOnlySpan<char> line, int nameStart, string name, int colon)
+    {
+        var second = FindNextKnownLabel(line, colon + 3);
+        if (second is not (int secondStart, string secondName))
+        {
+            return false;
+        }
+
+        if (secondStart - nameStart > MaxApplicationNameBytes + 1)
+        {
+            return false;
+        }
+
+        for (var i = nameStart; i < secondStart; i++)
+        {
+            if (line[i] < ' ' || line[i] > '~')
+            {
+                return false;
+            }
+        }
+
+        if (secondStart == 0 || line[secondStart - 1] != ' ')
+        {
+            return false;
+        }
+
+        return !LabelsAgree(name, secondName);
+    }
+
+    /// <summary>The next label <see cref="RefusalLabels"/> knows, starting at or after <paramref name="from"/>: an
+    /// exact <c>&lt;LABEL&gt;:  </c> whose name is not itself the tail of a longer all-caps token, the same
+    /// boundary <see cref="ContinuesAnUpperCaseToken"/> guards for the line's own field. Unlike
+    /// <see cref="IsLabelColon"/> this knows nothing of unpadded translated labels or a <c>%Q</c> pid gluing: the
+    /// rule is stated against the plain English alternation, the same one both readers share.</summary>
+    private static (int Start, string Name)? FindNextKnownLabel(ReadOnlySpan<char> line, int from)
+    {
+        var pos = from;
+        while (pos < line.Length)
+        {
+            var rel = line[pos..].IndexOf(':');
+            if (rel < 0)
+            {
+                return null;
+            }
+
+            var colon = pos + rel;
+            if (colon + 2 < line.Length && line[colon + 1] == ' ' && line[colon + 2] == ' ')
+            {
+                foreach (var name in RefusalLabels)
+                {
+                    if (EndsAt(line, name, colon))
+                    {
+                        return (colon - name.Length, name);
+                    }
+                }
+            }
+
+            pos = colon + 1;
+        }
+
+        return null;
     }
 
     /// <summary>Whether the field name ends right before <paramref name="colon"/> as a token of its own.</summary>

@@ -525,8 +525,13 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("SUM(delta_wait_time_ms)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_signal_wait_time_ms)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_waiting_tasks)", sql, StringComparison.Ordinal);
+        /* #4884: a wait stored with and without its trailing space is one row under the clean name. The deltas
+           sum per stored name first (the bare GROUP BY), then the spellings merge on rtrim, once per group. */
         Assert.Contains("GROUP BY wait_type", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(delta_wait_time_ms) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains(") AS per_spelling", sql, StringComparison.Ordinal);
+        Assert.Contains("rtrim(wait_type) AS wait_type", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY rtrim(wait_type)", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY SUM(wait_time_ms) DESC", sql, StringComparison.Ordinal);
         /* #3541 A3: the cap is the caller's ($4), not the 50 that sat under a limit the tool accepts up to
            1,000 — the shape DarlingPgWaitReader already fixed for the PostgreSQL twin. */
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
@@ -538,7 +543,9 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     {
         var sql = DarlingDataReader.WaitTrendSql;
         Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("wait_type = $2", sql, StringComparison.Ordinal);
+        /* #4884: the lookup takes either stored spelling and keeps the column bare. */
+        Assert.Contains("wait_type IN ($2, $2 || ' ')", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("rtrim(wait_type) =", sql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("wait_time_ms_per_second", sql, StringComparison.Ordinal);
         /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
@@ -609,6 +616,12 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("cntr_value", sql, StringComparison.Ordinal);
         Assert.Contains("delta_cntr_value", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+
+        /* The interval a rate row's per_second divides by, selected LAST (ordinal 6, after cntr_type) because the
+           reader reads by ordinal. */
+        var interval = sql.IndexOf("sample_interval_seconds", StringComparison.Ordinal);
+        Assert.True(interval > sql.IndexOf("cntr_type", StringComparison.Ordinal), "sample_interval_seconds must follow cntr_type");
+        Assert.True(interval < sql.IndexOf("FROM v_perfmon_stats", StringComparison.Ordinal), "sample_interval_seconds must be a selected column");
     }
 
     [Fact]
@@ -1011,7 +1024,9 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
             AssertServerEnvelope(await DarlingMcpDataTools.GetWaitTypes(postgres, ServerName), "wait_types");
             AssertServerEnvelope(await DarlingMcpDataTools.GetMemoryStats(postgres, ServerName), "buffer_pool_mb");
             AssertServerEnvelope(await DarlingMcpDataTools.GetMemoryClerks(postgres, ServerName), "clerks");
-            AssertServerEnvelope(await DarlingMcpDataTools.GetFileIoStats(postgres, ServerName), "files");
+            var fileIo = await DarlingMcpDataTools.GetFileIoStats(postgres, ServerName);
+            AssertServerEnvelope(fileIo, "files");
+            AssertFileSizes(fileIo);
             AssertServerEnvelope(await DarlingMcpDataTools.GetTempDbTrend(postgres, ServerName), "trend");
             AssertServerEnvelope(await DarlingMcpDataTools.GetPerfmonStats(postgres, ServerName), "counters");
 
@@ -1109,9 +1124,35 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", ct, CollectionIdGenerator.Next
         await Exec(c, @"INSERT INTO memory_clerks (collection_id, collection_time, server_id, server_name, clerk_type, memory_mb)
 VALUES ($1,$2,$3,$4,$5,$6)", ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, "MEMORYCLERK_SQLBUFFERPOOL", 40000m);
 
-    private static async Task PlantFileIoAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct) =>
+    /* A data file with a size, and the log file of an Azure SQL Database Hyperscale database, which the collector
+       stores with NO size (a NULL size_mb). The NULL is written as SQL text, so no parameter type is inferred. */
+    private static async Task PlantFileIoAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct)
+    {
         await Exec(c, @"INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)", ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, Db, "StackOverflow.mdf", "ROWS", "D:\\data\\so.mdf", 100000m, 500L, 200L, 4096000L, 1024000L, 2500L, 400L);
+        await Exec(c, @"INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11,$12,$13,$14)", ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, Db, "StackOverflow_log", "LOG", "D:\\logs\\so_log.ldf", 20L, 300L, 81920L, 1228800L, 40L, 90L);
+    }
+
+    /// <summary>
+    /// The C# read of a NULL <c>size_mb</c>, end to end against the store: the Hyperscale log row reports
+    /// <c>size_mb</c> as null beside the shared <see cref="FileIoStatsCollector.NoSizeLabel"/>, and the data file
+    /// in the same snapshot keeps its size and a null note. <c>FileIoHyperscaleLogSizeTests</c> pins the statement
+    /// and the row projection without a store.
+    /// </summary>
+    private static void AssertFileSizes(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var files = doc.RootElement.GetProperty("files").EnumerateArray().ToArray();
+
+        var log = Assert.Single(files, f => f.GetProperty("file_type").GetString() == "LOG");
+        Assert.Equal(JsonValueKind.Null, log.GetProperty("size_mb").ValueKind);
+        Assert.Equal(FileIoStatsCollector.NoSizeLabel, log.GetProperty("size_note").GetString());
+
+        var data = Assert.Single(files, f => f.GetProperty("file_type").GetString() == "ROWS");
+        Assert.Equal(100000.0, data.GetProperty("size_mb").GetDouble());
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("size_note").ValueKind);
+    }
 
     private static async Task PlantTempDbAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct) =>
         await Exec(c, @"INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb, total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
@@ -1169,7 +1210,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             .ToArray();
 
         using (var all = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName)))
+        {
             Assert.Equal(new (string?, long)[] { ("Aborted", 3L), ("Regular", 100L) }, Outcomes(all.RootElement.GetProperty("queries")));
+            /* No interval-table coverage on this store, so the raw tier served. */
+            Assert.Equal("raw", all.RootElement.GetProperty("history_source").GetString());
+        }
 
         using (var aborted = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, execution_type: "aborted")))
             Assert.Equal(new (string?, long)[] { ("Aborted", 3L) }, Outcomes(aborted.RootElement.GetProperty("queries")));

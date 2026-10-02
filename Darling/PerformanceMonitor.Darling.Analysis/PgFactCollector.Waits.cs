@@ -160,19 +160,32 @@ WHERE collection_time >= $2";
         };
     }
 
+    /* One fact per wait across the #4884 spelling change: SQL Server reports a few wait names with a trailing
+       space, which the collector stores trimmed from #4884 on. The inner query sums per stored spelling, the
+       aggregation this read always ran; the outer query merges the spellings on rtrim(wait_type), once per group
+       rather than once per row. Sums of sums are exact. */
     public const string WaitStatsSql = @"
 SELECT
-    wait_type,
-    SUM(delta_waiting_tasks) AS total_waiting_tasks,
-    SUM(delta_wait_time_ms) AS total_wait_time_ms,
-    SUM(delta_signal_wait_time_ms) AS total_signal_wait_time_ms
-FROM v_wait_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   delta_wait_time_ms > 0
-GROUP BY wait_type
-ORDER BY SUM(delta_wait_time_ms) DESC";
+    rtrim(wait_type) AS wait_type,
+    SUM(waiting_tasks) AS total_waiting_tasks,
+    SUM(wait_time_ms) AS total_wait_time_ms,
+    SUM(signal_wait_time_ms) AS total_signal_wait_time_ms
+FROM
+(
+    SELECT
+        wait_type,
+        SUM(delta_waiting_tasks) AS waiting_tasks,
+        SUM(delta_wait_time_ms) AS wait_time_ms,
+        SUM(delta_signal_wait_time_ms) AS signal_wait_time_ms
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   delta_wait_time_ms > 0
+    GROUP BY wait_type
+) AS per_spelling
+GROUP BY rtrim(wait_type)
+ORDER BY SUM(wait_time_ms) DESC";
 
     /// <summary>
     /// Collects wait stats facts — one Fact per significant wait type.
@@ -244,18 +257,26 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
        repeat), NOT an epoch: with an epoch origin a scheduled 4-hour pass that does not begin on a
        4-hour epoch boundary splits across two buckets and its peak reads BELOW its own whole-window
        average, so the ≤4h degeneracy (a short window IS its own peak bucket) only holds with the
-       window-start origin. */
-    public const string BlockingSql = @"
+       window-start origin.
+
+       the window is when the report HAPPENED (event_time), the same column the blocking grids and
+       the chain reconstruction read, so the fact counts the events the grid shows. $4 is the
+       EventWindowFloor for $2: blocked_process_reports is partitioned on collection_time, which an
+       event_time bound gives the planner nothing to exclude chunks on. The bucket moves with the window:
+       a bucket origin on one column over rows windowed on the other would split the peak across buckets. */
+    private const string BlockingSqlHead = @"
 WITH reports AS (
     SELECT
         wait_time_ms,
         blocking_spid,
         blocking_status,
-        date_bin('4 hours', collection_time, $2) AS bucket_start
+        date_bin('4 hours', event_time, $2) AS bucket_start
     FROM blocked_process_reports
     WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   event_time >= $2
+    AND   event_time <= $3";
+
+    private const string BlockingSqlTail = @"
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count
@@ -270,6 +291,17 @@ SELECT
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
     (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
 FROM reports";
+
+    public const string BlockingSql = BlockingSqlHead + @"
+    AND   collection_time >= $4" + BlockingSqlTail;
+
+    /// <summary>The same read for an Azure SQL Database master target: $4 is the names of the databases monitored
+    /// as their own targets, whose events are skipped (a NULL database still counts), and $5 the event-window
+    /// floor. The list keeps its number from the scoped read and the floor takes the next one, so the floor is
+    /// $4 in <see cref="BlockingSql"/> and $5 here.</summary>
+    public const string BlockingSqlSkippingSeparate = BlockingSqlHead + @"
+    AND   collection_time >= $5
+    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))" + BlockingSqlTail;
 
     /// <summary>The peak sub-window's width in hours — the grain the (10, 50) grading pair was measured
     /// on (#3871). The peak rate divides by <c>min(this, observed hours)</c>, never by the constant
@@ -297,10 +329,14 @@ FROM reports";
 
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var command = new NpgsqlCommand(BlockingSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        var separate = SeparateDatabases(context);
+        using var command = new NpgsqlCommand(separate is null ? BlockingSql : BlockingSqlSkippingSeparate, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
+        if (separate is not null) command.Parameters.AddWithValue(separate);
+        command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
         using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
         if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -341,12 +377,165 @@ FROM reports";
         });
     }
 
+    /// <summary>The window's deadlocks by when they HAPPENED (<c>deadlock_time</c>), as the deadlock grids read
+    /// them. $4 is the <see cref="EventWindowFloor"/> for $2 — the partition-column bound the event
+    /// window cannot supply, with no upper bound so a late-collected deadlock still counts.</summary>
     public const string DeadlocksSql = @"
 SELECT COUNT(*) AS deadlock_count
 FROM deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $4";
+
+    /// <summary>Deadlocks whose row names a database that is not a separately monitored one (the event's database on the
+    /// telemetry arm; a master stamp may be the connection's fallback, so it goes to the graph check): they cannot
+    /// be all-in, so they count without their graphs being read. $4 is the raw list (both sides fold with lower()),
+    /// $5 the event-window floor; the window is the event time, as <see cref="DeadlocksSql"/> reads it.</summary>
+    public const string DeadlockOutsideCountSql = @"
+SELECT COUNT(*)
+FROM deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>The graphs the every-process rule still has to decide: the row's database is unknown, is master, or is a
+    /// separately monitored one. Windowed as <see cref="DeadlocksSql"/> ($4 the list, $5 the floor), so
+    /// the arms count the same events.</summary>
+    public const string DeadlockGraphsSql = @"
+SELECT deadlock_graph_xml
+FROM deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>The count and the newest time of the outside rows: <see cref="DeadlockOutsideCountSql"/>'s predicate and
+    /// parameters ($4 the list, $5 the floor), reading the newest time beside the count so one statement answers both.</summary>
+    public const string DeadlockOutsideCountNewestSql = @"
+SELECT COUNT(*), MAX(deadlock_time)
+FROM v_deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>The graphs <see cref="DeadlockGraphsSql"/> selects, with each one's event time, so the same pass that
+    /// counts the graphs can find the newest of the ones it counts.</summary>
+    public const string DeadlockGraphsWithTimeSql = @"
+SELECT deadlock_time, deadlock_graph_xml
+FROM v_deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>
+    /// The window's deadlocks that do not belong wholly to the separately monitored databases (the rule
+    /// <see cref="CountDeadlocksSkippingSeparateAsync"/> counts by) and the newest event time among them, from one
+    /// pass: the outside rows come from one statement, each graph is read and parsed once, and a graph that counts
+    /// adds to the count and to the newest time. <c>Newest</c> is null when none counts or none has an event time;
+    /// rows with no event time are outside the window, as in the count; the null check is defensive.
+    /// </summary>
+    internal static async Task<(long Count, DateTime? Newest)> CountAndNewestDeadlocksSkippingSeparateAsync(
+        NpgsqlConnection connection, int serverId, DateTime start, DateTime end,
+        IReadOnlyList<string> separate, System.Threading.CancellationToken ct, int commandTimeoutSeconds = FactCommandTimeoutSeconds)
+    {
+        var bound = separate.ToArray();
+        long count;
+        DateTime? newest;
+        using (var outsideCommand = new NpgsqlCommand(DeadlockOutsideCountNewestSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            outsideCommand.Parameters.AddWithValue(serverId);
+            outsideCommand.Parameters.AddWithValue(AsNaive(start));
+            outsideCommand.Parameters.AddWithValue(AsNaive(end));
+            outsideCommand.Parameters.AddWithValue(bound);
+            outsideCommand.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
+            using var outsideReader = await outsideCommand.ExecuteReaderAsync(ct);
+            await outsideReader.ReadAsync(ct);
+            count = outsideReader.IsDBNull(0) ? 0L : outsideReader.GetInt64(0);
+            newest = outsideReader.IsDBNull(1) ? null : outsideReader.GetDateTime(1);
+        }
+
+        using var command = new NpgsqlCommand(DeadlockGraphsWithTimeSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(AsNaive(start));
+        command.Parameters.AddWithValue(AsNaive(end));
+        command.Parameters.AddWithValue(bound);
+        command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var xml = reader.IsDBNull(1) ? null : reader.GetString(1);
+            if (PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(xml, separate))
+            {
+                continue;
+            }
+
+            count++;
+            if (!reader.IsDBNull(0))
+            {
+                var time = reader.GetDateTime(0);
+                if (newest is null || time > newest)
+                {
+                    newest = time;
+                }
+            }
+        }
+
+        return (count, newest);
+    }
+
+    /// <summary>The separately monitored databases as the SQL arm binds them (raw: each statement folds both
+    /// sides with one lower()), or null when the context names none.</summary>
+    internal static string[]? SeparateDatabases(AnalysisContext context)
+    {
+        var list = context.SeparatelyMonitoredDatabases;
+        return list is not null && list.Count > 0 ? list.ToArray() : null;
+    }
+
+    /// <summary>Counts the window's deadlocks that do not belong wholly to the separately monitored databases
+    /// (the engine's every-process rule, shared with the alert sweep). Deadlocks whose row's database is
+    /// not separately monitored are counted in SQL; only the rest are read as graphs and parsed.</summary>
+    internal static async Task<long> CountDeadlocksSkippingSeparateAsync(
+        NpgsqlConnection connection, string outsideCountSql, string graphsSql, int serverId, DateTime start, DateTime end,
+        IReadOnlyList<string> separate, System.Threading.CancellationToken ct, int commandTimeoutSeconds = FactCommandTimeoutSeconds)
+    {
+        var bound = separate.ToArray();
+        long count;
+        using (var countCommand = new NpgsqlCommand(outsideCountSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            countCommand.Parameters.AddWithValue(serverId);
+            countCommand.Parameters.AddWithValue(AsNaive(start));
+            countCommand.Parameters.AddWithValue(AsNaive(end));
+            countCommand.Parameters.AddWithValue(bound);
+            countCommand.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
+            count = Convert.ToInt64(await countCommand.ExecuteScalarAsync(ct) ?? 0L);
+        }
+
+        using var command = new NpgsqlCommand(graphsSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(AsNaive(start));
+        command.Parameters.AddWithValue(AsNaive(end));
+        command.Parameters.AddWithValue(bound);
+        command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var xml = reader.IsDBNull(0) ? null : reader.GetString(0);
+            if (!PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(xml, separate)) count++;
+        }
+        return count;
+    }
 
     /// <summary>
     /// Collects deadlock facts from the deadlocks table.
@@ -361,15 +550,25 @@ AND   collection_time <= $3";
 
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var command = new NpgsqlCommand(DeadlocksSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(context.ServerId);
-        command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-        command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        long deadlockCount;
+        if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separate)
+        {
+            deadlockCount = await CountDeadlocksSkippingSeparateAsync(
+                connection, DeadlockOutsideCountSql, DeadlockGraphsSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                separate, context.CancellationToken);
+        }
+        else
+        {
+            using var command = new NpgsqlCommand(DeadlocksSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(context.ServerId);
+            command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+            command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
-        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
-        if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-        var deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+            using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+        }
         if (deadlockCount <= 0) return;
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
@@ -406,6 +605,7 @@ FROM v_blocked_process_reports
 WHERE server_id = $1
 AND   event_time >= $2
 AND   event_time <= $3
+AND   collection_time >= $4
 {PgBlockingPairRowQuery.SpidFilter}
 ORDER BY event_time DESC
 LIMIT 5000";
@@ -429,6 +629,8 @@ LIMIT 5000";
             command.Parameters.AddWithValue(context.ServerId);
             command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            /* The partition-column floor, so a late-collected report still counts and old chunks stay closed. */
+            command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
             var rows = new List<BlockingPairRow>();
             using (var reader = await command.ExecuteReaderAsync(context.CancellationToken))
@@ -460,6 +662,12 @@ LIMIT 5000";
                 },
                 rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 context.CancellationToken);
+
+            /* A master target leaves out the pairs of databases monitored as their own targets (the same
+               rule the BLOCKING_EVENTS fact applies), so one chain does not page from both targets. */
+            if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separateDatabases)
+                rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
+                    && separateDatabases.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
 
             if (rows.Count == 0) return;
 

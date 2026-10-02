@@ -157,8 +157,9 @@ ORDER BY latest.object_kind, latest.object_name";
     /// bucket, newest first within it), so each day contributes one settled point per object rather than
     /// 24 near-duplicates. A last snapshot and not a per-day maximum: the tiebreak takes the newest row
     /// in the bucket, so the day's largest value is discarded unless it happens to be the last one, and
-    /// <c>get_store_metrics</c>' description says so where a caller reads it (#3119). $1 window start
-    /// (naive UTC).</summary>
+    /// <c>get_store_metrics</c>' description says so where a caller reads it (#3119). The last column is
+    /// that kept row's own <c>metric_time</c> (#4734), the day's last snapshot time, beside <c>day</c>, the
+    /// midnight bucket it falls in. $1 window start (naive UTC).</summary>
     public const string StoreMetricsDailySql = @"
 SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
     object_kind,
@@ -175,7 +176,8 @@ SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
     total_runs,
     total_failures,
     toast_bytes,
-    toast_live_bytes
+    toast_live_bytes,
+    metric_time
 FROM collect.store_metrics
 WHERE metric_time >= $1
 ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC";
@@ -853,8 +855,18 @@ WHERE name = $1";
     /// <param name="SystemRelationCount">The <c>system</c> row's relation count; null likewise.</param>
     /// <param name="ResidualBytes"><c>DatabaseBytes - AttributedBytes</c>. Expected small and non-zero (the
     /// directory's non-relation files, plus movement between statements); can be negative.</param>
-    /// <param name="StaleRowCount">Latest rows whose <c>metric_time</c> is NOT the store row's — objects the
-    /// newest sweep did not reach. Non-zero means the sweep is not completing and the note says so.</param>
+    /// <param name="StaleRowCount">Latest rows whose <c>metric_time</c> is NOT the store row's AND whose
+    /// object still exists (#4619): objects the newest sweep should have reached and did not. Non-zero is a
+    /// sweep that failed part-way or skipped its TimescaleDB arms, and the note says where the service logged
+    /// which.</param>
+    /// <param name="UncheckedRowCount">Latest rows from another sweep whose object's existence could not be
+    /// read: the live check failed, or the kind needs a TimescaleDB catalog this database does not have.
+    /// Excluded from the sums like the others, with no verdict either way.</param>
+    /// <param name="DroppedObjects">Latest rows from another sweep whose object no longer exists (#4619) —
+    /// retired by the product (the superseded baselines of #4289, the frozen legacy rollups' jobs of #3653)
+    /// or dropped by hand. <c>collect.store_metrics</c> is append-only, so such an object's last row stays
+    /// its newest for <see cref="StoreSelfMetrics.RetentionDays"/> days; it is history, NOT a sweep failure.
+    /// Newest last row first.</param>
     public sealed record InventoryReconciliation(
         DateTime SweepAt,
         long DatabaseBytes,
@@ -866,7 +878,9 @@ WHERE name = $1";
         long? SystemBytes,
         int? SystemRelationCount,
         long ResidualBytes,
-        int StaleRowCount)
+        int StaleRowCount,
+        int UncheckedRowCount,
+        IReadOnlyList<DroppedObject> DroppedObjects)
     {
         /// <summary>Percent of the database under named objects — the coverage statement. Null on a zero-byte
         /// database, never a division by zero dressed as a hundred.</summary>
@@ -901,18 +915,14 @@ WHERE name = $1";
         StoreSelfMetrics.TableObjectKind,
     };
 
-    /// <summary>
-    /// Reconciles the newest sweep's inventory against its own database figure (#3582). Pure. Null when
-    /// there is no store row to reconcile against — the tool then says coverage is unknown rather than
-    /// computing a percentage of nothing. Rows from other sweeps are counted, not summed.
-    /// </summary>
-    public static InventoryReconciliation? ComputeInventory(IReadOnlyList<StoreMetricRow> latest)
-    {
-        if (latest is null)
-        {
-            throw new ArgumentNullException(nameof(latest));
-        }
+    /// <summary>One object the newest sweep did not reach because it no longer exists (#4619), with the
+    /// <c>metric_time</c> of its last row — "dropped since" that time.</summary>
+    public sealed record DroppedObject(string ObjectKind, string ObjectName, DateTime LastRowAt);
 
+    /// <summary>The newest store row that carries a size: the sweep every inventory figure is taken from.
+    /// Null when no sweep has written one.</summary>
+    private static StoreMetricRow? NewestStoreRow(IReadOnlyList<StoreMetricRow> latest)
+    {
         StoreMetricRow? store = null;
         foreach (var row in latest)
         {
@@ -923,6 +933,61 @@ WHERE name = $1";
             }
         }
 
+        return store;
+    }
+
+    /// <summary>
+    /// The object rows that are NOT from the store row's sweep (#4619) — the rows whose objects
+    /// <see cref="GetObjectExistenceAsync"/> checks. Pure. Older rows are objects the newest sweep did not
+    /// reach; NEWER rows exist too, because the sweep is not one transaction and writes the store row last,
+    /// so a sweep that failed after its first statements leaves rows stamped later than the newest store
+    /// row. Empty when there is no store row or every row shares its stamp, which is the healthy store:
+    /// the check then costs no query.
+    /// </summary>
+    public static IReadOnlyList<StoreMetricRow> RowsOutsideTheSweep(IReadOnlyList<StoreMetricRow> latest)
+    {
+        if (latest is null)
+        {
+            throw new ArgumentNullException(nameof(latest));
+        }
+
+        var store = NewestStoreRow(latest);
+        if (store is null)
+        {
+            return Array.Empty<StoreMetricRow>();
+        }
+
+        return latest
+            .Where(r => r.ObjectKind != StoreSelfMetrics.StoreObjectKind && r.MetricTime != store.MetricTime)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Reconciles the newest sweep's inventory against its own database figure (#3582). Pure. Null when
+    /// there is no store row to reconcile against — the tool then says coverage is unknown rather than
+    /// computing a percentage of nothing. Rows from other sweeps are never summed; since #4619 they are
+    /// split by whether their object still exists, from <paramref name="existence"/>
+    /// (<see cref="GetObjectExistenceAsync"/>'s result): true is a real sweep gap
+    /// (<see cref="InventoryReconciliation.StaleRowCount"/>), false a retired object
+    /// (<see cref="InventoryReconciliation.DroppedObjects"/>), and null — or a null map, the check having
+    /// failed — no verdict (<see cref="InventoryReconciliation.UncheckedRowCount"/>).
+    ///
+    /// <para><b>One kind is judged here, not in the catalog.</b> A <c>job_history</c> row is named for the
+    /// role the sweep read job history as (<c>current_user</c>), and that role usually still exists after
+    /// the sweep stops running as it. When the newest sweep wrote a <c>job_history</c> row of its own, an
+    /// older one under another role is superseded, not missed, so it is counted as retired whatever the
+    /// catalog says.</para>
+    /// </summary>
+    public static InventoryReconciliation? ComputeInventory(
+        IReadOnlyList<StoreMetricRow> latest,
+        IReadOnlyDictionary<(string ObjectKind, string ObjectName), bool?>? existence)
+    {
+        if (latest is null)
+        {
+            throw new ArgumentNullException(nameof(latest));
+        }
+
+        var store = NewestStoreRow(latest);
         if (store is null)
         {
             return null;
@@ -932,6 +997,10 @@ WHERE name = $1";
         long? other = null, system = null;
         int? otherCount = null, systemCount = null;
         var stale = 0;
+        var uncheckedCount = 0;
+        var dropped = new List<DroppedObject>();
+        var sweepWroteJobHistory = latest.Any(r =>
+            r.ObjectKind == StoreSelfMetrics.JobHistoryObjectKind && r.MetricTime == store.MetricTime);
 
         foreach (var row in latest)
         {
@@ -942,7 +1011,25 @@ WHERE name = $1";
 
             if (row.MetricTime != store.MetricTime)
             {
-                stale++;
+                bool? exists = row.ObjectKind == StoreSelfMetrics.JobHistoryObjectKind && sweepWroteJobHistory
+                    ? false
+                    : existence is not null && existence.TryGetValue((row.ObjectKind, row.ObjectName), out var known)
+                        ? known
+                        : null;
+
+                if (exists == true)
+                {
+                    stale++;
+                }
+                else if (exists == false)
+                {
+                    dropped.Add(new DroppedObject(row.ObjectKind, row.ObjectName, row.MetricTime));
+                }
+                else
+                {
+                    uncheckedCount++;
+                }
+
                 continue;
             }
 
@@ -987,7 +1074,130 @@ WHERE name = $1";
             system,
             systemCount,
             store.TotalBytes.Value - attributed,
-            stale);
+            stale,
+            uncheckedCount,
+            dropped
+                .OrderByDescending(d => d.LastRowAt)
+                .ThenBy(d => d.ObjectKind, StringComparer.Ordinal)
+                .ThenBy(d => d.ObjectName, StringComparer.Ordinal)
+                .ToList());
+    }
+
+    /// <summary>
+    /// Whether each object named by a row from another sweep still exists (#4619), read LIVE at tool time:
+    /// without it every object the product retires — a superseded baseline's view and its three policy
+    /// jobs (#4289), a frozen rollup's refresh job (#3653) — reads as a sweep that did not reach it, for as
+    /// long as the append-only series keeps that object's last row. One lookup per <c>object_kind</c>, in
+    /// the NAME FORM the sweep writes for that kind:
+    /// <list type="bullet">
+    /// <item><c>hypertable</c> and <c>continuous_aggregate</c>: the bare name in the same
+    /// <c>timescaledb_information</c> view the sweep enumerates from;</item>
+    /// <item><c>background_job</c>: <see cref="StoreSelfMetrics.BackgroundJobObjectNameSql"/>, the one
+    /// expression the sweep names jobs with, so a job re-created under a new <c>job_id</c> is the old one
+    /// gone rather than the old one missed;</item>
+    /// <item><c>dimension</c>: the bare table name, in <c>collect</c>; <c>table</c>: the
+    /// schema-qualified name every named-table row carries (a name without a schema gets no verdict);</item>
+    /// <item><c>job_history</c>: the role the sweep read as, in <c>pg_roles</c>;</item>
+    /// <item>the constant-named rows the sweep writes on EVERY run (<c>other</c>, <c>system</c>,
+    /// <c>checkpointer</c>): true — such a row from another sweep is always a real gap;</item>
+    /// <item>any other kind: NULL, no verdict.</item>
+    /// </list>
+    /// Catalog reads only — <c>pg_class</c>, <c>pg_namespace</c>, <c>pg_roles</c> and the TimescaleDB
+    /// information views are readable by every role, the <c>mcp</c> role included, and none of these
+    /// lookups resolves a name through a schema ACL the way <c>to_regclass</c> would. $1 the kinds and $2
+    /// the names, as two parallel arrays.
+    /// </summary>
+    public const string ObjectExistenceSql = $@"
+SELECT
+    s.object_kind,
+    s.object_name,
+    CASE s.object_kind
+        WHEN '{StoreSelfMetrics.HypertableObjectKind}' THEN EXISTS (
+            SELECT 1 FROM timescaledb_information.hypertables h WHERE h.hypertable_name = s.object_name)
+        WHEN '{StoreSelfMetrics.ContinuousAggregateObjectKind}' THEN EXISTS (
+            SELECT 1 FROM timescaledb_information.continuous_aggregates ca WHERE ca.view_name = s.object_name)
+        WHEN '{StoreSelfMetrics.BackgroundJobObjectKind}' THEN EXISTS (
+            SELECT 1 FROM timescaledb_information.jobs j WHERE {StoreSelfMetrics.BackgroundJobObjectNameSql} = s.object_name)
+        {ObjectExistenceCatalogArms}
+    END AS still_exists
+FROM unnest($1::text[], $2::text[]) AS s (object_kind, object_name)";
+
+    /// <summary>The plain-PostgreSQL variant of <see cref="ObjectExistenceSql"/>: the TimescaleDB views do not
+    /// exist there, so the three kinds read from them get no verdict (NULL), and every other kind is judged
+    /// exactly as on a TimescaleDB store. $1 the kinds, $2 the names.</summary>
+    public const string ObjectExistencePlainSql = $@"
+SELECT
+    s.object_kind,
+    s.object_name,
+    CASE s.object_kind
+        {ObjectExistenceCatalogArms}
+    END AS still_exists
+FROM unnest($1::text[], $2::text[]) AS s (object_kind, object_name)";
+
+    /// <summary>The arms of both existence variants that read only PostgreSQL's own catalogs. The CASE falls
+    /// through to NULL for any kind not named here or above it.</summary>
+    private const string ObjectExistenceCatalogArms = $@"WHEN '{StoreSelfMetrics.DimensionObjectKind}' THEN EXISTS (
+            SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'collect' AND c.relname = s.object_name)
+        WHEN '{StoreSelfMetrics.TableObjectKind}' THEN CASE WHEN strpos(s.object_name, '.') > 0 THEN EXISTS (
+            SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = split_part(s.object_name, '.', 1) AND c.relname = split_part(s.object_name, '.', 2)) END
+        WHEN '{StoreSelfMetrics.JobHistoryObjectKind}' THEN EXISTS (
+            SELECT 1 FROM pg_roles r WHERE r.rolname = s.object_name)
+        WHEN '{StoreSelfMetrics.OtherObjectKind}' THEN true
+        WHEN '{StoreSelfMetrics.SystemObjectKind}' THEN true
+        WHEN '{StoreSelfMetrics.CheckpointerObjectKind}' THEN true";
+
+    /// <summary>
+    /// Reads <see cref="ObjectExistenceSql"/> (or its plain variant, by the same
+    /// <see cref="JobExecutionLoggingStatus.NotRegistered"/> signal the other TimescaleDB-only reads use)
+    /// for <paramref name="rows"/> — <see cref="RowsOutsideTheSweep"/>'s result. No rows, no query: the
+    /// healthy store pays nothing. Unlike <see cref="GetContinuousAggregateStatesAsync"/>, a store without
+    /// TimescaleDB still queries, because three of the kinds are judged from PostgreSQL's own catalogs.
+    /// Failure-isolated to NULL — every row then gets no verdict and the note says the check did not
+    /// complete — never to an empty map, which would read the same way by accident rather than by design.
+    /// </summary>
+    public static async Task<IReadOnlyDictionary<(string ObjectKind, string ObjectName), bool?>?> GetObjectExistenceAsync(
+        NpgsqlDataSource postgres,
+        JobExecutionLoggingReading logging,
+        IReadOnlyList<StoreMetricRow> rows,
+        CancellationToken cancellationToken = default)
+    {
+        if (logging is null)
+        {
+            throw new ArgumentNullException(nameof(logging));
+        }
+
+        if (rows is null)
+        {
+            throw new ArgumentNullException(nameof(rows));
+        }
+
+        var existence = new Dictionary<(string ObjectKind, string ObjectName), bool?>();
+        if (rows.Count == 0)
+        {
+            return existence;
+        }
+
+        try
+        {
+            await using var command = postgres.CreateCommand(
+                logging.Status == JobExecutionLoggingStatus.NotRegistered ? ObjectExistencePlainSql : ObjectExistenceSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(rows.Select(r => r.ObjectKind).ToArray());
+            command.Parameters.AddWithValue(rows.Select(r => r.ObjectName).ToArray());
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                existence[(reader.GetString(0), reader.GetString(1))] = reader.IsDBNull(2) ? null : reader.GetBoolean(2);
+            }
+
+            return existence;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -1193,7 +1403,8 @@ LIMIT $1";
         long? ToastLiveBytes = null);
 
     /// <summary>One object's settled point for one day (the day's last sample). Job and TOAST fields as on
-    /// <see cref="StoreMetricRow"/>.</summary>
+    /// <see cref="StoreMetricRow"/>. <c>MetricTime</c> is that last sample's own time (#4734), which <c>Day</c>,
+    /// the midnight bucket it falls in, is not; null on a point built without one.</summary>
     public sealed record StoreMetricDailyPoint(
         string ObjectKind,
         string ObjectName,
@@ -1209,7 +1420,8 @@ LIMIT $1";
         long? TotalRuns = null,
         long? TotalFailures = null,
         long? ToastBytes = null,
-        long? ToastLiveBytes = null);
+        long? ToastLiveBytes = null,
+        DateTime? MetricTime = null);
 
     /* ---------------- #3783: TOAST utilisation on the dimension rows ---------------- */
 
@@ -1370,6 +1582,9 @@ LIMIT $1";
     /// <c>postmaster_start_time</c> (V139, #3955) rides along so <see cref="CheckpointerReading.From"/> can tell an
     /// interval that spans a restart; it is NULL on a row written before the rung, which the rule reads as no
     /// evidence on the newer row and as "compare its time" on the older one.
+    /// <c>checkpoint_longest_sync_ms</c> and <c>checkpoint_longest_sync_at</c> (V156, #4834) are the hour's longest
+    /// single sync; <see cref="CheckpointerReading.From"/> reads them off the NEWER row only, and a NULL pair (a row
+    /// from before the rung, or an hour the sampler took no difference in) is no evidence.
     /// </summary>
     public const string CheckpointerPairSql = $@"
 SELECT
@@ -1378,7 +1593,9 @@ SELECT
     checkpoint_sync_ms,
     checkpoints_requested,
     postmaster_start_time,
-    checkpoints_timed
+    checkpoints_timed,
+    checkpoint_longest_sync_ms,
+    checkpoint_longest_sync_at
 FROM collect.store_metrics
 WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'
 AND   checkpoint_write_ms IS NOT NULL
@@ -1395,7 +1612,11 @@ LIMIT $1";
     /// <param name="Timed">(V140, #4037) The cumulative COUNT of TIMED checkpoints as the server reported it,
     /// null on a row written before the rung. <see cref="CheckpointerReading.From"/> reads a null on either
     /// sample as no evidence for the average-per-checkpoint arm, never as zero.</param>
-    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null);
+    /// <param name="LongestSyncMs">(V156, #4834) The hour's longest single checkpoint sync in milliseconds, as the sweep
+    /// stored it with this row; null on a row written before the rung or in an hour the sampler took no difference in.</param>
+    /// <param name="LongestSyncAt">(V156, #4834) The naive-UTC time of the minute sample that saw it; null with
+    /// <paramref name="LongestSyncMs"/>.</param>
+    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null, long? LongestSyncMs = null, DateTime? LongestSyncAt = null);
 
     /// <summary>
     /// Whether the pair yielded an interval (#3783). Five states rather than a nullable delta, for the reason
@@ -1449,7 +1670,8 @@ LIMIT $1";
     /// <param name="WriteMs">Milliseconds the checkpointer spent in the write phase inside the interval.</param>
     /// <param name="SyncMs">Milliseconds it spent in the sync (fsync) phase inside the interval — the phase the
     /// production read kills sat inside.</param>
-    /// <param name="Requested">Checkpoints inside the interval that were REQUESTED (WAL-forced) rather than timed.</param>
+    /// <param name="Requested">Checkpoints inside the interval that were REQUESTED rather than timed: started by WAL
+    /// volume reaching <c>max_wal_size</c>, a base backup, or a <c>CHECKPOINT</c> statement.</param>
     /// <param name="CumulativeWriteMs">The newest row's raw counter, for a reader who wants the lifetime figure. Null when Absent.</param>
     /// <param name="CumulativeSyncMs">Likewise.</param>
     /// <param name="CumulativeRequested">Likewise.</param>
@@ -1463,6 +1685,13 @@ LIMIT $1";
     /// the rung — <see cref="IsPressure"/> then has no denominator for the average arm and states no pressure
     /// from sync alone, never falling back to the old summed-sync rule.</param>
     /// <param name="CumulativeTimed">The newest row's raw timed-checkpoint counter. Null when Absent or the row predates V140.</param>
+    /// <param name="LongestSyncMs">(V156, #4834) The longest single checkpoint sync inside the interval, in milliseconds,
+    /// as the worker's once-a-minute sample found it and the sweep stored it on the NEWER row. Null unless
+    /// <see cref="CheckpointerDeltaStatus.Observed"/> (a restart-spanning interval's sync includes the shutdown
+    /// checkpoint), and null on a row from before the rung or in an hour the sampler took no difference in - no
+    /// evidence, never zero. <see cref="IsPressure"/> judges it against the same per-checkpoint bar.</param>
+    /// <param name="LongestSyncAtUtc">(V156, #4834) The time of the minute sample that saw it, UTC; null with
+    /// <paramref name="LongestSyncMs"/>.</param>
     public sealed record CheckpointerReading(
         CheckpointerDeltaStatus Status,
         DateTime? ObservedAt,
@@ -1477,7 +1706,9 @@ LIMIT $1";
         bool PostmasterRestarted = false,
         DateTime? PostmasterStartTime = null,
         long? Timed = null,
-        long? CumulativeTimed = null)
+        long? CumulativeTimed = null,
+        long? LongestSyncMs = null,
+        DateTime? LongestSyncAtUtc = null)
     {
         /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
         public static CheckpointerReading Absent { get; } =
@@ -1550,6 +1781,16 @@ LIMIT $1";
                 ? newestTimed - previousTimed
                 : null;
 
+            /* (V156, #4834) The hour's longest single sync rides on the NEWER row, and counts only as the pair it is
+               stored as; the older row's pair described the hour before this interval. */
+            long? longestMs = null;
+            DateTime? longestAt = null;
+            if (newest.LongestSyncMs is long storedMs && newest.LongestSyncAt is DateTime storedAt)
+            {
+                longestMs = storedMs;
+                longestAt = DateTime.SpecifyKind(storedAt, DateTimeKind.Utc);
+            }
+
             return new CheckpointerReading(
                 CheckpointerDeltaStatus.Observed, observedAt, previousAt, Math.Round(span, 1),
                 newest.WriteMs - previous.WriteMs,
@@ -1557,7 +1798,8 @@ LIMIT $1";
                 newest.Requested - previous.Requested,
                 newest.WriteMs, newest.SyncMs, newest.Requested,
                 PostmasterRestarted: false, PostmasterStartTime: startedAt,
-                Timed: timedDelta, CumulativeTimed: newest.Timed);
+                Timed: timedDelta, CumulativeTimed: newest.Timed,
+                LongestSyncMs: longestMs, LongestSyncAtUtc: longestAt);
         }
 
         /// <summary>(V140, #4037) Checkpoints inside the interval, timed plus requested — the average arm's
@@ -1575,20 +1817,26 @@ LIMIT $1";
         /// The self-alert's condition (#3783, judged per-checkpoint average since #4037), on an Observed
         /// interval only: the AVERAGE sync milliseconds per checkpoint in the interval
         /// (<see cref="AverageSyncMsPerCheckpoint"/> = SyncMs / (timed + requested)) held more than
-        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, OR at least one checkpoint was WAL-forced.
+        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, OR at least one checkpoint was requested.
         /// The old rule judged the interval's SUMMED sync milliseconds against the same bar, which is a
         /// PER-CHECKPOINT bar (the MCP read deadline) — an hourly interval covers about twelve timed checkpoints
         /// on the default five-minute checkpoint_timeout, so a healthy store whose checkpoints synced five to
         /// eight seconds each summed past the bar every interval and never recovered. A pre-V140 row leaves
         /// <see cref="Timed"/> null; the average arm then states no pressure from sync alone rather than falling
-        /// back to the old sum, and the requested arm still fires on any WAL-forced checkpoint. Zero checkpoints
+        /// back to the old sum, and the requested arm still fires on any requested checkpoint. Zero checkpoints
         /// in the interval judges neither arm. False on every other status — an unmeasured interval is not a
-        /// finding, and that includes one that spans a postmaster restart (#3955).
+        /// finding, and that includes one that spans a postmaster restart (#3955). Since V156 (#4834) a third arm:
+        /// the interval's LONGEST single sync, stored on the newer row, held more than the same bar - an average
+        /// spreads one long sync over the interval's short ones, so a store whose one 23.5 s sync averaged 5.9 s
+        /// read as clean while the alert fired on it. A NULL longest sync (a row from before the rung, or an hour
+        /// the sampler took no difference in) is no evidence and leaves the other two arms to decide exactly as
+        /// they did.
         /// </summary>
         public bool IsPressure =>
             Status == CheckpointerDeltaStatus.Observed
             && ((Requested is long requested && requested > 0)
-                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
+                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs)
+                || (LongestSyncMs is long longest && longest > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
     }
 
     /// <summary>
@@ -1612,7 +1860,9 @@ LIMIT $1";
             var sample = new CheckpointerSample(
                 reader.GetDateTime(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3),
                 reader.IsDBNull(4) ? null : reader.GetDateTime(4),
-                reader.IsDBNull(5) ? null : reader.GetInt64(5));
+                reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                reader.IsDBNull(7) ? null : reader.GetDateTime(7));
             if (newest is null)
             {
                 newest = sample;
@@ -1629,8 +1879,19 @@ LIMIT $1";
     /// <summary>One day's whole-store growth: the byte delta from the previous day's settled point, and
     /// that delta divided by the day's enabled-server count — the number onboarding N servers multiplies.
     /// <c>PerServerBytes</c> is null when the server count is unknown or zero (a delta over no servers is
-    /// not a rate).</summary>
-    public sealed record DailyGrowthPoint(DateTime Day, long DeltaBytes, double? PerServerBytes);
+    /// not a rate). <c>MetricTime</c> is the time of the snapshot the day's point was read from (#4734), null when
+    /// the point carried none. <c>SpanDays</c> is the whole days between the two points the delta spans: always 1
+    /// on a point <see cref="ComputeDailyGrowth"/> returns, because a pair whose days are not consecutive, or
+    /// whose two snapshots are not about a day apart (#4734), is left out, and carried so the payload says so.
+    /// <c>Partial</c> is true for the day still in progress, whose point is the latest snapshot so far and not a
+    /// full day's growth.</summary>
+    public sealed record DailyGrowthPoint(
+        DateTime Day,
+        long DeltaBytes,
+        double? PerServerBytes,
+        DateTime? MetricTime = null,
+        int SpanDays = 1,
+        bool Partial = false);
 
     /// <summary>
     /// The index <see cref="StoreMetricsLatestSql"/>'s skip-scan walks (#3934), created by the Tuning stage
@@ -1733,33 +1994,92 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 reader.IsDBNull(11) ? null : reader.GetInt64(11),
                 reader.IsDBNull(12) ? null : reader.GetInt64(12),
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
-                reader.IsDBNull(14) ? null : reader.GetInt64(14)));
+                reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                reader.GetDateTime(15)));
         }
 
         return rows;
     }
 
+    /// <summary>The shortest time between two daily points' snapshots that still reads as one day's growth
+    /// (#4734): half a day, where a span starts to round to one day. A shorter pair is left out, except for
+    /// today's partial point, which is short by nature.</summary>
+    internal static readonly TimeSpan MinDailyGrowthSpan = TimeSpan.FromHours(12);
+
+    /// <summary>The time between two daily points' snapshots at which a pair stops reading as one day's growth
+    /// (#4734): a day and a half, where a span starts to round to two days. A pair this far apart or more is
+    /// left out, today's partial point included.</summary>
+    internal static readonly TimeSpan MaxDailyGrowthSpan = TimeSpan.FromHours(36);
+
     /// <summary>
     /// The whole-store daily growth series from the store-kind daily points, ordered by day: each day's
     /// byte delta from the previous day's settled point, plus the per-server rate (delta divided by THAT
-    /// day's enabled-server count — the day being measured, not the baseline day). Pure. The first day has
-    /// no predecessor and yields no point; a day whose total or predecessor's total is unrecorded is
-    /// skipped rather than invented; the per-server rate is null (never zero, never infinity) when the
-    /// server count is missing or zero. Deltas can be NEGATIVE — retention drops and compression passes
-    /// shrink the store, and hiding that would misstate the trend a forecast extrapolates.
+    /// day's enabled-server count — the day being measured, not the baseline day). Pure, apart from the
+    /// clock <paramref name="asOfUtc"/> falls back to. The first day has no predecessor and yields no
+    /// point; a day whose total or predecessor's total is unrecorded is skipped rather than invented; the
+    /// per-server rate is null (never zero, never infinity) when the server count is missing or zero.
+    /// Deltas can be NEGATIVE — retention drops and compression passes shrink the store, and hiding that
+    /// would misstate the trend a forecast extrapolates.
+    ///
+    /// <para><b>A gap is not one day's growth (#4734).</b> A day is compared with its predecessor only when
+    /// the predecessor is the calendar day before it. When the service recorded nothing for whole days in
+    /// between, the first day back is skipped like an unrecorded total is, not labeled with the delta of the
+    /// several days it spans: that pair would read as a single-day spike, and the per-server rate built on it
+    /// would overstate what onboarding a server costs. The day after that one compares with the first day
+    /// back and is right. Each point carries the time of its own snapshot and the days it spans.</para>
+    ///
+    /// <para><b>Consecutive days are not always a day apart (#4734).</b> Each day's point is that day's LAST
+    /// snapshot. If the service stopped at 00:30 on one day and ran again until 23:59 the next, the two points
+    /// are on consecutive calendar days and about 47 hours apart, and the pair still reads as one day's growth,
+    /// with the per-server rate built on it. So when both points carry the time of their own snapshot, the
+    /// pair is kept only when those two times are at least <see cref="MinDailyGrowthSpan"/> and under
+    /// <see cref="MaxDailyGrowthSpan"/> apart (a span that rounds to one day; today's partial point is exempt from
+    /// the lower bound, below); otherwise it is left out, like a calendar gap is. The calendar-day test above
+    /// still applies to every pair, so a whole day with no point between two close-in-time snapshots is still a
+    /// gap; when either point has no time it is the only test.</para>
+    ///
+    /// <para><b>Today is partial.</b> The day's point is its LAST snapshot, and the last snapshot of the day
+    /// still in progress (the UTC date of <paramref name="asOfUtc"/>) is only the latest so far, so its delta
+    /// covers part of a day. It is kept, marked <c>Partial</c>, and never shown as a full day's growth. A
+    /// partial day is short by nature, so only the upper bound of the span applies to it: a pair
+    /// <see cref="MaxDailyGrowthSpan"/> or more apart is left out even for today.</para>
     /// </summary>
-    public static List<DailyGrowthPoint> ComputeDailyGrowth(IReadOnlyList<StoreMetricDailyPoint> storePoints)
+    public static List<DailyGrowthPoint> ComputeDailyGrowth(
+        IReadOnlyList<StoreMetricDailyPoint> storePoints, DateTime? asOfUtc = null)
     {
         if (storePoints is null)
         {
             throw new ArgumentNullException(nameof(storePoints));
         }
 
+        var today = (asOfUtc ?? DateTime.UtcNow).Date;
         var growth = new List<DailyGrowthPoint>();
         for (var i = 1; i < storePoints.Count; i++)
         {
             var previous = storePoints[i - 1];
             var current = storePoints[i];
+
+            var spanDays = (current.Day.Date - previous.Day.Date).Days;
+            if (spanDays != 1)
+            {
+                continue;
+            }
+
+            var partial = current.Day.Date >= today;
+
+            /* #4734: consecutive calendar days can still be nearly two days apart, because each point is the
+               day's LAST snapshot. Measure the span from the two snapshots' own times. A point with no time
+               leaves nothing to measure, and the day's midnight bucket is not a snapshot time to measure from,
+               so that pair stays judged by its calendar days alone. */
+            if (previous.MetricTime is { } previousAt && current.MetricTime is { } currentAt)
+            {
+                var elapsed = currentAt - previousAt;
+                if (elapsed >= MaxDailyGrowthSpan || (elapsed < MinDailyGrowthSpan && !partial))
+                {
+                    continue;
+                }
+            }
+
             if (previous.TotalBytes is not { } before || current.TotalBytes is not { } after)
             {
                 continue;
@@ -1770,7 +2090,8 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 ? delta / (double)current.EnabledServerCount.Value
                 : null;
 
-            growth.Add(new DailyGrowthPoint(current.Day, delta, perServer));
+            growth.Add(new DailyGrowthPoint(
+                current.Day, delta, perServer, current.MetricTime, spanDays, Partial: partial));
         }
 
         return growth;

@@ -73,7 +73,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadWaitStatsAsync()
     {
-        _waitStatsHover ??= new ChartHoverHelper(WaitStatsChart, "ms/sec");
+        _waitStatsHover ??= new ChartHoverHelper(WaitStatsChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
 
         var (startUtc, endUtc) = GetWindowUtc();
         var waitTypes = await _dataService.GetDistinctWaitTypesAsync(_server.ServerId, startUtc, endUtc);
@@ -91,6 +91,7 @@ public partial class ViewerServerTab
             IsSelected = previouslySelected.Contains(w) || (topWaits != null && topWaits.Contains(w))
         }).ToList();
         /* Sort checked items to top, then preserve original order (by total wait time desc) */
+        _waitTypeRefresh?.Invalidate();
         RefreshWaitTypeListOrder();
     }
 
@@ -136,6 +137,7 @@ public partial class ViewerServerTab
             item.IsSelected = topWaits.Contains(item.DisplayName);
         }
         _isUpdatingWaitTypeSelection = false;
+        _waitTypeRefresh?.Invalidate();
         RefreshWaitTypeListOrder();
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
@@ -146,6 +148,7 @@ public partial class ViewerServerTab
         var visible = (WaitTypesList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _waitTypeItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingWaitTypeSelection = false;
+        _waitTypeRefresh?.Invalidate();
         RefreshWaitTypeListOrder();
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
@@ -155,11 +158,23 @@ public partial class ViewerServerTab
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _waitTypeRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void WaitType_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingWaitTypeSelection) return;
-        RefreshWaitTypeListOrder();
-        _ = UpdateWaitStatsChartFromPickerAsync();
+        (_waitTypeRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshWaitTypeListOrder();
+                _ = UpdateWaitStatsChartFromPickerAsync();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_waitTypeItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
     private async Task UpdateWaitStatsChartFromPickerAsync()
@@ -181,8 +196,8 @@ public partial class ViewerServerTab
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
 
-            /* The per-server toolbar's settable window (preset or custom From/To). The store is naive-UTC;
-               display converts via ViewerTimeHelper.ForDisplay. */
+            /* The per-server toolbar's settable window (preset or custom From/To). The store is naive-UTC and the chart
+               plots it as is; the labels are drawn in ViewerTimeHelper.CurrentDisplayZone. */
             var (startUtc, endUtc) = GetWindowUtc();
             double globalMax = 0;
 
@@ -195,7 +210,7 @@ public partial class ViewerServerTab
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = useAvgPerWait
                     ? trend.Select(t => t.AvgMsPerWait).ToArray()
                     : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
@@ -209,9 +224,9 @@ public partial class ViewerServerTab
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
 
-            WaitStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
-            var rangeStart = ViewerTimeHelper.ForDisplay(startUtc);
-            var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc);
+            WaitStatsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
+            var rangeStart = startUtc;
+            var rangeEnd = endUtc;
             WaitStatsChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(WaitStatsChart);
             WaitStatsChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");

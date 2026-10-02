@@ -852,12 +852,25 @@ public static class FleetSweepEngine
     /// and a sweep failure must cost the fleet nothing but this sweep slot. Cancellation returns
     /// quietly; any other fault is one error line naming what was lost.</para>
     /// </summary>
+    public static Task RunAsync(
+        NpgsqlDataSource postgres,
+        IReadOnlyList<(int ServerId, string ServerName)> servers,
+        TimeSpan interval,
+        bool alertsEnabled,
+        ILogger logger,
+        CancellationToken cancellationToken)
+        => RunAsync(postgres, servers, interval, alertsEnabled, logger, null, cancellationToken);
+
+    /// <inheritdoc cref="RunAsync(NpgsqlDataSource, IReadOnlyList{ValueTuple{int, string}}, TimeSpan, bool, ILogger, CancellationToken)"/>
+    /// <param name="separatelyMonitored">#4925: per server id, the databases an Azure SQL Database master leaves to
+    /// their own targets (null or absent: read unscoped).</param>
     public static async Task RunAsync(
         NpgsqlDataSource postgres,
         IReadOnlyList<(int ServerId, string ServerName)> servers,
         TimeSpan interval,
         bool alertsEnabled,
         ILogger logger,
+        IReadOnlyDictionary<int, IReadOnlyList<string>?>? separatelyMonitored,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
@@ -886,8 +899,10 @@ public static class FleetSweepEngine
             foreach (var (serverId, serverName) in servers.DistinctBy(s => s.ServerId))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                IReadOnlyList<string>? separate = null;
+                separatelyMonitored?.TryGetValue(serverId, out separate);
                 readings.Add(await ReadServerSignalsAsync(
-                    postgres, serverId, serverName, spanStartUtc, nowUtc, cancellationToken).ConfigureAwait(false));
+                    postgres, serverId, serverName, spanStartUtc, nowUtc, separate, logger, cancellationToken).ConfigureAwait(false));
             }
 
             var composition = Compose(
@@ -922,25 +937,41 @@ public static class FleetSweepEngine
     /// <summary>One server's signals over the span — the shared daily-summary aggregate, summed across
     /// the UTC-day buckets the statement returns (exact: every signal is an additive count over the
     /// same half-open window). A fault is CAUGHT into the reading, because for a per-server read the
-    /// honest rendering is a dead instrument on that server's card, not a lost sweep.</summary>
-    private static async Task<FleetSweepServerReading> ReadServerSignalsAsync(
+    /// honest rendering is a dead instrument on that server's card, not a lost sweep. Internal so the
+    /// live read test can drive it against a scratch store.</summary>
+    internal static Task<FleetSweepServerReading> ReadServerSignalsAsync(
         NpgsqlDataSource postgres,
         int serverId,
         string serverName,
         DateTime spanStartUtc,
         DateTime spanEndUtc,
         CancellationToken cancellationToken)
+        => ReadServerSignalsAsync(postgres, serverId, serverName, spanStartUtc, spanEndUtc, null, null, cancellationToken);
+
+    /// <summary>#4925: <see cref="ReadServerSignalsAsync(NpgsqlDataSource, int, string, DateTime, DateTime, CancellationToken)"/>
+    /// for a target with a list of databases it leaves to their own targets.</summary>
+    internal static async Task<FleetSweepServerReading> ReadServerSignalsAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        string serverName,
+        DateTime spanStartUtc,
+        DateTime spanEndUtc,
+        IReadOnlyList<string>? separatelyMonitored,
+        ILogger? logger,
+        CancellationToken cancellationToken)
     {
         try
         {
+            /* #4925: an Azure SQL Database master counts only its own blocking and deadlocks. A scoping fault
+               is absorbed inside the read (logged, read unscoped), so the catch below sees store faults only. */
             var rows = await DarlingHealthReader.GetWindowSignalsAsync(
-                postgres, serverId, spanStartUtc, spanEndUtc, cancellationToken).ConfigureAwait(false);
+                postgres, serverId, spanStartUtc, spanEndUtc, separatelyMonitored, logger, cancellationToken).ConfigureAwait(false);
 
             var peakBlock = rows.Count == 0 ? 0L : rows.Max(r => r.MaxBlockDurationMs);
 
             var signals = new DailyHealthSignals
             {
-                HasData = rows.Count > 0,
+                HasData = SpanHasData(rows),
                 Deadlocks = rows.Sum(r => r.DeadlockCount),
                 CollectionErrors = rows.Sum(r => r.CollectionErrors),
                 /* #3539 A2: runs sum exactly as the errors do (additive counts over one half-open window),
@@ -970,6 +1001,18 @@ public static class FleetSweepEngine
         {
             return new FleetSweepServerReading(serverId, serverName, default, 0L, ex.Message);
         }
+    }
+
+    /// <summary>Whether a span holds any collection at all (#4747). The day spine that
+    /// <see cref="DailySummarySql.RangeSql"/> returns also holds a day that only has alert rows: a server
+    /// that cannot be reached writes no collection-log row, but its "Collection Stopped" self-alert keeps
+    /// firing, so an outage span comes back as one row with alerts and zero collector runs. Counting that
+    /// row as data banded the outage Warning, counted it in <c>servers_reported</c> and hid the
+    /// collection-stale item. Only collector runs (every status) prove the collectors were running, so
+    /// the rule is the run count.</summary>
+    internal static bool SpanHasData(IEnumerable<DarlingHealthReader.DailySummaryReadRow> rows)
+    {
+        return rows.Sum(r => r.CollectionRuns) > 0;
     }
 
     /// <summary>The deadlock band's tiers from the store's singleton settings row (#3368, V120) — the

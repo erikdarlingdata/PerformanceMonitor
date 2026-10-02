@@ -171,6 +171,53 @@ public sealed class MigrationDataMovingRungCensusPins
             + "V62's and V137's shape on the same control-plane singleton (id = 1, CHECK (id = 1)), so the "
             + "UPDATE's WHERE compose_statement_timeout_seconds = 15 touches at most one row and spends none "
             + "of the budget"),
+        new(
+            150,
+            SetsTheFloor: false,
+            "two CREATE INDEXes over populated hypertables (#4469, #4477): idx_collection_log_watermark on "
+            + "collect.collection_log (created V2) and idx_job_history_server_run on collect.job_history "
+            + "(created V1/V24). V104's and V142's case rather than V22's/V23's/V39's: real collected series, "
+            + "but costed rather than assumed. Measured on a rig shaped like the field (43 servers, ~40 "
+            + "collectors, 15M collection_log rows, 9 of 11 chunks compressed): the collection_log index built "
+            + "in ~0.94 s. A separate rig for job_history (43 servers, ~2.7M rows over 4 days, 3 of 5 chunks "
+            + "compressed) built its index in well under a second too. CompressAfterDays leaves only the "
+            + "newest day or two of either table uncompressed at migration time, with every older chunk's "
+            + "decompressed relation an empty shell (one 8 KB page per compressed chunk, V142's own measured "
+            + "property) - so a store many times today's size would still build both in low seconds, nowhere "
+            + "near a MigrationCommandTimeoutSeconds window, and this rung does not move the multiple"),
+        new(
+            153,
+            SetsTheFloor: false,
+            "CREATE INDEX over the populated collect.query_store_interval_latest table (created V143) "
+            + "(#4608, split into its own rung #4615) - real collected series, V104's/V142's/V150's shape "
+            + "rather than a same-rung freebie, but a plain (uncompressed) heap rather than a compressed "
+            + "hypertable, so every row is a real page rather than V142's/V150's empty-shell compressed "
+            + "chunks. Measured on a rig seeded at generate_series scale with the same maintenance_work_mem "
+            + "(2047 MB) and max_parallel_maintenance_workers (2) the field store runs: the index built in "
+            + "1.41 s at 5M rows, 3.61 s at 10M, and 8.13 s at 20M rows (near-linear, ~0.28-0.41 ms/row) with "
+            + "max_parallel_maintenance_workers = 2, versus roughly 2.3x slower serial (0 workers) on the same "
+            + "20M-row seed. query_store_interval_latest is kept to 15 days by the purge this rung speeds up, "
+            + "and the field store measured 18.3M rows at that horizon on 2026-09-28 - a full-horizon store "
+            + "(roughly 6-7x today's rows, ~110M) projects to roughly 20-25 s with parallel workers, nowhere "
+            + "near the 280 s MigrationCommandTimeoutSeconds window this rung's own SET LOCAL lock_timeout "
+            + "leaves. V143 is new in 3.9.0 (v3.8.0 was schema 125), so every store upgrading from a released "
+            + "version creates the table EMPTY in this same migrate run and builds the index instantly; only "
+            + "a nightly-build store already holds rows, and only for the few days since it picked up V143 - "
+            + "nowhere near the horizon in practice"),
+        new(
+            154,
+            SetsTheFloor: false,
+            "CREATE INDEX over the populated collect.query_store_interval_wide table (created V145) (#4608, "
+            + "split into its own rung #4615) - V153's twin, same shape and same measurement basis, on the "
+            + "table this rung purges/reads instead: the index built in 3.52 s at 9M rows with "
+            + "max_parallel_maintenance_workers = 2. query_store_interval_wide is kept to 9 days, and the "
+            + "field store measured 9.3M rows at that horizon on 2026-09-28 - a full-horizon store (roughly "
+            + "6-7x today's rows, ~65M) projects to roughly 25-30 s with parallel workers, nowhere near the "
+            + "280 s MigrationCommandTimeoutSeconds window this rung's own SET LOCAL lock_timeout leaves. "
+            + "V145 is new in 3.9.0 (v3.8.0 was schema 125), so every store upgrading from a released version "
+            + "creates the table EMPTY in this same migrate run and builds the index instantly; only a "
+            + "nightly-build store already holds rows, and only for the few days since it picked up V145 - "
+            + "nowhere near the horizon in practice"),
     ];
 
     /// <summary>
@@ -446,16 +493,34 @@ public sealed class MigrationDataMovingRungCensusPins
     }
 
     /// <summary>
+    /// The one rung today whose dynamic SQL is an accepted, hand-costed exception — the scan cannot read
+    /// past <c>EXECUTE format(...)</c> or a parameterised <c>EXECUTE '...' USING ...</c>, so this name has
+    /// to be kept in sync by hand rather than derived. V152's <c>DO $$ ... $$</c> (#4503) uses both forms
+    /// against the catalog only: <c>EXECUTE '...' INTO ... USING v_view</c> reads a continuous aggregate's
+    /// materialization name from <c>timescaledb_information</c>, and <c>EXECUTE format('DROP INDEX IF
+    /// EXISTS %s', ...)</c> then drops a catalog index resolved via <c>pg_index</c>/<c>pg_attribute</c>
+    /// (metadata, not collected rows) — the opposite direction from every shape <see cref="s_declared"/>
+    /// tracks (which are all index BUILDS or DML over pre-existing rows), so it gets no
+    /// <see cref="s_declared"/> entry at all: there is no data-moving cost to declare, only a scan blind
+    /// spot to name.
+    /// </summary>
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152];
+
+    /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has none — 109 rungs, and the only <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's
-    /// trigger definitions. Pinned so the blind spot stays theoretical: a rung that builds DDL with
-    /// <c>format()</c> needs to be costed by hand, and this is where that gets said.
+    /// ladder has one exempted rung today (V152, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// its <c>DO $$ ... EXECUTE format(...)</c> drops a catalog index rather than moving data) and
+    /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
+    /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
+    /// with <c>format()</c> needs to be costed by hand, added either to this exemption list (if it moves
+    /// no data) or to <see cref="s_declared"/> (if it does), and this is where that gets said.
     /// </summary>
     [Fact]
     public void TheLadderStillContainsNoDynamicSql()
     {
         var offenders = PgMigrations.Scripts
             .Where(m => s_dynamicSql.IsMatch(StripComments(m.Sql)))
+            .Where(m => !s_dynamicSqlExemptedRungs.Contains(m.Version))
             .Select(m => $"V{m.Version.ToString(CultureInfo.InvariantCulture)} ({m.Name})")
             .ToList();
 

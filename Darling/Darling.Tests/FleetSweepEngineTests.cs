@@ -14,6 +14,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
+using Reader = PerformanceMonitor.Darling.Service.Mcp.DarlingHealthReader;
 
 namespace Darling.Tests;
 
@@ -764,6 +765,40 @@ public sealed class FleetSweepEngineTests
             Now - TimeSpan.FromMinutes(FleetSweepCadence.IntervalMinutesCeiling),
             FleetSweepEngine.ComputeSpanStart(Now, interval, ancient));
     }
+
+    /* ─────────────────────── the span's data test (#4747) ─────────────────────── */
+
+    /* One day-bucket row of the daily-summary aggregate: only the two counts the rule reads are set. */
+    private static Reader.DailySummaryReadRow SpanRow(long alerts, long runs) =>
+        new(Now.Date, 0m, "", 0, 0, 0, 0, 0, 0, 0, alerts, 0, HasData: true) { CollectionRuns = runs };
+
+    /// <summary>
+    /// An outage span: the server cannot be reached, so the collectors write no collection-log row, but
+    /// the "Collection Stopped" self-alert keeps firing. The day spine holds that span as a row with
+    /// alerts and zero collector runs, and that row is NOT data — alert rows are not evidence that
+    /// anything was collected.
+    /// </summary>
+    [Fact]
+    public void ASpanWithAlertRowsAndNoCollectionRuns_HasNoData()
+    {
+        Assert.False(FleetSweepEngine.SpanHasData(new[] { SpanRow(alerts: 4, runs: 0) }));
+
+        /* A span across midnight lands in two day buckets; alerts in both still prove no collection. */
+        Assert.False(FleetSweepEngine.SpanHasData(new[] { SpanRow(alerts: 2, runs: 0), SpanRow(alerts: 3, runs: 0) }));
+    }
+
+    [Fact]
+    public void ASpanWithOneCollectionRun_HasData()
+    {
+        Assert.True(FleetSweepEngine.SpanHasData(new[] { SpanRow(alerts: 0, runs: 1) }));
+
+        /* The run is in one of a midnight-crossing span's two buckets; the other holds only alerts. */
+        Assert.True(FleetSweepEngine.SpanHasData(new[] { SpanRow(alerts: 4, runs: 0), SpanRow(alerts: 0, runs: 1) }));
+    }
+
+    [Fact]
+    public void ASpanWithNoRowsAtAll_HasNoData() =>
+        Assert.False(FleetSweepEngine.SpanHasData(Array.Empty<Reader.DailySummaryReadRow>()));
 
     /* ─────────────────────── helpers ─────────────────────── */
 

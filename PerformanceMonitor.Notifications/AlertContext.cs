@@ -351,13 +351,42 @@ public record AlertRoutingDto(string Route, string Reason);
 /// <see cref="AlertContextDto"/> like <c>Incidents</c> and <c>Severity</c>, so a row written before it
 /// existed rehydrates to null, which reads as "this row carries no routing record". <c>Family</c> is the
 /// alert's <see cref="AlertFamily"/>; <c>RouteId</c> the most specific route that matched (null = the parent
-/// defaults answered everything); <c>Destinations</c> one entry per channel that was DELIVERED, each naming
-/// the route that supplied it (null = the parent default) and the level it came from, spelled as the
-/// <see cref="RouteSource"/> member's NAME for the same reason <c>Severity</c> is: the column outlives any
-/// build and an ordinal would change meaning the day a member is inserted.
+/// defaults answered everything); <c>Destinations</c> one entry per channel that RESOLVED to a destination,
+/// each naming the route that supplied it (null = the parent default), the level it came from, spelled as
+/// the <see cref="RouteSource"/> member's NAME for the same reason <c>Severity</c> is: the column outlives
+/// any build and an ordinal would change meaning the day a member is inserted, and (#4750) what the send to
+/// it did.
 /// </summary>
 public record AlertRouteDto(string Family, int? RouteId, List<AlertRouteDestinationDto> Destinations);
-public record AlertRouteDestinationDto(string Channel, int? RouteId, string Source);
+
+/// <summary>
+/// One channel of an <see cref="AlertRouteDto"/> (#3598). <c>Outcome</c> (#4750) is what the send to that
+/// channel did, spelled as one of <see cref="AlertRouteOutcomes"/>'s constants, so an alert that reached one
+/// channel and failed on another says so on the row instead of reading as one delivery. It is trailing and
+/// nullable like <c>AlertContextDto.Route</c>: a row written before it existed rehydrates to null, which reads
+/// as "this row does not say", and so does a row whose fan-out reported no per-channel outcomes. It carries NO
+/// error text — a webhook failure message can name the endpoint URL, which is a secret — so the row's
+/// <c>send_error</c> stays the only place a failure's reason is written.
+/// </summary>
+public record AlertRouteDestinationDto(string Channel, int? RouteId, string Source, string? Outcome = null);
+
+/// <summary>
+/// The spellings of <see cref="AlertRouteDestinationDto.Outcome"/> (#4750). A persisted contract: the
+/// alert-history row's <c>context_json</c> outlives any build, and the MCP history reads hand the text to
+/// callers as-is, so a value is never renamed and a new one is only ever added.
+/// </summary>
+public static class AlertRouteOutcomes
+{
+    /// <summary>The channel's send went out.</summary>
+    public const string Delivered = "delivered";
+
+    /// <summary>The channel's send was attempted and did not succeed. The reason is not stored here.</summary>
+    public const string Failed = "failed";
+
+    /// <summary>The channel resolved to a destination but nothing was sent to it on this firing: a cooldown
+    /// or a fold held the send, the alert was muted, or the fan-out never reached the channel.</summary>
+    public const string NotAttempted = "not attempted";
+}
 
 public record AlertDetailItemDto(string Heading, List<FieldDto> Fields, string? Body, bool IsCodeBlock, RemediationActionDto? Remediation = null);
 public record FieldDto(string Label, string Value);
@@ -471,6 +500,11 @@ public record RcsiInactionFiguresDto(
 /// copy-paste command from the DESERIALIZED action, so a flag dropped by this DTO never reaches the
 /// pasted surface at all, and the future auto-force bot reading persisted actions would see false
 /// for every flagged target (review catch on #2140).
+/// <see cref="BestPlanLastSeenUtc"/> (#3953) and <see cref="BestPlanAgeDays"/> (#4736) are appended the same
+/// way and mirrored for the same reason: the MCP findings read reports each target's best plan age from the
+/// DESERIALIZED action, so a member missing here reads back null for every persisted target. A row written
+/// before they existed has neither property and reads back null, the same as a drill-down row that had no
+/// best_plan_last_seen.
 /// </summary>
 public record ForcePlanTargetDto(
     string Database,
@@ -482,7 +516,9 @@ public record ForcePlanTargetDto(
     double BestCpuPerExecUs,
     double RegressionFactor,
     string? ReplicaRole = null,
-    bool ParameterSensitivityCoFired = false);
+    bool ParameterSensitivityCoFired = false,
+    DateTime? BestPlanLastSeenUtc = null,
+    double? BestPlanAgeDays = null);
 
 /// <summary>
 /// JSON mirror of <see cref="DbConfigTarget"/>. <see cref="Setting"/> is persisted
@@ -935,7 +971,9 @@ public static class AlertContextSerializer
                 t.BestCpuPerExecUs,
                 t.RegressionFactor,
                 t.ReplicaRole,
-                t.ParameterSensitivityCoFired));
+                t.ParameterSensitivityCoFired,
+                t.BestPlanLastSeenUtc,
+                t.BestPlanAgeDays));
         }
 
         List<DbConfigTargetDto>? dbConfigTargets = null;
@@ -1040,7 +1078,9 @@ public static class AlertContextSerializer
                     t.BestCpuPerExecUs,
                     t.RegressionFactor,
                     t.ReplicaRole,
-                    t.ParameterSensitivityCoFired));
+                    t.ParameterSensitivityCoFired,
+                    t.BestPlanLastSeenUtc,
+                    t.BestPlanAgeDays));
             }
         }
 

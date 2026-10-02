@@ -37,9 +37,9 @@ public partial class ViewerServerTab
     private ChartHoverHelper? _cpuComparisonHover;
 
     private SystemHealthChartRenderer? _sysHealthRendererField;
-    /// <summary>The shared System Events counter-chart renderer, bound to the viewer's display-time projection.</summary>
+    /// <summary>The shared System Events counter-chart renderer, bound to the viewer's display zone (it plots the UTC instant).</summary>
     private SystemHealthChartRenderer SysHealthRenderer =>
-        _sysHealthRendererField ??= new SystemHealthChartRenderer(_chartHelper, ViewerTimeHelper.ForDisplay);
+        _sysHealthRendererField ??= new SystemHealthChartRenderer(_chartHelper, static utc => utc, ViewerTimeHelper.CurrentDisplayZone);
 
     /// <summary>Applies the shared chrome + hover to the eight Corruption/Contention charts up front
     /// (constructor), so they don't flash white before the tab's first load — matching the CPU/Latch charts.
@@ -56,14 +56,14 @@ public partial class ViewerServerTab
             chart.Refresh();
         }
 
-        _badPagesHover = new ChartHoverHelper(BadPagesChart, "events");
-        _dumpRequestsHover = new ChartHoverHelper(DumpRequestsChart, "events");
-        _accessViolationsHover = new ChartHoverHelper(AccessViolationsChart, "events");
-        _writeAccessViolationsHover = new ChartHoverHelper(WriteAccessViolationsChart, "events");
-        _nonYieldingTasksHover = new ChartHoverHelper(NonYieldingTasksChart, "events");
-        _latchWarningsHover = new ChartHoverHelper(LatchWarningsChart, "events");
-        _sickSpinlocksHover = new ChartHoverHelper(SickSpinlocksChart, "backoffs");
-        _cpuComparisonHover = new ChartHoverHelper(CpuComparisonChart, "%");
+        _badPagesHover = new ChartHoverHelper(BadPagesChart, "events", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _dumpRequestsHover = new ChartHoverHelper(DumpRequestsChart, "events", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _accessViolationsHover = new ChartHoverHelper(AccessViolationsChart, "events", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _writeAccessViolationsHover = new ChartHoverHelper(WriteAccessViolationsChart, "events", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _nonYieldingTasksHover = new ChartHoverHelper(NonYieldingTasksChart, "events", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _latchWarningsHover = new ChartHoverHelper(LatchWarningsChart, "events", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _sickSpinlocksHover = new ChartHoverHelper(SickSpinlocksChart, "backoffs", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _cpuComparisonHover = new ChartHoverHelper(CpuComparisonChart, "%", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -76,8 +76,8 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetSystemHealthAsync(_server.ServerId, startUtc, endUtc);
 
-        double xMin = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        double xMax = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        double xMin = startUtc.ToOADate();
+        double xMax = endUtc.ToOADate();
 
         // Corruption Events (2x2).
         SysHealthRenderer.RenderCounterChart(BadPagesChart, _badPagesHover, data, d => d.BadPagesDetected, "Bad Pages",
@@ -96,6 +96,28 @@ public partial class ViewerServerTab
             ChartPalette.CyclingColor(2), xMin, xMax);
         SysHealthRenderer.RenderSickSpinlocksChart(SickSpinlocksChart, _sickSpinlocksHover, data, xMin, xMax);
         SysHealthRenderer.RenderCpuComparisonChart(CpuComparisonChart, _cpuComparisonHover, data, xMin, xMax);
+
+        ShowSystemHealthChartsNote();
+    }
+
+    /// <summary>
+    /// The two chart sub-tabs where the system_health_events collector cannot run (an Azure SQL Database): the charts are
+    /// hidden and its note shows in their place, since nothing can ever be plotted there. Anywhere else the charts show
+    /// and the note stays hidden.
+    /// </summary>
+    private void ShowSystemHealthChartsNote()
+    {
+        var gap = SystemHealthGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind);
+        foreach (var (note, charts) in new (System.Windows.Controls.TextBlock, System.Windows.Controls.Grid)[]
+                 {
+                     (CorruptionEventsNoDataMessage, CorruptionEventsCharts),
+                     (ContentionEventsNoDataMessage, ContentionEventsCharts),
+                 })
+        {
+            note.Text = gap ?? "";
+            note.Visibility = gap is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+            charts.Visibility = gap is null ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+        }
     }
 
     /// <summary>Tears down the eight Corruption/Contention hover helpers (mirrors the other tabs' dispose)

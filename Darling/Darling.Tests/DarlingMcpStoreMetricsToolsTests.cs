@@ -7,11 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -688,6 +690,15 @@ public sealed class DarlingMcpStoreMetricsToolsTests
 
     private static readonly DateTime SweepAt = new(2026, 9, 18, 15, 0, 0, DateTimeKind.Unspecified);
 
+    /// <summary>An existence map (#4619) from (kind, name, verdict) triples; a null verdict is "no check".</summary>
+    private static IReadOnlyDictionary<(string ObjectKind, string ObjectName), bool?> Exists(params (string Kind, string Name, bool? Verdict)[] entries)
+        => entries.ToDictionary(e => (e.Kind, e.Name), e => e.Verdict);
+
+    /// <summary>ComputeInventory over rows that all share the store row's sweep, where the existence map is
+    /// never consulted — so the empty one is as good as any.</summary>
+    private static DarlingStoreMetricsReader.InventoryReconciliation? OneSweep(IReadOnlyList<DarlingStoreMetricsReader.StoreMetricRow> rows)
+        => DarlingStoreMetricsReader.ComputeInventory(rows, Exists());
+
     /// <summary>A <c>job_history</c> row as the sweep writes it: role in the name, count in row_count (null =
     /// filtered), population in total_runs, window in schedule_interval_ms, newest-row AGE in
     /// last_run_duration_ms.</summary>
@@ -966,11 +977,11 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             /* Kinds with no bytes contribute nothing and are not stale. */
             new DarlingStoreMetricsReader.StoreMetricRow(StoreSelfMetrics.BackgroundJobObjectKind, "policy_compression x [1]", SweepAt, null, null, null, null, null, null, 100, 3_600_000, 5, 0),
             OwnerRow(),
-            /* From the previous sweep: excluded and counted. */
-            Row(StoreSelfMetrics.HypertableObjectKind, "dropped_since", 7 * gib, at: older),
+            /* From the previous sweep, for an object that still exists: excluded and counted as a gap. */
+            Row(StoreSelfMetrics.HypertableObjectKind, "not_reached", 7 * gib, at: older),
         };
 
-        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows);
+        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows, Exists((StoreSelfMetrics.HypertableObjectKind, "not_reached", true)));
         Assert.NotNull(inventory);
         Assert.Equal(SweepAt, inventory!.SweepAt);
         Assert.Equal(415 * gib, inventory.DatabaseBytes);
@@ -995,7 +1006,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.True(inventory.Reconciled);
 
         /* Ten GiB attributed to no row: a finding. */
-        var gap = DarlingStoreMetricsReader.ComputeInventory(new[]
+        var gap = OneSweep(new[]
         {
             StoreRow(bytes: 415 * gib),
             Row(StoreSelfMetrics.HypertableObjectKind, "a", 400 * gib),
@@ -1007,7 +1018,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
 
         /* The floor: on a 17 MiB store, 1% is 170 KiB and a 160 KiB residual would sit under it — but the
            floor is what carries a small store, and a residual under 64 MiB reconciles regardless. */
-        var small = DarlingStoreMetricsReader.ComputeInventory(new[]
+        var small = OneSweep(new[]
         {
             StoreRow(bytes: 17_192_639),
             Row(StoreSelfMetrics.HypertableObjectKind, "a", 1_720_320),
@@ -1018,7 +1029,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.True(small.Reconciled);
 
         /* No catch-all rows: not judgeable, so not reconciled — however small the arithmetic residual. */
-        var noCatchAll = DarlingStoreMetricsReader.ComputeInventory(new[]
+        var noCatchAll = OneSweep(new[]
         {
             StoreRow(bytes: 1_000),
             Row(StoreSelfMetrics.HypertableObjectKind, "a", 1_000),
@@ -1028,8 +1039,8 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Null(noCatchAll.UnenumeratedBytes);
 
         /* No store row: nothing to reconcile against, and no percentage of nothing. */
-        Assert.Null(DarlingStoreMetricsReader.ComputeInventory(new[] { Row(StoreSelfMetrics.HypertableObjectKind, "a", 1) }));
-        Assert.Null(DarlingStoreMetricsReader.ComputeInventory(Array.Empty<DarlingStoreMetricsReader.StoreMetricRow>()));
+        Assert.Null(OneSweep(new[] { Row(StoreSelfMetrics.HypertableObjectKind, "a", 1) }));
+        Assert.Null(OneSweep(Array.Empty<DarlingStoreMetricsReader.StoreMetricRow>()));
 
         Assert.Equal(1.0, DarlingStoreMetricsReader.ReconciliationTolerancePercent);
         Assert.Equal(64L * 1024 * 1024, DarlingStoreMetricsReader.ReconciliationToleranceFloorBytes);
@@ -1067,8 +1078,8 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             new DarlingStoreMetricsReader.UnenumeratedRelation("collect.store_metrics", "r", gib / 2),
         };
 
-        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows)!;
-        var reconciled = DarlingMcpStoreMetricsTools.InventoryNote(inventory, rows, states, largest);
+        var inventory = OneSweep(rows)!;
+        var reconciled = DarlingMcpStoreMetricsTools.InventoryNote(inventory, rows, states, largest, existenceRead: true);
 
         Assert.Contains("account for 409.0 GiB of the 415.0 GiB database (98.55%)", reconciled, StringComparison.Ordinal);
         Assert.Contains("3.0 GiB sits in 14 un-enumerated user-schema relation(s) (object_kind other)", reconciled, StringComparison.Ordinal);
@@ -1077,7 +1088,9 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("RECONCILED: every row together accounts for 99.76%", reconciled, StringComparison.Ordinal);
         Assert.Contains("1 of 2 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT RECONCILED", reconciled, StringComparison.Ordinal);
-        Assert.DoesNotContain("OLDER sweep", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("not from the store row's sweep", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("uncompressed by design", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("plain-PostgreSQL", reconciled, StringComparison.Ordinal);
 
         /* The gap: a finding, with the direction stated. */
@@ -1088,22 +1101,30 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
             Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
         };
-        var gap = DarlingMcpStoreMetricsTools.InventoryNote(DarlingStoreMetricsReader.ComputeInventory(gapRows)!, gapRows, states, largest);
+        var gap = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(gapRows)!, gapRows, states, largest, existenceRead: true);
         Assert.Contains("NOT RECONCILED — a finding: 10.0 GiB of pg_database_size is attributed to NO row", gap, StringComparison.Ordinal);
         Assert.DoesNotContain("RECONCILED: every", gap, StringComparison.Ordinal);
 
         /* Missing catch-all rows: a sweep failure, said so, and no coverage verdict dressed up as arithmetic. */
         var partialRows = new[] { StoreRow(bytes: 415 * gib), Row(StoreSelfMetrics.HypertableObjectKind, "a", 400 * gib) };
-        var partial = DarlingMcpStoreMetricsTools.InventoryNote(DarlingStoreMetricsReader.ComputeInventory(partialRows)!, partialRows, null, null);
+        var partial = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(partialRows)!, partialRows, null, null, existenceRead: true);
         Assert.Contains("'other' catch-all row is MISSING", partial, StringComparison.Ordinal);
         Assert.Contains("'system' catch-all row is MISSING", partial, StringComparison.Ordinal);
         Assert.Contains("NOT RECONCILED: without both catch-all rows", partial, StringComparison.Ordinal);
         Assert.Contains("live read of each aggregate's compression and policy state did not complete", partial, StringComparison.Ordinal);
 
-        /* Stale rows and the live census failing are each named. */
+        /* A row for an object that still exists but the newest sweep did not reach, and the live census
+           failing, are each named — the gap with the two places the service log says why (#4619: there is
+           no "Warning line" for a failed sweep, so the note no longer promises one). */
         var staleRows = rows.Append(Row(StoreSelfMetrics.HypertableObjectKind, "old", gib, at: SweepAt.AddHours(-1))).ToArray();
-        var stale = DarlingMcpStoreMetricsTools.InventoryNote(DarlingStoreMetricsReader.ComputeInventory(staleRows)!, staleRows, states, null);
-        Assert.Contains("1 object row(s) in the inventory are from an OLDER sweep", stale, StringComparison.Ordinal);
+        var stale = DarlingMcpStoreMetricsTools.InventoryNote(
+            DarlingStoreMetricsReader.ComputeInventory(staleRows, Exists((StoreSelfMetrics.HypertableObjectKind, "old", true)))!,
+            staleRows, states, null, existenceRead: true);
+        Assert.Contains("1 object row(s) are for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", stale, StringComparison.Ordinal);
+        Assert.Contains("an Error starting 'Store self-metrics sweep'", stale, StringComparison.Ordinal);
+        Assert.Contains("in a line containing 'plain-PostgreSQL mode'", stale, StringComparison.Ordinal);
+        Assert.DoesNotContain("Warning line", stale, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", stale, StringComparison.Ordinal);
         Assert.Contains("live census naming them did not complete", stale, StringComparison.Ordinal);
 
         /* No TimescaleDB rows at all: the low share is explained, not flagged. */
@@ -1114,12 +1135,217 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 8 * gib, chunks: 70),
             Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, gib, chunks: 60),
         };
-        var plain = DarlingMcpStoreMetricsTools.InventoryNote(DarlingStoreMetricsReader.ComputeInventory(plainRows)!, plainRows, Array.Empty<DarlingStoreMetricsReader.ContinuousAggregateState>(), Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>());
+        var plain = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(plainRows)!, plainRows, Array.Empty<DarlingStoreMetricsReader.ContinuousAggregateState>(), Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>(), existenceRead: true);
         Assert.Contains("a plain-PostgreSQL store, or TimescaleDB unavailable to the sweep", plain, StringComparison.Ordinal);
         Assert.Contains("not a fault", plain, StringComparison.Ordinal);
         Assert.DoesNotContain("the largest being", plain, StringComparison.Ordinal);
 
         Assert.Equal(5, new[] { reconciled, gap, partial, stale, plain }.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /* ---------------- #4619: a gone object is not a sweep gap ---------------- */
+
+    /// <summary>
+    /// #4619: a row from another sweep is split by whether its object still EXISTS — the pin that tells a
+    /// retired object from a real sweep gap. On three production stores every such row was a retired object
+    /// (a superseded baseline and its jobs, a frozen rollup's refresh job), and every one was reported as a
+    /// sweep that "is not completing". Exists: stale, a gap. Gone: dropped, newest last row first, with that
+    /// row's time. No verdict (null, a missing key, or a null map because the check failed): unchecked. A row
+    /// NEWER than the store row (a sweep that failed after its first statements) is a gap like an older one.
+    /// A job_history row under another role is superseded, not missed, whenever the newest sweep wrote its
+    /// own, whatever pg_roles says. None of the three is ever summed.
+    /// </summary>
+    [Fact]
+    public void ComputeInventory_SplitsRowsFromAnotherSweep_ByWhetherTheObjectStillExists()
+    {
+        const long gib = 1L << 30;
+        var dayBefore = SweepAt.AddDays(-1);
+        var weekBefore = SweepAt.AddDays(-7);
+        const string retiredView = "perfmon_baseline";
+        const string retiredJob = "policy_refresh_continuous_aggregate perfmon_baseline [1012]";
+
+        var current = new[]
+        {
+            StoreRow(bytes: 10 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "wait_stats", 4 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+            OwnerRow(),
+        };
+        var outside = new[]
+        {
+            Row(StoreSelfMetrics.HypertableObjectKind, "not_reached", gib, at: dayBefore),
+            Row(StoreSelfMetrics.HypertableObjectKind, "written_after_the_store_row", gib, at: SweepAt.AddMinutes(1)),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView, 5 * gib, at: weekBefore),
+            new DarlingStoreMetricsReader.StoreMetricRow(StoreSelfMetrics.BackgroundJobObjectKind, retiredJob, dayBefore, null, null, null, null, null, null, 100, 3_600_000, 5, 0),
+            Row(StoreSelfMetrics.DimensionObjectKind, "no_verdict", gib, at: dayBefore),
+            Row(StoreSelfMetrics.TableObjectKind, "collect.missing_from_the_map", gib, at: dayBefore),
+            OwnerRow(at: weekBefore, role: "previous_role"),
+        };
+        var rows = current.Concat(outside).ToArray();
+        var existence = Exists(
+            (StoreSelfMetrics.HypertableObjectKind, "not_reached", true),
+            (StoreSelfMetrics.HypertableObjectKind, "written_after_the_store_row", true),
+            (StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView, false),
+            (StoreSelfMetrics.BackgroundJobObjectKind, retiredJob, false),
+            (StoreSelfMetrics.DimensionObjectKind, "no_verdict", null),
+            /* The role still exists, but the newest sweep read as another one: superseded. */
+            (StoreSelfMetrics.JobHistoryObjectKind, "previous_role", true));
+
+        /* The rows the check is asked about: every non-store row off the store row's stamp, in both directions. */
+        Assert.Equal(
+            outside.Select(r => (r.ObjectKind, r.ObjectName)).OrderBy(k => k),
+            DarlingStoreMetricsReader.RowsOutsideTheSweep(rows).Select(r => (r.ObjectKind, r.ObjectName)).OrderBy(k => k));
+
+        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows, existence)!;
+        Assert.Equal(2, inventory.StaleRowCount);
+        Assert.Equal(2, inventory.UncheckedRowCount);
+        Assert.Equal(
+            new[]
+            {
+                (StoreSelfMetrics.BackgroundJobObjectKind, retiredJob, dayBefore),
+                (StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView, weekBefore),
+                (StoreSelfMetrics.JobHistoryObjectKind, "previous_role", weekBefore),
+            },
+            inventory.DroppedObjects.Select(d => (d.ObjectKind, d.ObjectName, d.LastRowAt)));
+
+        /* None of it is summed: the sums are the store row's sweep alone. */
+        Assert.Equal(4 * gib, inventory.EnumeratedBytes);
+        Assert.Equal(9 * gib, inventory.AttributedBytes);
+        Assert.Equal(4 * gib, inventory.BytesByKind[StoreSelfMetrics.HypertableObjectKind]);
+        Assert.False(inventory.BytesByKind.ContainsKey(StoreSelfMetrics.ContinuousAggregateObjectKind));
+
+        /* The check failed (a null map): no verdict on anything the catalog would have judged. Only the
+           superseded job_history row, judged from the rows themselves, is still retired. */
+        var failed = DarlingStoreMetricsReader.ComputeInventory(rows, null)!;
+        Assert.Equal(0, failed.StaleRowCount);
+        Assert.Equal(6, failed.UncheckedRowCount);
+        Assert.Equal(new[] { "previous_role" }, failed.DroppedObjects.Select(d => d.ObjectName));
+
+        /* Without a job_history row in the newest sweep, an older one is judged by the catalog like any row:
+           here the role exists, so the sweep missed it. */
+        var noCurrentHistory = current.Where(r => r.ObjectKind != StoreSelfMetrics.JobHistoryObjectKind)
+            .Append(OwnerRow(at: weekBefore, role: "previous_role"))
+            .ToArray();
+        var missed = DarlingStoreMetricsReader.ComputeInventory(noCurrentHistory, Exists((StoreSelfMetrics.JobHistoryObjectKind, "previous_role", true)))!;
+        Assert.Equal(1, missed.StaleRowCount);
+        Assert.Empty(missed.DroppedObjects);
+
+        /* The healthy store: nothing outside the sweep, so nothing to check and every count zero. */
+        Assert.Empty(DarlingStoreMetricsReader.RowsOutsideTheSweep(current));
+        Assert.Empty(DarlingStoreMetricsReader.RowsOutsideTheSweep(Array.Empty<DarlingStoreMetricsReader.StoreMetricRow>()));
+        var healthy = DarlingStoreMetricsReader.ComputeInventory(current, null)!;
+        Assert.Equal(0, healthy.StaleRowCount + healthy.UncheckedRowCount + healthy.DroppedObjects.Count);
+    }
+
+    /// <summary>
+    /// #4619: the note says what each kind of row from another sweep IS. A dropped object is named with its
+    /// last row and called history, never a sweep failure; only a row whose object still exists gets the
+    /// "did not reach them" sentence and the two log lines that say why; an unchecked row says which of its
+    /// two causes applies. The three shapes are distinct, and each carries none of the others' claims.
+    /// </summary>
+    [Fact]
+    public void TheInventoryNote_TellsAGoneObjectFromASweepGap()
+    {
+        const long gib = 1L << 30;
+        var sweep = new[]
+        {
+            StoreRow(bytes: 10 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "wait_stats", 5 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+        };
+        var retiredAt = new DateTime(2026, 9, 10, 4, 0, 0, DateTimeKind.Unspecified);
+        var outside = sweep.Append(Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "perfmon_baseline", gib, at: retiredAt)).ToArray();
+        var none = Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>();
+
+        string Note(bool? verdict, bool existenceRead) => DarlingMcpStoreMetricsTools.InventoryNote(
+            DarlingStoreMetricsReader.ComputeInventory(outside, existenceRead
+                ? Exists((StoreSelfMetrics.ContinuousAggregateObjectKind, "perfmon_baseline", verdict))
+                : null)!,
+            outside, null, none, existenceRead);
+
+        var dropped = Note(false, existenceRead: true);
+        Assert.Contains("1 object row(s) are for objects that no longer exist — dropped or retired since their last row — and are excluded from these sums", dropped, StringComparison.Ordinal);
+        Assert.Contains("That is history, not a sweep failure", dropped, StringComparison.Ordinal);
+        Assert.Contains($"stays its newest for {StoreSelfMetrics.RetentionDays} days", dropped, StringComparison.Ordinal);
+        Assert.Contains("The most recent: perfmon_baseline (continuous_aggregate, last row 2026-09-10T04:00:00.0000000)", dropped, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not reach them", dropped, StringComparison.Ordinal);
+        Assert.DoesNotContain("Store self-metrics sweep", dropped, StringComparison.Ordinal);
+        Assert.DoesNotContain("no verdict", dropped, StringComparison.Ordinal);
+
+        var gap = Note(true, existenceRead: true);
+        Assert.Contains("1 object row(s) are for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", gap, StringComparison.Ordinal);
+        Assert.Contains("darling-service_yyyyMMdd.log", gap, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", gap, StringComparison.Ordinal);
+        Assert.DoesNotContain("no verdict", gap, StringComparison.Ordinal);
+
+        var noCheck = Note(null, existenceRead: true);
+        Assert.Contains("1 object row(s) are not from the store row's sweep and are excluded from these sums, with no verdict", noCheck, StringComparison.Ordinal);
+        Assert.Contains("their kind has no existence check on this store", noCheck, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not reach them", noCheck, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", noCheck, StringComparison.Ordinal);
+
+        var failed = Note(null, existenceRead: false);
+        Assert.Contains("with no verdict on whether their objects still exist: the live existence check did not complete.", failed, StringComparison.Ordinal);
+        Assert.DoesNotContain("their kind has no existence check", failed, StringComparison.Ordinal);
+
+        Assert.Equal(4, new[] { dropped, gap, noCheck, failed }.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /// <summary>
+    /// #4619: collection_health_hourly is uncompressed BY DESIGN, so the compression line explains it rather
+    /// than counting it DISABLED — beside a real finding it is left out of the count and the bytes, and on
+    /// its own it produces no finding at all. The explanation's two spans are the policy's own constants, and
+    /// the claim they support is pinned: retention does not outlast the refresh window, and the refresh
+    /// window plus the store's one-chunk compression margin lies past retention, so no chunk of it could
+    /// ever be compressed. If either stops holding, this fails and the "by design" sentence is a lie to fix.
+    /// </summary>
+    [Fact]
+    public void TheCompressionLine_ExplainsCollectionHealthHourly_InsteadOfCountingIt()
+    {
+        const long gib = 1L << 30;
+        var rows = new[]
+        {
+            StoreRow(bytes: 300 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "query_store_stats_hourly", 200 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "query_store_stats_daily", 35 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, TimescaleSupport.CollectionHealthHourlyView, 60 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+        };
+        var byDesign = new DarlingStoreMetricsReader.ContinuousAggregateState(TimescaleSupport.CollectionHealthHourlyView, false, false, "collection_log", 1005, null, 1006);
+        var states = new[]
+        {
+            new DarlingStoreMetricsReader.ContinuousAggregateState("query_store_stats_hourly", false, true, "query_store_stats", 1001, null, null),
+            new DarlingStoreMetricsReader.ContinuousAggregateState("query_store_stats_daily", true, true, "query_store_stats_hourly", 1002, 1003, 1004),
+            byDesign,
+        };
+        var none = Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>();
+        const string explained = "collection_health_hourly is uncompressed by design: each refresh re-materializes its last 8 days and its retention keeps 8 days";
+
+        var both = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, states, none, existenceRead: true);
+        Assert.Contains("1 of 3 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB between them", both, StringComparison.Ordinal);
+        Assert.Contains("not counting the one uncompressed by design below.", both, StringComparison.Ordinal);
+        Assert.Contains(explained, both, StringComparison.Ordinal);
+        Assert.Contains("no chunk of this one gets that old before retention drops it", both, StringComparison.Ordinal);
+
+        var alone = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, new[] { states[1], byDesign }, none, existenceRead: true);
+        Assert.DoesNotContain("compression DISABLED", alone, StringComparison.Ordinal);
+        Assert.Contains(explained, alone, StringComparison.Ordinal);
+
+        /* Compressed after all (a hand-enabled store): nothing to explain, and it is counted like any other. */
+        var enabled = byDesign with { CompressionEnabled = true };
+        var handEnabled = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, new[] { states[0], states[1], enabled }, none, existenceRead: true);
+        Assert.DoesNotContain("uncompressed by design", handEnabled, StringComparison.Ordinal);
+        Assert.Contains("1 of 3 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it).", handEnabled, StringComparison.Ordinal);
+
+        Assert.Equal("8 days", TimescaleSupport.CollectionHealthRefreshStartOffset);
+        Assert.Equal("8 days", TimescaleSupport.CollectionHealthRetentionInterval);
+        Assert.True(TimescaleSupport.CollectionHealthRetentionSpan <= TimescaleSupport.CollectionHealthRefreshStartSpan,
+            "retention outlasts the refresh window, so some chunks sit outside it and could be compressed");
+        Assert.True(TimescaleSupport.CollectionHealthRefreshStartSpan + TimescaleSupport.AggregateCompressMarginSpan > TimescaleSupport.CollectionHealthRetentionSpan,
+            "the refresh window plus the compression margin now falls inside retention, so collection_health_hourly could be compressed");
     }
 
     /// <summary>The byte formatter picks the unit that gives a whole-number part, so a registry table is
@@ -1193,6 +1419,42 @@ public sealed class DarlingMcpStoreMetricsToolsTests
 
         /* The top-N is attempted on a plain store (its plain variant), so it fails to null there too. */
         Assert.Null(await DarlingStoreMetricsReader.GetLargestUnenumeratedAsync(nowhere, notRegistered, ct));
+    }
+
+    /// <summary>
+    /// #4758: the description's <c>requested</c> field says what PostgreSQL's counter counts. A requested
+    /// checkpoint is started by WAL volume reaching <c>max_wal_size</c>, a base backup or a <c>CHECKPOINT</c>
+    /// statement, and the counter does not say which, so the description must not call them all WAL-forced.
+    /// </summary>
+    [Fact]
+    public void TheDescription_SaysARequestedCheckpointHasThreeCauses_NotOnlyWalVolume()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        Assert.Contains(
+            "requested (checkpoints started by WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement rather than by checkpoint_timeout; the counter does not say which)",
+            description!, StringComparison.Ordinal);
+        Assert.DoesNotContain("checkpoints forced by WAL volume", description!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4834: the checkpointer paragraph names the four fields the block emits for the per-checkpoint average, each
+    /// with what the emitting code makes it: <c>timed</c> and <c>checkpoint_count</c> (timed plus requested),
+    /// <c>average_sync_ms_per_checkpoint</c> (sync_ms over that count) and <c>sync_bar_ms</c> (the bar it is judged
+    /// against, 10,000 ms).
+    /// </summary>
+    [Fact]
+    public void TheDescription_NamesTheAveragePerCheckpointFields()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        Assert.Contains("timed (the checkpoints started by checkpoint_timeout inside the interval", description!, StringComparison.Ordinal);
+        Assert.Contains("checkpoint_count (timed plus requested, the checkpoints the interval held)", description!, StringComparison.Ordinal);
+        Assert.Contains("average_sync_ms_per_checkpoint is sync_ms divided by checkpoint_count", description!, StringComparison.Ordinal);
+        Assert.Contains("sync_bar_ms is the per-checkpoint bar in milliseconds", description!, StringComparison.Ordinal);
+        Assert.Equal(10_000, PerformanceMonitor.Darling.Service.DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
     }
 
     /// <summary>
@@ -1315,6 +1577,286 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     {
         Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(Array.Empty<DarlingStoreMetricsReader.StoreMetricDailyPoint>()));
         Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5) }));
+    }
+
+    /* ---------------- #4734: a gap in the series is not one day's growth ---------------- */
+
+    /// <summary>
+    /// The store recorded nothing for one or more whole days (the service was down), so the first day back is
+    /// compared with a baseline several days old. That pair must not be labeled as the later day's growth: the
+    /// whole gap's bytes would read as one day's spike, and the per-server rate built on it would overstate what
+    /// onboarding a server costs. The pair is skipped, and the days on either side keep their own one-day numbers.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(10)]
+    public void ComputeDailyGrowth_AGapOfSeveralDays_IsNotOneDaysGrowth_AndTheDaysOnEitherSideAreRight(int missingDays)
+    {
+        var firstDayAfterTheGap = 2 + missingDays + 1;
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(new[]
+        {
+            StoreDay(1, 1_000, 10),
+            StoreDay(2, 1_100, 10),
+            /* the days in between recorded nothing; the whole gap's growth lands on the first day back */
+            StoreDay(firstDayAfterTheGap, 1_700, 10),
+            StoreDay(firstDayAfterTheGap + 1, 1_800, 20),
+        });
+
+        Assert.Equal(
+            new[] { new DateTime(2026, 8, 2), new DateTime(2026, 8, firstDayAfterTheGap + 1) },
+            growth.Select(g => g.Day).ToArray());
+        Assert.DoesNotContain(growth, g => g.Day == new DateTime(2026, 8, firstDayAfterTheGap));
+
+        /* No single-day spike: the 600 bytes the gap accumulated are on no day. */
+        Assert.All(growth, g => Assert.Equal(100, g.DeltaBytes));
+        Assert.Equal(100 / 10.0, growth[0].PerServerBytes);
+        Assert.Equal(100 / 20.0, growth[1].PerServerBytes);
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_ASeriesWithoutAGap_GivesEveryDayItsOwnNumbers()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(new[]
+        {
+            StoreDay(1, 5_000, 10),
+            StoreDay(2, 5_400, 10),
+            StoreDay(3, 5_250, 12),
+            StoreDay(4, 5_250, 0),
+            StoreDay(5, 5_700, 15),
+            StoreDay(6, 6_000, 20),
+        });
+
+        Assert.Equal(
+            new (DateTime Day, long Delta, double? PerServer)[]
+            {
+                (new DateTime(2026, 8, 2), 400, 40.0),
+                (new DateTime(2026, 8, 3), -150, -12.5),
+                (new DateTime(2026, 8, 4), 0, null),
+                (new DateTime(2026, 8, 5), 450, 30.0),
+                (new DateTime(2026, 8, 6), 300, 15.0),
+            },
+            growth.Select(g => (g.Day, g.DeltaBytes, g.PerServerBytes)).ToArray());
+    }
+
+    /// <summary>
+    /// The daily read now projects the day's last snapshot time as its last column, so a growth point can say
+    /// when its reading was taken (today's point is a partial day, and only the time shows how far in). Paired
+    /// with the ordinal the reader takes it from.
+    /// </summary>
+    [Fact]
+    public void StoreMetricsDailySql_ProjectsTheDaysLastSnapshotTime_AndTheReaderTakesItFromThatColumn()
+    {
+        var sql = DarlingStoreMetricsReader.StoreMetricsDailySql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("    toast_live_bytes,\n    metric_time\nFROM collect.store_metrics", sql, StringComparison.Ordinal);
+
+        var source = File.ReadAllText(ReaderSourcePath());
+        Assert.Contains("reader.GetDateTime(15)", source, StringComparison.Ordinal);
+    }
+
+    private static DarlingStoreMetricsReader.StoreMetricDailyPoint StoreDayAt(
+        int day, int hour, long? totalBytes, int? servers) => new(
+            "store", "darling", new DateTime(2026, 8, day, 0, 0, 0, DateTimeKind.Unspecified),
+            totalBytes, null, null, null, null, servers,
+            MetricTime: new DateTime(2026, 8, day, hour, 5, 0, DateTimeKind.Unspecified));
+
+    [Fact]
+    public void ComputeDailyGrowth_TodaysPoint_IsMarkedPartial_AndASettledDayIsNot()
+    {
+        var points = new[]
+        {
+            StoreDayAt(1, 23, 1_000, 10),
+            StoreDayAt(2, 23, 1_100, 10),
+            StoreDayAt(3, 9, 1_150, 10),
+        };
+
+        /* Day 3 is still open at 09:30: its point is the morning's last snapshot, not a full day's growth.
+           It is still reported, as what it is. */
+        var midMorning = DarlingStoreMetricsReader.ComputeDailyGrowth(points, new DateTime(2026, 8, 3, 9, 30, 0, DateTimeKind.Utc));
+        Assert.Equal(new[] { false, true }, midMorning.Select(g => g.Partial).ToArray());
+        Assert.Equal(50, midMorning[1].DeltaBytes);
+
+        /* Once the day is over it is a settled day like the rest. */
+        var nextDay = DarlingStoreMetricsReader.ComputeDailyGrowth(points, new DateTime(2026, 8, 4, 0, 0, 1, DateTimeKind.Utc));
+        Assert.All(nextDay, g => Assert.False(g.Partial));
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_CarriesEachPointsRealSnapshotTime_AndItsSpanInDays()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 22, 1_000, 10), StoreDayAt(2, 23, 1_100, 10), StoreDayAt(3, 21, 1_300, 10) },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        /* The day's last snapshot, not its midnight bucket. */
+        Assert.Equal(new DateTime(2026, 8, 2, 23, 5, 0), growth[0].MetricTime);
+        Assert.Equal(new DateTime(2026, 8, 3, 21, 5, 0), growth[1].MetricTime);
+        Assert.All(growth, g => Assert.Equal(1, g.SpanDays));
+
+        /* A point with no recorded time carries none: the midnight bucket is not a snapshot time. */
+        var untimed = DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5), StoreDay(2, 130, 5) });
+        Assert.Null(untimed.Single().MetricTime);
+    }
+
+    [Fact]
+    public void TheDailyGrowthEntry_CarriesTheDay_TheSnapshotTime_TheSpan_AndThePartialFlag()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 22, 1_000, 10), StoreDayAt(2, 9, 1_500, 10) },
+            new DateTime(2026, 8, 2, 9, 30, 0, DateTimeKind.Utc));
+
+        using var timed = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpStoreMetricsTools.DailyGrowthEntry(growth.Single())));
+        var entry = timed.RootElement;
+        Assert.Equal("2026-08-02", entry.GetProperty("day").GetString());
+        Assert.Equal(new DateTime(2026, 8, 2, 9, 5, 0).ToString("o"), entry.GetProperty("metric_time").GetString());
+        Assert.Equal(1, entry.GetProperty("span_days").GetInt32());
+        Assert.True(entry.GetProperty("partial").GetBoolean());
+        Assert.Equal(500L, entry.GetProperty("delta_bytes").GetInt64());
+        Assert.Equal(50.0, entry.GetProperty("per_server_bytes").GetDouble());
+
+        /* No recorded time is null, never the day's midnight. */
+        var untimedGrowth = DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5), StoreDay(2, 130, 5) });
+        using var untimed = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpStoreMetricsTools.DailyGrowthEntry(untimedGrowth.Single())));
+        Assert.Equal(JsonValueKind.Null, untimed.RootElement.GetProperty("metric_time").ValueKind);
+        Assert.False(untimed.RootElement.GetProperty("partial").GetBoolean());
+    }
+
+    [Fact]
+    public void TheDescription_SaysAHoleInTheDailyGrowthIsMissingSnapshots_AndTodaysPointIsPartial()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+        Assert.Matches(@"daily_growth point carries[^.]*metric_time[^.]*span_days[^.]*partial", description!);
+        Assert.Contains("not zero growth", description!, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #4734: two snapshots about two days apart are not one day's growth ---------------- */
+
+    /// <summary>
+    /// A day's point is its LAST snapshot, so two points on consecutive calendar days can be nearly two days
+    /// apart: the service stopped shortly after the first day's early snapshot, ran again, and the next day's
+    /// last snapshot came at 23:05, 47 hours later. That pair is not one day's growth and is left out, as a
+    /// calendar gap is; the day after it compares with the second point and is right.
+    /// </summary>
+    [Fact]
+    public void ComputeDailyGrowth_ConsecutiveDaysWhoseSnapshotsAreAboutTwoDaysApart_AreNotOneDaysGrowth()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[]
+            {
+                StoreDayAt(1, 0, 1_000, 10),
+                StoreDayAt(2, 23, 1_900, 10),
+                StoreDayAt(3, 23, 2_000, 10),
+            },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        /* Day 2 is left out: its 900 bytes are two days' growth. Day 3 is 24 hours after day 2 and is right. */
+        var only = Assert.Single(growth);
+        Assert.Equal(new DateTime(2026, 8, 3), only.Day);
+        Assert.Equal(100, only.DeltaBytes);
+    }
+
+    /// <summary>
+    /// The edges of "about a day": a pair is kept when its two snapshots are at least 12 hours and under 36
+    /// hours apart, a span that rounds to one day. The first day's snapshot is at <c>firstHour</c>:05 and the
+    /// next day's at <c>secondHour</c>:05, so the spans here are 23, 24, 25, 12 and 35 hours (kept) and 11,
+    /// 36 and 47 hours (left out).
+    /// </summary>
+    [Theory]
+    [InlineData(1, 0, true)]
+    [InlineData(23, 23, true)]
+    [InlineData(0, 1, true)]
+    [InlineData(12, 0, true)]
+    [InlineData(0, 11, true)]
+    [InlineData(13, 0, false)]
+    [InlineData(0, 12, false)]
+    [InlineData(0, 23, false)]
+    public void ComputeDailyGrowth_KeepsAPairOnlyWhenItsSnapshotsAreAboutADayApart(int firstHour, int secondHour, bool kept)
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, firstHour, 1_000, 10), StoreDayAt(2, secondHour, 1_100, 10) },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        if (kept)
+        {
+            var point = Assert.Single(growth);
+            Assert.Equal(100, point.DeltaBytes);
+            Assert.False(point.Partial);
+        }
+        else
+        {
+            Assert.Empty(growth);
+        }
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_APairWithAPointThatHasNoSnapshotTime_IsJudgedByItsCalendarDays()
+    {
+        var asOf = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        /* With either point untimed there is no span to measure, and the day's midnight bucket is not a
+           snapshot time to measure one from: consecutive days are kept, whichever side lacks the time. */
+        var earlierUntimed = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDay(1, 1_000, 10), StoreDayAt(2, 23, 1_100, 10) }, asOf);
+        Assert.Equal(100, Assert.Single(earlierUntimed).DeltaBytes);
+
+        var laterUntimed = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 0, 1_000, 10), StoreDay(2, 1_100, 10) }, asOf);
+        Assert.Equal(100, Assert.Single(laterUntimed).DeltaBytes);
+
+        /* Days that are not consecutive stay left out, with or without the other point's time. */
+        Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDay(1, 1_000, 10), StoreDayAt(3, 23, 1_100, 10) }, asOf));
+        Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 0, 1_000, 10), StoreDay(3, 1_100, 10) }, asOf));
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_APairWithAWholeDayBetweenItsDays_IsLeftOutHoweverCloseItsTimesAre()
+    {
+        /* 23:05 on day 1 and 00:05 on day 3 are 25 hours apart, but day 2 has no point: a gap, as before. */
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 23, 1_000, 10), StoreDayAt(3, 0, 1_100, 10) },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        Assert.Empty(growth);
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_TodaysPartialPoint_MayBeUnderHalfADayApart_ButNotOverADayAndAHalf()
+    {
+        var asOf = new DateTime(2026, 8, 3, 16, 30, 0, DateTimeKind.Utc);
+
+        /* Yesterday's last snapshot at 23:05 and today's newest at 09:05: 10 hours, a partial day is short by
+           nature. It is kept and marked partial. */
+        var shortDay = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(2, 23, 1_100, 10), StoreDayAt(3, 9, 1_150, 10) }, asOf);
+        var kept = Assert.Single(shortDay);
+        Assert.True(kept.Partial);
+        Assert.Equal(50, kept.DeltaBytes);
+
+        /* Yesterday's last snapshot at 00:05 and today's newest at 16:05: 40 hours of growth would read as
+           part of today. It is left out like any other pair over a day and a half apart. */
+        var longSpan = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(2, 0, 1_100, 10), StoreDayAt(3, 16, 1_300, 10) }, asOf);
+        Assert.Empty(longSpan);
+    }
+
+    [Fact]
+    public void TheDescription_SaysItsTimesAreUtc_AndWhichPairsTheDailyGrowthLeavesOut()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        /* The served head is at its tools/list budget, so both statements live in the guide part. */
+        var (_, guide) = PerformanceMonitor.Common.McpToolGuide.Split(description!);
+        Assert.NotNull(guide);
+        Assert.Contains("Every date and time in the response is UTC", guide!, StringComparison.Ordinal);
+        Assert.Matches(@"daily_growth point carries[^.]*between 12 and 36 hours apart[^.]*partial", guide!);
+        /* Today's partial point is short by nature, so the reader skips the 12-hour floor for it and only the
+           36-hour ceiling applies. A pair rule that leaves this out reads as if a short partial day were dropped. */
+        Assert.Contains(
+            "today's partial point skips the 12-hour floor but not the 36-hour ceiling", guide!, StringComparison.Ordinal);
     }
 }
 

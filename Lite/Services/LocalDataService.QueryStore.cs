@@ -28,7 +28,7 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -166,7 +166,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
         var executionTypeParameterIndex = 5 + dbValues.Count;
         var executionTypeClause = string.IsNullOrWhiteSpace(executionType)
@@ -618,7 +618,7 @@ FULL OUTER JOIN baseline_period b
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH deduped AS
@@ -716,7 +716,7 @@ ORDER BY point_time";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -916,22 +916,23 @@ OPTION(RECOMPILE);',
     /// corrected recent section and an un-corrected older one, each behaving as its own generation
     /// always did, and the mixture resolves itself as the pre-upgrade rows age out of retention.</para>
     /// <para>The first placed interval in the window carries NULL rates, not 0 — see
-    /// <see cref="GetQueryDurationTrendAsync"/> (#3541 A12).</para>
-    /// <para><b>The denominator stays the spacing to the previous point, deliberately (#3653 A11).</b> The
-    /// three delta-family trends now divide by the interval the store HAS (<c>sample_interval_seconds</c>);
-    /// <c>query_store_stats</c> stores no interval length — it is a cumulative-snapshot source outside the ten
-    /// delta families, carrying an interval START (<c>interval_start_time_utc</c>) but not its width — so the
-    /// LAG over <c>point_time</c> is the only denominator this read can honestly use. Its residual is stated:
-    /// a QUIET interval before a placed point doubles that point's spacing and halves its rate; removing that
-    /// needs the interval length stored beside the row (a collector change and a schema bump), not a read
-    /// change. Darling's raw Query Store arms carry the same rule and the same residual.</para>
+    /// <see cref="GetQueryDurationTrendAsync"/> (#3541 A12) — unless it stored its end (below).</para>
+    /// <para><b>The rate is over the interval's own length (#4765).</b> The three delta-family trends divide by
+    /// the interval the store HAS (<c>sample_interval_seconds</c>, #3653 A11), and a Query Store interval now
+    /// stores its END (<c>interval_end_time_utc</c>, v66) beside its start, so this read divides by end minus
+    /// start. It used to divide by the seconds since the previous STORED interval; Query Store stores no row
+    /// for an interval with no executions, so an interval that followed a quiet one divided by the gap plus its
+    /// own length and read too low. Only a row that stored no end (collected before v66) keeps the LAG over
+    /// <c>point_time</c>, the way the delta families fall back to it for a collection that predates
+    /// <c>sample_interval_seconds</c> (#3540); such a first point in the window stays unrated. Darling's Query
+    /// Store reads carry the same expression.</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -943,12 +944,14 @@ WITH placed AS
     -- collapses this series and placement alone leaves it inflated.
     SELECT
         interval_start_time_utc AS point_time,
+        interval_end_time_utc,
         execution_count,
         avg_duration_us
     FROM
     (
         SELECT
             interval_start_time_utc,
+            interval_end_time_utc,
             execution_count,
             avg_duration_us,
             ROW_NUMBER() OVER
@@ -977,9 +980,12 @@ WITH placed AS
     -- Arm 2 — rows collected before tier 2. No interval start exists and none can be reconstructed, so
     -- these keep the pre-tier-2 treatment byte for byte: un-deduped, placed at collection_time, still
     -- overstating. The split is on IS NULL / IS NOT NULL, so the two arms partition the rows exactly —
-    -- nothing is counted twice and nothing is dropped.
+    -- nothing is counted twice and nothing is dropped. The end is stated NULL: a row placed at its
+    -- collection time is not measured from an interval start, so it keeps the gap to the previous point
+    -- below (#4765).
     SELECT
         collection_time AS point_time,
+        CAST(NULL AS TIMESTAMP) AS interval_end_time_utc,
         execution_count,
         avg_duration_us
     FROM v_query_store_stats
@@ -994,14 +1000,18 @@ raw AS
         point_time,
         SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
         SUM(execution_count) AS total_executions,
-        extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+        -- #4765: the interval's OWN length, its stored end less its start. Query Store stores no row for an
+        -- interval with no executions, so the gap to the previous stored point is the interval's length PLUS
+        -- every quiet interval before it. Only a point whose rows stored no end (collected before the column)
+        -- keeps that gap, as sample_interval_seconds does (#3540).
+        COALESCE(extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))), extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))) AS interval_seconds
     FROM placed
     GROUP BY point_time
 )
 SELECT
     point_time AS collection_time,
-    /* No ELSE: the first placed interval's LAG is NULL and its rate unknowable, so the rate is NULL — never a
-       fabricated 0 (#3541 A12). */
+    /* No ELSE: the first placed interval of a row with no stored end has a NULL LAG and an unknowable rate, so
+       the rate is NULL — never a fabricated 0 (#3541 A12). */
     CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
     CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM raw
@@ -1176,7 +1186,24 @@ public class QueryStoreHistoryRow
 
     public double TotalDurationMs => ExecutionCount * AvgDurationMs;
     public double TotalCpuMs => ExecutionCount * AvgCpuTimeMs;
-    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string FirstExecutionTimeLocal => ServerTimeHelper.FormatServerTime(FirstExecutionTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
+
+    /// <summary>
+    /// The zone the window that shows this row draws its chart in (#4766): its opening tab's picker zone. The window
+    /// sets it on every row it loads, so <see cref="CollectionTimeLocal"/>, <see cref="FirstExecutionTimeLocal"/> and
+    /// <see cref="LastExecutionTimeLocal"/> are worded in that zone and not in the zone
+    /// of whichever server's tab is selected when the row is drawn (a history window stays open after another tab is
+    /// selected). Null on a row no window set, such as the server tab's own grids, which render only while their tab
+    /// is selected: the text is then <see cref="ServerTimeHelper.FormatServerTime(DateTime?, string)"/>'s. Not bound
+    /// in any grid.
+    /// </summary>
+    public Func<TimeZoneInfo>? Zone { get; set; }
+    public string CollectionTimeLocal => Worded(Zone, CollectionTime);
+    public string FirstExecutionTimeLocal => Worded(Zone, FirstExecutionTime);
+    public string LastExecutionTimeLocal => Worded(Zone, LastExecutionTime);
+
+    /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
+    private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>
+        naiveUtc is not { } instant ? ""
+        : zone is null ? ServerTimeHelper.FormatServerTime(instant)
+        : DisplayZone.Format(instant, zone(), "yyyy-MM-dd HH:mm:ss");
 }

@@ -374,6 +374,14 @@ LIMIT 1";
             }
         }
 
+        /* An Azure master's events for databases monitored as their own targets belong to those servers'
+           cards; empty for every other server. */
+        var separate = await GetSeparatelyMonitoredAsync(serverId, cancellationToken);
+        /* The card's own unscoped statements have no upper bound (everything newer than windowStart counts),
+           so the scoped reads, which take an explicit end, get one a day ahead: a row stamped ahead of this
+           machine's clock by skew still counts, the same as it does in the unscoped statement. */
+        var scopeEnd = nowUtc.AddDays(1);
+
         /* Blocking count + worst wait in the last hour (XE preferred, DMV fallback — same source for both). */
         await using (var command = _dataSource.CreateCommand(ServerSummaryBlockingSql))
         {
@@ -386,6 +394,21 @@ LIMIT 1";
             {
                 var xeCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
                 var xeMaxWait = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
+                if (separate.Count > 0)
+                {
+                    /* The XE arm without the separately monitored databases' reports; the DMV arm and the
+                       XE-then-DMV fallback below are unchanged. */
+                    try
+                    {
+                        (xeCount, xeMaxWait) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        /* A failed scoped read leaves the unscoped XE count and wait above: a double count
+                           is better than a card with no blocking figure. */
+                        ViewerLogger.Warn("ViewerDataService", $"Scoped blocking read failed for server {serverId}; showing unscoped counts: {ex.Message}");
+                    }
+                }
                 var dmvCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
                 var dmvMaxWait = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3));
 
@@ -410,7 +433,10 @@ LIMIT 1";
                 {
                     lastBlocking = dmvLast;
                 }
-                lastBlockingMinutesAgo = MinutesAgo(lastBlocking, nowUtc);
+                /* A master with separately monitored databases shows no "Last" for blocking: the card's "Last"
+                   looks back over all history, and the master's own newest would need a cached all-history read.
+                   Its lists keep every row, with the note. */
+                lastBlockingMinutesAgo = separate.Count > 0 ? null : MinutesAgo(lastBlocking, nowUtc);
             }
         }
 
@@ -427,7 +453,22 @@ LIMIT 1";
             if (await reader.ReadAsync(cancellationToken))
             {
                 deadlockCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                /* "Last" is the server's newest deadlock; a master with separately monitored databases shows none (below). */
                 lastDeadlock = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+            }
+        }
+
+        if (separate.Count > 0)
+        {
+            try
+            {
+                deadlockCount = (int)Math.Min(
+                    await ReadScopedDeadlocksAsync(serverId, windowStart, scopeEnd, separate, cancellationToken), int.MaxValue);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The unscoped deadlock count read above stays. */
+                ViewerLogger.Warn("ViewerDataService", $"Scoped deadlock read failed for server {serverId}; showing unscoped counts: {ex.Message}");
             }
         }
 
@@ -457,7 +498,8 @@ LIMIT 1";
             }
         }
 
-        lastDeadlockMinutesAgo = MinutesAgo(lastDeadlock, nowUtc);
+        /* No deadlock "Last" for a master with separately monitored databases, for the blocking reason above. */
+        lastDeadlockMinutesAgo = separate.Count > 0 ? null : MinutesAgo(lastDeadlock, nowUtc);
 
         /* Newest collection time across all collectors — drives the freshness status. */
         await using (var command = _dataSource.CreateCommand(ServerSummaryLastCollectionSql))
@@ -722,12 +764,14 @@ public sealed class ServerSummaryItem
     /// <summary>The worst blocking wait (ms) observed in the window — the "max: Ns" detail + Critical band input.</summary>
     public long MaxBlockingWaitMs { get; set; }
 
-    /// <summary>Minutes since the most recent blocking event ever — the "Last: N ago" detail when the window is clear.</summary>
+    /// <summary>Minutes since the most recent blocking event ever — the "Last: N ago" detail when the window is clear;
+    /// null for an Azure master with separately monitored databases.</summary>
     public int? LastBlockingMinutesAgo { get; set; }
 
     public int DeadlockCount { get; set; }
 
-    /// <summary>Minutes since the most recent deadlock ever — the "Last: N ago" deadlock detail.</summary>
+    /// <summary>Minutes since the most recent deadlock ever — the "Last: N ago" deadlock detail;
+    /// null for an Azure master with separately monitored databases.</summary>
     public int? LastDeadlockMinutesAgo { get; set; }
 
     /// <summary>How many <c>pg_stat_database.deadlocks</c> counter differences <see cref="DeadlockCount"/>'s
@@ -1026,7 +1070,7 @@ public sealed class ServerSummaryItem
     /// was collected, and none of it is retained, which is what the row says.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastCollectionTime.Value).ToString("HH:mm:ss")
+        ? ViewerTimeHelper.FormatForDisplay(LastCollectionTime.Value, "HH:mm:ss")
         : IsOnline == false ? "None retained" : "Never";
 
     /* Collection status. The (IsOnline, CollectionStale, AwaitingFirstCollection) triple is resolved by

@@ -38,10 +38,24 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// </summary>
 public sealed class RdsLogEventIngestor
 {
+    /// <summary>
+    /// The <c>log_line_prefix</c> every RDS and Aurora PostgreSQL instance runs under: the engine's default
+    /// parameter group sets it, and unlike almost every other setting the RDS/Aurora documentation lists it
+    /// as NOT modifiable — there is no parameter to change it to anything else (#4501 round 2). That is what
+    /// makes passing it here safe: <see cref="PgLogEntryAssembler.ForgeryCheckFor"/> already reads its
+    /// client fields as sitting BEFORE the pid, not after, so it returns "no check" for this exact string —
+    /// the correct answer, since there is no forgery surface to guard on this transport.
+    /// </summary>
+    internal const string DefaultLogLinePrefix = "%t:%r:%u@%d:[%p]:";
+
     private readonly NpgsqlDataSource _postgres;
     private readonly PgLogEventClassifier _classifier;
     private readonly RdsLogSource _logs;
     private readonly ILogger? _logger;
+
+    /// <summary>#4708: where this ingestor's log positions survive a restart, or null for a source that keeps
+    /// them in memory only (a test that does not need a store).</summary>
+    private readonly RdsResumeStore? _resume;
 
     /// <summary>
     /// The csvlog partial-record carry (#4053 part c1), extracted (#4053 part c2) into
@@ -52,12 +66,13 @@ public sealed class RdsLogEventIngestor
 
     /// <param name="logHashKey">The store's log-hash key (#4004), the same instance the <c>pg_read_file</c> route's
     /// runs carry, so the two transports store identical identities for identical text.</param>
-    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null)
+    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _classifier = new PgLogEventClassifier(logHashKey ?? throw new ArgumentNullException(nameof(logHashKey)));
-        _logs = logs ?? new RdsLogSource();
+        _logs = logs ?? new RdsLogSource(logger: logger);
         _logger = logger;
+        _resume = resume;
     }
 
     /// <param name="host">The target's connection host. A non-RDS host means this transport does not apply
@@ -78,6 +93,32 @@ public sealed class RdsLogEventIngestor
         bool logTimezoneIsUtc = false,
         bool pgLogUsesCsvlog = false,
         CancellationToken cancellationToken = default)
+    {
+        /* #4708: what the last process saved for this server is loaded once, before its first read, so a
+           restart resumes from the saved file and marker instead of the newest file's last lines. */
+        if (_resume is not null)
+        {
+            await _resume.RestoreAsync(_logs, serverId, cancellationToken);
+        }
+
+        /* #4708: a rotated file is finished and the newest file opened in the SAME cycle (bounded), rather than
+           the old file on one cycle and the new one on the next. */
+        return await RdsLogSource.RunPassesAsync(
+            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken));
+    }
+
+    /// <summary>
+    /// One read of the log: fetch a chunk, store its rows, then commit the position and save it. The
+    /// second value is <see cref="RdsLogSource.LogChunk.ReadAgain"/>: the chunk came from a file that is no
+    /// longer the newest, so the caller reads again.
+    /// </summary>
+    private async Task<(RdsIngestOutcome Outcome, bool ReadAgain)> IngestPassAsync(
+        int serverId,
+        string storageName,
+        string host,
+        bool logTimezoneIsUtc,
+        bool pgLogUsesCsvlog,
+        CancellationToken cancellationToken)
     {
         RdsLogSource.LogChunk? chunk;
 
@@ -115,7 +156,7 @@ public sealed class RdsLogEventIngestor
         {
             /* #3017: NOT_REACHED, not zero rows — the host is not an RDS or Aurora endpoint, no AWS call was
                made, and nothing is known about the log. */
-            return RdsIngestOutcome.NotReached;
+            return (RdsIngestOutcome.NotReached, false);
         }
 
         var (carry, carryKey, droppedByRotation, currentFileName) = pgLogUsesCsvlog
@@ -142,7 +183,16 @@ public sealed class RdsLogEventIngestor
             csvRecordsDiscarded += _csvCarry.Commit(carryKey, currentFileName, nextCarry, droppedByRotation);
         }
 
-        return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded);
+        /* #4708: the position is saved AFTER the chunk's rows are stored and the in-process position has moved, never
+           before, so a crash between the two re-reads a window (rows dedupe on their identity hash) rather than
+           resuming past one. */
+        if (_resume is not null)
+        {
+            await _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken);
+        }
+
+        return (RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded,
+            filesSkipped: chunk.Value.FilesSkipped, resumeFileMissing: chunk.Value.ResumeFileMissing), chunk.Value.ReadAgain);
     }
 
     private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, RdsCsvlogCarry.CsvCarry NextCarry)> StoreAsync(
@@ -189,8 +239,12 @@ public sealed class RdsLogEventIngestor
             /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
                about the target's configuration and has to reach the runner uncommitted (#3008). #4046 part 1b:
                logTimezoneIsUtc skips and counts a foreign-zone line instead of throwing, the same trade the
-               self-hosted route already makes. */
-            events = _classifier.Classify(text, logTimezoneIsUtc, out foreignZoneLines);
+               self-hosted route already makes. #4501 round 2: this transport's prefix is not "not yet
+               collected" the way a self-hosted target's can be — RDS and Aurora fix log_line_prefix at
+               DefaultLogLinePrefix, unwritable by any parameter group setting, so passing it (rather than
+               falling back to no separator check) keeps a K1-shaped statement line
+               (`statement: SELECT 'ERROR:  x'`) that the no-separator fallback would otherwise refuse. */
+            events = _classifier.Classify(text, logTimezoneIsUtc, DefaultLogLinePrefix, out foreignZoneLines);
         }
 
         if (events.Count == 0)

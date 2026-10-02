@@ -352,7 +352,7 @@ public static class FactAdvice
             if (advice is null)
                 continue;
             advice = WithNamedHops(advice, story, byKey);
-            advice = WithSideLeaves(advice, story);
+            advice = WithSideLeaves(advice, story, byKey);
             story.StoryText = SerializeForStoryText(advice);
         }
     }
@@ -384,24 +384,32 @@ public static class FactAdvice
     }
 
     /// <summary>
-    /// #3691 (lane 42): appends the ONE sentence naming the config lever(s) hanging off this story
-    /// (<see cref="AnalysisStory.SideLeafKeys"/>) to the root's INVESTIGATION, after the named-hop sentences and by
-    /// the same rule — the levers are where to look next, and the lever's own card (the payload's
-    /// <c>side_leaves</c>) carries its value and its remediation. Before this, the lever rooted a card of its own
-    /// beside the incident; now the walk consumes it, so the root's card is the only place that can point at it and
-    /// this sentence is that pointer. Remediation is untouched: the lever's fix is the lever's, in its own family's
-    /// words. A story with no side leaves returns the block untouched — the byte-identity arm for every chain this
-    /// does not concern, which is nearly all of them.
+    /// #3691, #4730: appends the config lever(s) hanging off this story
+    /// (<see cref="AnalysisStory.SideLeafKeys"/>) to the root's advice, after the named-hop sentences. Each lever
+    /// gets one INVESTIGATION sentence carrying its own composed headline, and its composed remediation joins the
+    /// root's REMEDIATION under its key ("For `CONFIG_PG_MAINT_WORK_MEM`: …"). Before this, the lever rooted a card
+    /// of its own beside the incident; the walk now consumes it, and only <c>analyze_server</c> renders the
+    /// lever's card (the payload's <c>side_leaves</c>). <c>get_analysis_findings</c>, the viewer and the e-mail
+    /// render this frozen StoryText alone, so the advice has to be in it: the sentence used to say "see its card",
+    /// a pointer to a card those surfaces never show, and the lever's fix stayed on that card. Each lever is
+    /// composed from the FULL fact set here, the one place both are in scope, the same way
+    /// <see cref="WithNamedHops"/> reads its hops. A story with no side leaves returns the block untouched — the
+    /// byte-identity arm for every chain this does not concern, which is nearly all of them.
     /// </summary>
-    private static AdviceBlock WithSideLeaves(AdviceBlock advice, AnalysisStory story)
+    private static AdviceBlock WithSideLeaves(AdviceBlock advice, AnalysisStory story, IReadOnlyDictionary<string, Fact> byKey)
     {
-        var sentence = StorySideLeaves.Sentence(story.SideLeafKeys);
+        var sentence = StorySideLeaves.Sentence(story.SideLeafKeys, byKey);
         if (sentence is null)
             return advice;
         var investigation = advice.Investigation ?? string.Empty;
+        var remediation = advice.Remediation ?? string.Empty;
+        var remediationClauses = StorySideLeaves.RemediationSentence(story.SideLeafKeys, byKey);
+        if (remediationClauses is not null)
+            remediation = remediation.Length == 0 ? remediationClauses.TrimStart() : remediation + remediationClauses;
         return advice with
         {
-            Investigation = investigation.Length == 0 ? sentence.TrimStart() : investigation + sentence
+            Investigation = investigation.Length == 0 ? sentence.TrimStart() : investigation + sentence,
+            Remediation = remediation
         };
     }
 
@@ -442,14 +450,6 @@ public static class FactAdvice
         facts.TryGetValue(key, out var f) ? (long)Math.Round(f.Value) : (long?)null;
 
     /// <summary>
-    /// Cores-per-socket from SERVER_HARDWARE metadata — the per-NUMA-node proxy MAXDOP guidance keys
-    /// on (NUMA node count itself is not collected). 0 when absent.
-    /// </summary>
-    private static int CoresPerSocket(IReadOnlyDictionary<string, Fact> facts) =>
-        facts.TryGetValue("SERVER_HARDWARE", out var hw)
-            && hw.Metadata.TryGetValue("cores_per_socket", out var c) ? (int)c : 0;
-
-    /// <summary>
     /// The collection-gap caveat appended to every THREADPOOL-family block: under live thread
     /// exhaustion the collector is itself a query waiting for a worker, so a gap in Collection Health
     /// around the window corroborates the event rather than being a separate problem.
@@ -474,9 +474,9 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
-        return fallback with { Remediation = ParallelGuardCore(maxdop, ctfp, cores, rec) + CollectionGapNote };
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
+        return fallback with { Remediation = ParallelGuardCore(maxdop, ctfp, basis, rec) + CollectionGapNote };
     }
 
     /// <summary>
@@ -492,14 +492,14 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
         var remediation =
             "Collapse the blocking first — workers parked on locks are not running, so it is the " +
             "faster win: if the chain was headed by a sleeping/abandoned transaction, fix the code " +
             "path that leaves a BEGIN TRAN open (and SET XACT_ABORT ON so an aborted batch rolls " +
             "back); otherwise fix the slow operation under the held lock. Then guard parallelism. " +
-            ParallelGuardCore(maxdop, ctfp, cores, rec) + CollectionGapNote;
+            ParallelGuardCore(maxdop, ctfp, basis, rec) + CollectionGapNote;
         return fallback with { Remediation = remediation };
     }
 
@@ -511,7 +511,7 @@ public static class FactAdvice
     /// guard harder for the concurrency level. Does NOT include the collection-gap note (the caller
     /// appends it once).
     /// </summary>
-    private static string ParallelGuardCore(long? maxdop, long? ctfp, int cores, long rec)
+    private static string ParallelGuardCore(long? maxdop, long? ctfp, FactRemediation.MaxdopBasis basis, long rec)
     {
         var sb = new StringBuilder();
 
@@ -520,7 +520,7 @@ public static class FactAdvice
           .Append(maxdop?.ToString() ?? "not readable this window")
           .Append(" and cost threshold for parallelism is ")
           .Append(ctfp?.ToString() ?? "not readable this window")
-          .Append(cores > 0 ? $" (cores per socket {cores})." : ".");
+          .Append(basis.Cores > 0 ? $" {basis.Note}." : ".");
 
         var ctfpGuarded = ctfp is >= 50;
         var maxdopGuarded = maxdop is > 0 && maxdop <= rec;
@@ -546,9 +546,9 @@ public static class FactAdvice
                 sb.Append(" cost threshold for parallelism is already past the trivial-query cutoff");
 
             if (maxdop is 0)
-                sb.Append($", and cap MAXDOP at {rec} (this server's per-NUMA-node processor count, capped at 8) instead of unlimited");
+                sb.Append($", and cap MAXDOP at {rec} ({basis.Source}, capped at 8) instead of unlimited");
             else if (maxdop > rec)
-                sb.Append($", and lower MAXDOP from {maxdop} to {rec} (the per-NUMA-node processor count, capped at 8)");
+                sb.Append($", and lower MAXDOP from {maxdop} to {rec} ({basis.Bare}, capped at 8)");
             else
                 sb.Append($"; MAXDOP at {maxdop} is already within the ≤ {rec} guidance");
             sb.Append(". Then go after the specific high-DOP offenders");
@@ -579,18 +579,27 @@ public static class FactAdvice
         if (maxdop is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
-        var coresNote = cores > 0 ? $" (cores per socket {cores})" : string.Empty;
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
+        var coresNote = basis.Cores > 0 ? $" {basis.Note}" : string.Empty;
+        var cappedFrom = basis.FromVcores ? "vCores" : "cores-per-socket";
+        /* MAXDOP is an instance option (sp_configure) everywhere except an Azure SQL Database, which has no instance setting for it:
+           there it is the database-scoped MAXDOP, set with ALTER DATABASE SCOPED CONFIGURATION. Only that engine carries vCores
+           instead of cores per socket, so the vCores basis is the one that names the database-scoped statement. */
+        var applySentence = basis.FromVcores
+            ? $"An Azure SQL Database has no instance setting for it; set it per database with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}, an online change."
+            : "The Apply button runs sp_configure + RECONFIGURE, an online metadata change.";
+        var viaClause = basis.FromVcores
+            ? $"with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}"
+            : "via sp_configure + RECONFIGURE";
 
         string headline, remediation;
         if (maxdop == 0)
         {
             headline = "MAXDOP is 0 — a single query can fan out across every scheduler (up to 64)";
             remediation =
-                $"Set MAXDOP to {rec} — this server's cores-per-socket capped at 8{coresNote}, the per-NUMA-node " +
-                "proxy; the SKU is irrelevant to the right value. The Apply button runs sp_configure + " +
-                "RECONFIGURE, an online metadata change. On hardware with more than 16 logical processors " +
+                $"Set MAXDOP to {rec} — this {(basis.FromVcores ? "database" : "server")}'s {cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
+                $"proxy; the SKU is irrelevant to the right value. {applySentence} On hardware with more than 16 logical processors " +
                 "per NUMA node you can raise it by hand. Raise Cost Threshold for Parallelism in the same pass " +
                 "if its companion finding fired.";
         }
@@ -600,15 +609,14 @@ public static class FactAdvice
             remediation =
                 $"MAXDOP 1 forces every query serial: large analytical queries, index rebuilds, and DBCC run " +
                 $"far slower. Unless this was set deliberately to fix a specific parallelism problem, set MAXDOP " +
-                $"to {rec} (cores-per-socket capped at 8{coresNote}) via sp_configure + RECONFIGURE, an online change.";
+                $"to {rec} ({cappedFrom} capped at 8{coresNote}) {viaClause}, an online change.";
         }
         else
         {
-            headline = $"MAXDOP is {maxdop} — above this server's topology-based guidance of {rec}";
+            headline = $"MAXDOP is {maxdop} — above this {(basis.FromVcores ? "database" : "server")}'s topology-based guidance of {rec}";
             remediation =
-                $"Lower MAXDOP from {maxdop} to {rec} (cores-per-socket capped at 8{coresNote}, the per-NUMA-node " +
-                "proxy; the SKU is irrelevant). The Apply button runs sp_configure + RECONFIGURE, an online " +
-                "metadata change. On hardware with more than 16 logical processors per NUMA node a higher value " +
+                $"Lower MAXDOP from {maxdop} to {rec} ({cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
+                $"proxy; the SKU is irrelevant). {applySentence} On hardware with more than 16 logical processors per NUMA node a higher value " +
                 "can be justified by hand. Pair it with a sane Cost Threshold for Parallelism if that finding fired.";
         }
 
@@ -653,8 +661,8 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return string.Empty;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
         var sb = new StringBuilder("This server's MAXDOP is ")
             .Append(maxdop?.ToString() ?? "not readable this window")
             .Append(" and cost threshold for parallelism is ")
@@ -667,7 +675,7 @@ public static class FactAdvice
         else if (ctfp is not null && ctfp < 50)
             recs.Add($"raise cost threshold for parallelism from {ctfp} toward 50");
         if (maxdop is 0)
-            recs.Add($"cap MAXDOP at {rec} (the per-NUMA-node processor count, ≤ 8)");
+            recs.Add($"cap MAXDOP at {rec} ({basis.Bare}, ≤ 8)");
         else if (maxdop is not null && maxdop > rec)
             recs.Add($"lower MAXDOP from {maxdop} to {rec}");
 
@@ -850,6 +858,13 @@ public static class FactAdvice
         var moved = ConfigChangeAttribution.MovedKeys(fact);
         var stable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaStable);
         var omitted = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaMovedKeysOmitted);
+        /* #4729: presence-only rows a young after half cannot judge yet. The minutes are rounded and held one
+           under the floor's own, so an after half of 59.7 minutes never reads "60 minutes" beside a "1 h" floor. */
+        var notYetComparable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
+        var afterMinutes = Math.Min(Math.Round(afterHours * 60), Math.Ceiling(ConfigChangeAttribution.MinComparableAfterHours * 60) - 1);
+        /* An after half under 30 seconds rounds to 0 minutes, and "covers only 0 minutes" reads as no data at all. */
+        var afterCovers = afterMinutes < 1 ? "under a minute" : $"only {Plural(afterMinutes, "minute")}";
+        var youngAfterClause = $"the after half covers {afterCovers}, under the {ConfigChangeAttribution.MinComparableAfterHours:0.#} h the compare needs before a missing metric means anything";
 
         string verdict;
         if (unavailable)
@@ -866,6 +881,11 @@ public static class FactAdvice
             if (pendingRestart.Count == changes.Count)
             {
                 verdict = "Nothing should have moved yet: the engine is still running the old value until the next restart, and the compare is a control for that pass, not a verdict on this one.";
+            }
+            else if (moved.Count == 0 && notYetComparable > 0)
+            {
+                var one = notYetComparable == 1;
+                verdict = $"{Plural(notYetComparable, "metric")} appeared in or vanished from the compare, but {youngAfterClause}, so {(one ? "it is" : "they are")} not yet comparable and later passes compare {(one ? "it" : "them")}.";
             }
             else if (moved.Count == 0)
             {
@@ -889,6 +909,8 @@ public static class FactAdvice
                 verdict = $"Moved beyond its band after the change: {string.Join("; ", parts)}"
                           + (omitted > 0 ? $"; and {Plural(omitted, "more key")} (see the fact's metadata)" : string.Empty)
                           + (stable > 0 ? $". {Plural(stable, "other compared key")} stayed inside band." : ".");
+                if (notYetComparable > 0)
+                    verdict += $" {Plural(notYetComparable, "more metric")} appeared in or vanished from the compare and {(notYetComparable == 1 ? "is" : "are")} not yet comparable: {youngAfterClause}.";
             }
         }
         inv.Append(' ').Append(verdict);
@@ -909,9 +931,11 @@ public static class FactAdvice
             ? $"{family}: {subject} — effect not yet compared"
             : pendingRestart.Count == changes.Count
                 ? $"{family}: {subject} — takes effect at the next restart"
-                : moved.Count == 0
-                    ? $"{family}: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
-                    : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
+                : moved.Count == 0 && notYetComparable > 0
+                    ? $"{family}: {subject} — effect not yet comparable"
+                    : moved.Count == 0
+                        ? $"{family}: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
+                        : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
 
         // ── remediation: the history read(s) of the families present, the compare, and each family's grader ──
         var historyTools = new List<string>(3);
@@ -967,9 +991,32 @@ public static class FactAdvice
         : ms < 60000 ? $"{ms / 1000.0:0.#} s"
         : $"{ms / 60000.0:0.#} min";
 
-    /// <summary>"{n} {noun}" with a plural "s" unless n == 1, e.g. "1 deadlock" / "47 deadlocks".</summary>
-    private static string Plural(double n, string noun) =>
-        $"{n:N0} {noun}{(Math.Abs(n - 1) < 0.5 ? string.Empty : "s")}";
+    /// <summary>"{n} {noun}" pluralized unless n == 1, e.g. "1 deadlock" / "47 deadlocks", "1 query" / "3 queries"
+    /// (#4478 — a bare trailing-"s" rule wrote "querys"). A noun ending in a consonant + "y" drops the "y" for
+    /// "ies" ("query" → "queries"); every other noun this file passes just takes "s". Internal, not private,
+    /// so <c>Darling.Tests</c>/<c>Lite.Tests</c> (InternalsVisibleTo) can pin the pluralization directly.</summary>
+    internal static string Plural(double n, string noun) =>
+        $"{n:N0} {PluralNoun(noun, Math.Abs(n - 1) < 0.5)}";
+
+    /// <summary>The irregular half of <see cref="Plural"/>: a noun ending in a consonant immediately before a
+    /// trailing "y" pluralizes to "ies", not "ys" ("query" → "queries", not "querys"). A vowel before the "y"
+    /// ("day") keeps the plain "s" rule, which is every other noun <see cref="Plural"/>'s callers pass.</summary>
+    private static string PluralNoun(string noun, bool isSingular)
+    {
+        if (isSingular)
+        {
+            return noun;
+        }
+
+        if (noun.Length > 1 && noun[^1] == 'y' && !IsVowel(noun[^2]))
+        {
+            return noun[..^1] + "ies";
+        }
+
+        return noun + "s";
+    }
+
+    private static bool IsVowel(char c) => "aeiouAEIOU".Contains(c);
 
     // Anomaly value formatters (passed to ComposeAnomaly as the observed/baseline renderer).
     private static string Pct(double v) => $"{v:0.#}%";
@@ -1787,11 +1834,7 @@ public static class FactAdvice
 
         if ((FactMeta(facts, key, "baseline_zero_history") ?? 0) >= 1)
         {
-            var days = FactMeta(facts, key, "baseline_distinct_days");
-            var restsOn = samples is > 0
-                ? $"{samples.Value:N0} baseline sample{(samples.Value == 1 ? "" : "s")}" +
-                  (days is > 0 ? $" across {days.Value:N0} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
-                : "this server's hour-of-week baseline";
+            var restsOn = ZeroHistoryRestsOn(samples, FactMeta(facts, key, "baseline_distinct_days"));
             return fallback with
             {
                 Headline = $"{noun} reached {fmt(observed.Value)} — against a month in which this hour saw none",
@@ -1832,9 +1875,32 @@ public static class FactAdvice
     }
 
     /// <summary>
+    /// The clause every zero-history shape rests its claim on: the baseline's sample count and the distinct
+    /// days behind it, or the plain "this server's hour-of-week baseline" when the fact carries no sample
+    /// count. One spelling for <see cref="ComposeAnomaly"/>, <see cref="ComposeAnomalyRatio"/> and the
+    /// PostgreSQL-target composers in <c>PgTargetAdvice</c> (#4731), so no two of them can word the same
+    /// measurement two ways. <paramref name="provider"/> is the number format: null keeps the current culture
+    /// this class has always used, and the PostgreSQL composers pass the invariant culture their other figures
+    /// are written in.
+    /// </summary>
+    internal static string ZeroHistoryRestsOn(double? samples, double? days, IFormatProvider? provider = null) =>
+        samples is > 0
+            ? $"{samples.Value.ToString("N0", provider)} baseline sample{(samples.Value == 1 ? "" : "s")}" +
+              (days is > 0 ? $" across {days.Value.ToString("N0", provider)} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
+            : "this server's hour-of-week baseline";
+
+    /// <summary>
     /// Ratio-anomaly composed (BLOCKING / DEADLOCK spike): states the event count this window and how
     /// many times the hour-of-week baseline rate it represents. Falls back to the static block when
     /// the count/ratio metadata is absent.
+    /// <para>
+    /// #4731: a <c>baseline_zero_history</c> fact gets the gate families' third shape (see
+    /// <see cref="ComposeAnomaly"/>), checked BEFORE <c>is_new</c>. A zero-history bucket is never trustworthy,
+    /// so the detector stamps it <c>is_new = 1</c> as well, and read in the old order it was worded "first
+    /// occurrence, no baseline yet" — the words for a baseline the engine has not built, said about a month it
+    /// measured as empty. The zero-history shape prints no multiple: <c>ratio</c> on such a fact is the
+    /// first-occurrence sentinel, and any multiple of a zero rate would be infinite.
+    /// </para>
     /// </summary>
     private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun)
     {
@@ -1843,6 +1909,28 @@ public static class FactAdvice
         var ratio = FactMeta(facts, key, "ratio");
         if (current is null || ratio is null)
             return fallback;
+
+        if ((FactMeta(facts, key, "baseline_zero_history") ?? 0) >= 1)
+        {
+            var restsOn = ZeroHistoryRestsOn(FactMeta(facts, key, "baseline_samples"), FactMeta(facts, key, "baseline_distinct_days"));
+            var invZero =
+                $"{Plural(current.Value, noun)} this window. This server's baseline for this hour-of-week is not thin — " +
+                $"it is a measured ZERO: {restsOn}, not one of them above zero. That makes this an extremity rather than " +
+                "a multiple of a normal rate: the count went from never-happens to this, and a rate that is zero has no " +
+                "multiple to print. Check whether it lines up with a workload change, a deploy, or a one-off job before " +
+                "treating it as chronic.";
+            var remZero =
+                "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
+                "changed. If it was a one-time event — a report run, a backfill, a deploy — awareness is enough, but a count " +
+                "that was reliably zero and now is not will usually recur; if it recurs or sustains, it will cross the standard " +
+                $"{noun} threshold and surface as a first-class finding with its chain or graph detail on a later window; treat it then.";
+            return fallback with
+            {
+                Headline = $"{Plural(current.Value, noun)} this window — against a month in which this hour saw none",
+                Investigation = invZero,
+                Remediation = remZero
+            };
+        }
 
         // is_new = the baseline was too thin to trust a ratio (the detector fell back to the absolute
         // count). Render it as a first occurrence — never the dishonest "spiked to 100×" the sentinel
@@ -1907,10 +1995,15 @@ public static class FactAdvice
 
         // Top contributors: metadata keys "contrib_<TYPE>" → value = the type's total wait ms; name
         // them in descending order.
+        // A contributor the firing young-baseline bar left out (bar_excluded_<TYPE>) is ranked after the ones that counted
+        // and labelled; with no marker the order and text are unchanged.
         var contributors = f.Metadata
             .Where(kvp => kvp.Key.StartsWith("contrib_", StringComparison.Ordinal))
-            .OrderByDescending(kvp => kvp.Value)
-            .Select(kvp => kvp.Key.Substring("contrib_".Length))
+            .Select(kvp => (Type: kvp.Key.Substring("contrib_".Length), kvp.Value))
+            .Select(c => (c.Type, c.Value, Excluded: PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.IsBarExcluded(f.Metadata, c.Type)))
+            .OrderBy(c => c.Excluded)
+            .ThenByDescending(c => c.Value)
+            .Select(c => c.Excluded ? c.Type + " (not counted toward the threshold on Azure SQL Database)" : c.Type)
             .ToList();
         var topList = contributors.Count == 0
             ? "the collected wait types"

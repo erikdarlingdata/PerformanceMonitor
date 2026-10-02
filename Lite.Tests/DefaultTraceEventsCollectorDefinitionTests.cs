@@ -425,7 +425,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
             .Select(c => c.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" }, declaring);
+        Assert.Equal(new[] { "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" }, declaring);
     }
 
     [Fact]

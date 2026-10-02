@@ -30,6 +30,13 @@ public partial class ServerTab : UserControl
 
     private void UpdateMemorySummary(MemoryStatsRow? stats)
     {
+        /* On an Azure SQL Database the first two figures are the database's memory limit and the room left under it, not the
+           host's RAM, so they are named that way (the same words the FinOps utilization card uses). The names follow the tab's
+           own edition, the value the page-file and memory-state lines below read (_isAzureSqlDatabase is derived from it), so
+           one panel never names a figure one way and shows its neighbor the other. */
+        PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_engineEdition);
+        AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_engineEdition);
+
         if (stats == null)
         {
             PhysicalMemoryText.Text = "--";
@@ -51,10 +58,10 @@ public partial class ServerTab : UserControl
         TargetServerMemoryText.Text = FormatMb(stats.TargetServerMemoryMb);
         BufferPoolText.Text = FormatMb(stats.BufferPoolMb);
         PlanCacheText.Text = FormatMb(stats.PlanCacheMb);
-        TotalPageFileText.Text = FormatMb(stats.TotalPageFileMb);
-        AvailablePageFileText.Text = FormatMb(stats.AvailablePageFileMb);
-        MemoryStateText.Text = stats.SystemMemoryState;
-        SqlMemoryModelText.Text = stats.SqlMemoryModel;
+        TotalPageFileText.Text = PageFileText(stats.TotalPageFileMb, _isAzureSqlDatabase);
+        AvailablePageFileText.Text = PageFileText(stats.AvailablePageFileMb, _isAzureSqlDatabase);
+        MemoryStateText.Text = SystemMemoryStateText(stats.SystemMemoryState, _isAzureSqlDatabase);
+        SqlMemoryModelText.Text = MemoryModelText(stats.SqlMemoryModel);
     }
 
     private static string FormatMb(double mb)
@@ -62,6 +69,51 @@ public partial class ServerTab : UserControl
         return mb >= 1024 ? $"{mb / 1024:F1} GB" : $"{mb:F0} MB";
     }
 
+    /// <summary>
+    /// A Memory Overview page-file figure. On an Azure SQL Database the memory collector has no page-file source and
+    /// stores 0 in both page-file columns, which is an unknown and not a size, so the figure reads n/a there. Anywhere
+    /// else it is the stored figure, as it always was.
+    /// </summary>
+    internal static string PageFileText(double pageFileMb, bool isAzureSqlDatabase) =>
+        isAzureSqlDatabase ? ServerHardwareScope.NotApplicable : FormatMb(pageFileMb);
+
+    /// <summary>
+    /// The Memory Overview's memory state. On an Azure SQL Database the memory collector has no memory-state source and
+    /// stores the constant "Available", which is not a reading, so the state reads n/a there. Anywhere else it is the
+    /// stored state, as it always was.
+    /// </summary>
+    internal static string SystemMemoryStateText(string storedState, bool isAzureSqlDatabase) =>
+        isAzureSqlDatabase ? ServerHardwareScope.NotApplicable : storedState;
+
+    /// <summary>
+    /// The Memory Overview's SQL memory model. Where the engine has no memory model to report, which is an Azure SQL
+    /// Database, the memory collector stores "N/A", and the tab shows it as n/a like the other figures it cannot read.
+    /// Every other stored value shows as it is.
+    /// </summary>
+    internal static string? MemoryModelText(string? model) =>
+        string.Equals(model, "N/A", StringComparison.OrdinalIgnoreCase) ? ServerHardwareScope.NotApplicable : model;
+
+
+    /// <summary>
+    /// The hover's answer to "does this plotted X have a stored wall time that names two instants?" (#4766), or
+    /// <c>null</c> when no row does. It holds each flagged row's X the way the hover reads it back:
+    /// <c>SampleTimeUtc</c> through <c>ToOADate</c> and <c>FromOADate</c>, the round trip the plotted value takes,
+    /// so the match is exact.
+    /// </summary>
+    internal static Func<DateTime, bool>? CpuHoverPlainTimes(IEnumerable<CpuUtilizationRow> rows)
+    {
+        HashSet<DateTime>? plain = null;
+        foreach (var row in rows)
+        {
+            if (row.SampleTimeNamesTwoInstants)
+            {
+                plain ??= new HashSet<DateTime>();
+                plain.Add(DateTime.FromOADate(row.SampleTimeUtc.ToOADate()));
+            }
+        }
+
+        return plain == null ? null : plain.Contains;
+    }
 
     private void UpdateCpuChart(List<CpuUtilizationRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
@@ -69,21 +121,23 @@ public partial class ServerTab : UserControl
         _cpuHover?.Clear();
         ApplyTheme(CpuChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
         if (data.Count == 0)
         {
-            CpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            CpuChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             CpuChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(CpuChart);
             CpuChart.Refresh();
             return;
         }
 
-        var times = data.Select(d => d.SampleTime.ToOADate()).ToArray();
+        /* #4766: the CPU read asks for the UTC frame (RefreshCpuAsync), so each point is plotted at its own instant:
+           the two readings of a repeated hour are two points, and the ticks and the hover word the instant in the
+           display zone. SampleTime is the server's wall clock and is not what a chart plots. */
+        var times = data.Select(d => d.SampleTimeUtc.ToOADate()).ToArray();
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
         var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();
 
@@ -99,7 +153,14 @@ public partial class ServerTab : UserControl
         ChartStyle.StyleScatter(otherPlot);
         _cpuHover?.Add(otherPlot, "Other");
 
-        CpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        /* A point whose stored wall time names two instants sits at the first of them, so the hover words it
+           without the repeated-hour offset (#4766). Set after Clear() emptied it above. */
+        if (_cpuHover != null)
+        {
+            _cpuHover.PlainTimeAt = CpuHoverPlainTimes(data);
+        }
+
+        CpuChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         CpuChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(CpuChart);
         CpuChart.Plot.YLabel("CPU %");
@@ -115,21 +176,20 @@ public partial class ServerTab : UserControl
         _memoryHover?.Clear();
         ApplyTheme(MemoryChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
         if (data.Count == 0)
         {
-            MemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             MemoryChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(MemoryChart);
             MemoryChart.Refresh();
             return;
         }
 
-        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var totalMem = data.Select(d => d.TotalServerMemoryMb / 1024.0).ToArray();
         var targetMem = data.Select(d => d.TargetServerMemoryMb / 1024.0).ToArray();
         var bufferPool = data.Select(d => d.BufferPoolMb / 1024.0).ToArray();
@@ -157,7 +217,7 @@ public partial class ServerTab : UserControl
         double[] grantTimes, grantMb;
         if (grantData.Count > 0)
         {
-            grantTimes = grantData.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            grantTimes = grantData.Select(d => d.CollectionTime.ToOADate()).ToArray();
             grantMb = grantData.Select(d => d.TotalGrantedMb / 1024.0).ToArray();
         }
         else
@@ -172,7 +232,7 @@ public partial class ServerTab : UserControl
         ChartStyle.StyleScatter(grantPlot);
         _memoryHover?.Add(grantPlot, "Memory Grants");
 
-        MemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         MemoryChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(MemoryChart);
         MemoryChart.Plot.YLabel("Memory (GB)");
@@ -193,8 +253,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(MemoryGrantSizingChart);
         ApplyTheme(MemoryGrantActivityChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -202,7 +261,7 @@ public partial class ServerTab : UserControl
         {
             foreach (var c in new[] { MemoryGrantSizingChart, MemoryGrantActivityChart })
             {
-                c.Plot.Axes.DateTimeTicksBottomDateChange();
+                c.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
                 c.Plot.Axes.SetLimitsX(xMin, xMax);
                 ReapplyAxisColors(c);
                 c.Refresh();
@@ -225,7 +284,7 @@ public partial class ServerTab : UserControl
         foreach (var poolId in poolIds)
         {
             var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
-            var times = poolData.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = poolData.Select(d => d.CollectionTime.ToOADate()).ToArray();
 
             foreach (var metric in sizingMetrics)
             {
@@ -241,7 +300,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         MemoryGrantSizingChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(MemoryGrantSizingChart);
         MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
@@ -263,7 +322,7 @@ public partial class ServerTab : UserControl
         foreach (var poolId in poolIds)
         {
             var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
-            var times = poolData.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = poolData.Select(d => d.CollectionTime.ToOADate()).ToArray();
 
             foreach (var metric in activityMetrics)
             {
@@ -279,7 +338,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         MemoryGrantActivityChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(MemoryGrantActivityChart);
         MemoryGrantActivityChart.Plot.YLabel("Count");
@@ -298,8 +357,7 @@ public partial class ServerTab : UserControl
         _memoryPressureEventsHover?.Clear();
         ApplyTheme(MemoryPressureEventsChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -339,7 +397,7 @@ public partial class ServerTab : UserControl
                 int sqlSevere = g.Count(d => d.MemoryIndicatorsProcess >= 3);
                 int osMedium = g.Count(d => d.MemoryIndicatorsSystem == 2);
                 int osSevere = g.Count(d => d.MemoryIndicatorsSystem >= 3);
-                double x = g.Key.AddMinutes(UtcOffsetMinutes).ToOADate();
+                double x = g.Key.ToOADate();
 
                 if (sqlMedium > 0)
                     sqlMediumBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
@@ -387,7 +445,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         MemoryPressureEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(MemoryPressureEventsChart);
         MemoryPressureEventsChart.Plot.YLabel("Pressure Events per Hour");
@@ -399,6 +457,7 @@ public partial class ServerTab : UserControl
         }
 
         MemoryPressureEventsChart.Refresh();
+        ShowEngineGap(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureRows.Count);
     }
 
     private void UpdateTempDbChart(List<TempDbRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -407,21 +466,20 @@ public partial class ServerTab : UserControl
         _tempDbHover?.Clear();
         ApplyTheme(TempDbChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
         if (data.Count == 0)
         {
-            TempDbChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             TempDbChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(TempDbChart);
             TempDbChart.Refresh();
             return;
         }
 
-        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var userObj = data.Select(d => d.UserObjectReservedMb).ToArray();
         var internalObj = data.Select(d => d.InternalObjectReservedMb).ToArray();
         var versionStore = data.Select(d => d.VersionStoreReservedMb).ToArray();
@@ -444,7 +502,7 @@ public partial class ServerTab : UserControl
         ChartStyle.StyleScatter(vsPlot);
         _tempDbHover?.Add(vsPlot, "Version Store");
 
-        TempDbChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         TempDbChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
@@ -464,14 +522,13 @@ public partial class ServerTab : UserControl
         ApplyTheme(TempDbSizeChart);
         _tempDbSizeHover?.Clear();
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
         if (data.Count == 0)
         {
-            TempDbSizeChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             TempDbSizeChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(TempDbSizeChart);
             TempDbSizeChart.Refresh();
@@ -479,7 +536,7 @@ public partial class ServerTab : UserControl
         }
 
         var sorted = data.OrderBy(d => d.CollectionTime).ToList();
-        var times = sorted.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = sorted.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var totals = sorted.Select(d => d.TotalReservedMb + d.UnallocatedMb).ToArray();
 
         var sizePlot = TempDbSizeChart.Plot.Add.TimeSeries(times, totals);
@@ -487,7 +544,7 @@ public partial class ServerTab : UserControl
         ChartStyle.StyleScatter(sizePlot);
         _tempDbSizeHover?.Add(sizePlot, "Allocated MB");
 
-        TempDbSizeChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         ReapplyAxisColors(TempDbSizeChart);
         TempDbSizeChart.Plot.YLabel("Allocated MB");
         TempDbSizeChart.Plot.Axes.AutoScaleY();
@@ -501,14 +558,13 @@ public partial class ServerTab : UserControl
         _tempDbFileIoHover?.Clear();
         ApplyTheme(TempDbFileIoChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
         if (data.Count == 0)
         {
-            TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             TempDbFileIoChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(TempDbFileIoChart);
             TempDbFileIoChart.Refresh();
@@ -527,7 +583,7 @@ public partial class ServerTab : UserControl
         foreach (var fileGroup in files)
         {
             var points = fileGroup.OrderBy(d => d.CollectionTime).ToList();
-            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
             var latency = points.Select(d => d.AvgReadLatencyMs + d.AvgWriteLatencyMs).ToArray();
             var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             colorIdx++;
@@ -543,7 +599,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         TempDbFileIoChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(TempDbFileIoChart);
         TempDbFileIoChart.Plot.YLabel("tempdb File I/O Latency (ms)");
@@ -561,8 +617,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(FileIoReadChart);
         ApplyTheme(FileIoWriteChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -570,7 +625,7 @@ public partial class ServerTab : UserControl
         {
             foreach (var c in new[] { FileIoReadChart, FileIoWriteChart })
             {
-                c.Plot.Axes.DateTimeTicksBottomDateChange();
+                c.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
                 c.Plot.Axes.SetLimitsX(xMin, xMax);
                 ReapplyAxisColors(c);
                 c.Refresh();
@@ -593,7 +648,7 @@ public partial class ServerTab : UserControl
         foreach (var dbGroup in databases)
         {
             var points = dbGroup.OrderBy(d => d.CollectionTime).ToList();
-            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
             var readLatency = points.Select(d => d.AvgReadLatencyMs).ToArray();
             var writeLatency = points.Select(d => d.AvgWriteLatencyMs).ToArray();
             var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
@@ -647,7 +702,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        FileIoReadChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FileIoReadChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         FileIoReadChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(FileIoReadChart);
         FileIoReadChart.Plot.YLabel("Read Latency (ms)");
@@ -655,7 +710,7 @@ public partial class ServerTab : UserControl
         ShowChartLegend(FileIoReadChart);
         FileIoReadChart.Refresh();
 
-        FileIoWriteChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FileIoWriteChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         FileIoWriteChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(FileIoWriteChart);
         FileIoWriteChart.Plot.YLabel("Write Latency (ms)");
@@ -673,8 +728,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(FileIoReadThroughputChart);
         ApplyTheme(FileIoWriteThroughputChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -682,7 +736,7 @@ public partial class ServerTab : UserControl
         {
             foreach (var c in new[] { FileIoReadThroughputChart, FileIoWriteThroughputChart })
             {
-                c.Plot.Axes.DateTimeTicksBottomDateChange();
+                c.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
                 c.Plot.Axes.SetLimitsX(xMin, xMax);
                 ReapplyAxisColors(c);
                 c.Refresh();
@@ -703,7 +757,7 @@ public partial class ServerTab : UserControl
         foreach (var fileGroup in files)
         {
             var points = fileGroup.OrderBy(d => d.CollectionTime).ToList();
-            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
             var readThroughput = points.Select(d => d.ReadMbPerSec).ToArray();
             var writeThroughput = points.Select(d => d.WriteMbPerSec).ToArray();
             var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
@@ -730,7 +784,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         FileIoReadThroughputChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
@@ -738,7 +792,7 @@ public partial class ServerTab : UserControl
         ShowChartLegend(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Refresh();
 
-        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         FileIoWriteThroughputChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(FileIoWriteThroughputChart);
         FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");
@@ -762,8 +816,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _lockWaitTrendHover?.Clear();
@@ -775,7 +828,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Lock Waits";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("LockWaits"));
             zeroLine.MarkerSize = 0;
-            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(LockWaitTrendChart);
             LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
@@ -791,7 +844,7 @@ public partial class ServerTab : UserControl
         for (int i = 0; i < grouped.Count; i++)
         {
             var group = grouped[i];
-            var times = group.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = group.Select(t => t.CollectionTime.ToOADate()).ToArray();
             var values = group.Select(t => t.WaitTimeMsPerSecond).ToArray();
 
             var plot = LockWaitTrendChart.Plot.Add.TimeSeries(times, values);
@@ -803,7 +856,7 @@ public partial class ServerTab : UserControl
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(LockWaitTrendChart);
         LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
@@ -826,8 +879,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _blockingTrendHover?.Clear();
@@ -840,7 +892,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Blocking Incidents";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
             zeroLine.MarkerSize = 0;
-            BlockingTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
             BlockingTrendChart.Plot.YLabel("Blocking Incidents");
@@ -860,7 +912,7 @@ public partial class ServerTab : UserControl
 
         foreach (var point in data.OrderBy(d => d.Time))
         {
-            var time = point.Time.AddMinutes(UtcOffsetMinutes).ToOADate();
+            var time = point.Time.ToOADate();
             /* Go to zero just before the spike */
             expandedTimes.Add(time - 0.0001);
             expandedCounts.Add(0);
@@ -882,7 +934,7 @@ public partial class ServerTab : UserControl
         plot.MarkerSize = 0; /* No markers, just lines */
         _blockingTrendHover?.Add(plot, "Blocking Incidents");
 
-        BlockingTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
         BlockingTrendChart.Plot.YLabel("Blocking Incidents");
@@ -905,8 +957,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _deadlockTrendHover?.Clear();
@@ -919,7 +970,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Deadlocks";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
             zeroLine.MarkerSize = 0;
-            DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockTrendChart);
             DeadlockTrendChart.Plot.YLabel("Deadlocks");
@@ -939,7 +990,7 @@ public partial class ServerTab : UserControl
 
         foreach (var point in data.OrderBy(d => d.Time))
         {
-            var time = point.Time.AddMinutes(UtcOffsetMinutes).ToOADate();
+            var time = point.Time.ToOADate();
             /* Go to zero just before the spike */
             expandedTimes.Add(time - 0.0001);
             expandedCounts.Add(0);
@@ -961,7 +1012,7 @@ public partial class ServerTab : UserControl
         plot.MarkerSize = 0; /* No markers, just lines */
         _deadlockTrendHover?.Add(plot, "Deadlocks");
 
-        DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockTrendChart);
         DeadlockTrendChart.Plot.YLabel("Deadlocks");
@@ -985,8 +1036,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _currentWaitsDurationHover?.Clear();
@@ -998,7 +1048,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Current Waits";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("CurrentWaits"));
             zeroLine.MarkerSize = 0;
-            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsDurationChart);
             CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
@@ -1015,7 +1065,7 @@ public partial class ServerTab : UserControl
         {
             var group = grouped[i];
             var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = ordered.Select(t => t.CollectionTime.ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.TotalWaitMs).ToArray();
 
             var plot = CurrentWaitsDurationChart.Plot.Add.TimeSeries(times, values);
@@ -1027,7 +1077,7 @@ public partial class ServerTab : UserControl
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsDurationChart);
         CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
@@ -1049,8 +1099,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _currentWaitsBlockedHover?.Clear();
@@ -1062,7 +1111,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Blocked Sessions";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("BlockedSessions"));
             zeroLine.MarkerSize = 0;
-            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsBlockedChart);
             CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
@@ -1079,7 +1128,7 @@ public partial class ServerTab : UserControl
         {
             var group = grouped[i];
             var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = ordered.Select(t => t.CollectionTime.ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.BlockedCount).ToArray();
 
             var plot = CurrentWaitsBlockedChart.Plot.Add.TimeSeries(times, values);
@@ -1091,7 +1140,7 @@ public partial class ServerTab : UserControl
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsBlockedChart);
         CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
@@ -1104,8 +1153,10 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// Draws the window's baseline discontinuities on one Performance Trends chart (#3653 A5): a dashed
-    /// vertical line per marker at its instant on the server's display clock (<c>UtcOffsetMinutes</c>, as
-    /// every point here is shifted), legend-named with the shared <see cref="BaselineDiscontinuities.Sentence"/>.
+    /// vertical line per marker at its instant, as every point here is placed (X is the UTC instant, #4766),
+    /// legend-named with the shared <see cref="BaselineDiscontinuities.Sentence"/>, which words the instant in
+    /// the display zone the axis ticks use and, in the repeated autumn hour, adds that instant's UTC offset so
+    /// the two markers a repeated hour holds read differently (#4766; the axis tick labels stay plain).
     /// The identity-epoch carriers (#3694, #3705) forget this server's delta baselines when the target
     /// restarts, fails over, is renamed or has its statistics reset; the four series here are all
     /// delta-family rates, so across such an instant they show a step that is the instrument re-baselining,
@@ -1116,10 +1167,12 @@ public partial class ServerTab : UserControl
     /// </summary>
     private void MarkDiscontinuities(ScottPlot.WPF.WpfPlot chart, IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
+        var zone = GetPickerZone();
         foreach (var discontinuity in discontinuities)
         {
-            var shown = discontinuity.At.AddMinutes(UtcOffsetMinutes);
-            ChartStyle.AddDiscontinuityMarker(chart, shown.ToOADate(), BaselineDiscontinuities.Sentence(shown, discontinuity.Reason));
+            var shown = DisplayZone.ToDisplay(discontinuity.At, zone);
+            ChartStyle.AddDiscontinuityMarker(chart, discontinuity.At.ToOADate(),
+                BaselineDiscontinuities.Sentence(shown, discontinuity.Reason, DisplayZone.AmbiguousOffsetSuffix(discontinuity.At, zone)));
         }
     }
 
@@ -1133,12 +1186,11 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = rated.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _queryDurationTrendHover?.Clear();
@@ -1149,7 +1201,7 @@ public partial class ServerTab : UserControl
         _queryDurationTrendHover?.Add(plot, "Query Duration");
         MarkDiscontinuities(QueryDurationTrendChart, discontinuities);
 
-        QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         QueryDurationTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(QueryDurationTrendChart);
         QueryDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
@@ -1168,12 +1220,11 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = rated.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _procDurationTrendHover?.Clear();
@@ -1184,7 +1235,7 @@ public partial class ServerTab : UserControl
         _procDurationTrendHover?.Add(plot, "Procedure Duration");
         MarkDiscontinuities(ProcDurationTrendChart, discontinuities);
 
-        ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         ProcDurationTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(ProcDurationTrendChart);
         ProcDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
@@ -1198,17 +1249,18 @@ public partial class ServerTab : UserControl
         ClearChart(QueryStoreDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
 
-        /* #3541 A12: the window's first collection carries a null rate (nothing to difference against) and
-           a chart has nowhere to draw "unknown" — it is skipped, not plotted as the 0 it used to be. */
+        /* #3541 A12: a point with no rate is skipped, not plotted as the 0 it used to be — a chart has nowhere to
+           draw "unknown". A Query Store point that stored its end is rated over its own length (#4765), so
+           the point left unrated is the window's first one when it stored no end (nothing to difference
+           against). */
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = rated.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _queryStoreDurationTrendHover?.Clear();
@@ -1219,7 +1271,7 @@ public partial class ServerTab : UserControl
         _queryStoreDurationTrendHover?.Add(plot, "Query Store Duration");
         MarkDiscontinuities(QueryStoreDurationTrendChart, discontinuities);
 
-        QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(QueryStoreDurationTrendChart);
         QueryStoreDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
@@ -1238,12 +1290,11 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = rated.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _executionCountTrendHover?.Clear();
@@ -1254,7 +1305,7 @@ public partial class ServerTab : UserControl
         _executionCountTrendHover?.Add(plot, "Executions");
         MarkDiscontinuities(ExecutionCountTrendChart, discontinuities);
 
-        ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         ExecutionCountTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(ExecutionCountTrendChart);
         ExecutionCountTrendChart.Plot.YLabel("Executions/sec");
@@ -1306,13 +1357,13 @@ public partial class ServerTab : UserControl
         ReapplyAxisColors(QueryHeatmapChart);
 
         // X-axis: time labels at column positions. #1831: NumericManual labels bypass the shared
-        // DateTime formatter, so this axis converts for display itself — matching this same
-        // chart's tooltip, which already goes through ConvertForDisplay.
+        // DateTime formatter, so this axis words each bucket's UTC instant in the display zone itself
+        // (#4766) — the same zone this same chart's tooltip uses.
         var xTicks = new ScottPlot.TickGenerators.NumericManual();
         int xStep = Math.Max(1, numCols / 12); // ~12 labels max
         for (int i = 0; i < numCols; i += xStep)
         {
-            var t = UiTimeContext.ConvertForDisplay(result.TimeBuckets[i].AddMinutes(UtcOffsetMinutes));
+            var t = DisplayZone.ToDisplay(result.TimeBuckets[i], GetPickerZone());
             xTicks.AddMajor(i, t.ToString("M/d\nHH:mm"));
         }
         QueryHeatmapChart.Plot.Axes.Bottom.TickGenerator = xTicks;
@@ -1404,14 +1455,12 @@ public partial class ServerTab : UserControl
         }
 
         var cell = _lastHeatmapResult.CellDetails[row, col];
-        var time = ServerTimeHelper.ConvertForDisplay(
-            _lastHeatmapResult.TimeBuckets[col].AddMinutes(UtcOffsetMinutes),
-            ServerTimeHelper.CurrentDisplayMode);
+        var time = DisplayZone.Format(_lastHeatmapResult.TimeBuckets[col], GetPickerZone(), "HH:mm:ss");
         var bucketLabel = row < _lastHeatmapResult.BucketLabels.Length
             ? _lastHeatmapResult.BucketLabels[row]
             : "?";
 
-        var tipText = $"{time:HH:mm:ss}  |  {bucketLabel}  |  {count:N0} queries";
+        var tipText = $"{time}  |  {bucketLabel}  |  {count:N0} queries";
         if (cell != null && !string.IsNullOrEmpty(cell.TopQueryText))
         {
             // Single line, collapse whitespace, truncate
@@ -1431,18 +1480,7 @@ public partial class ServerTab : UserControl
         if (!IsLoaded) return;
         try
         {
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null, toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             var metric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
             var result = await System.Threading.Tasks.Task.Run(() => _dataService.GetQueryHeatmapAsync(_serverId, metric, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
             UpdateQueryHeatmapChart(result);
@@ -1522,12 +1560,11 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        /* Re-pins the axes onto the window the plotted data was read over, so it takes the same offset
+        /* Re-pins the axes onto the window the plotted data was read over, so it takes the same clock
            those reads take — the selected tab's. This runs from a chart on the visible tab, where that
            is this tab. */
-        var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.UtcOffsetMinutes);
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         chart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         chart.Plot.Axes.AutoScaleY();
         chart.Refresh();
@@ -1543,14 +1580,13 @@ public partial class ServerTab : UserControl
         /* Pin the X axis to the settable window (the same idiom as the CPU / tempdb-size charts) rather than
            AutoScale()'ing to the data — a bare AutoScale fits X to the data plus ScottPlot's ~10% side margins,
            which reads as symmetric dead space. This is the one chart the window-pin campaign missed. */
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
         if (data.Count == 0)
         {
-            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             CollectorDurationChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(CollectorDurationChart);
             CollectorDurationChart.Refresh();
@@ -1571,7 +1607,7 @@ public partial class ServerTab : UserControl
             var points = group.OrderBy(d => d.CollectionTime).ToList();
             if (points.Count < 2) continue;
 
-            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
             var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
 
             var scatter = CollectorDurationChart.Plot.Add.TimeSeries(times, durations);
@@ -1583,7 +1619,7 @@ public partial class ServerTab : UserControl
             colorIdx++;
         }
 
-        CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         ReapplyAxisColors(CollectorDurationChart);
         CollectorDurationChart.Plot.YLabel("Duration (ms)");
         CollectorDurationChart.Plot.Axes.AutoScaleY();

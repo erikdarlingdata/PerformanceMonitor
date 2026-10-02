@@ -19,10 +19,12 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -158,7 +160,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         string? lastOverrideReport = null;
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
+            if (config is null && CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff))
             {
                 try
                 {
@@ -209,7 +211,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             switch (DecideMcpAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
             {
-                case McpSupervisorAction.Start when DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff:
+                case McpSupervisorAction.Start when CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff):
                     if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
@@ -410,8 +412,13 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* Lifetime tied to the running app (#1560): disposed by StopServerAsync, not this method's
-               scope — the supervisor may keep the app running across many poll ticks. */
-            var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString));
+               scope — the supervisor may keep the app running across many poll ticks. #4479: the mcp-role
+               connection string built by DarlingManagedPostgres already carries McpApplicationName, but a
+               CONFIGURED (postgres.mcpConnectionString) or owner-fallback login never runs through that
+               builder — set-if-absent here so every path this string can take still names the surface. */
+            var postgres = NpgsqlDataSource.Create(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.McpApplicationName)));
             _appDataSource = postgres;
 
             /* serverId → connection string, keyed by the STORE's identity (review catch on #2218).
@@ -499,6 +506,8 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* Register services that MCP tools need via dependency injection. */
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
+            /* get_fleet_overview scopes an Azure master's counts by the live registry, the way the analysis service is. */
+            builder.Services.AddSingleton<MonitoredServerRegistryState>(_registryState);
             /* #4214 part 2: get_store_host's config seat — the same config this host loaded to reach this
                point, so it cannot disagree with what actually connected. Read-only: GatherAsync only ever
                reads dataDirectory/Managed off it, never writes.
@@ -507,13 +516,22 @@ public sealed class DarlingMcpHostService : BackgroundService
                but injecting only the two fields GatherAsync reads means a future [McpServerTool] that
                takes a PostgresConfig parameter cannot receive the owner secret through this seat. */
             builder.Services.AddSingleton(new PostgresConfig { Managed = config.Postgres.Managed, DataDirectory = config.Postgres.DataDirectory });
+            /* #4535: the plan analyzer's per-rule config, read from darling.json's optional "analyzer"
+               section. Null (section omitted) is AnalyzerConfig.Default; DarlingMcpPlanTools takes this
+               as an [McpServerTool] method parameter the same way it takes NpgsqlDataSource above. */
+            builder.Services.AddSingleton<AnalyzerConfig>(config.Analyzer ?? AnalyzerConfig.Default);
             /* #4214 round-1 review, Medium 2: get_store_host's 5-minute shared cache — the process-wide
                Shared instance, not a fresh one per request, so every caller (MCP and the direct-call web
                path below) actually shares the one cache window. Typed-generic AddSingleton<T>, not the
                untyped AddSingleton(instance) overload: McpServiceParameterDiSeatCensusTests greps this
                file's source text for AddSingleton<StoreHostProfileCache> specifically. */
             builder.Services.AddSingleton<StoreHostProfileCache>(StoreHostProfileCache.Shared);
-            builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache));
+            /* #4602: the same analyzer config just registered above, so MCP's plan advisories (get_analysis_facts,
+               analyze_server, drill-down) honor a user's disabled/overridden rules the same way the worker
+               (DarlingWorker.cs) and the web endpoints (DarlingWebEndpoints.cs) already do. Before this fix the
+               MCP path silently fell back to AnalyzerConfig.Default. */
+            /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
+            RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer, _registryState);
             /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
                (the postgres pattern one line up — service-typed params are resolved per request and never
                reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder
@@ -626,6 +644,33 @@ public sealed class DarlingMcpHostService : BackgroundService
     }
 
     /// <summary>
+    /// #4726: registers the analysis service TRANSIENT, so every MCP call gets its own instance, the way the worker
+    /// builds one per pass. A single shared instance answers a second, overlapping analyze_server call with an empty
+    /// list (its busy check) and the tool then reads the FIRST call's running state, so the second server got
+    /// "No significant findings" for a server it never analyzed. The ONE shared <paramref name="baselineCache"/> is
+    /// still handed to every instance (#3941), so baselines are not recomputed per call. Extracted so a test resolves
+    /// the service from the production registration instead of a hand-copied one that could drift from it.
+    /// </summary>
+    internal static void RegisterAnalysisService(
+        IServiceCollection services,
+        NpgsqlDataSource postgres,
+        PerformanceMonitor.Analysis.IPlanFetcher? planFetcher,
+        ILogger? logger,
+        BaselineCache baselineCache,
+        AnalyzerConfig? analyzer,
+        MonitoredServerRegistryState? registryState = null)
+    {
+        services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(postgres, planFetcher, logger, baselineCache, analyzer ?? AnalyzerConfig.Default)
+        {
+            /* Resolved per call from the live registry, the way the worker fills its per-pass instance, so an
+               analyze_server run (which persists) agrees with the scheduled pass for an Azure master target. */
+            SeparatelyMonitoredResolver = registryState is null
+                ? null
+                : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct)
+        });
+    }
+
+    /// <summary>
     /// Registers the MCP server, its stateless HTTP transport, every tool class, and the two call-tool
     /// filters — the same registration <c>TryStartServerAsync</c> used to build inline. Extracted (#4128)
     /// so a live-HTTP test builds the SAME server (including <c>/core</c>'s <c>ConfigureSessionOptions</c>
@@ -643,7 +688,16 @@ public sealed class DarlingMcpHostService : BackgroundService
            (which passes none) keeps building and running with its own throwaway accumulator instead of a
            null-reference. Production's one real call site (TryStartServerAsync) resolves the DI singleton and
            passes it here explicitly. */
-        var toolLatency = new McpToolLatencyFilter(readLatency ?? new ReadLatencyAccumulator(), readLatencyLogger);
+        var hostReadLatency = readLatency ?? new ReadLatencyAccumulator();
+        var toolLatency = new McpToolLatencyFilter(hostReadLatency, readLatencyLogger);
+
+        /* #4782: run_custom_view_panel records its composed-panel run through the shared runner, which used to
+           find the accumulator in a process-wide static that only the web host set -- so the run was dropped
+           whenever the web host was off, and was tied to whichever web server was mapped last when several
+           were set up in one process. The tool now takes this seat as a DI service parameter, over the SAME
+           accumulator the filter above records into. Typed-generic AddSingleton<T>, as the seat census
+           (McpServiceParameterDiSeatCensusTests) greps this file's source text for it. */
+        services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger));
 
         services
             .AddMcpServer(options =>

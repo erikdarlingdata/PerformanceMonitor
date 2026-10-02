@@ -151,37 +151,54 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        No pg_input_is_valid: it is PostgreSQL 16+, and the TEXT route serves 14 and 15 targets too. So a
        forged row is nulled rather than aborting capture for every real row beside it — the parser already treats query_id = 0 as "the prefix carried no %Q" and DurationMs
        is not identity, so NULL reads the same as a block this bounded tail cut in half. */
+    /* The match cap on the stderr routes. The regex arm orders its matches newest first (the newest file, then the
+       latest match in it) and fetches one more than RowLimit, so ReadAsync can tell a read the cap cut from one that
+       ended exactly at it; the resume marker advances either way. */
+    private const int RowLimit = 2000;
+    private const string MatchFetchLiteral = "2001";
+
     private const string QueryText = PgServerLogTail.TailCteSql + @"
+SELECT NULL::bigint AS query_id, NULL::double precision AS duration_ms, " + PgServerLogTail.ResumeRowSql + @" AS plan_json, NULL AS line_prefix
+FROM resume AS r
+UNION ALL
 SELECT
-    CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
-         WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,
-    CASE WHEN m[2] !~ '^[0-9]{1,15}(\.[0-9]{1,9})?$' THEN NULL ELSE (m[2])::double precision END AS duration_ms,
-    replace(m[3], chr(9), '')                        AS plan_json
-FROM tail,
-     regexp_matches(
+    CASE WHEN x.m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
+         WHEN (x.m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (x.m[1])::bigint END AS query_id,
+    CASE WHEN x.m[2] !~ '^[0-9]{1,15}(\.[0-9]{1,9})?$' THEN NULL ELSE (x.m[2])::double precision END AS duration_ms,
+    replace(x.m[3], chr(9), '')                      AS plan_json,
+    pg_catalog.current_setting('log_line_prefix', true)  AS line_prefix
+FROM (
+    SELECT mm.m AS m
+    FROM tail
+    CROSS JOIN LATERAL regexp_matches(
          tail.body,
          '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
-         'gn') AS m
+         'gn') WITH ORDINALITY AS mm(m, ord)
+    ORDER BY tail.part DESC, mm.ord DESC
+    LIMIT " + MatchFetchLiteral + @"
+) AS x
 UNION ALL
-SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
+SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"'
-WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
-LIMIT 2000";
+SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     /* The csvlog pair (#4053 part b2), sent instead of QueryText/BinaryQueryText once
        context.PgLogUsesCsvlog says the target's log_destination includes csvlog — the same flag
        PgLogEventsCollector reads for its own csvlog pair (#4053 part a1b). Opened on
        PgServerLogTail.TailCsvCteSql/TailCsvCteBinarySql instead of the stderr twins, this collector's own
        regexp_matches is dropped entirely: a csvlog record already carries the plan JSON quoted whole in
-       its own "message" field (see PgServerLogCsvParser's type header for the 26-column shape), so there
+       its own "message" field (see PgServerLogCsvParser's type header for the 24- and 26-column shapes), so there
        is no block to extract with SQL — ReadAsync gets the raw body and calls PgServerLogCsvParser.Parse
        itself, the same shape PgLogEventsCollector's csv branch takes. The marker arms carry
        PgNoCsvlogFileException.Marker, not PgNoStderrLogFileException.Marker, so the fault this route
        throws names csvlog rather than stderr — PgLogEventsCollector's csv branch makes the identical
        choice. */
     private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
+SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -198,6 +215,9 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        arms are cast through convert_to, the same reason PgLogEventsCollector's own binary-route csv pair
        gives. */
     private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
+SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -241,24 +261,32 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        whole block, and plan capture needs no plant at all — the marker is present on every cycle wherever
        auto_explain logs anything. See the type header's #4058 M1 remarks (still open on the issue). */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
+SELECT NULL::bigint AS query_id, NULL::double precision AS duration_ms, " + PgServerLogTail.ResumeRowSql + @" AS plan_json, NULL AS line_prefix
+FROM resume AS r
+UNION ALL
 SELECT
-    CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
-         WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,
-    CASE WHEN m[2] !~ '^[0-9]{1,15}(\.[0-9]{1,9})?$' THEN NULL ELSE (m[2])::double precision END AS duration_ms,
-    replace(m[3], chr(9), '')                        AS plan_json
-FROM tail,
-     regexp_matches(
+    CASE WHEN x.m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
+         WHEN (x.m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (x.m[1])::bigint END AS query_id,
+    CASE WHEN x.m[2] !~ '^[0-9]{1,15}(\.[0-9]{1,9})?$' THEN NULL ELSE (x.m[2])::double precision END AS duration_ms,
+    replace(x.m[3], chr(9), '')                      AS plan_json,
+    pg_catalog.current_setting('log_line_prefix', true)  AS line_prefix
+FROM (
+    SELECT mm.m AS m
+    FROM tail
+    CROSS JOIN LATERAL regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
          '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
-         'gn') AS m
-WHERE pg_catalog.position(tail.body, '" + PlanMarkerLiteral + @"'::bytea) > 0
+         'gn') WITH ORDINALITY AS mm(m, ord)
+    WHERE pg_catalog.position(tail.body, '" + PlanMarkerLiteral + @"'::bytea) > 0
+    ORDER BY tail.part DESC, mm.ord DESC
+    LIMIT " + MatchFetchLiteral + @"
+) AS x
 UNION ALL
-SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
+SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"'
-WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
-LIMIT 2000";
+SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     public override string Name => "pg_plan_capture";
 
@@ -282,10 +310,19 @@ LIMIT 2000";
     /// <summary>Server-wide: one log holds every database's plans.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
+    public override IReadOnlyList<string> StateKeys => PgServerLogTail.ResumeStateKeys;
+
     public override CollectorQuery BuildQuery(CollectorContext context) =>
-        new(context.PgLogUsesCsvlog
-            ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
-            : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
+        context.PgLogUsesCsvlog
+            ? PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, RouteKey(context))
+            : PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context, RouteKey(context));
+
+    /// <summary>The resume-marker key for the route <see cref="BuildQuery"/> sends and the read stages under: csvlog or stderr, never jsonlog (this collector has no json route).</summary>
+    internal static string RouteKey(CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.PgLogUsesCsvlog ? PgServerLogTail.ResumeStateKeyCsv : PgServerLogTail.ResumeStateKey;
+    }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -364,6 +401,13 @@ LIMIT 2000";
                 throw new PgLoggingCollectorOffException();
             }
 
+            /* The resume row (#4699) on the csvlog route: the csv tail is not row-limited, so the marker is
+               staged as it is consumed, under the csv key. The timezone column is NULL on it and never on a real row. */
+            if (PgServerLogTail.TryConsumeResumeRow(body, reader.FieldCount > 1 && reader.IsDBNull(1), RouteKey(context), context))
+            {
+                continue;
+            }
+
             if (string.Equals(body, PgNoCsvlogFileException.Marker, StringComparison.Ordinal))
             {
                 throw new PgNoCsvlogFileException();
@@ -395,11 +439,11 @@ LIMIT 2000";
     /// entries the RDS log API handed it, rather than a second copy of the marker check, the LOG-severity
     /// gate, the query-id and duration guards and <see cref="PgPlanLogParser.FromBlock"/>. Internal, visible
     /// to the Darling service (that caller's assembly) and nothing else (#4053 c3 review).
-    /// <para><b>Precondition: csv-parser entries only.</b> The query id is read from the text after the LAST
-    /// comma of <see cref="PgLogEntry.RawText"/>. That is the unquoted <c>query_id</c> column only because
-    /// <see cref="PgServerLogCsvParser"/> admits a record only with exactly 26 fields. An entry from the stderr
-    /// assembler or the jsonlog parser carries raw line text, whose last comma can sit in client-written
-    /// message text, so a client could choose the query id. Never pass those entries here.</para>
+    /// <para><b>Precondition: csv-parser entries only.</b> The query id is <see cref="PgLogEntry.QueryIdText"/>,
+    /// which only <see cref="PgServerLogCsvParser"/> fills, from the record's own <c>query_id</c> column. It is null
+    /// on a 24-field PostgreSQL 13 record, which has no such column, and null on every entry from the stderr
+    /// assembler or the jsonlog parser too, so an entry from those would read as an unattributable capture. Never
+    /// pass those entries here.</para>
     /// <para>No foreign-zone filter, on either route: plan rows are stamped with the collection time, never a
     /// log timestamp, and the stderr plan routes never filtered either.</para>
     /// </summary>
@@ -466,11 +510,20 @@ LIMIT 2000";
                csvlog carries no %Q-rendered prefix at all: the identity is PostgreSQL's own column. A
                query id that is not a real value — %Q renders 0 when compute_query_id is off, never an
                unparseable string — marks this record as one this collector cannot attribute. */
-            if (!long.TryParse(
-                    entry.RawText.Length > 0 ? QueryIdFromRawText(entry.RawText) : null,
-                    NumberStyles.Integer | NumberStyles.AllowLeadingSign,
-                    CultureInfo.InvariantCulture,
-                    out var queryId))
+            long queryId;
+
+            if (entry.QueryIdText is null)
+            {
+                /* #4709: a PostgreSQL 13 record has 24 fields and no query_id column at all, so the id is ABSENT, not
+                   forged. 0 is this collector's own "no attribution" value (see Row.QueryId): the capture is real and
+                   only unattributable, stored as an orphan the way a target that never configured %Q is. */
+                queryId = 0;
+            }
+            else if (!long.TryParse(
+                         entry.QueryIdText,
+                         NumberStyles.Integer | NumberStyles.AllowLeadingSign,
+                         CultureInfo.InvariantCulture,
+                         out queryId))
             {
                 forgedCaptures++;
                 continue;
@@ -500,19 +553,6 @@ LIMIT 2000";
         return rows;
     }
 
-    /// <summary>
-    /// Reads the <c>query_id</c> field — the last of the 26 csvlog columns (#4053 part b2) — straight off
-    /// the record's own raw text rather than re-splitting it through <c>PgServerLogCsvParser</c>'s private
-    /// field splitter, which <see cref="PgLogEntry"/> does not expose past field 19 (its own consumers never
-    /// needed the trailing columns). <c>query_id</c> is PostgreSQL's own bigint rendering — never quoted —
-    /// so it is the text after the LAST comma in the record.
-    /// </summary>
-    private static string? QueryIdFromRawText(string rawText)
-    {
-        var lastComma = rawText.LastIndexOf(',');
-        return lastComma < 0 ? null : rawText[(lastComma + 1)..].TrimEnd('\r', '\n');
-    }
-
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
@@ -523,8 +563,22 @@ LIMIT 2000";
             return await ReadCsvAsync(reader, context, cancellationToken);
         }
 
+        var matchRows = 0;
+        var limited = false;
+        string? nextMarker = null;
+
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* The resume row (#4699), recognised before any marker check: line_prefix is NULL on it and
+               never on a real row (a real row's prefix is non-null even when empty). Its marker is staged
+               after the loop. */
+            if (reader.FieldCount > 3 && reader.IsDBNull(3) && reader.IsDBNull(0)
+                && PgServerLogTail.TryConsumeResumeRow(reader.IsDBNull(2) ? null : reader.GetString(2), true, context, out var staged))
+            {
+                nextMarker ??= staged;
+                continue;
+            }
+
             /* The marker row the query returns instead of listing the log directory when
                logging_collector is off (#3410). A real row always carries a query id — the regexp capture
                is literal digits cast to bigint — so a NULL first column plus the marker text is the gate's
@@ -545,6 +599,13 @@ LIMIT 2000";
                 && string.Equals(reader.GetString(2), PgNoStderrLogFileException.Marker, StringComparison.Ordinal))
             {
                 throw new PgNoStderrLogFileException();
+            }
+
+            /* The regex arm fetched RowLimit + 1: the extra row only proves the cap cut the read, and is not read. */
+            if (++matchRows > RowLimit)
+            {
+                limited = true;
+                continue;
             }
 
             /* #4046 part 1c: on the binary route plan_json came back through encode(..., 'escape'),
@@ -568,11 +629,20 @@ LIMIT 2000";
                 continue;
             }
 
+            /* #4501: the digits regexp_matches captured right after the pid are trusted as the real
+               %Q query id only when the target's own collected log_line_prefix puts %Q there. Under the
+               v17 managed default '%m [%p] %a ' that position renders application_name instead, and an
+               all-digit application name would otherwise attach as a plausible-looking but wrong query
+               id. A NULL line_prefix (not collected — current_setting's own "true" missing-ok argument)
+               keeps this route's pre-#4501 behaviour of trusting the capture unconditionally. */
+            var linePrefix = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var queryId = PgPlanLogParser.PrefixCarriesQueryIdAfterPid(linePrefix) ? reader.GetInt64(0) : 0;
+
             /* Extraction, redaction and hashing live in PgPlanLogParser, shared with the RDS log-API
                transport (#2538). Two implementations of the redaction would eventually disagree, and the
                cost of THAT divergence is customer data rather than a wrong number. */
             var parsed = PgPlanLogParser.FromBlock(
-                reader.GetInt64(0),
+                queryId,
                 reader.GetDouble(1),
                 planJson);
 
@@ -588,6 +658,18 @@ LIMIT 2000";
                     TopNodeType: parsed.Value.TopNodeType,
                     PlanJson: parsed.Value.PlanJson));
             }
+        }
+
+        /* The marker always advances: a read the cap cut kept the newest matches, and a marker held back would
+           re-read the same window forever (a rotation would leave the newer file unread). The cut is disclosed. */
+        if (nextMarker is not null)
+        {
+            context.PendingState[RouteKey(context)] = nextMarker;
+        }
+
+        if (limited)
+        {
+            PgServerLogTail.MeasureMatchesLimited(context);
         }
 
         if (forgedCaptures > 0)

@@ -93,8 +93,9 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Deadlock count per minute — Lite's <c>GetDeadlockTrendAsync</c> ported to Postgres. Buckets on
-    /// the deadlock's own <c>deadlock_time</c> while windowing on the collection prefix. Reads
-    /// <c>v_deadlocks</c>. $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// the deadlock's own <c>deadlock_time</c> and windows on it too, so a count and its bucket agree. Reads
+    /// <c>v_deadlocks</c>. $1 server_id, $2 window start, $3 window end (naive UTC). $4 is the
+    /// <see cref="EventWindowFloor"/> for $2 (no upper bound, so a late-collected deadlock still counts).
     /// </summary>
     public const string DeadlockTrendSql = """
         SELECT
@@ -106,8 +107,9 @@ public sealed partial class ViewerDataService
                 COUNT(*) AS deadlock_count
             FROM v_deadlocks
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            AND   deadlock_time >= $2
+            AND   deadlock_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', deadlock_time)
         ) sub
         ORDER BY bucket
@@ -172,11 +174,13 @@ public sealed partial class ViewerDataService
     /// #3540 trend family every row is unconditionally "rated" — a bucket's total is simply the SUM of
     /// its rows' durations, and <c>collection_count</c> can never be 0 for a bucket the GROUP BY produced.
     /// SUM of the bigint duration is <c>numeric</c> in Postgres, CAST back to bigint for the typed reader.
+    /// Grouped on <c>rtrim(wait_type)</c>, so a wait stored with and without the trailing space the collector
+    /// trimmed from #4884 on is one series under the clean name.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes.
     /// </summary>
     public const string WaitingTaskTrendSql = $$"""
         SELECT
-            wait_type,
+            rtrim(wait_type) AS wait_type,
             GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
             CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms,
             MIN(collection_time) AS first_collection_time,
@@ -187,9 +191,9 @@ public sealed partial class ViewerDataService
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         GROUP BY
-            wait_type, 2
+            rtrim(wait_type), 2
         ORDER BY
-            wait_type, 2
+            rtrim(wait_type), 2
         """;
 
     /// <summary>
@@ -243,13 +247,14 @@ public sealed partial class ViewerDataService
     /// <summary>Deadlock-per-minute buckets for one server over the window (Blocking Trends).</summary>
     public async Task<List<BlockingTrendPoint>> GetDeadlockTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => await ReadCountTrendAsync(DeadlockTrendSql, serverId, startUtc, endUtc, cancellationToken: cancellationToken);
+        => await ReadCountTrendAsync(DeadlockTrendSql, serverId, startUtc, endUtc, boundEventWindow: true, cancellationToken: cancellationToken);
 
     /// <summary>
     /// The blocking and deadlock trends share a (bucket timestamp, COUNT(*)) shape, so one reader maps
     /// both. COUNT(*) is bigint in Postgres, read via GetInt64 and narrowed to the record's int.
     /// The blocking trend applies the #1319 database filter (both CTEs carry database_name); the deadlock
     /// trend is server-global (v_deadlocks has no database_name column), so it leaves the filter off.
+    /// Both bind the <see cref="EventWindowFloor"/> last (<c>boundEventWindow</c>).
     /// </summary>
     private async Task<List<BlockingTrendPoint>> ReadCountTrendAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc,

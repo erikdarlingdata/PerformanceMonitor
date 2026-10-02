@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -23,6 +24,7 @@ using System.Windows.Data;
 using System.Windows.Threading;
 using Microsoft.Data.SqlClient;
 using Microsoft.Win32;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
@@ -137,9 +139,26 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<TraceFlagChangeRow>? _traceFlagChangesFilterMgr;
     private CancellationTokenSource? _actualPlanCts;
 
-    public int UtcOffsetMinutes { get; }
+    /// <summary>
+    /// This server's clock: its time zone where one was collected, else the fixed offset the connect probe read
+    /// (#4766). Read again on every refresh by <see cref="RefreshServerClockAsync"/>, so a server that moves to a
+    /// new zone, or upgrades to an engine that reports a zone id, is picked up without reopening the tab.
+    /// </summary>
+    public ServerClock ServerClock => _serverClock;
+    private volatile ServerClock _serverClock;
+
+    /// <summary>This server's UTC offset in minutes right now. A chart that spans a daylight-saving change
+    /// converts each time through <see cref="ServerClock"/> instead of adding this one value to all of them.</summary>
+    public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
+
     private readonly bool _hasMsdbAccess;
-    private readonly bool _isAzureSqlDatabase;
+    /* The connection check's AWS RDS flag (the rdsadmin database exists). It stays false when that check failed. */
+    private readonly bool _isAwsRds;
+    /* The connection check's SERVERPROPERTY('EngineEdition'), or 0 when that check failed. RefreshEngineEditionAsync then
+       fills it from the newest collected server_properties row, the row Lite's MCP tools read, so a tab opened while the
+       server was unreachable still knows what it is. */
+    private int _engineEdition;
+    private bool _isAzureSqlDatabase => _engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition;
     /* Live probe of the opt-in long-query completion collector's enabled flag (#1496), so the Long
        Queries tab shows an explicit "trace is OFF" empty-state banner when it is disabled — read fresh
        each refresh so toggling it in the schedule editor updates the banner without reopening the tab. */
@@ -153,7 +172,7 @@ public partial class ServerTab : UserControl
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, bool isAzureSqlDatabase = false, Func<bool>? isLongQueryTraceEnabled = null)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, bool isAwsRds = false)
     {
         InitializeComponent();
         SetupBarCellMaxes();
@@ -167,10 +186,11 @@ public partial class ServerTab : UserControl
         _dataService = new LocalDataService(duckDb);
         _serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
         _credentialResolver = credentialResolver;
-        UtcOffsetMinutes = utcOffsetMinutes;
+        _serverClock = ServerClock.FixedOffset(utcOffsetMinutes);
         _hasMsdbAccess = hasMsdbAccess;
-        _isAzureSqlDatabase = isAzureSqlDatabase;
-        ServerTimeHelper.UtcOffsetMinutes = utcOffsetMinutes;
+        _isAwsRds = isAwsRds;
+        _engineEdition = sqlEngineEdition;
+        ServerTimeHelper.ActiveServerClock = _serverClock;
 
         ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
         ConnectionStatusText.Text = "Connecting...";
@@ -221,11 +241,8 @@ public partial class ServerTab : UserControl
             }
         };
 
-        /* Show warning on Running Jobs tab if login lacks msdb access */
-        if (!_hasMsdbAccess)
-        {
-            RunningJobsMsdbWarning.Visibility = System.Windows.Visibility.Visible;
-        }
+        /* Show warning on Running Jobs tab if login lacks msdb access, except where the collector cannot run at all */
+        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);
 
         /* Initialize time picker ComboBoxes */
         InitializeTimeComboBoxes();
@@ -284,33 +301,36 @@ public partial class ServerTab : UserControl
         ApplyTheme(QueryHeatmapChart);
 
         /* Chart hover tooltips */
-        CorrelatedLanes.Initialize(_dataService, _serverId);
+        CorrelatedLanes.Initialize(_dataService, _serverId, GetPickerZone);
+        /* #4766: the six slicers word their time axis and range caption in the tab's display zone. */
+        foreach (var slicer in new[] { ActiveQueriesSlicer, QueryStatsSlicer, ProcStatsSlicer, QueryStoreSlicer, BlockingSlicer, DeadlockSlicer })
+            slicer.DisplayZone = GetPickerZone;
         CorrelatedLanes.ShowActiveQueriesRequested += OnActiveQueriesDrillDown;
-        _waitStatsHover = new ChartHoverHelper(WaitStatsChart, "ms/sec");
-        _perfmonHover = new ChartHoverHelper(PerfmonChart, "");
-        _cpuHover = new ChartHoverHelper(CpuChart, "%");
-        _memoryHover = new ChartHoverHelper(MemoryChart, "GB");
-        _tempDbHover = new ChartHoverHelper(TempDbChart, "MB");
-        _tempDbSizeHover = new ChartHoverHelper(TempDbSizeChart, "MB");
-        _tempDbFileIoHover = new ChartHoverHelper(TempDbFileIoChart, "ms");
-        _fileIoReadHover = new ChartHoverHelper(FileIoReadChart, "ms");
-        _fileIoWriteHover = new ChartHoverHelper(FileIoWriteChart, "ms");
-        _fileIoReadThroughputHover = new ChartHoverHelper(FileIoReadThroughputChart, "MB/s");
-        _fileIoWriteThroughputHover = new ChartHoverHelper(FileIoWriteThroughputChart, "MB/s");
-        _collectorDurationHover = new ChartHoverHelper(CollectorDurationChart, "ms");
-        _queryDurationTrendHover = new ChartHoverHelper(QueryDurationTrendChart, "ms/sec");
-        _procDurationTrendHover = new ChartHoverHelper(ProcDurationTrendChart, "ms/sec");
-        _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec");
-        _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec");
-        _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec");
-        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents");
-        _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks");
-        _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB");
-        _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB");
-        _memoryGrantActivityHover = new ChartHoverHelper(MemoryGrantActivityChart, "");
-        _memoryPressureEventsHover = new ChartHoverHelper(MemoryPressureEventsChart, "events");
-        _currentWaitsDurationHover = new ChartHoverHelper(CurrentWaitsDurationChart, "ms");
-        _currentWaitsBlockedHover = new ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
+        _waitStatsHover = new ChartHoverHelper(WaitStatsChart, "ms/sec", displayZone: GetPickerZone);
+        _perfmonHover = new ChartHoverHelper(PerfmonChart, "", displayZone: GetPickerZone);
+        _cpuHover = new ChartHoverHelper(CpuChart, "%", displayZone: GetPickerZone);
+        _memoryHover = new ChartHoverHelper(MemoryChart, "GB", displayZone: GetPickerZone);
+        _tempDbHover = new ChartHoverHelper(TempDbChart, "MB", displayZone: GetPickerZone);
+        _tempDbSizeHover = new ChartHoverHelper(TempDbSizeChart, "MB", displayZone: GetPickerZone);
+        _tempDbFileIoHover = new ChartHoverHelper(TempDbFileIoChart, "ms", displayZone: GetPickerZone);
+        _fileIoReadHover = new ChartHoverHelper(FileIoReadChart, "ms", displayZone: GetPickerZone);
+        _fileIoWriteHover = new ChartHoverHelper(FileIoWriteChart, "ms", displayZone: GetPickerZone);
+        _fileIoReadThroughputHover = new ChartHoverHelper(FileIoReadThroughputChart, "MB/s", displayZone: GetPickerZone);
+        _fileIoWriteThroughputHover = new ChartHoverHelper(FileIoWriteThroughputChart, "MB/s", displayZone: GetPickerZone);
+        _collectorDurationHover = new ChartHoverHelper(CollectorDurationChart, "ms", displayZone: GetPickerZone);
+        _queryDurationTrendHover = new ChartHoverHelper(QueryDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
+        _procDurationTrendHover = new ChartHoverHelper(ProcDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
+        _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
+        _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec", displayZone: GetPickerZone);
+        _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec", displayZone: GetPickerZone);
+        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents", displayZone: GetPickerZone);
+        _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks", displayZone: GetPickerZone);
+        _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB", displayZone: GetPickerZone);
+        _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB", displayZone: GetPickerZone);
+        _memoryGrantActivityHover = new ChartHoverHelper(MemoryGrantActivityChart, "", displayZone: GetPickerZone);
+        _memoryPressureEventsHover = new ChartHoverHelper(MemoryPressureEventsChart, "events", displayZone: GetPickerZone);
+        _currentWaitsDurationHover = new ChartHoverHelper(CurrentWaitsDurationChart, "ms", displayZone: GetPickerZone);
+        _currentWaitsBlockedHover = new ChartHoverHelper(CurrentWaitsBlockedChart, "sessions", displayZone: GetPickerZone);
 
         /* Latch/spinlock charts: theme + hover up front (own partial, mirrors Darling's tab file) */
         InitializeLatchSpinlockCharts();
@@ -354,7 +374,7 @@ public partial class ServerTab : UserControl
             }
         };
         /* Heatmap mouse events wired up in XAML */
-        var heatmapMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(QueryHeatmapChart, "Query_Heatmap", revertAction: RevertChartAxes);
+        var heatmapMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(QueryHeatmapChart, "Query_Heatmap", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         var heatmapDrillDown = new MenuItem { Header = "Show _Active Queries at This Time" };
         heatmapMenu.Items.Insert(0, heatmapDrillDown);
         heatmapMenu.Items.Insert(1, new Separator());
@@ -387,55 +407,55 @@ public partial class ServerTab : UserControl
         };
 
         /* Chart context menus (right-click save/export) */
-        var waitStatsMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(WaitStatsChart, "Wait_Stats", revertAction: RevertChartAxes);
+        var waitStatsMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(WaitStatsChart, "Wait_Stats", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddWaitDrillDownMenuItem(WaitStatsChart, waitStatsMenu);
-        var queryDurationTrendMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(QueryDurationTrendChart, "Query_Duration_Trends", revertAction: RevertChartAxes);
+        var queryDurationTrendMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(QueryDurationTrendChart, "Query_Duration_Trends", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(QueryDurationTrendChart, queryDurationTrendMenu, _queryDurationTrendHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var procDurationTrendMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(ProcDurationTrendChart, "Procedure_Duration_Trends", revertAction: RevertChartAxes);
+        var procDurationTrendMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(ProcDurationTrendChart, "Procedure_Duration_Trends", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(ProcDurationTrendChart, procDurationTrendMenu, _procDurationTrendHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var queryStoreDurationTrendMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(QueryStoreDurationTrendChart, "QueryStore_Duration_Trends", revertAction: RevertChartAxes);
+        var queryStoreDurationTrendMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(QueryStoreDurationTrendChart, "QueryStore_Duration_Trends", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(QueryStoreDurationTrendChart, queryStoreDurationTrendMenu, _queryStoreDurationTrendHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var executionCountTrendMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(ExecutionCountTrendChart, "Execution_Count_Trends", revertAction: RevertChartAxes);
+        var executionCountTrendMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(ExecutionCountTrendChart, "Execution_Count_Trends", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(ExecutionCountTrendChart, executionCountTrendMenu, _executionCountTrendHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var cpuMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CpuChart, "CPU_Usage", revertAction: RevertChartAxes);
+        var cpuMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CpuChart, "CPU_Usage", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(CpuChart, cpuMenu, _cpuHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var memoryMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryChart, "Memory_Usage", revertAction: RevertChartAxes);
+        var memoryMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryChart, "Memory_Usage", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(MemoryChart, memoryMenu, _memoryHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var memoryClerksMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks", revertAction: RevertChartAxes);
+        var memoryClerksMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(MemoryClerksChart, memoryClerksMenu, _memoryClerksHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var memoryGrantSizingMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing", revertAction: RevertChartAxes);
+        var memoryGrantSizingMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(MemoryGrantSizingChart, memoryGrantSizingMenu, _memoryGrantSizingHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var memoryGrantActivityMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity", revertAction: RevertChartAxes);
+        var memoryGrantActivityMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(MemoryGrantActivityChart, memoryGrantActivityMenu, _memoryGrantActivityHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var memoryPressureEventsMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryPressureEventsChart, "Memory_Pressure_Events", revertAction: RevertChartAxes);
+        var memoryPressureEventsMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryPressureEventsChart, "Memory_Pressure_Events", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(MemoryPressureEventsChart, memoryPressureEventsMenu, _memoryPressureEventsHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var fileIoReadMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoReadChart, "File_IO_Read_Latency", revertAction: RevertChartAxes);
+        var fileIoReadMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoReadChart, "File_IO_Read_Latency", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(FileIoReadChart, fileIoReadMenu, _fileIoReadHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var fileIoWriteMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteChart, "File_IO_Write_Latency", revertAction: RevertChartAxes);
+        var fileIoWriteMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteChart, "File_IO_Write_Latency", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(FileIoWriteChart, fileIoWriteMenu, _fileIoWriteHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var fileIoReadThroughputMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoReadThroughputChart, "File_IO_Read_Throughput", revertAction: RevertChartAxes);
+        var fileIoReadThroughputMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoReadThroughputChart, "File_IO_Read_Throughput", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(FileIoReadThroughputChart, fileIoReadThroughputMenu, _fileIoReadThroughputHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var fileIoWriteThroughputMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteThroughputChart, "File_IO_Write_Throughput", revertAction: RevertChartAxes);
+        var fileIoWriteThroughputMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteThroughputChart, "File_IO_Write_Throughput", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(FileIoWriteThroughputChart, fileIoWriteThroughputMenu, _fileIoWriteThroughputHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var tempDbMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbChart, "TempDB_Stats", revertAction: RevertChartAxes);
+        var tempDbMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbChart, "TempDB_Stats", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(TempDbChart, tempDbMenu, _tempDbHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var tempDbSizeMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbSizeChart, "TempDB_Allocated_Size", revertAction: RevertChartAxes);
+        var tempDbSizeMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbSizeChart, "TempDB_Allocated_Size", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(TempDbSizeChart, tempDbSizeMenu, _tempDbSizeHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var tempDbFileIoMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbFileIoChart, "TempDB_File_IO", revertAction: RevertChartAxes);
+        var tempDbFileIoMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbFileIoChart, "TempDB_File_IO", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(TempDbFileIoChart, tempDbFileIoMenu, _tempDbFileIoHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var lockWaitMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(LockWaitTrendChart, "Lock_Wait_Trends", revertAction: RevertChartAxes);
+        var lockWaitMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(LockWaitTrendChart, "Lock_Wait_Trends", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(LockWaitTrendChart, lockWaitMenu, _lockWaitTrendHover, "Show _Blocking at This Time", OnBlockingDrillDown);
-        var blockingMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(BlockingTrendChart, "Blocking_Trends", revertAction: RevertChartAxes);
+        var blockingMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(BlockingTrendChart, "Blocking_Trends", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(BlockingTrendChart, blockingMenu, _blockingTrendHover, "Show _Blocking at This Time", OnBlockingDrillDown);
-        var deadlockMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(DeadlockTrendChart, "Deadlock_Trends", revertAction: RevertChartAxes);
+        var deadlockMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(DeadlockTrendChart, "Deadlock_Trends", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(DeadlockTrendChart, deadlockMenu, _deadlockTrendHover, "Show Deadloc_ks at This Time", OnDeadlockDrillDown);
-        var currentWaitsDurationMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration", revertAction: RevertChartAxes);
+        var currentWaitsDurationMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(CurrentWaitsDurationChart, currentWaitsDurationMenu, _currentWaitsDurationHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var currentWaitsBlockedMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked", revertAction: RevertChartAxes);
+        var currentWaitsBlockedMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(CurrentWaitsBlockedChart, currentWaitsBlockedMenu, _currentWaitsBlockedHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        var perfmonMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(PerfmonChart, "Perfmon_Counters", revertAction: RevertChartAxes);
+        var perfmonMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(PerfmonChart, "Perfmon_Counters", revertAction: RevertChartAxes, displayZone: GetPickerZone);
         AddChartDrillDownMenuItem(PerfmonChart, perfmonMenu, _perfmonHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
-        Helpers.ContextMenuHelper.SetupChartContextMenu(CollectorDurationChart, "Collector_Duration", revertAction: RevertChartAxes);
+        Helpers.ContextMenuHelper.SetupChartContextMenu(CollectorDurationChart, "Collector_Duration", revertAction: RevertChartAxes, displayZone: GetPickerZone);
 
         /* Subscribe for the life of the tab. Do NOT unsubscribe on Unloaded — a TabControl fires
            Unloaded when you switch to another tab, which would permanently detach this handler so
@@ -513,18 +533,7 @@ public partial class ServerTab : UserControl
         // set/cleared around the tab switch in SelectActiveQueriesForDrillDown().
         if (_suppressActiveQueriesAutoRefresh) return;
 
-        var hoursBack = GetHoursBack();
-        DateTime? fromDate = null, toDate = null;
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-            {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-            }
-        }
+        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
         var navContext = MainTabControl.SelectedIndex == 2
             ? $"TabNav-Queries.sub{QueriesSubTabControl.SelectedIndex}"
             : $"TabNav-tab{MainTabControl.SelectedIndex}";
@@ -561,47 +570,13 @@ public partial class ServerTab : UserControl
 
             while (await reader.ReadAsync())
             {
-                var liveQueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4);
-                var liveActualPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString();
-                results.Add(new QuerySnapshotRow
-                {
-                    SessionId = Convert.ToInt32(reader.GetValue(0)),
-                    DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                    QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                    QueryPlan = liveQueryPlan,
-                    LiveQueryPlan = liveActualPlan,
-                    /* #4239: this row is never written to the store (CollectionTime is "now", not a
-                       capture the collector persisted), so a fetch-by-key from the grid's plan buttons
-                       would never find it. The payload rides in-row here, same as before #4239, so the
-                       flags are derived from it directly instead of from a store read. */
-                    HasQueryPlan = !string.IsNullOrEmpty(liveQueryPlan),
-                    HasLiveQueryPlan = !string.IsNullOrEmpty(liveActualPlan),
-                    Status = reader.IsDBNull(6) ? "" : reader.GetString(6),
-                    BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
-                    WaitType = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                    WaitTimeMs = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
-                    WaitResource = reader.IsDBNull(10) ? "" : reader.GetString(10),
-                    CpuTimeMs = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11)),
-                    TotalElapsedTimeMs = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
-                    Reads = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
-                    Writes = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
-                    LogicalReads = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
-                    GrantedQueryMemoryGb = reader.IsDBNull(16) ? 0 : Convert.ToDouble(reader.GetValue(16)),
-                    TransactionIsolationLevel = reader.IsDBNull(17) ? "" : reader.GetString(17),
-                    Dop = reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)),
-                    ParallelWorkerCount = reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)),
-                    LoginName = reader.IsDBNull(20) ? "" : reader.GetString(20),
-                    HostName = reader.IsDBNull(21) ? "" : reader.GetString(21),
-                    ProgramName = reader.IsDBNull(22) ? "" : reader.GetString(22),
-                    OpenTransactionCount = reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)),
-                    PercentComplete = reader.IsDBNull(24) ? 0m : Convert.ToDecimal(reader.GetValue(24)),
-                    CollectionTime = snapshotTime
-                });
+                results.Add(ReadLiveSnapshotRow(reader, snapshotTime));
             }
 
             _querySnapshotsFilterMgr!.UpdateData(results);
-            LiveSnapshotIndicator.Text = $"LIVE at {DateTime.Now:HH:mm:ss} ({results.Count} queries)";
+            /* #4766: the refresh instant is UTC now, worded in the tab's own display zone; the machine clock is
+               neither the server's nor the mode's. */
+            LiveSnapshotIndicator.Text = $"LIVE at {DisplayZone.Format(DateTime.UtcNow, GetPickerZone(), "HH:mm:ss")} ({results.Count} queries)";
         }
         catch (Exception ex)
         {
@@ -612,6 +587,53 @@ public partial class ServerTab : UserControl
         {
             LiveSnapshotButton.IsEnabled = true;
         }
+    }
+
+    /// <summary>
+    /// One row of the live snapshot query, read into the grid's row. The query is the scheduled collector's,
+    /// but this read is the button's own, so it trims the wait type the same way the collector does (see
+    /// <see cref="PerformanceMonitor.Collectors.WaitTypeName"/>): a live row then shows the name a stored row
+    /// carries. <c>WaitNameTrimTests</c> drives this method with the spaced name the server returns.
+    /// </summary>
+    internal static QuerySnapshotRow ReadLiveSnapshotRow(DbDataReader reader, DateTime snapshotTime)
+    {
+        var liveQueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4);
+        var liveActualPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString();
+        return new QuerySnapshotRow
+        {
+            SessionId = Convert.ToInt32(reader.GetValue(0)),
+            DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+            QueryPlan = liveQueryPlan,
+            LiveQueryPlan = liveActualPlan,
+            /* #4239: this row is never written to the store (CollectionTime is "now", not a
+               capture the collector persisted), so a fetch-by-key from the grid's plan buttons
+               would never find it. The payload rides in-row here, same as before #4239, so the
+               flags are derived from it directly instead of from a store read. */
+            HasQueryPlan = !string.IsNullOrEmpty(liveQueryPlan),
+            HasLiveQueryPlan = !string.IsNullOrEmpty(liveActualPlan),
+            Status = reader.IsDBNull(6) ? "" : reader.GetString(6),
+            BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
+            WaitType = reader.IsDBNull(8) ? "" : PerformanceMonitor.Collectors.WaitTypeName.Trim(reader.GetString(8)),
+            WaitTimeMs = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+            WaitResource = reader.IsDBNull(10) ? "" : reader.GetString(10),
+            CpuTimeMs = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11)),
+            TotalElapsedTimeMs = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
+            Reads = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
+            Writes = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
+            LogicalReads = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
+            GrantedQueryMemoryGb = reader.IsDBNull(16) ? 0 : Convert.ToDouble(reader.GetValue(16)),
+            TransactionIsolationLevel = reader.IsDBNull(17) ? "" : reader.GetString(17),
+            Dop = reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)),
+            ParallelWorkerCount = reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)),
+            LoginName = reader.IsDBNull(20) ? "" : reader.GetString(20),
+            HostName = reader.IsDBNull(21) ? "" : reader.GetString(21),
+            ProgramName = reader.IsDBNull(22) ? "" : reader.GetString(22),
+            OpenTransactionCount = reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)),
+            PercentComplete = reader.IsDBNull(24) ? 0m : Convert.ToDecimal(reader.GetValue(24)),
+            CollectionTime = snapshotTime
+        };
     }
 
     private void OpenLogFile_Click(object sender, RoutedEventArgs e)

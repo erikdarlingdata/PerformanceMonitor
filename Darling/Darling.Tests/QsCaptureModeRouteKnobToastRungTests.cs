@@ -381,12 +381,30 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
         Assert.Equal(CollectorTargetEngine.SqlServer, QueryStoreHealthCollector.Instance.TargetEngine);
 
         var initializer = RepoFile.ReadRepoFile("Lite", "Database", "DuckDbInitializer.cs");
-        Assert.Contains("internal const int CurrentSchemaVersion = 64;", initializer, StringComparison.Ordinal);
+        /* Stays-true shape (#4475 raised CurrentSchemaVersion past 64, so a literal "= 64;" pin would
+           break on the next rung): the v64 block must still be present, and CurrentSchemaVersion must be
+           AT LEAST 64 — this fact is about Lite twinning ONLY the capture modes at v64, not about v64
+           being the ceiling. */
+        Assert.Contains("internal const int CurrentSchemaVersion = ", initializer, StringComparison.Ordinal);
+        var versionMatch = System.Text.RegularExpressions.Regex.Match(initializer, @"internal const int CurrentSchemaVersion = (\d+);");
+        Assert.True(versionMatch.Success, "DuckDbInitializer has no CurrentSchemaVersion literal");
+        Assert.True(int.Parse(versionMatch.Groups[1].Value) >= 64);
         var start = initializer.IndexOf("if (fromVersion < 64)", StringComparison.Ordinal);
         Assert.True(start >= 0, "DuckDbInitializer has no v64 block");
-        var block = initializer[start..];
-        Assert.Contains("(\"query_store_health\", \"query_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
-        Assert.Contains("(\"query_store_health\", \"wait_stats_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        /* #4727: the two columns are entries of ONE versioned list, DuckDbInitializer.AddedColumns (version first),
+           and the v64 step adds its own version's entries through the shared AddMissingColumnsAsync. The step is cut
+           at the next "if (fromVersion <" so a call in a later step cannot satisfy the pin. */
+        var end = initializer.IndexOf("if (fromVersion <", start + 1, StringComparison.Ordinal);
+        Assert.True(end > start, "DuckDbInitializer's v64 block has no later step to end at");
+        var block = initializer[start..end];
+        var listStart = initializer.IndexOf("internal static readonly (int Version, string Table, string Column, string Type)[] AddedColumns =", StringComparison.Ordinal);
+        Assert.True(listStart >= 0, "DuckDbInitializer no longer declares AddedColumns in the pinned shape");
+        var listEnd = initializer.IndexOf("};", listStart, StringComparison.Ordinal);
+        Assert.True(listEnd > listStart, "DuckDbInitializer's AddedColumns list has no closing brace to end at");
+        var list = initializer[listStart..listEnd];
+        Assert.Contains("(64, \"query_store_health\", \"query_capture_mode\", \"VARCHAR\")", list, StringComparison.Ordinal);
+        Assert.Contains("(64, \"query_store_health\", \"wait_stats_capture_mode\", \"VARCHAR\")", list, StringComparison.Ordinal);
+        Assert.Contains("AddMissingColumnsAsync(connection, AddedColumnsForVersion(64))", block, StringComparison.Ordinal);
         Assert.Contains("Running migration to v64", block, StringComparison.Ordinal);
         Assert.Contains("twinning Darling's V137", block, StringComparison.Ordinal);
 

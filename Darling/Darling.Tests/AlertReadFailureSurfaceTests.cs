@@ -919,8 +919,10 @@ public sealed class AlertReadFailureSurfaceTests
            self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
            since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
            self-alert's evidence (the readings) is a parameter too, with the read counted in
-           DarlingWorker. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 15),
+           DarlingWorker. 16th exempt since #4750: EvaluateNotificationChannelsAsync's wrapper catch — the
+           webhook channels' failure counts are read from the webhook service's memory, so there is no store
+           read for the condition to swallow. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 17),
     };
 
     /// <summary>
@@ -1034,7 +1036,9 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Raw-purge-over-horizon self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Notification-channel self-alert failed"] = "reads the webhook channels' failure counts from the webhook service's memory and performs no store read at all - there is no read for this condition to be the swallowing of",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
+        ["Fleet gate self-alert failed"] = "handed its evidence (the worker's in-memory gate counts) as a parameter and performs no store read at all",
         ["Web TLS certificate self-alert failed"] = "handed its evidence (the report from the web host's in-memory WebTlsCertificateState publish) as a parameter and performs no store read at all",
         ["Store settings self-alert failed"] = "handed its evidence as a parameter; the one store read behind it (the rejected-verdict names) is isolated in its own COUNTED catch in DarlingWorker (#4215) rather than exempted",
         ["Failed to record resolution"] = "an audit-row write",
@@ -1234,8 +1238,11 @@ public sealed class AlertReadFailureSurfaceTests
            judgeable evidence, so it moved to the counted census above instead. 31st since #4299: the
            Raw Purge Over Horizon self-alert's catch, whose evidence (the readings) is handed in as a
            parameter, with the read counted in DarlingWorker. 32nd since #4442: the read-latency histogram
-           flush's catch, a telemetry write whose loss costs an hour's histogram rows and never an alert. */
-        Assert.Equal(32, totalExempt);
+           flush's catch, a telemetry write whose loss costs an hour's histogram rows and never an alert.
+           33rd since #4750: the Notification Channel Failing self-alert's catch, whose counts come from the
+           webhook service's memory rather than the store. 34th since #4732: the Collection Falling Behind
+           self-alert's wrapper catch, whose counts come from the worker's in-memory gate statistics. */
+        Assert.Equal(34, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
@@ -2487,8 +2494,10 @@ public sealed class AlertReadFailureSurfaceTests
 
         Assert.NotNull(classify);
         /* 10 since #3240 added extensionMissingCount (a run-class count, not an alert-read term); 9 since
-           #4000 removed isOnLoad, because callers now resolve an on-load collector's cadence to daily. */
-        Assert.Equal(9, classify!.GetParameters().Length);
+           #4000 removed isOnLoad, because callers now resolve an on-load collector's cadence to daily; 10
+           since #4748 appended latestRunNote (the newest run's partial-failure note - a run outcome, not an
+           alert-read term, which the no-"alert" assertion below still holds). */
+        Assert.Equal(10, classify!.GetParameters().Length);
         Assert.DoesNotContain(
             "alert",
             string.Join("|", classify.GetParameters().Select(p => p.Name)),

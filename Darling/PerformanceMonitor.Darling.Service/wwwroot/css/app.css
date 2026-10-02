@@ -69,6 +69,9 @@ a:hover { text-decoration: underline; }
 .auto-refresh-toggle:hover { color: var(--fg); border-color: var(--accent); }
 .auto-refresh-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 
+.refresh-control { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
+.refresh-control .refresh-select { font-size: 0.82rem; }
+
 .nav { padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
 .nav a,
 .server-item {
@@ -812,6 +815,10 @@ table.data td.sev-Healthy { color: var(--ok); }
 .detail-field { display: contents; }
 .detail-field .fk { color: var(--muted); font-weight: 600; }
 .detail-field .fv { color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A section heading inside the field grid ("Blocking chain (x2)", "Incident 1 of 2"): its own full-width row,
+   so it neither shares a cell with a value nor moves the label/value columns out of line. */
+.detail-heading { grid-column: 1 / -1; margin-top: 0.4rem; color: var(--dim); font-weight: 600; white-space: normal; overflow-wrap: anywhere; }
+.detail-heading:first-child { margin-top: 0; }
 .detail-fields.detail-error .fk,
 .detail-fields.detail-error .fv { color: var(--err); }
 .detail-raw { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); }

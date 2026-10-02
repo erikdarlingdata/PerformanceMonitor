@@ -552,12 +552,14 @@ public sealed class DarlingMcpAlertTools
     }
 
     /// <summary>The <c>route</c> member of a get_alert_history row (#3598): the persisted provenance, re-spelled
-    /// in the tool's snake_case, or null when the row carries none.</summary>
+    /// in the tool's snake_case, or null when the row carries none. #4750: each destination's <c>outcome</c> is
+    /// what the send to that channel did ("delivered", "failed" or "not attempted"), or null on a row written
+    /// before it was recorded.</summary>
     internal static object? RouteHistoryPayload(AlertRouteDto? route) => route is null ? null : new
     {
         family = route.Family,
         route_id = route.RouteId,
-        destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source }),
+        destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source, outcome = d.Outcome }),
     };
 
     /// <summary>The one-line audience each family names, for the taxonomy the read tool publishes.</summary>
@@ -702,6 +704,7 @@ public sealed class DarlingMcpAlertTools
         expires_at_utc = r.ExpiresAtUtc?.ToString("o"),
         reason = r.Reason,
         server_name = r.ServerName,
+        server_id = r.ServerId,
         metric_name = r.MetricName,
         database_pattern = r.DatabasePattern,
         query_text_pattern = r.QueryTextPattern,
@@ -910,10 +913,16 @@ public sealed class DarlingMcpAlertTools
         "the alert's exact values (see get_alert_history / get_alert_settings for the names in use); the *_pattern " +
         "fields are case-insensitive substring matches. expires_at is an optional ISO-8601 UTC timestamp after " +
         "which the rule stops applying; omit it for a permanent rule. Returns the stored rule, including its " +
-        "generated id (for delete_mute_rule). The running service applies the rule on its next collection " +
+        "generated id (for delete_mute_rule). Repeating a call is safe: when an enabled, unexpired rule already " +
+        "holds the same six scope and pattern fields and the same expires_at, nothing is created and the answer is " +
+        "status already_exists with that rule's id (a disabled or expired rule does not count; a different " +
+        "expires_at is a different rule). The running service applies the rule on its next collection " +
         "sweep, when the write's config_version bump makes it reload its mute cache — so a matching alert " +
-        "already mid-flight can still be delivered once.")]
-    public static async Task<string> CreateMuteRule(
+        "already mid-flight can still be delivered once. server_id keys the rule on that server's store id: it " +
+        "then matches only that server, whatever its name, and server_name only labels it (filled from the " +
+        "registry when omitted). Two servers can share a display name (a blank name falls back to the host), so " +
+        "server_id is the way to silence one of them. An id that is not a monitored server is refused.")]
+    public static Task<string> CreateMuteRule(
         NpgsqlDataSource postgres,
         [Description("Scope the rule to this server (its display name, as get_alert_history reports). Omit for all servers.")] string? server_name = null,
         [Description("Scope to this alert metric (e.g. 'High CPU', 'Blocking Detected', 'Deadlocks Detected'). Omit for all metrics.")] string? metric_name = null,
@@ -922,7 +931,52 @@ public sealed class DarlingMcpAlertTools
         [Description("Case-insensitive substring the alert's wait type must contain. Omit for any wait type.")] string? wait_type_pattern = null,
         [Description("Case-insensitive substring the alert's job name must contain. Omit for any job.")] string? job_name_pattern = null,
         [Description("Optional human-readable reason, shown in the mute-rule list.")] string? reason = null,
-        [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null)
+        [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
+        [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null) =>
+        CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
+            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id));
+
+    /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
+    /// nothing while reading as if it muted something.</summary>
+    private static string UnknownServerIdOutcome(int serverId) =>
+        Outcome("invalid", $"server_id {serverId} is not a monitored server. Use a server_id from get_fleet_overview, or omit it to scope by server_name.");
+
+    /// <summary>The refusal when <paramref name="serverId"/> is not a registered server's id, else null. With no
+    /// lookup the id cannot be checked, so it is refused rather than trusted.</summary>
+    private static async Task<string?> UnknownServerIdAsync(int serverId, Func<int, Task<string?>>? serverNameLookup) =>
+        serverNameLookup is not null && await serverNameLookup(serverId) is not null
+            ? null
+            : UnknownServerIdOutcome(serverId);
+
+    /// <summary>The display name of the monitored server with this store id, or null when there is none. Reads the
+    /// registry the fleet cards read (<c>servers</c>), disabled servers included: a silence for a server an operator
+    /// has disabled is still a silence on a real registration.</summary>
+    internal static async Task<string?> MonitoredServerDisplayNameAsync(NpgsqlDataSource postgres, int serverId)
+    {
+        await using var command = postgres.CreateCommand(
+            "SELECT COALESCE(display_name, server_name) AS display_name FROM servers WHERE server_id = $1");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        return await command.ExecuteScalarAsync() as string;
+    }
+
+    /// <summary>
+    /// create_mute_rule's body over the <see cref="IMuteRuleStore"/> seam, so the path the MCP tool runs can be
+    /// exercised without a database exactly as <see cref="CreateMuteRuleCore"/> is (#4734). The tool above is a
+    /// one-line hand-off to this with the Postgres-backed store.
+    /// </summary>
+    internal static async Task<string> CreateMuteRuleOver(
+        IMuteRuleStore store,
+        string? server_name,
+        string? metric_name,
+        string? database_pattern,
+        string? query_text_pattern,
+        string? wait_type_pattern,
+        string? job_name_pattern,
+        string? reason,
+        string? expires_at,
+        int? server_id = null,
+        Func<int, Task<string?>>? serverNameLookup = null)
     {
         try
         {
@@ -938,6 +992,19 @@ public sealed class DarlingMcpAlertTools
                 expiresAtUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
             }
 
+            /* A server_id keys the rule on the store id; it must be a monitored server's, or the rule would mute
+               nothing and look like it muted something. server_name then only labels the rule, so an omitted
+               one is filled from the registry. Without a server_id the rule is name-keyed, as it always was. */
+            string? labelFromRegistry = null;
+            if (server_id.HasValue)
+            {
+                labelFromRegistry = serverNameLookup is null ? null : await serverNameLookup(server_id.Value);
+                if (labelFromRegistry is null)
+                {
+                    return UnknownServerIdOutcome(server_id.Value);
+                }
+            }
+
             /* A new MuteRule defaults Id to a fresh GUID — the SAME id-generation the Viewer's mute-create path
                uses (MuteRuleEditDialog builds a `new MuteRule()`), persisted through the SAME PgMuteRuleStore. */
             var rule = new MuteRule
@@ -946,7 +1013,8 @@ public sealed class DarlingMcpAlertTools
                 CreatedAtUtc = DateTime.UtcNow,
                 ExpiresAtUtc = expiresAtUtc,
                 Reason = Trimmed(reason),
-                ServerName = Trimmed(server_name),
+                ServerName = Trimmed(server_name) ?? labelFromRegistry,
+                ServerId = server_id,
                 MetricName = Trimmed(metric_name),
                 DatabasePattern = Trimmed(database_pattern),
                 QueryTextPattern = Trimmed(query_text_pattern),
@@ -954,7 +1022,12 @@ public sealed class DarlingMcpAlertTools
                 JobNamePattern = Trimmed(job_name_pattern)
             };
 
-            await new PgMuteRuleStore(postgres).InsertAsync(rule);
+            var existing = await InsertUnlessDuplicateAsync(store, rule);
+            if (existing != null)
+            {
+                return AlreadyExists(existing);
+            }
+
             return JsonSerializer.Serialize(new { status = "created", mute_rule = BuildMuteRulePayload(rule) }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -977,13 +1050,19 @@ public sealed class DarlingMcpAlertTools
     /// with no constraining fields mutes EVERY alert, and that warning belongs on the surface's description, not
     /// in a refusal its MCP twin does not make.
     ///
+    /// <para><b>Safe to repeat (#4734).</b> The insert goes through <see cref="InsertUnlessDuplicateAsync"/>, the
+    /// one the MCP tool runs too: a body that repeats an enabled, unexpired rule's six scope and pattern fields and
+    /// expiry answers <c>already_exists</c> with that rule and writes nothing. The web route maps that word to HTTP
+    /// 409 (<see cref="DarlingWebEndpoints.MuteRuleEnvelopeStatus"/>), its status for a conflict.</para>
+    ///
     /// <para>The new rule is born ENABLED with a fresh GUID id and <c>created_at_utc</c> = now — the same
     /// <see cref="MuteRule"/> initializer defaults the Viewer's dialog and the MCP tool rely on. The reported
     /// rule is <b>re-read from the store after the insert</b>, the discipline every mute verb follows: the
     /// <c>created_at_utc</c> on the wire — the #3306 clock — is the value the store HOLDS, not a restatement of
     /// the value this method computed, which is the only form in which the two can disagree and be seen to.</para>
     /// </summary>
-    internal static async Task<string> CreateMuteRuleCore(IMuteRuleStore store, string fieldsJson)
+    internal static async Task<string> CreateMuteRuleCore(IMuteRuleStore store, string fieldsJson,
+        Func<int, Task<string?>>? serverNameLookup = null)
     {
         try
         {
@@ -1019,7 +1098,24 @@ public sealed class DarlingMcpAlertTools
                 change.Apply(rule);
             }
 
-            await store.InsertAsync(rule);
+            /* The web route creates through here, so a server_id in its body is held to the create tool's rule:
+               it must be a registered server's, and an omitted server_name is labelled from the registry. */
+            if (rule.ServerId.HasValue)
+            {
+                var label = serverNameLookup is null ? null : await serverNameLookup(rule.ServerId.Value);
+                if (label is null)
+                {
+                    return UnknownServerIdOutcome(rule.ServerId.Value);
+                }
+
+                rule.ServerName ??= label;
+            }
+
+            var existing = await InsertUnlessDuplicateAsync(store, rule);
+            if (existing != null)
+            {
+                return AlreadyExists(existing);
+            }
 
             var stored = await FindRuleAsync(store, rule.Id);
             if (stored is null)
@@ -1190,7 +1286,7 @@ public sealed class DarlingMcpAlertTools
         "{\"reason\":\"root cause found\",\"expires_at_utc\":\"2026-08-01T00:00:00Z\"}); a field you do NOT " +
         "send is left exactly as stored, and an EXPLICIT JSON null clears a field — the same clearing the " +
         "Viewer's edit dialog performs by blanking it — so {\"expires_at_utc\":null} makes a rule permanent and " +
-        "{\"job_name_pattern\":null} stops constraining that dimension. Editable fields: server_name, " +
+        "{\"job_name_pattern\":null} stops constraining that dimension. Editable fields: server_name, server_id, " +
         "metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, " +
         "expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
         "one). enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
@@ -1213,7 +1309,7 @@ public sealed class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to edit (from get_mute_rules or create_mute_rule).")] string rule_id,
         [Description("A JSON object with ONLY the mute-rule fields to change, in the shape get_mute_rules returns (e.g. {\"reason\":\"root cause found\"}). An explicit null clears a field; a field not sent does not change.")] string changes_json) =>
-        UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json);
+        UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json, id => MonitoredServerDisplayNameAsync(postgres, id));
 
     /// <summary>
     /// update_mute_rule's body over the <see cref="IMuteRuleStore"/> seam <see cref="PgMuteRuleStore"/>
@@ -1245,7 +1341,8 @@ public sealed class DarlingMcpAlertTools
     /// store AFTER the write</b>; a rule deleted in that window reports the absence, naming the write that
     /// landed, rather than folding the race into a failure.</para>
     /// </summary>
-    internal static async Task<string> UpdateMuteRuleCore(IMuteRuleStore store, string ruleId, string changesJson)
+    internal static async Task<string> UpdateMuteRuleCore(IMuteRuleStore store, string ruleId, string changesJson,
+        Func<int, Task<string?>>? serverNameLookup = null)
     {
         try
         {
@@ -1295,6 +1392,12 @@ public sealed class DarlingMcpAlertTools
             foreach (var change in changes)
             {
                 change.Apply(merged);
+            }
+
+            if (merged.ServerId.HasValue && merged.ServerId != existing.ServerId
+                && await UnknownServerIdAsync(merged.ServerId.Value, serverNameLookup) is { } unknownServer)
+            {
+                return unknownServer;
             }
 
             if (SameEditableFields(existing, merged))
@@ -1380,6 +1483,23 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        void AddInt(string field, JsonNode? node, Action<MuteRule, int?> set)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange(field, r => set(r, null)));
+            }
+            else if (node is JsonValue v && v.TryGetValue<int>(out var id) && id != 0)
+            {
+                changes.Add(new MuteRuleFieldChange(field, r => set(r, id)));
+            }
+            else
+            {
+                error = $"'{field}' must be a non-zero integer store server id, or null to clear it (the rule is then keyed on server_name alone).";
+            }
+        }
+
         /* `spelling` is the key the caller sent (for the error text); the recorded Field is always the
            canonical expires_at_utc, so both spellings in one body surface as a duplicate below. */
         void AddExpiry(string spelling, JsonNode? node)
@@ -1408,6 +1528,7 @@ public sealed class DarlingMcpAlertTools
             switch (prop.Key)
             {
                 case "server_name": AddText("server_name", prop.Value, (r, v) => r.ServerName = v); break;
+                case "server_id": AddInt("server_id", prop.Value, (r, v) => r.ServerId = v); break;
                 case "metric_name": AddText("metric_name", prop.Value, (r, v) => r.MetricName = v); break;
                 case "database_pattern": AddText("database_pattern", prop.Value, (r, v) => r.DatabasePattern = v); break;
                 case "query_text_pattern": AddText("query_text_pattern", prop.Value, (r, v) => r.QueryTextPattern = v); break;
@@ -1433,7 +1554,7 @@ public sealed class DarlingMcpAlertTools
                     error = "'summary' is derived from the scope fields and is not stored — edit the fields it summarizes instead.";
                     break;
                 default:
-                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at_utc.";
+                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at_utc.";
                     break;
             }
         }
@@ -1455,6 +1576,7 @@ public sealed class DarlingMcpAlertTools
     /// them could only ever mask a difference the caller did not ask about.</summary>
     private static bool SameEditableFields(MuteRule a, MuteRule b) =>
         string.Equals(a.ServerName, b.ServerName, StringComparison.Ordinal)
+        && a.ServerId == b.ServerId
         && string.Equals(a.MetricName, b.MetricName, StringComparison.Ordinal)
         && string.Equals(a.DatabasePattern, b.DatabasePattern, StringComparison.Ordinal)
         && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
@@ -1468,6 +1590,88 @@ public sealed class DarlingMcpAlertTools
     private static async Task<MuteRule?> FindRuleAsync(IMuteRuleStore store, string ruleId) =>
         (await store.LoadAllAsync())
             .FirstOrDefault(r => r is not null && string.Equals(r.Id, ruleId, StringComparison.Ordinal));
+
+    /// <summary>
+    /// Serializes the check-then-insert of <see cref="InsertUnlessDuplicateAsync"/> within this process, so a client
+    /// retry that arrives while the first call is still in flight (the usual reason for a retry: the first answer
+    /// was slow) sees that call's rule instead of racing it. It does not reach a second process writing the same
+    /// table; the check is a guard against a repeated call, not a uniqueness constraint.
+    /// </summary>
+    private static readonly SemaphoreSlim s_createGate = new(1, 1);
+
+    /// <summary>
+    /// The one insert both create paths run — the MCP tool (<see cref="CreateMuteRuleOver"/>) and the web route
+    /// (<see cref="CreateMuteRuleCore"/>) — so neither can create what the other refuses (#4734). A repeated call
+    /// left two identical rules; the sibling write tools are already safe to repeat (custom rules and views answer
+    /// <c>conflict</c>, <c>mute_analysis_finding</c> answers <c>already_muted</c>). Reads the store, and inserts
+    /// <paramref name="rule"/> only when it holds no ENABLED, UNEXPIRED rule with the same six scope and pattern
+    /// fields and the same expiry (see <see cref="FindDuplicate"/>). Returns that existing rule and inserts nothing
+    /// when it does, or null once it has inserted.
+    /// </summary>
+    internal static async Task<MuteRule?> InsertUnlessDuplicateAsync(IMuteRuleStore store, MuteRule rule)
+    {
+        await s_createGate.WaitAsync();
+        try
+        {
+            var existing = FindDuplicate(await store.LoadAllAsync(), rule, DateTime.UtcNow);
+            if (existing != null)
+            {
+                return existing;
+            }
+
+            await store.InsertAsync(rule);
+            return null;
+        }
+        finally
+        {
+            s_createGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// The rule a new <paramref name="candidate"/> would repeat, or null: enabled, not expired as of
+    /// <paramref name="nowUtc"/>, and equal to it on all six scope and pattern fields plus the expiry. A disabled or
+    /// expired rule is not in force, so it does not stand in for a rule the caller asked to have in force. The
+    /// reason is not part of the identity — it describes the rule, it does not narrow what the rule mutes. With
+    /// several matches (rules that predate this check) the OLDEST answers, so a repeat names the original.
+    /// </summary>
+    internal static MuteRule? FindDuplicate(IReadOnlyList<MuteRule> rules, MuteRule candidate, DateTime nowUtc) =>
+        rules
+            .Where(r => r is not null && r.Enabled && !r.IsExpiredAt(nowUtc) && SameScopeAndExpiry(r, candidate))
+            .OrderBy(r => r.CreatedAtUtc)
+            .FirstOrDefault();
+
+    /// <summary>ORDINAL on the text fields, like <see cref="SameEditableFields"/>: the spelling a caller sent is the
+    /// spelling the rule keeps and shows, so a case-only difference is a different rule, not a repeat.</summary>
+    private static bool SameScopeAndExpiry(MuteRule a, MuteRule b) =>
+        string.Equals(a.ServerName, b.ServerName, StringComparison.Ordinal)
+        && a.ServerId == b.ServerId
+        && string.Equals(a.MetricName, b.MetricName, StringComparison.Ordinal)
+        && string.Equals(a.DatabasePattern, b.DatabasePattern, StringComparison.Ordinal)
+        && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
+        && string.Equals(a.WaitTypePattern, b.WaitTypePattern, StringComparison.Ordinal)
+        && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
+        && SameExpiry(a.ExpiresAtUtc, b.ExpiresAtUtc);
+
+    /// <summary>Two expiries are the same instant to the store's precision. Postgres keeps microseconds and a .NET
+    /// tick is 100 ns, so an expiry sent with seven fractional digits comes back from the store truncated: compared
+    /// tick for tick, the same call repeated would never match the rule it created.</summary>
+    private static bool SameExpiry(DateTime? a, DateTime? b) =>
+        a is null || b is null
+            ? a is null && b is null
+            : Math.Abs((a.Value - b.Value).Ticks) < TimeSpan.TicksPerMillisecond / 1000;
+
+    /// <summary>The answer to a create that repeats a rule already in force: the existing rule, whole, and its id
+    /// on its own key. Nothing was written. The web route reads the status word as a conflict (HTTP 409).</summary>
+    private static string AlreadyExists(MuteRule existing) =>
+        JsonSerializer.Serialize(new
+        {
+            status = "already_exists",
+            message = "An enabled mute rule with the same scope, patterns and expiry is already in force, so nothing was created. " +
+                      "Use its rule_id with set_mute_rule_enabled, update_mute_rule or delete_mute_rule; a different expires_at makes a different rule.",
+            rule_id = existing.Id,
+            mute_rule = BuildMuteRulePayload(existing),
+        }, McpHelpers.JsonOptions);
 
     /// <summary>The singleton config rows update_alert_settings writes, in the order it writes them — see
     /// the statement-order note at the write itself. Also the read side's table set: the settings row is

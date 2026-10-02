@@ -6,7 +6,6 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using System.Globalization;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -54,6 +53,12 @@ public static class QueryStoreTextStore
     /// </summary>
     public const int PruneMarginDays = 2;
 
+    /* This const mirrors the IMMUTABLE V74 migration rung and stays byte-frozen with it, EXCEPT for V149
+       (#4250): the rung drops the last_seen btree index and sets fillfactor 90 on the live table so the
+       liveness touch's UPDATE (see TouchAndProbeSql below) can go HOT — last_seen is the only indexed
+       column that touch ever changed, and the text/digest payload columns it never rewrites stay untouched
+       either way. The prune (DarlingRetention.UnorderedRowCappedDeleteSql, item 3 of #4250) is the only
+       other reader of that index and keeps working off a row-capped sequential scan instead. */
     public const string CreateTableSql = @"CREATE TABLE IF NOT EXISTS collect.query_store_text (
     server_id integer NOT NULL,
     database_name text NOT NULL,
@@ -61,9 +66,7 @@ public static class QueryStoreTextStore
     query_sql_text text,
     last_seen timestamp NOT NULL,
     PRIMARY KEY (server_id, database_name, query_id)
-);
-CREATE INDEX IF NOT EXISTS idx_query_store_text_last_seen
-    ON collect.query_store_text(last_seen);";
+);";
 
     /// <summary>
     /// Records what a text fetch landed.
@@ -147,21 +150,21 @@ LEFT JOIN collect.query_store_text AS t
        AND t.query_id = batch.query_id
 ORDER BY batch.server_id, batch.database_name, batch.query_id";
 
-    /// <summary>
-    /// Retires text whose facts have all aged out, bounded to roughly one chunk-width of the oldest rows
-    /// per call so a single sweep cannot take an unbounded row lock — the same shape and the same reason as
-    /// <see cref="QueryStorePlanMap.PruneSql"/>.
-    ///
-    /// <para>Safe to run against live data because <c>last_seen</c> is refreshed by every pass that
-    /// re-observes a statement: a row can only fall behind the cutoff once nothing has referenced it for
-    /// the retention window, and re-fetching text for a statement that comes back is one row through a
-    /// watermark that has already expired.</para>
-    /// </summary>
-    public static string PruneSql(int chunkIntervalDays) =>
-        "DELETE FROM collect.query_store_text WHERE " + LastSeenColumn + " < $1" +
-        " AND " + LastSeenColumn + " >= (SELECT min(" + LastSeenColumn + ") FROM collect.query_store_text WHERE " +
-        LastSeenColumn + " < $1)" +
-        " AND " + LastSeenColumn + " < (SELECT min(" + LastSeenColumn + ") FROM collect.query_store_text WHERE " +
-        LastSeenColumn + " < $1) + INTERVAL '" +
-        chunkIntervalDays.ToString(CultureInfo.InvariantCulture) + " days'";
+    /* Retires text whose facts have all aged out. This table used to run the same three-scan slice shape
+       as query_store_plan_map (two min() subqueries plus the DELETE); since V149 (#4250) dropped
+       LastSeenColumn's btree index, that shape's cost on this table specifically was measured at field
+       scale (6.86 M rows, ~5 GB main fork plus ~4.35 GB TOAST) at roughly 29 GB of logical buffers PER
+       SLICE (three sequential scans of a TOAST-heavy table) — tens of GB/day at the drain loop's normal
+       cadence, the largest of the costs #4250 item 3 measured. That item replaced it fleet-wide (both
+       this table and query_store_plan_map) with DarlingRetention.UnorderedRowCappedDeleteSql: a single
+       ctid-capped scan with no ORDER BY (this table has no index over LastSeenColumn to sort through
+       either), cutting the read cost to roughly a third of the old shape by dropping the two extra
+       scans. See that builder's summary for why the missing ORDER BY is still correct against a FIXED
+       cutoff, and DarlingRetention.LivenessTouchedTablePruneRowCap for the cap's sizing from the field's
+       last_seen age histogram (this table's rows retire up to ~32 days old, ~150k-220k rows/day).
+
+       Safe to run against live data because last_seen is refreshed by every pass that re-observes a
+       statement: a row can only fall behind the cutoff once nothing has referenced it for the retention
+       window, and re-fetching text for a statement that comes back is one row through a watermark that
+       has already expired. */
 }

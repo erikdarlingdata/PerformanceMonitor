@@ -81,6 +81,9 @@
     <!-- Legible warning amber for content text/borders (block-chain longest-wait, flag banner).
          Tuned per theme so it clears >=4.5:1 as TEXT on content backgrounds; any control may adopt it. -->
     <SolidColorBrush x:Key="WarningTextBrush" Color="#FFB347"/>
+    <!-- #4629/#4635: critical-tier text (plan viewer, status bar). A literal hex like WarningTextBrush
+         above, so it stays out of the user-overridable palette. -->
+    <SolidColorBrush x:Key="CriticalTextBrush" Color="#FF7043"/>
     <!-- Apex (lead-blocker) node + legend border. Theme-aware so it clears >=3:1 as a graphical border on
          the light node card (bright #4FA3FF is only ~2.6:1 on white). The LEAD BLOCKER badge fill keeps the
          bright ApexBrush constant so the apex still pops. -->
@@ -1390,10 +1393,11 @@
     <SolidColorBrush x:Key="PlanPanelMutedBrush" Color="#E4E6EB"/>
     <SolidColorBrush x:Key="PlanSectionHeaderBrush" Color="#4FA3FF"/>
     <SolidColorBrush x:Key="PlanPropSeparatorBrush" Color="#2A2D35"/>
-    <SolidColorBrush x:Key="PlanMissingIndexBgBrush" Color="#3D2A0E"/>
-    <SolidColorBrush x:Key="PlanMissingIndexBorderBrush" Color="#7A5A1E"/>
-    <SolidColorBrush x:Key="PlanMissingIndexHeaderBrush" Color="#FFB347"/>
-    <SolidColorBrush x:Key="PlanWaitStatsBgBrush" Color="#1A2A3D"/>
-    <SolidColorBrush x:Key="PlanWaitStatsHeaderBrush" Color="#4FA3FF"/>
-
+    <!-- Plan Insights card accents: one neutral surface (BackgroundLightBrush) for every card,
+         identity carried by a 3px accent edge plus the header in that colour. Ported from
+         PerformanceStudio (erikdarlingdata/PerformanceStudio@87bad14), same values. -->
+    <SolidColorBrush x:Key="InsightIndexBrush" Color="#FFB347"/>
+    <SolidColorBrush x:Key="InsightWaitsBrush" Color="#4FA3FF"/>
+    <SolidColorBrush x:Key="InsightParamsBrush" Color="#7BCF7B"/>
+    <SolidColorBrush x:Key="InsightServerBrush" Color="#9B9BFF"/>
 </ResourceDictionary>

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -27,7 +28,7 @@ SELECT edition, product_version, product_level, product_update_level,
        engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb,
        socket_count, cores_per_socket, is_hadr_enabled, is_clustered,
        enterprise_features, service_objective, collection_time,
-       utc_offset_minutes, time_zone_id
+       utc_offset_minutes, time_zone_id, vcore_count
 FROM v_server_properties
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -58,7 +59,10 @@ LIMIT 1";
             /* v42 / v63 (#3653 item 13): both nullable in the store and both read null-or-value — a 0 offset
                would claim UTC of a row that never recorded one, and "" would claim a zone name. */
             UtcOffsetMinutes = reader.IsDBNull(15) ? null : reader.GetInt32(15),
-            TimeZoneId = reader.IsDBNull(16) ? null : reader.GetString(16)
+            TimeZoneId = reader.IsDBNull(16) ? null : reader.GetString(16),
+            /* The vCore count parsed from an Azure SQL Database's service objective; null elsewhere and for a
+               DTU-model objective or an elastic pool. It is what the database is given, where cpu_count is the schedulers it can see. */
+            VcoreCount = reader.IsDBNull(17) ? null : reader.GetInt32(17)
         };
     }
 
@@ -98,6 +102,42 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// <see cref="GetServerUtcOffsetMinutesAsync"/> with the zone: the newest <c>server_properties</c> row that
+    /// carries an offset, with its <c>time_zone_id</c> (schema v42 - <c>CURRENT_TIMEZONE_ID()</c>, a Windows zone
+    /// id such as "Eastern Standard Time" on SQL Server 2022 and later, NULL before). Both columns come from the
+    /// SAME row, so the id and the offset describe one snapshot. The zone is what lets Server-time mode follow a
+    /// daylight-saving change (#4766); a server with no zone id keeps its fixed offset.
+    /// <para>Returns <c>null</c> when the store holds no offset for the server yet, so a caller keeps the clock
+    /// it already has rather than falling back to UTC on a server whose properties are still uncollected.</para>
+    /// </summary>
+    public async Task<ServerClock?> GetServerClockAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = ServerClockSql;
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return null;
+        }
+
+        var offset = reader.IsDBNull(0) ? (int?)null : Convert.ToInt32(reader.GetValue(0));
+        var zoneId = reader.IsDBNull(1) ? null : reader.GetString(1);
+        return offset.HasValue ? ServerClock.Resolve(zoneId, offset) : null;
+    }
+
+    /// <summary>The statement behind <see cref="GetServerClockAsync"/>: <c>$1</c> server_id.</summary>
+    internal const string ServerClockSql = @"
+SELECT utc_offset_minutes, time_zone_id
+FROM v_server_properties
+WHERE server_id = $1
+AND   utc_offset_minutes IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
     /// Gets the latest database size stats (file sizes, volume space).
     /// </summary>
     public async Task<List<DatabaseSizeStatsRow>> GetLatestDatabaseSizeStatsAsync(int serverId)
@@ -108,7 +148,7 @@ LIMIT 1";
 SELECT database_name, file_name, file_type_desc, physical_name,
        total_size_mb, used_size_mb, auto_growth_mb, max_size_mb,
        volume_mount_point, volume_total_mb, volume_free_mb,
-       collection_time
+       collection_time, file_id
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1)
@@ -126,14 +166,20 @@ ORDER BY database_name, file_type_desc, file_name";
                 FileName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 FileTypeDesc = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 PhysicalName = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                TotalSizeMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
-                UsedSizeMb = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                AutoGrowthMb = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
-                MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
-                VolumeMountPoint = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                VolumeTotalMb = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
-                VolumeFreeMb = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
-                CollectionTime = reader.GetDateTime(11)
+                /* NULL size, growth and ceiling are the Hyperscale log file (the log service): they stay null so
+                   get_database_sizes says so, the same as Darling's twin, instead of reporting a size of 0. */
+                TotalSizeMb = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
+                /* NULL used space stays null: it is not 0 MB used. A row stored before the allocated/used fix for
+                   another database on an Azure SQL Database server has none, and so does a file whose probe failed. */
+                UsedSizeMb = reader.IsDBNull(5) ? null : ToDouble(reader.GetValue(5)),
+                AutoGrowthMb = reader.IsDBNull(6) ? null : ToDouble(reader.GetValue(6)),
+                MaxSizeMb = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
+                VolumeMountPoint = reader.IsDBNull(8) ? null : reader.GetString(8),
+                VolumeTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                VolumeFreeMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
+                CollectionTime = reader.GetDateTime(11),
+                /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
+                FileId = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))
             });
         }
 
@@ -205,6 +251,10 @@ public class ServerPropertiesRow
     /// <summary>The engine's own time-zone name from <c>CURRENT_TIMEZONE_ID()</c> (v63, #3653 item 13, Q8); null
     /// where the engine cannot say — every SQL Server before 2022 — which is a real value, not a miss.</summary>
     public string? TimeZoneId { get; set; }
+
+    /// <summary>The vCore count parsed from an Azure SQL Database's service objective (null off Azure SQL Database,
+    /// and for a DTU-model objective or an elastic pool, which name no vCores).</summary>
+    public int? VcoreCount { get; set; }
 }
 
 public class DatabaseSizeStatsRow
@@ -213,14 +263,27 @@ public class DatabaseSizeStatsRow
     public string FileName { get; set; } = "";
     public string FileTypeDesc { get; set; } = "";
     public string PhysicalName { get; set; } = "";
-    public double TotalSizeMb { get; set; }
-    public double UsedSizeMb { get; set; }
-    public double AutoGrowthMb { get; set; }
-    public double MaxSizeMb { get; set; }
-    public string VolumeMountPoint { get; set; } = "";
-    public double VolumeTotalMb { get; set; }
-    public double VolumeFreeMb { get; set; }
+    /// <summary>Null for the LOG file of an Azure SQL Database Hyperscale database (the log service): see
+    /// <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>. The growth and ceiling are null with it.</summary>
+    public double? TotalSizeMb { get; set; }
+    /// <summary>Null when the store holds no used space for the row: a row stored before the allocated/used fix for
+    /// another database on an Azure SQL Database server, or a file whose probe failed. It is not 0 MB used.</summary>
+    public double? UsedSizeMb { get; set; }
+    public double? AutoGrowthMb { get; set; }
+    public double? MaxSizeMb { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public string? VolumeMountPoint { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public double? VolumeTotalMb { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public double? VolumeFreeMb { get; set; }
     public DateTime CollectionTime { get; set; }
+    /// <summary>The file id; null for the one row another database on an Azure SQL Database server gets.</summary>
+    public int? FileId { get; set; }
+
+    /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the database's
+    /// data size, and its log size is not reported. See <see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>.</summary>
+    public bool IsAzureSiblingRow => PerformanceMonitor.Common.AzureSiblingDatabaseSize.IsSiblingRow(FileId, FileName);
 }
 
 public class SessionStatsRow

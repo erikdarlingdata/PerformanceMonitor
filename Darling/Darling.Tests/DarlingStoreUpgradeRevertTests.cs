@@ -387,7 +387,10 @@ public sealed class DarlingStoreUpgradeRevertTests
             Assert.Equal(LogLevel.Critical, stranded.Level);
             Assert.Contains(host.RetainedDirectory, stranded.Message, StringComparison.Ordinal);
             Assert.Contains("pg_control.old", stranded.Message, StringComparison.Ordinal);
-            Assert.Contains("EMPTY store", stranded.Message, StringComparison.Ordinal);
+            /* The line promises what the bootstrap now does: no start initializes an empty store in the moved-aside
+               store's place, and the retention sweep does not count starts against it. */
+            Assert.Contains("every start refuses to initialize an empty store", stranded.Message, StringComparison.Ordinal);
+            Assert.Contains("does not count starts against the moved-aside copy", stranded.Message, StringComparison.Ordinal);
 
             Assert.DoesNotContain(log.Entries, entry => entry.Message.Contains("NO data has been lost", StringComparison.Ordinal));
             var last = log.Entries[^1];
@@ -469,6 +472,70 @@ public sealed class DarlingStoreUpgradeRevertTests
         {
             TryDeleteTree(root.FullName);
         }
+    }
+
+    /// <summary>
+    /// A runner refuses a token that was cancelled before the call, so a stop that runs in a catch or a
+    /// finally must not carry its method's own token: it would throw before pg_ctl started and leave the server
+    /// running. The quiesced TimescaleDB update shows it. Its start throws the shutdown's cancellation, and its
+    /// finally still has to launch pg_ctl (ping stands in) to stop the private-port cluster. Ping answers every
+    /// command with a failure, so the log carries both stop attempts, and the marker that lets the next start
+    /// find the server is kept.
+    /// </summary>
+    [Fact]
+    public async Task UpdateTimescaleQuiesced_AShutdownBeforeTheStart_StillRunsTheStopInItsFinally()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-precancel-stop-");
+        try
+        {
+            var bin = Directory.CreateDirectory(Path.Combine(root.FullName, "pgsql", "bin"));
+            var data = Directory.CreateDirectory(Path.Combine(root.FullName, "data"));
+            File.Copy(s_ping, Path.Combine(bin.FullName, "pg_ctl.exe"));
+
+            using var shutdown = new CancellationTokenSource();
+            shutdown.Cancel();
+
+            var log = new DarlingSelfAlertTests.CapturingLogger();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => new DarlingStoreUpgrade(log).UpdateTimescaleQuiescedAsync(
+                    bin.FullName, data.FullName, "password", "2.99.0", shutdown.Token));
+
+            Assert.True(IndexOf(log, "pg_ctl stop -m fast reported exit code") >= 0, Describe(log));
+            Assert.True(IndexOf(log, "pg_ctl stop -m immediate reported exit code") >= 0, Describe(log));
+            Assert.True(
+                File.Exists(Path.Combine(data.FullName, DarlingStoreUpgrade.QuiescedUpdateMarkerFileName)),
+                Describe(log));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The stops that run while a cancellation unwinds carry CancellationToken.None. The behavioral test above
+    /// covers the finally in the quiesced update; the stop in the upgrade's own cancellation and failure
+    /// handlers needs a running old cluster to reach, so it is pinned here: confirmed stops take no token at
+    /// all, and the handlers' stop passes None.
+    /// </summary>
+    [Fact]
+    public void TheStopsThatRunWhileACancellationUnwinds_CarryNoCancellableToken()
+    {
+        var source = ReadUpgradeSource();
+
+        var confirmedFrom = source.IndexOf("private async Task<bool> StopClusterConfirmedAsync(", StringComparison.Ordinal);
+        var confirmedTo = source.IndexOf("/// <summary>", confirmedFrom, StringComparison.Ordinal);
+        Assert.True(confirmedFrom >= 0 && confirmedTo > confirmedFrom, "StopClusterConfirmedAsync is gone, so this pin can no longer find what it guards");
+        var confirmed = source[confirmedFrom..confirmedTo];
+        Assert.DoesNotContain("cancellationToken", confirmed, StringComparison.Ordinal);
+        Assert.Equal(2, confirmed.Split("CancellationToken.None").Length - 1);
+
+        var tryStopFrom = source.IndexOf("private async Task TryStopAsync(", StringComparison.Ordinal);
+        var tryStopTo = source.IndexOf("private bool RevertRuntimeForCancel(", tryStopFrom, StringComparison.Ordinal);
+        Assert.True(tryStopFrom >= 0 && tryStopTo > tryStopFrom, "TryStopAsync is gone, so this pin can no longer find what it guards");
+        Assert.Contains(
+            "StopClusterAsync(context.OldBinDirectory, context.DataDirectory, CancellationToken.None)",
+            source[tryStopFrom..tryStopTo], StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
@@ -84,7 +85,7 @@ ranked AS (
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"WITH{FileIoRankedCte}
 SELECT database_name, file_type, file_name, files, stall_ms, ops, series_rank
@@ -126,7 +127,7 @@ ORDER BY series_rank";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"WITH{FileIoRankedCte},
 labelled AS (
@@ -257,7 +258,7 @@ rated AS
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"WITH{LockWaitRatedCtes}
 SELECT
@@ -298,7 +299,7 @@ ORDER BY wait_type";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"WITH{LockWaitRatedCtes},
 per_collection AS
@@ -360,7 +361,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 WITH raw AS
@@ -440,7 +441,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 WITH raw AS
@@ -455,7 +456,7 @@ WITH raw AS
         END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
-    AND   wait_type = $2
+    AND   rtrim(wait_type) = rtrim($2)
     AND   collection_time >= $3
     AND   collection_time <= $4
 ),
@@ -500,24 +501,28 @@ ORDER BY 1";
     }
 
     /// <summary>
-    /// CPU bucketed (#3960) — <see cref="GetCpuUtilizationAsync"/>'s window (the stored UTC instant, the offset only for
-    /// a pre-v63 row), averaged per bucket of the server-local <c>sample_time</c> the tool has always published and
-    /// the MCP tool used to average to the minute itself. The busiest sample's SQL and total CPU ride beside the
-    /// averages; a NULL reading counts as 0, as that read always read it. Stamped at each bucket's start, unclamped,
-    /// as Darling's twin (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>) is.
+    /// CPU bucketed (#3960) — <see cref="GetCpuUtilizationAsync"/>'s window (the stored UTC instant, and for a
+    /// pre-v63 row with none its server-local stamp against the server-local bounds), averaged per bucket of the
+    /// server-local <c>sample_time</c> the tool has always published and the MCP tool used to average to the
+    /// minute itself. The busiest sample's SQL and total CPU ride beside the averages; a NULL reading counts as 0,
+    /// as that read always read it. Stamped at each bucket's start, unclamped, as Darling's twin
+    /// (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>) is.
     /// </summary>
-    internal async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, int utcOffsetMinutes, int bucketMinutes)
+    internal async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, ServerClock serverClock, int bucketMinutes)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, null, null, asOfUtc, utcOffsetMinutes);
-        var startUtc = startTime.AddMinutes(-utcOffsetMinutes);
-        var endUtc = endTime.AddMinutes(-utcOffsetMinutes);
+        /* The window is a UTC one: hoursBack back from the UTC anchor. A row with a sample_time_utc is compared on
+           it against the UTC bounds; a pre-v63 row with none is compared on its server-local sample_time against
+           the same window in the server's clock, each bound at its own instant, so neither arm applies one offset
+           to the whole window (#4766). */
+        var (startUtc, endUtc) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, null, null, asOfUtc, serverClock);
 
         command.CommandText = $@"
 SELECT
-    time_bucket(to_minutes(CAST($5 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}) AS bucket_start,
+    time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}) AS bucket_start,
     AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
     AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu,
     AVG(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS total_cpu,
@@ -527,15 +532,18 @@ SELECT
     COUNT(*) AS samples
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
-AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) >= $2
-AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) <= $3
+AND   (
+          (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3)
+       OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5)
+      )
 GROUP BY 1
 ORDER BY 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
-        command.Parameters.Add(new DuckDBParameter { Value = (long)utcOffsetMinutes });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
         var items = new List<CpuBucketPoint>();
@@ -567,7 +575,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 SELECT
@@ -624,7 +632,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 SELECT
@@ -670,7 +678,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 WITH grants AS
@@ -713,28 +721,90 @@ ORDER BY 1";
     /// largest and last value, and the deltas summed per interval class — rated, unknowable 0, unrecorded NULL — with
     /// the seconds the rated ones accrued over. The rate's peak is the busiest single rated collection. Darling's twin
     /// is <c>DarlingTrendReader.PerfmonTrendBucketedSql</c>.
+    /// <para>#4476: a raw-row layer sits under the per-collection SUM, carrying <c>lag</c>/<c>lead</c> of
+    /// <c>cntr_value</c> per instance (<c>PARTITION BY object_name, instance_name ORDER BY collection_time</c> —
+    /// this read is already scoped to one counter name by <paramref name="counterName"/>, so
+    /// <c>counter_name</c> does not need to join the window) so
+    /// <see cref="WaitStatisticsArtifact.ArtifactPredicateSql"/> can tell an isolated single-sample artifact (a
+    /// <c>SQLServer:Wait Statistics</c> gauge instance whose one collection reads its lifetime cumulative count,
+    /// #4476) apart from a real value BEFORE the instances are summed into a per-collection point. Every artifact
+    /// instance-row is excluded from the <c>cntr_value</c>/<c>delta_cntr_value</c> SUMs via <c>FILTER (WHERE NOT
+    /// is_artifact)</c>; the per-collection layer counts how many of its rows were set aside, and the outer
+    /// bucket layer SUMs that count into <c>artifacts_set_aside</c>. A bucket every one of whose instance rows
+    /// was set aside reads <c>cntr_value IS NULL</c> with a positive <c>artifacts_set_aside</c> — the returned
+    /// <see cref="PerfmonBucketsResult"/> drops that point from <see cref="PerfmonBucketsResult.Points"/> rather
+    /// than manufacturing a 0, but keeps its count in <see cref="PerfmonBucketsResult.ArtifactsSetAside"/> so a
+    /// dropped bucket does not silently drop its own count too — the same shape as Darling's
+    /// <c>DarlingTrendReader.GetPerfmonBucketsAsync</c>.</para>
     /// </summary>
-    internal async Task<List<PerfmonBucketPoint>> GetPerfmonBucketsAsync(int serverId, string counterName, int hoursBack, DateTime asOfUtc, int bucketMinutes)
+    internal async Task<PerfmonBucketsResult> GetPerfmonBucketsAsync(int serverId, string counterName, int hoursBack, DateTime asOfUtc, int bucketMinutes)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+
+        var isArtifact = "COALESCE((" + WaitStatisticsArtifact.ArtifactPredicateSql(
+            "cntr_type", "object_name", "prev_value", "cntr_value", "next_value") + "), false)";
+        var isWaitStatistics = WaitStatisticsArtifact.ObjectNameSuffixMatchSql("object_name");
 
         command.CommandText = $@"
-WITH collections AS
+WITH flagged AS
 (
     SELECT
         collection_time,
-        SUM(cntr_value) AS cntr_value,
-        SUM(delta_cntr_value) AS delta_cntr_value,
+        cntr_value,
+        delta_cntr_value,
+        sample_interval_seconds,
+        cntr_type,
+        {isArtifact} AS is_artifact
+    FROM (
+        SELECT
+            collection_time,
+            object_name,
+            cntr_value,
+            delta_cntr_value,
+            sample_interval_seconds,
+            cntr_type,
+            lag(cntr_value) OVER w AS prev_value,
+            lead(cntr_value) OVER w AS next_value
+        FROM v_perfmon_stats
+        WHERE server_id = $1
+        AND   counter_name = $2
+        AND   collection_time >= $3
+        AND   collection_time <= $4
+        AND   {isWaitStatistics}
+        WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
+
+        UNION ALL
+
+        SELECT
+            collection_time,
+            object_name,
+            cntr_value,
+            delta_cntr_value,
+            sample_interval_seconds,
+            cntr_type,
+            NULL AS prev_value,
+            NULL AS next_value
+        FROM v_perfmon_stats
+        WHERE server_id = $1
+        AND   counter_name = $2
+        AND   collection_time >= $3
+        AND   collection_time <= $4
+        AND   NOT ({isWaitStatistics})
+    ) AS raw
+),
+collections AS
+(
+    SELECT
+        collection_time,
+        SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS cntr_value,
+        SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS delta_cntr_value,
         MAX(sample_interval_seconds) AS sample_interval_seconds,
-        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
-    FROM v_perfmon_stats
-    WHERE server_id = $1
-    AND   counter_name = $2
-    AND   collection_time >= $3
-    AND   collection_time <= $4
+        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+        COUNT(*) FILTER (WHERE is_artifact) AS artifacts
+    FROM flagged
     GROUP BY collection_time
 )
 SELECT
@@ -748,7 +818,8 @@ SELECT
     SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds = 0) AS unknowable_delta,
     SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds IS NULL) AS unrecorded_delta,
     MAX(CAST(delta_cntr_value AS DOUBLE PRECISION) / NULLIF(sample_interval_seconds, 0)) AS peak_per_second,
-    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+    SUM(artifacts) AS artifacts_set_aside
 FROM collections
 GROUP BY 1
 ORDER BY 1";
@@ -760,9 +831,20 @@ ORDER BY 1";
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
         var items = new List<PerfmonBucketPoint>();
+        long artifactsSetAsideTotal = 0;
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var artifactsSetAside = reader.IsDBNull(11) ? 0 : ToInt64(reader.GetValue(11));
+            artifactsSetAsideTotal += artifactsSetAside;
+            if (reader.IsDBNull(1) && artifactsSetAside > 0)
+            {
+                /* Every row in this bucket was set aside: no genuine reading survived to average, so this
+                   is not a bucket with nothing collected — skip it rather than manufacture a 0. Its count is
+                   already folded into artifactsSetAsideTotal above. */
+                continue;
+            }
+
             items.Add(new PerfmonBucketPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
@@ -774,9 +856,17 @@ ORDER BY 1";
                 reader.IsDBNull(7) ? null : ToInt64(reader.GetValue(7)),
                 reader.IsDBNull(8) ? null : ToInt64(reader.GetValue(8)),
                 reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
-                reader.IsDBNull(10) ? null : (int)ToInt64(reader.GetValue(10))));
+                reader.IsDBNull(10) ? null : (int)ToInt64(reader.GetValue(10)),
+                artifactsSetAside));
         }
 
-        return items;
+        return new PerfmonBucketsResult(items, artifactsSetAsideTotal);
     }
 }
+
+/// <summary>Return shape of <see cref="LocalDataService.GetPerfmonBucketsAsync"/> (#4476): the published points,
+/// plus the TOTAL artifacts set aside across the whole window — a separate figure because a bucket every one
+/// of whose rows was an artifact is dropped from <see cref="Points"/>, so summing
+/// <see cref="PerfmonBucketPoint.ArtifactsSetAside"/> back out of the published points would silently lose
+/// that bucket's own count. Mirrors Darling's <c>DarlingTrendReader.PerfmonBucketsResult</c>.</summary>
+internal sealed record PerfmonBucketsResult(List<PerfmonBucketPoint> Points, long ArtifactsSetAside);

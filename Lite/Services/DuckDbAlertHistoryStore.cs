@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
@@ -166,8 +167,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
                unsafe for a caller whose dedupKey is not a hash. NULL context_json rows fail the
                match either way. */
             command.CommandText = @"
+/* #4887: v_config_alert_log = live UNION ALL archive, so MAX is the greater of both and a reset (which
+   archives the log and empties the live table) cannot re-open the cooldown. No cache: runs at startup or per send. */
 SELECT MAX(alert_time)
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
 AND   notification_type IN ('email', 'email+webhook')
@@ -234,8 +237,10 @@ AND   send_error IS NULL"
                hand-built "%\"DedupKey\":\"<value>\"%" pattern is unsafe for a caller whose dedupKey
                is not a hash. */
             command.CommandText = @"
+/* #4887: v_config_alert_log = live UNION ALL archive, so MAX is the greater of both and a reset (which
+   archives the log and empties the live table) cannot re-open the cooldown. No cache: runs at startup or per send. */
 SELECT MAX(alert_time)
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
 AND   notification_type IN ('webhook', 'email+webhook')"
@@ -304,8 +309,10 @@ AND   notification_type IN ('webhook', 'email+webhook')"
                per server before a 50% chance, and the failure mode is suppress
                (not over-notify). */
             command.CommandText = @"
+/* #4887: v_config_alert_log = live UNION ALL archive, so MAX is the greater of both and a reset (which
+   archives the log and empties the live table) cannot re-open the cooldown. No cache: runs at startup or per send. */
 SELECT MAX(alert_time)
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2"
             /* #3712: the digest exclusion, spelled through the constant the writer uses (a literal, like the
@@ -357,8 +364,10 @@ AND   metric_name = $2"
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
+/* #4887: v_config_alert_log = live UNION ALL archive, so MAX is the greater of both and a reset (which
+   archives the log and empties the live table) cannot re-open the cooldown. No cache: runs at startup or per send. */
 SELECT MAX(alert_time)
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
 AND   alert_sent"
@@ -526,11 +535,16 @@ AND   metric_name = $2";
     /// empty list therefore clears the metric, which is how the falling edge is recorded — there is no
     /// separate clear method to forget to call.
     ///
-    /// <para>Delete-then-insert inside ONE transaction rather than an INSERT OR REPLACE per row, because
-    /// absence carries meaning: a fingerprint with no events left in the window has a FINISHED incident, and
-    /// leaving its row behind would make that fingerprint's next incident read as a continuation of the old
-    /// one — an undercount reported under a stale start time. Upserting only the live rows cannot express
-    /// that, and splitting the delete from the insert would let a crash between them zero live counters.</para>
+    /// <para>Absence carries meaning: a fingerprint with no events left in the window has a FINISHED incident,
+    /// and leaving its row behind would make that fingerprint's next incident read as a continuation of the
+    /// old one — an undercount reported under a stale start time. So every live fingerprint is upserted and
+    /// then the metric's rows for every other fingerprint are deleted, inside ONE transaction, so a crash
+    /// between the two leaves the old set whole rather than a mix of old and new.</para>
+    ///
+    /// <para>Upsert-then-prune rather than delete-everything-then-insert, which deleted each surviving
+    /// fingerprint's key and inserted it again in the same transaction. The upsert updates a surviving row in
+    /// place (it writes no key column, so the primary-key index is untouched), and the prune deletes only the
+    /// keys that are not coming back. No key is deleted and inserted again in one transaction.</para>
     ///
     /// <para>Called once per delivered alert (cooldown-gated by construction), so it is a low-frequency
     /// write like the watermarks above.</para>
@@ -557,34 +571,47 @@ AND   metric_name = $2";
             await connection.OpenAsync();
             using var transaction = connection.BeginTransaction();
 
+            foreach (var state in states)
+            {
+                using var upsert = connection.CreateCommand();
+                upsert.Transaction = transaction;
+                upsert.CommandText = @"
+INSERT INTO config_incident_occurrences
+    (server_id, metric_name, dedup_key, total_occurrences, observed_window_count, incident_started_at, last_observed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (server_id, metric_name, dedup_key) DO UPDATE SET
+    total_occurrences = EXCLUDED.total_occurrences,
+    observed_window_count = EXCLUDED.observed_window_count,
+    incident_started_at = EXCLUDED.incident_started_at,
+    last_observed_at = EXCLUDED.last_observed_at";
+                upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+                upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.DedupKey });
+                upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.TotalOccurrences });
+                upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.ObservedWindowCount });
+                upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.IncidentStartedUtc });
+                upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.LastObservedUtc });
+                await upsert.ExecuteNonQueryAsync();
+            }
+
             using (var prune = connection.CreateCommand())
             {
                 prune.Transaction = transaction;
+                /* Every fingerprint that is not in the new set; an empty set clears the whole metric. */
                 prune.CommandText = @"
 DELETE FROM config_incident_occurrences
 WHERE server_id = $1
-AND   metric_name = $2";
+AND   metric_name = $2"
+                    + (states.Count == 0
+                        ? string.Empty
+                        : " AND dedup_key NOT IN (" + string.Join(", ", states.Select((_, i) => "$" + (i + 3))) + ")");
                 prune.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
                 prune.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+                foreach (var state in states)
+                {
+                    prune.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.DedupKey });
+                }
                 await prune.ExecuteNonQueryAsync();
-            }
-
-            foreach (var state in states)
-            {
-                using var insert = connection.CreateCommand();
-                insert.Transaction = transaction;
-                insert.CommandText = @"
-INSERT INTO config_incident_occurrences
-    (server_id, metric_name, dedup_key, total_occurrences, observed_window_count, incident_started_at, last_observed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)";
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.DedupKey });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.TotalOccurrences });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.ObservedWindowCount });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.IncidentStartedUtc });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.LastObservedUtc });
-                await insert.ExecuteNonQueryAsync();
             }
 
             transaction.Commit();
@@ -655,13 +682,10 @@ AND   metric_name = $2";
     /// <summary>
     /// #3282: upserts one subject's persistence-gate record.
     ///
-    /// <para>DELETE-then-INSERT rather than <c>INSERT OR REPLACE</c>, and that is the point rather than a
-    /// style choice: the partial-column <c>INSERT OR REPLACE</c> used on
-    /// <c>config_edge_trigger_watermarks</c> resets every unlisted column to its default, which is precisely
-    /// why this state could not live on that table. Naming every column on one statement here would work
-    /// today and would silently zero whatever a later column adds, so the shape that cannot rot is the one
-    /// that writes the whole row. One transaction, because a delete that commits without its insert is a
-    /// subject that forgot it had an incident open.</para>
+    /// <para>One <c>INSERT ... ON CONFLICT DO UPDATE</c> that names every column, so each write carries the
+    /// whole record. An existing row is updated in place: the update writes no key column, so the primary-key
+    /// index is untouched. The earlier shape deleted the key and inserted it again in one transaction. A
+    /// column added to the table later has to join both the column list and the SET list.</para>
     ///
     /// <para>Failures are absorbed like the watermark writes: the gate has already decided this observation
     /// from the engine's in-memory record, so a dropped write costs the streak across a restart and never an
@@ -683,41 +707,29 @@ AND   metric_name = $2";
             using var writeLock = duckDb.AcquireWriteLock();
             using var connection = duckDb.CreateConnection();
             await connection.OpenAsync();
-            using var transaction = connection.BeginTransaction();
 
-            using (var prune = connection.CreateCommand())
-            {
-                prune.Transaction = transaction;
-                prune.CommandText = @"
-DELETE FROM config_alert_persistence_state
-WHERE server_id = $1
-AND   metric_name = $2";
-                prune.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-                prune.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
-                await prune.ExecuteNonQueryAsync();
-            }
-
-            using (var insert = connection.CreateCommand())
-            {
-                insert.Transaction = transaction;
-                insert.CommandText = @"
+            using var upsert = connection.CreateCommand();
+            upsert.CommandText = @"
 INSERT INTO config_alert_persistence_state
     (server_id, metric_name, consecutive_breaches, consecutive_clears, firing, last_observed_sample_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)";
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = breaches });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = clears });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = firing });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
-                {
-                    Value = lastObservedSampleUtc.HasValue ? lastObservedSampleUtc.Value : (object)DBNull.Value,
-                });
-                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
-                await insert.ExecuteNonQueryAsync();
-            }
-
-            transaction.Commit();
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (server_id, metric_name) DO UPDATE SET
+    consecutive_breaches = EXCLUDED.consecutive_breaches,
+    consecutive_clears = EXCLUDED.consecutive_clears,
+    firing = EXCLUDED.firing,
+    last_observed_sample_at = EXCLUDED.last_observed_sample_at,
+    updated_at = EXCLUDED.updated_at";
+            upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+            upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = breaches });
+            upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = clears });
+            upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = firing });
+            upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
+            {
+                Value = lastObservedSampleUtc.HasValue ? lastObservedSampleUtc.Value : (object)DBNull.Value,
+            });
+            upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
+            await upsert.ExecuteNonQueryAsync();
         }
         catch (Exception ex)
         {

@@ -395,6 +395,204 @@ public sealed class DarlingSelfAlertTests
         Assert.True(fired.Muted); /* the deliverer skips channels but still records — same as the engine */
     }
 
+    /* ---------------- collection-stopped across a service restart (#4757) ---------------- */
+
+    /// <summary>
+    /// One collection-stopped pass minus the store read: the judgement and the edge apply that
+    /// <c>EvaluateStoreAlertsAsync</c> runs on the signals it read, fed those signals directly. The default
+    /// recent-run window is ten runs of which nine succeeded, so only the staleness arm can decide it.
+    /// </summary>
+    private static async Task<bool> CollectionStoppedPassAsync(
+        DarlingSelfAlertEvaluator evaluator, DateTime? lastSuccess, int recentRuns = 10, int recentSuccess = 9)
+    {
+        var stopped = evaluator.JudgeCollectionStopped(ServerId, lastSuccess, recentRuns, recentSuccess, out var reason);
+        await evaluator.ApplyCollectionStoppedAsync(ServerId, Name, stopped, reason, Ct);
+        return stopped;
+    }
+
+    private static AlertOutcome SingleCollectionStopped(Harness h) =>
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+    [Fact]
+    public async Task CollectionStopped_ServerDownAcrossARestart_FiresOnceTheWindowPassesAfterTheStart()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The server went down three hours before the service restarted and has stayed down. Its recent
+           window still holds old successes, so the failure-streak arm cannot decide: only the staleness arm
+           can fire this one. */
+        var lastSuccess = start.AddHours(-3);
+
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        h.Now = start.AddMinutes(29);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = start.AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        var fired = SingleCollectionStopped(h);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.StartsWith("No successful collection in 30 minutes", fired.CurrentValue, StringComparison.Ordinal);
+
+        /* Still down a minute later: the cooldown holds the standing alert to the one fire. */
+        h.Now = start.AddMinutes(31);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        SingleCollectionStopped(h);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_HealthyServerWhoseLastSuccessPredatesTheRestart_StaysSilent()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The service was down for 45 minutes, so the server's newest success is 45 minutes older than the
+           start. It is stale only because Darling is the collector and was not running. */
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(-45)));
+
+        /* The first fresh collection lands ten minutes in, and successes keep landing after it. */
+        h.Now = start.AddMinutes(10);
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(10)));
+        h.Now = start.AddMinutes(40);
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(38)));
+        h.Now = start.AddHours(3);
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(178)));
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_ServerThatStopsAfterTheRestart_StillFiresFromItsLastSuccess()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The collectors were healthy for an hour after the start, then the server dropped out. The staleness
+           runs from that last success, not from the service start. */
+        var lastSuccess = start.AddMinutes(60);
+        h.Now = start.AddMinutes(89);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        h.Now = start.AddMinutes(90);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        Assert.StartsWith("No successful collection in 30 minutes", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_NeverSucceededServer_IsNotFlaggedByTheStalenessArm()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* No success row at all (freshly added, or never reachable): a null last success stays null however
+           long the service has been watching, and the connection-lost alert covers that server. */
+        Assert.False(await CollectionStoppedPassAsync(e, null, recentRuns: 0, recentSuccess: 0));
+        h.Now = start.AddHours(6);
+        Assert.False(await CollectionStoppedPassAsync(e, null, recentRuns: 0, recentSuccess: 0));
+        Assert.False(await CollectionStoppedPassAsync(e, null, recentRuns: 3, recentSuccess: 0));
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_StoredFailureStreak_WaitsForTheFirstOnlineEdge()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The last ten STORED runs all failed and no success is on record. Those are pre-restart rows until a
+           fresh run lands, so the streak stays quiet until the service has seen the server online. */
+        var streak = DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold;
+        Assert.False(await CollectionStoppedPassAsync(e, null, streak, recentSuccess: 0));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: true, error: null, Ct);
+        Assert.True(await CollectionStoppedPassAsync(e, null, streak, recentSuccess: 0));
+        Assert.StartsWith("The last 10 collector runs all failed", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_DownAcrossARestartWithAStoredFailureStreak_FiresFromTheStalenessArmAtStartPlusTheWindow()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The stored streak is the pre-restart rows again, and the server never comes online, so the streak
+           is never armed. The staleness arm still fires it one window after the start. */
+        var streak = DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold;
+        var lastSuccess = start.AddHours(-3);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
+        h.Now = start.AddMinutes(29);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = start.AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
+        Assert.StartsWith("No successful collection in 30 minutes", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_AfterForget_TheNextPassIsJudgedFromThatPassNotTheOldRows()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The service has been up for two hours when the server is removed and enabled again. It keeps its
+           server_id and its days-old collection_log rows, which must not page CRITICAL the moment it returns. */
+        h.Now = start.AddHours(2);
+        e.Forget(ServerId);
+        var oldRows = start.AddDays(-3);
+
+        Assert.False(await CollectionStoppedPassAsync(e, oldRows));
+        h.Now = start.AddHours(2).AddMinutes(29);
+        Assert.False(await CollectionStoppedPassAsync(e, oldRows));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* One window after that first pass with nothing collected, it fires. */
+        h.Now = start.AddHours(2).AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, oldRows));
+        SingleCollectionStopped(h);
+
+        /* The tombstone belongs to the forgotten server: a neighbour is still judged from the service start. */
+        Assert.True(e.JudgeCollectionStopped(ServerId + 1, oldRows, 10, 9, out _));
+    }
+
+    [Fact]
+    public async Task ReconcileServers_ServerEnabledWhileTheServiceRuns_IsWatchedFromItsFirstPassNotTheServiceStart()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
+        typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_selfAlerts", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, e);
+
+        /* Disabled across a restart, so no removal ever ran Forget in this process, then enabled five hours in. */
+        var loopState = typeof(DarlingWorker).GetNestedType("ServerLoopState", BindingFlags.NonPublic)!;
+        var servers = Activator.CreateInstance(typeof(List<>).MakeGenericType(loopState))!;
+        var enabledLater = new MonitoredServer { Name = Name, Host = "later.invalid", StoredServerId = ServerId };
+        h.Now = start.AddHours(5);
+        typeof(DarlingWorker).GetMethod("ReconcileServers", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(worker, new object[] { servers, new List<MonitoredServer> { enabledLater } });
+
+        var oldRows = start.AddDays(-2);
+        Assert.False(await CollectionStoppedPassAsync(e, oldRows));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = start.AddHours(5).AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, oldRows));
+        SingleCollectionStopped(h);
+    }
+
     /* ---------------- capture-down edge ---------------- */
 
     [Fact]
@@ -4312,6 +4510,308 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(nodeB.ToString(System.Globalization.CultureInfo.InvariantCulture), fired.ServerKey);
     }
 
+    /* ---------------- #4795: a sweep that was reading when its server was removed ---------------- */
+
+    [Fact]
+    public void AgSweepGeneration_StartsAtZero_AndMovesOnlyForTheServerThatWasForgotten()
+    {
+        var e = new Harness().Build();
+        Assert.Equal(0, e.GenerationOf(ServerId));
+
+        e.Forget(ServerId);
+        e.Forget(ServerId);
+
+        Assert.Equal(2, e.GenerationOf(ServerId));
+        Assert.Equal(0, e.GenerationOf(ServerId + 1));
+    }
+
+    [Fact]
+    public async Task AgAlerts_AReplicaSweepThatWasReadingWhenItsServerWasRemoved_ClaimsNoGroup_SoASurvivorStillJudgesIt()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        const int nodeA = 100001;
+        const int nodeB = 100002;
+
+        /* NODE-A's sweep took its generation and went to read the store. NODE-A is removed meanwhile, and the rows
+           come back for a server that is gone. */
+        var generation = e.GenerationOf(nodeA);
+        e.Forget(nodeA);
+        await e.ApplyAgReplicaHealthAsync(
+            nodeA, "NODE-A", new[] { ReplicaRow(role: "PRIMARY") }, Ct, sweepGeneration: generation);
+
+        /* NODE-B sees the same group with the same view. Had the stale sweep claimed the group, an equal view could
+           not take it over (ties keep the incumbent), the removed server would never sweep again, and nobody would
+           judge the group: this failover would go unreported. */
+        await e.ApplyAgReplicaHealthAsync(nodeB, "NODE-B", new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+        await e.ApplyAgReplicaHealthAsync(nodeB, "NODE-B", new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Failover", fired.MetricName);
+        Assert.Equal(nodeB.ToString(CultureInfo.InvariantCulture), fired.ServerKey);
+    }
+
+    [Fact]
+    public async Task AgAlerts_ADatabaseSweepThatWasReadingWhenItsServerWasRemoved_ClaimsNoGroup_SoASurvivorStillJudgesIt()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        const int nodeA = 100001;
+        const int nodeB = 100002;
+
+        var generation = e.GenerationOf(nodeA);
+        e.Forget(nodeA);
+        await e.ApplyAgDatabaseHealthAsync(
+            nodeA, "NODE-A", new[] { DatabaseRow(suspended: false) }, Ct, sweepGeneration: generation);
+
+        await e.ApplyAgDatabaseHealthAsync(nodeB, "NODE-B", new[] { DatabaseRow(suspended: false) }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(nodeB, "NODE-B", new[] { DatabaseRow(suspended: true) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Database Suspended", fired.MetricName);
+        Assert.Equal(nodeB.ToString(CultureInfo.InvariantCulture), fired.ServerKey);
+    }
+
+    [Fact]
+    public async Task AgAlerts_ASweepThatPassesTheServersCurrentGeneration_JudgesLikeOneThatPassesNone()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Removed and added again once, so the current generation is not merely the unset one, and another server's
+           removal does not move this one. */
+        e.Forget(ServerId);
+        e.Forget(ServerId + 1);
+        var generation = e.GenerationOf(ServerId);
+        Assert.Equal(1, generation);
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct, sweepGeneration: generation);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct, sweepGeneration: generation);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: false) }, Ct, sweepGeneration: generation);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: true) }, Ct, sweepGeneration: generation);
+
+        Assert.Equal(new[] { "AG Failover", "AG Database Suspended" }, h.Deliverer.Outcomes.Select(o => o.MetricName).ToArray());
+    }
+
+    [Fact]
+    public async Task CollectionStopped_ASweepThatWasReadingWhenItsServerWasRemoved_SendsNothingAndLeavesNoState_SoAReAddedServerStartsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The sweep took its generation and went to read the store. The server is removed meanwhile, and the rows
+           come back for a server that is gone. */
+        var generation = e.GenerationOf(ServerId);
+        e.Forget(ServerId);
+        await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct, sweepGeneration: generation);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* The same server comes back under the same id. It finds no standing alert, so a healthy first judgment
+           writes no "Collection Resumed" row for an alert it never fired... */
+        await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: false, "", Ct);
+        Assert.Empty(h.History.Records);
+
+        /* ...and no cooldown stamp, so the first time it is stopped it is announced at once, as a new server's is. */
+        await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct);
+        Assert.Equal("Collection Stopped", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task CaptureDown_ASweepThatWasReadingWhenItsServerWasRemoved_SendsNothingAndLeavesNoState_SoAReAddedServerStartsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var generation = e.GenerationOf(ServerId);
+        e.Forget(ServerId);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct, sweepGeneration: generation);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Ct);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        Assert.Equal("Capture Down", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task AgentNotRunning_ASweepThatWasReadingWhenItsServerWasRemoved_SendsNothingAndLeavesNoState_SoAReAddedServerStartsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var generation = e.GenerationOf(ServerId);
+        e.Forget(ServerId);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct, sweepGeneration: generation);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
+        Assert.Equal("Agent Not Running", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task StoreAlerts_ASweepThatPassesTheServersCurrentGeneration_JudgesLikeOneThatPassesNone()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* One server forgotten once, so its current generation is 1 and not merely the unset 0; another server never
+           forgotten, judged with no generation at all. */
+        e.Forget(ServerId);
+        var generation = e.GenerationOf(ServerId);
+        Assert.Equal(1, generation);
+
+        foreach (var (serverId, sweepGeneration) in new (int, int?)[] { (ServerId, generation), (ServerId + 2, null) })
+        {
+            await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: true, "no recent collection", Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, new[] { "Blocking" }, Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
+
+            await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: false, "", Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, Array.Empty<string>(), Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
+        }
+
+        var fired = new[] { "Collection Stopped", "Capture Down", "Agent Not Running" };
+        var resolved = new[] { "Collection Resumed", "Capture Restored", "Agent Restarted" };
+        Assert.Equal(fired.Concat(fired).ToArray(), h.Deliverer.Outcomes.Select(o => o.MetricName).ToArray());
+        Assert.Equal(resolved.Concat(resolved).ToArray(), h.History.Records.Select(r => r.MetricName).ToArray());
+    }
+
+    [Fact]
+    public void TheStoreSweep_ReadsTheServersGenerationBeforeItsFirstAwait_AndHandsItToAllFiveJudgments()
+    {
+        var source = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"));
+        var start = source.IndexOf("public async Task EvaluateStoreAlertsAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the evaluator has no EvaluateStoreAlertsAsync");
+        var end = source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, "EvaluateStoreAlertsAsync has no closing brace");
+        var sweep = Regex.Replace(source[start..end], @"\s+", " ");
+
+        var capture = sweep.IndexOf("var generation = GenerationOf(serverId);", StringComparison.Ordinal);
+        var firstAwait = sweep.IndexOf("await ", StringComparison.Ordinal);
+        Assert.True(capture >= 0, "the sweep no longer reads the server's generation");
+        Assert.True(firstAwait > capture, "the generation must be read before the sweep's first await, or a removal during a read goes unseen");
+
+        Assert.Contains(
+            "await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4795: a server removed while its connect was queued or running must leave no alert state and send nothing,
+    /// on the failed connect exactly as on the successful one. The worker's Retired containment has no unit seam
+    /// (see the remark in DarlingSweepSchedulingTests), so this pins the shape: every connection alert in the
+    /// connect body sits behind a <c>server.Retired</c> re-check that returns, with no await between the check and
+    /// the call. Without the offline half, a removal landing in a failed connect is followed by an Offline write
+    /// under the removed server's key after <c>Forget</c> cleared it, and the re-added server, which hashes to
+    /// the same server_id, inherits it.
+    /// </summary>
+    [Fact]
+    public void TheConnectBody_ChecksRetiredRightBeforeEachConnectionAlert_WithNoAwaitBetween()
+    {
+        var source = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var start = source.IndexOf("private async Task TryConnectAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the worker has no TryConnectAsync");
+        var end = source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, "TryConnectAsync has no closing brace");
+        var body = Regex.Replace(source[start..end], @"\s+", " ");
+
+        var checks = Regex.Matches(body, @"if \(server\.Retired\) \{[^{}]*\breturn; \}");
+        var alerts = Regex.Matches(body, @"await _selfAlerts!\.ApplyConnectionOutcomeAsync\(");
+        Assert.Equal(Regex.Matches(body, @"ApplyConnectionOutcomeAsync\(").Count, alerts.Count);
+        Assert.Matches(@"ApplyConnectionOutcomeAsync\([^;]*online: true", body);
+        Assert.Matches(@"ApplyConnectionOutcomeAsync\([^;]*online: false", body);
+
+        foreach (Match alert in alerts)
+        {
+            var flavour = alert.Index + 160 < body.Length ? body.Substring(alert.Index, 160) : body[alert.Index..];
+            Match? check = null;
+            foreach (Match candidate in checks)
+            {
+                if (candidate.Index + candidate.Length <= alert.Index)
+                {
+                    check = candidate;
+                }
+            }
+
+            Assert.True(check is not null, "no server.Retired re-check that returns comes before the connection alert: " + flavour);
+            var between = body[(check.Index + check.Length)..alert.Index];
+            Assert.False(between.Contains("await ", StringComparison.Ordinal),
+                "an await sits between the server.Retired re-check and the connection alert, so a removal in that await goes unseen: " + flavour);
+        }
+    }
+
+    /// <summary>
+    /// #4795: the failed-connect handler returns for a removed server before it counts the failure, schedules the
+    /// backoff or logs "retrying in Ns", and not only before the Offline alert. A removed server is never retried,
+    /// so a "Connect failed, retrying" line for it, or a failure count and a <c>NextConnectAttempt</c> on state
+    /// nothing reads again, would say something that will not happen. <c>server.Runtime = null;</c> stays first,
+    /// so the removed server does not keep a half-built runtime. The source walker blanks literal text, so the
+    /// log lines are located in the raw source (which the walker leaves the same length, so offsets line up).
+    /// </summary>
+    [Fact]
+    public void TheConnectBody_OnAFailedConnect_ReturnsForARemovedServerBeforeCountingBackingOffOrLoggingARetry()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var source = CSharpSourceWalker.StripCommentsAndStrings(raw);
+        Assert.Equal(raw.Length, source.Length);
+        var start = source.IndexOf("private async Task TryConnectAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the worker has no TryConnectAsync");
+        var end = source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, "TryConnectAsync has no closing brace");
+
+        var handler = Regex.Match(source[start..end], @"catch \(Exception ex\) when \(ex is not OperationCanceledException\)\s*\{");
+        Assert.True(handler.Success, "TryConnectAsync has no failed-connect handler");
+        var handlerCode = source[(start + handler.Index)..end];
+        var handlerRaw = raw[(start + handler.Index)..end];
+
+        var cleared = handlerCode.IndexOf("server.Runtime = null;", StringComparison.Ordinal);
+        Assert.True(cleared >= 0, "the failed-connect handler no longer clears server.Runtime");
+        var check = Regex.Match(handlerCode, @"if \(server\.Retired\)\s*\{[^{}]*\breturn;\s*\}");
+        Assert.True(check.Success, "the failed-connect handler has no server.Retired re-check that returns");
+        Assert.True(check.Index > cleared,
+            "the server.Retired return comes before server.Runtime = null, so a removed server keeps a half-built runtime");
+        var checkEnd = check.Index + check.Length;
+
+        var firstLog = Regex.Match(handlerCode, @"_logger\.Log\w+\(");
+        var after = new (string What, int At)[]
+        {
+            ("the failure count", handlerCode.IndexOf("ConsecutiveConnectFailures++", StringComparison.Ordinal)),
+            ("the backoff", handlerCode.IndexOf("NextConnectAttempt =", StringComparison.Ordinal)),
+            ("the first log call", firstLog.Success ? firstLog.Index : -1),
+            ("the 'Connect failed, retrying' log line", handlerRaw.IndexOf("Connect failed, retrying in", StringComparison.Ordinal)),
+            ("the 'Connect still failing, retrying' log line", handlerRaw.IndexOf("Connect still failing, retrying in", StringComparison.Ordinal)),
+            ("the Offline alert", handlerCode.IndexOf("ApplyConnectionOutcomeAsync(", StringComparison.Ordinal)),
+        };
+
+        foreach (var (what, at) in after)
+        {
+            Assert.True(at >= 0, what + " is missing from the failed-connect handler, so this pin no longer sees it");
+            Assert.True(at >= checkEnd,
+                what + " comes before the server.Retired return, so a server removed during a failing connect is counted, backed off or logged as retrying");
+        }
+    }
+
     [Fact]
     public async Task AgAlerts_FireUnderTheRealServerKey_SoPerServerDeliveryAndHistoryStillCorrelate()
     {
@@ -4457,8 +4957,8 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new List<PvsPressureInfo>());
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             Task.FromResult(new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>()));
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<DatabaseStateInfo>());
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult<List<DatabaseStateInfo>?>(new List<DatabaseStateInfo>());
 
         public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<ForcePlanFailureInfo>());
@@ -4550,9 +5050,11 @@ public sealed class DarlingSelfAlertTests
             Assert.True(DarlingSelfAlertEvaluator.IsCollectionStopped(
                 lastSuccess, recentRuns, recentSuccess, DateTime.UtcNow, out _));
 
-            /* Full path: EvaluateStoreAlertsAsync must NOT fire collection-stopped until the server has been
-               online this run (the restart-staleness guard), then must fire once it has. Real-time clock so
-               the 45-minute-old success reads as stale against the seeded rows. */
+            /* Full path (#4757): the seeded 45-minute-old success and the stored failure streak are both
+               pre-restart rows to an evaluator that has just started, so at startup it must stay silent: the
+               staleness is judged from the service start (the later of the two), and the stored streak is
+               not armed until the server has been seen online. Once it has, the streak fires. Real-time
+               clock so the seeded rows read as stale in the store. */
             var h = new Harness { Now = DateTime.UtcNow };
             var evaluator = h.Build();
 
@@ -4562,6 +5064,20 @@ public sealed class DarlingSelfAlertTests
             await evaluator.ApplyConnectionOutcomeAsync(LiveServerId, Name, online: true, error: null, ct); /* arm */
             await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: true, ct);
             Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+            /* A second evaluator that never sees the server online is the server that stays down across a
+               restart: silent at the start, fired by the staleness arm once the window has passed since the
+               start. Taken before the capture-down rows below, which add a fresh success. */
+            var hDown = new Harness { Now = DateTime.UtcNow };
+            var downEvaluator = hDown.Build();
+
+            await downEvaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
+            Assert.DoesNotContain(hDown.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+            hDown.Now = hDown.Now.AddMinutes(31);
+            await downEvaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
+            var stoppedByStaleness = Assert.Single(hDown.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+            Assert.StartsWith("No successful collection in 31 minutes", stoppedByStaleness.CurrentValue, StringComparison.Ordinal);
 
             /* Capture-down: latest deadlocks run is SESSION_MISSING, latest blocked_process_report is fine. */
             await InsertLogAsync(connection, ct, logId++, "blocked_process_report", utcNow.AddMinutes(-1), "SUCCESS");

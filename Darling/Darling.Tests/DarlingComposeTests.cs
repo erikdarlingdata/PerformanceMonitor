@@ -746,7 +746,7 @@ public sealed class DarlingComposeTests
 
         /* The series pass buckets ONLY the winners: membership is IS NOT DISTINCT FROM (a NULL group key
            that wins a slot must not be knocked out of its own series by '='). */
-        Assert.Contains("AND EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type)", sql, StringComparison.Ordinal);
+        Assert.Contains("AND EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM rtrim(f.wait_type))", sql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('hour', f.collection_time)", sql, StringComparison.Ordinal);
 
         /* Default is NO residual series — the label appears only under includeOther. */
@@ -768,7 +768,7 @@ public sealed class DarlingComposeTests
 
         /* The residual fold: non-members keep contributing, relabeled — so every bucket still sums to the
            window total. The CASE replaces the WHERE semi-filter (a row filtered out cannot be folded). */
-        var fold = $"CASE WHEN EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type) THEN f.wait_type ELSE '{ComposeCompiler.OtherSeriesLabel}' END";
+        var fold = $"CASE WHEN EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM rtrim(f.wait_type)) THEN rtrim(f.wait_type) ELSE '{ComposeCompiler.OtherSeriesLabel}' END";
         Assert.Contains(fold + " AS wait_type", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY date_trunc('hour', f.collection_time), " + fold, sql, StringComparison.Ordinal);
         Assert.DoesNotContain("  AND EXISTS", sql, StringComparison.Ordinal);
@@ -795,6 +795,88 @@ public sealed class DarlingComposeTests
         /* Values stay bound, never interpolated — in either pass. */
         Assert.DoesNotContain("PROD-01", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SLEEP_TASK", sql, StringComparison.Ordinal);
+    }
+
+    /* ─────────────── #4884: a wait name stored under two spellings ─────────────── */
+
+    /* SQL Server reports a few wait names with a trailing space, which the collector stores trimmed from #4884 on,
+       so history from before the upgrade holds the same wait under a second spelling. The SQL Server wait-name
+       dimensions group on the trimmed name, and every filter keeps the column bare and widens the value instead. */
+    [Fact]
+    public void Catalog_TrailingSpaceHistory_IsExactlyTheSqlServerWaitNameDimensions()
+    {
+        var flagged = MeasureCatalog.Dimensions
+            .Where(d => d.TrailingSpaceHistory)
+            .Select(d => d.SourceTable + "." + d.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        /* pg_wait_stats.wait_type is a PostgreSQL wait event, never stored with a trailing space. */
+        Assert.Equal(new[] { "query_snapshots.wait_type", "wait_stats.wait_type", "waiting_tasks.wait_type" }, flagged);
+    }
+
+    [Theory]
+    [InlineData("wait_stats", "wait_time_delta_ms", "sum")]
+    [InlineData("waiting_tasks", "waiting_task_duration_ms", "max")]
+    [InlineData("query_snapshots", "snapshot_cpu_time_ms", "max")]
+    public void Compile_WaitNameDimension_GroupsOnTheTrimmedName_AndFiltersOnTheBareColumn(string source, string measure, string aggregate)
+    {
+        var compiled = CompileWithParameters(
+            $"{{\"source\":\"{source}\",\"measure\":\"{measure}\",\"aggregate\":\"{aggregate}\",\"topN\":10,\"groupBy\":[\"wait_type\"],\"viz\":\"bar\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"EDC_DOPP_LOCK\"}]}");
+
+        Assert.Contains("rtrim(f.wait_type) AS wait_type", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY rtrim(f.wait_type)", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("rtrim(f.wait_type) =", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(new[] { "EDC_DOPP_LOCK", "EDC_DOPP_LOCK " }, BoundArray(compiled, @"f\.wait_type = ANY\(\$(\d+)\)"));
+    }
+
+    [Theory]
+    [InlineData("neq", @"f\.wait_type <> ALL\(\$\d+\)")]
+    [InlineData("like", @"\(f\.wait_type LIKE (\$\d+) OR f\.wait_type LIKE \1 \|\| ' '\)")]
+    [InlineData("gt", @"\(f\.wait_type > (\$\d+) AND f\.wait_type <> \1 \|\| ' '\)")]
+    [InlineData("gte", @"f\.wait_type >= \$\d+")]
+    [InlineData("lt", @"f\.wait_type < \$\d+")]
+    [InlineData("lte", @"\(f\.wait_type <= (\$\d+) OR f\.wait_type = \1 \|\| ' '\)")]
+    public void Compile_WaitNameFilter_EveryOperatorKeepsTheColumnBare(string op, string predicate)
+    {
+        var compiled = CompileWithParameters(
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_delta_ms\",\"aggregate\":\"sum\",\"viz\":\"stat\"," +
+            $"\"filters\":[{{\"dimension\":\"wait_type\",\"op\":\"{op}\",\"value\":\"EDC_DOPP_LOCK\"}}]}}");
+
+        Assert.Matches(predicate, compiled.Sql);
+        Assert.DoesNotContain("rtrim(", compiled.Sql, StringComparison.Ordinal);
+        if (op == "neq")
+        {
+            Assert.Equal(new[] { "EDC_DOPP_LOCK", "EDC_DOPP_LOCK " }, BoundArray(compiled, @"f\.wait_type <> ALL\(\$(\d+)\)"));
+        }
+    }
+
+    [Fact]
+    public void Compile_PgWaitStatsWaitType_IsLeftAsStored()
+    {
+        var compiled = CompileWithParameters(
+            "{\"source\":\"pg_wait_stats\",\"measure\":\"pg_wait_time_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"wait_type\"],\"viz\":\"bar\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"Lock\"}]}");
+
+        Assert.DoesNotContain("rtrim(", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(new[] { "Lock" }, BoundArray(compiled, @"f\.wait_type = ANY\(\$(\d+)\)"));
+    }
+
+    private static ComposeCompiled CompileWithParameters(string json)
+    {
+        var (compiled, error) = ComposeCompiler.Compile(
+            ValidPlan(json), new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        Assert.True(error is null, error);
+        return compiled!;
+    }
+
+    /// <summary>The text array bound to the one placeholder <paramref name="pattern"/> captures.</summary>
+    private static string[] BoundArray(ComposeCompiled compiled, string pattern)
+    {
+        var match = Assert.Single(Regex.Matches(compiled.Sql, pattern));
+        var ordinal = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        return Assert.IsType<string[]>(compiled.Parameters[ordinal - 1].Value);
     }
 
     [Fact]
@@ -880,7 +962,7 @@ public sealed class DarlingComposeTests
         var (compiled, error) = CompileAged(
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
         Assert.True(error is null, error);
-        Assert.Contains("CAST(SUM(f.worker_time_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0)", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(f.worker_time_sum)::numeric / NULLIF(SUM(f.sample_count), 0) AS double precision)", compiled!.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1109,6 +1191,26 @@ public sealed class DarlingComposeTests
         Assert.NotNull(firstMeasure["allowedDimensions"]);
         Assert.NotNull(firstMeasure["category"]);
         Assert.Null(compose["compact"]);
+    }
+
+    [Fact]
+    public void CatalogNode_LabelSuffix_MatchesTheHelper_AndSkipsWindowTotalsAndScalars()
+    {
+        var compose = Assert.IsType<JsonObject>(DarlingWebEndpoints.BuildCatalogNode()["compose"]);
+        var nodes = Assert.IsType<JsonArray>(compose["measures"]).Select(n => Assert.IsType<JsonObject>(n))
+            .ToDictionary(n => n["key"]!.GetValue<string>(), StringComparer.Ordinal);
+
+        foreach (var m in MeasureCatalog.Measures)
+        {
+            if (m.Kind != MeasureKind.Ratio || m.RatioMode == MeasureRatioMode.WeightedSum)
+                Assert.False(nodes[m.Key].ContainsKey("labelSuffix"));
+            else
+                Assert.Equal(" (ratio)", nodes[m.Key]["labelSuffix"]!.GetValue<string>());
+        }
+
+        Assert.Contains(MeasureCatalog.Measures, m => m.RatioMode == MeasureRatioMode.WeightedSum && m.Kind == MeasureKind.Ratio);
+        Assert.False(nodes["qs_total_duration_us"].ContainsKey("labelSuffix"));
+        Assert.False(nodes["qs_total_cpu_us"].ContainsKey("labelSuffix"));
     }
 
     /* ─────────────────────────── DoS backstop + loopback scrub (provisioning) ─────────────────────────── */
@@ -1652,6 +1754,159 @@ public sealed class DarlingComposeTests
         Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
     }
 
+    /* ─────────────── #4605: the query_store_interval_wide (V145) route ─────────────── */
+
+    private static string CompileQueryStoreWideEligible(string planJson, string[]? servers = null)
+    {
+        var plan = ValidPlan(planJson);
+        var context = new ComposeRunContext(
+            servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+            QueryStoreWideEligible: true);
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+        Assert.NotNull(compiled);
+        return compiled!.Sql;
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideEligible_ReadsTheTableWithTheServerNameJoin()
+    {
+        /* #4605 part 2: an eligible run reads collect.query_store_interval_wide directly (the table already
+           holds the latest snapshot per interval, every outcome — the raw dedup's own answer) joined to
+           collect.servers to restore server_name, which the table itself does not carry. */
+        var sql = CompileQueryStoreWideEligible(
+            "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
+
+        Assert.Contains(
+            "(SELECT w.*, s.server_name FROM collect.query_store_interval_wide AS w "
+            + "JOIN collect.servers AS s ON s.server_id = w.server_id "
+            + "WHERE w.collection_time >= $1 AND w.collection_time <= $2)",
+            sql, StringComparison.Ordinal);
+
+        /* No ROW_NUMBER dedup — the table already holds one row per interval identity. */
+        Assert.DoesNotContain("qs_rn", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideStart_BindsTheLaterOfWindowStartAndWideStart_InTheCollectionTimeColumn()
+    {
+        /* #4689: query_store_stats' prefix time column is collection_time, the column the window predicate
+           already uses. A wide start after the window start binds as its own parameter on the table read. */
+        var plan = ValidPlan("{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
+        var wideStart = WindowStart.AddHours(12);
+        var context = new ComposeRunContext(
+            null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+            QueryStoreWideEligible: true, QueryStoreWideStart: wideStart);
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+
+        Assert.Contains("WHERE w.collection_time >= $3 AND w.collection_time <= $2)", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains(compiled.Parameters, prm => prm.Value is DateTime d && d == wideStart);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideStart_NullOrEarlierThanTheWindow_LeavesTheWindowBind()
+    {
+        var plan = ValidPlan("{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
+        foreach (DateTime? wideStart in new DateTime?[] { null, WindowStart.AddHours(-3) })
+        {
+            var context = new ComposeRunContext(
+                null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+                QueryStoreWideEligible: true, QueryStoreWideStart: wideStart);
+            var (compiled, error) = ComposeCompiler.Compile(plan, context);
+            Assert.True(error is null, error);
+            Assert.Contains("WHERE w.collection_time >= $1 AND w.collection_time <= $2)", compiled!.Sql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideEligible_CarriesNoFirstExecutionTimeFloor()
+    {
+        /* #4605: the Custom Views route, for all servers or some, deliberately carries no first_execution_time floor:
+           with a collection_time index and random_page_cost 1.1 the floor made the planner fetch window + 26 h of rows
+           through the first_exec index. */
+        const string panel = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
+        var plan = ValidPlan(panel);
+
+        var wideContext = new ComposeRunContext(
+            null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+            QueryStoreWideEligible: true);
+        var (wide, wideError) = ComposeCompiler.Compile(plan, wideContext);
+        Assert.True(wideError is null, wideError);
+        Assert.DoesNotContain("first_execution_time >=", wide!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, wide.Sql, StringComparison.Ordinal);
+
+        /* The raw route stays byte-for-byte what it was: the dedupe over the raw table, no floor, no margin. */
+        var rawContext = wideContext with { QueryStoreWideEligible = false };
+        var (raw, rawError) = ComposeCompiler.Compile(plan, rawContext);
+        Assert.True(rawError is null, rawError);
+        Assert.Contains(
+            "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
+            + "query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role "
+            + "ORDER BY collection_time DESC, execution_count DESC) AS qs_rn "
+            + "FROM collect.query_store_stats WHERE collection_time >= $1 AND collection_time <= $2) AS qs_ranked WHERE qs_rn = 1)",
+            raw!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, raw.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("first_execution_time >=", raw.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStoreHistoryNote_NamesTheStartAndTheReason()
+    {
+        var start = new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc);
+        var filled = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.FilledSince);
+        var purge = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge);
+        Assert.Contains(start.ToString("o"), filled, StringComparison.Ordinal);
+        Assert.Contains("began keeping complete history", filled, StringComparison.Ordinal);
+        Assert.Contains("keeps 9 days", purge, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStoreHistoryNote_NamesTheSettingServer_AndTheRouteEmitsSetByOnlyWhenTruncated()
+    {
+        var start = new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc);
+        var named = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.FilledSince, "alpha");
+        Assert.Contains("complete history for alpha at ", named, StringComparison.Ordinal);
+        Assert.DoesNotContain("these servers", named, StringComparison.Ordinal);
+
+        /* The field sits inside the same guard as the note: present when the table cut the window, absent otherwise. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var guard = source.IndexOf("wideResolution.WideStart is DateTime historyStart && historyStart > start", StringComparison.Ordinal);
+        Assert.True(guard >= 0);
+        var block = source[guard..source.IndexOf("return ComposeRunOutcome.Ok(payload);", guard, StringComparison.Ordinal)];
+        Assert.Contains("payload[\"query_store_history_note\"]", block, StringComparison.Ordinal);
+        Assert.Contains("payload[\"query_store_history_set_by\"] = wideResolution.SettingServer;", block, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideEligible_ModuleNameFilterCompilesAgainstTheFactAlias()
+    {
+        /* module_name is a real column on query_store_stats AND on the wide table, so a LIKE filter on it
+           compiles the same way against the fact alias either way — no join, no CTE, unlike query_stats'
+           object_name (#1568). */
+        var sql = CompileQueryStoreWideEligible(
+            "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\","
+            + "\"filters\":[{\"dimension\":\"module_name\",\"op\":\"like\",\"value\":\"usp_%\"}]}");
+
+        Assert.Contains("f.module_name LIKE", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideNotEligible_ReadsTodaysRawDedupUnchanged()
+    {
+        /* The default context (QueryStoreWideEligible: false, the parameter's default) must compile to
+           EXACTLY today's raw ROW_NUMBER dedup — every non-eligible case (the flag false, a pre-V145
+           schema, or a failed eligibility clause all resolve to this same false before Compile ever runs). */
+        var sql = Compile(
+            ValidPlan("{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"));
+
+        Assert.Contains("AS qs_rn", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE qs_rn = 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_store_interval_wide", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_QueryStoreCaggRoute_IsNotWrappedInTheRawDedup()
     {
@@ -1996,7 +2251,7 @@ public sealed class DarlingComposeTests
 
     private static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(
         PanelPlan plan, IReadOnlyList<string>? servers = null) =>
-        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown), ComposeCompiler.NoServerClocks);
 
     [Fact]
     public void CompileAnnotations_ReturnsEmpty_WhenNoneRequested()

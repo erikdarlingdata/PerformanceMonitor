@@ -272,10 +272,12 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
 
     /* ---------------- IAlertSettings (delivery) ---------------- */
 
+    /* #4751: host + from only. The default recipient list is no longer part of "SMTP is set up": a notification
+       route can name the recipients on its own, and the parent supplies only the host, the from address and the
+       credentials. A firing that resolves to no recipients at all is skipped by EmailSendCore, not sent. */
     public bool SmtpEnabled =>
         !string.IsNullOrWhiteSpace(_config.Smtp.Host)
-        && !string.IsNullOrWhiteSpace(_config.Smtp.From)
-        && !string.IsNullOrWhiteSpace(_config.Smtp.To);
+        && !string.IsNullOrWhiteSpace(_config.Smtp.From);
 
     public string SmtpServer => _config.Smtp.Host;
     public int SmtpPort => _config.Smtp.Port;

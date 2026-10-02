@@ -262,7 +262,7 @@ public sealed class DarlingAgStatesReaderLiveEqualityTests
                 Assert.Equal(2, removedCard.Databases.Count);
             }
 
-            var fleetHealth = await DarlingAgReader.GetAgHealthAsync(postgres, null, now, ct);
+            var fleetHealth = await DarlingAgReader.GetAgHealthAsync(postgres, null, now, cancellationToken: ct);
             var fleetGroups = fleetHealth.AvailabilityGroups.Where(g => sentinelIds.Contains(g.ServerId)).ToList();
             Assert.Equal(9, fleetGroups.Count);
             Assert.DoesNotContain(fleetGroups, g => g.ServerId == disabledId);
@@ -270,7 +270,7 @@ public sealed class DarlingAgStatesReaderLiveEqualityTests
             var fleetCount = await DarlingAgReader.GetAvailabilityGroupCountAsync(postgres, null, ct);
             Assert.Equal(fleetHealth.AvailabilityGroupCount, fleetCount);
 
-            var scopedHealth = await DarlingAgReader.GetAgHealthAsync(postgres, staleId, now, ct);
+            var scopedHealth = await DarlingAgReader.GetAgHealthAsync(postgres, staleId, now, cancellationToken: ct);
             Assert.Equal(StaleName, Assert.Single(scopedHealth.AvailabilityGroups).ServerName);
 
             var fleetJson = await DarlingMcpAgTools.GetAgHealth(postgres, null);
@@ -303,14 +303,25 @@ public sealed class DarlingAgStatesReaderLiveEqualityTests
     [Fact]
     public async Task AgStatesReader_StepTwoStaysBounded_ForCurrentAndStaleServers_AgainstDevPostgres()
     {
-        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #4228 AG plan test.");
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live #4228 AG plan test (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        // #4650: a scratch database, so no other class's leftover chunks shape the plan under test.
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var cs = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         var timescale = await PrepareHypertablesAsync(cs!, connection, ct);
+        if (timescale)
+        {
+            /* No background policy job reshapes the chunks under the plan assertion. */
+            await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+            {
+                await stop.ExecuteNonQueryAsync(ct);
+            }
+        }
         Assert.SkipUnless(timescale, "TimescaleDB is not available on this store: there are no chunks to exclude.");
 
         await DeleteSentinelRowsAsync(connection, ct);

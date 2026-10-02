@@ -75,11 +75,21 @@ LIMIT 1";
 
         try
         {
-            var plan = ShowPlanParser.Parse(planXml);
-            PlanAnalyzer.Analyze(plan);
+            var plan = ShowPlanParser.Parse(planXml, context.CancellationToken);
+            // #4551: a parse-error plan still carries parser-extracted content (SQL Server's own
+            // plan warnings and missing-index suggestions), so it can't be treated as empty; return
+            // before that content is read. PlanAnalysisPipeline.Run separately skips analysis on it.
+            if (!string.IsNullOrWhiteSpace(plan.ParseError))
+                return;
 
-            var allWarnings = plan.Batches
-                .SelectMany(b => b.Statements)
+            // #4530/#4597: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP. No
+            // database name is known at this call site (query_hash lookup only), so Database stays null.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, cancellationToken: context.CancellationToken);
+            PlanAnalysisPipeline.Run(plan, _analyzerConfig, metadata, context.CancellationToken);
+
+            // #4514: includes statements nested inside a stored procedure or UDF body, so a
+            // finding inside an EXEC <procedure> plan's body reaches the drill-down.
+            var allWarnings = PlanStatements.EnumerateAll(plan)
                 .Where(s => s.RootNode != null)
                 .SelectMany(s =>
                 {
@@ -116,9 +126,10 @@ LIMIT 1";
                 })
             };
         }
-        catch
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            // Plan parsing can fail on malformed XML — skip silently
+            // Plan parsing can fail on malformed XML — skip silently. An abandonment is NOT
+            // swallowed here (#2443).
         }
     }
 
@@ -174,7 +185,11 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var details = PlanAdvisoryAggregator.Extract(planXmls);
+            // #4530/#4597: one store read per collector call so rule 38 can see the server's edition/MAXDOP.
+            // This aggregates plans across whatever databases fed the top-10-by-cost set (no single database
+            // name), so Database stays null here.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, cancellationToken: context.CancellationToken);
+            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, _analyzerConfig, metadata, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)
             {

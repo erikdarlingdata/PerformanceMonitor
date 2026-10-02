@@ -1,0 +1,572 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ShowPlanXML xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Version="1.564" Build="16.0.4210.1" xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+  <BatchSequence>
+    <Batch>
+      <Statements>
+        <StmtSimple StatementCompId="1" StatementEstRows="482677" StatementId="1" StatementOptmLevel="FULL" CardinalityEstimationModelVersion="140" StatementSubTreeCost="16976.5" StatementText="SELECT&#xD;&#xA;    u.DisplayName,&#xD;&#xA;    p.Score&#xD;&#xA;    , p.Title&#xD;&#xA;    , p.Tags&#xD;&#xA;    , p.Body&#xD;&#xA;FROM dbo.Users AS u&#xD;&#xA;LEFT JOIN&#xD;&#xA;(&#xD;&#xA;    SELECT&#xD;&#xA;        p.*,&#xD;&#xA;        n = ROW_NUMBER() OVER&#xD;&#xA;            (&#xD;&#xA;                PARTITION BY&#xD;&#xA;                    p.OwnerUserId&#xD;&#xA;                ORDER BY&#xD;&#xA;                    p.Score DESC&#xD;&#xA;            )&#xD;&#xA;    FROM dbo.Posts AS p&#xD;&#xA;    WHERE p.PostTypeId = 2&#xD;&#xA;    AND   p.Score &gt; 0&#xD;&#xA;) AS p&#xD;&#xA;  ON  p.OwnerUserId = u.Id&#xD;&#xA;  AND p.n = 1&#xD;&#xA;WHERE u.Reputation &gt;= 20000&#xD;&#xA;ORDER BY&#xD;&#xA;    u.Reputation DESC,&#xD;&#xA;    u.Id DESC" StatementType="SELECT" QueryHash="0xF00E4B0A5D9CD2E5" QueryPlanHash="0xC4C50220FBFA216F" RetrievedFromCache="true" StatementSqlHandle="0x0900211277A0A259F90336012D3C38EB1F030000000000000000000000000000000000000000000000000000" DatabaseContextSettingsId="1" ParentObjectId="0" StatementParameterizationType="0" SecurityPolicyApplied="false">
+          <StatementSetOptions ANSI_NULLS="true" ANSI_PADDING="true" ANSI_WARNINGS="true" ARITHABORT="true" CONCAT_NULL_YIELDS_NULL="true" NUMERIC_ROUNDABORT="false" QUOTED_IDENTIFIER="true" />
+          <QueryPlan DegreeOfParallelism="8" MemoryGrant="10851312" CachedPlanSize="96" CompileTime="2" CompileCPU="2" CompileMemory="632">
+            <ThreadStat Branches="3" UsedThreads="24">
+              <ThreadReservation NodeId="0" ReservedThreads="24" />
+            </ThreadStat>
+            <MissingIndexes>
+              <MissingIndexGroup Impact="10.1015">
+                <MissingIndex Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]">
+                  <ColumnGroup Usage="EQUALITY">
+                    <Column Name="[PostTypeId]" ColumnId="16" />
+                  </ColumnGroup>
+                  <ColumnGroup Usage="INEQUALITY">
+                    <Column Name="[Score]" ColumnId="17" />
+                  </ColumnGroup>
+                  <ColumnGroup Usage="INCLUDE">
+                    <Column Name="[Body]" ColumnId="4" />
+                    <Column Name="[OwnerUserId]" ColumnId="14" />
+                    <Column Name="[Tags]" ColumnId="18" />
+                    <Column Name="[Title]" ColumnId="19" />
+                  </ColumnGroup>
+                </MissingIndex>
+              </MissingIndexGroup>
+            </MissingIndexes>
+            <MemoryGrantInfo SerialRequiredMemory="1664" SerialDesiredMemory="51068520" RequiredMemory="21056" DesiredMemory="51087936" RequestedMemory="10851312" GrantWaitTime="0" GrantedMemory="10851312" MaxUsedMemory="10232840" MaxQueryMemory="10851312" />
+            <OptimizerHardwareDependentProperties EstimatedAvailableMemoryGrant="367001" EstimatedPagesCached="367001" EstimatedAvailableDegreeOfParallelism="8" MaxCompileMemory="47067952" />
+            <OptimizerStatsUsage>
+              <StatisticsInfo Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Statistics="[PK_Users_Id]" ModificationCount="0" SamplingPercent="100" LastUpdate="2025-06-24T15:18:46.47" />
+              <StatisticsInfo Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Statistics="[_WA_Sys_00000011_0519C6AF]" ModificationCount="0" SamplingPercent="0.866349" LastUpdate="2025-08-17T07:25:11.84" />
+              <StatisticsInfo Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Statistics="[_WA_Sys_0000000E_0519C6AF]" ModificationCount="0" SamplingPercent="0.866349" LastUpdate="2025-08-17T07:25:12.26" />
+              <StatisticsInfo Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Statistics="[_WA_Sys_0000000A_08EA5793]" ModificationCount="0" SamplingPercent="4.33169" LastUpdate="2025-08-17T07:25:11.61" />
+              <StatisticsInfo Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Statistics="[_WA_Sys_00000010_0519C6AF]" ModificationCount="0" SamplingPercent="0.866349" LastUpdate="2025-08-17T07:25:12.05" />
+            </OptimizerStatsUsage>
+            <WaitStats>
+              <Wait WaitType="CXSYNC_PORT" WaitTimeMs="202414" WaitCount="57" />
+              <Wait WaitType="CXPACKET" WaitTimeMs="132945" WaitCount="1160672" />
+              <Wait WaitType="LOGBUFFER" WaitTimeMs="42691" WaitCount="5112" />
+              <Wait WaitType="IO_COMPLETION" WaitTimeMs="27534" WaitCount="164349" />
+              <Wait WaitType="RESERVED_MEMORY_ALLOCATION_EXT" WaitTimeMs="5444" WaitCount="1280982" />
+              <Wait WaitType="SOS_PHYS_PAGE_CACHE" WaitTimeMs="3243" WaitCount="24114" />
+              <Wait WaitType="PAGEIOLATCH_EX" WaitTimeMs="873" WaitCount="2" />
+              <Wait WaitType="MEMORY_ALLOCATION_EXT" WaitTimeMs="256" WaitCount="243262" />
+              <Wait WaitType="PAGEIOLATCH_SH" WaitTimeMs="225" WaitCount="690" />
+              <Wait WaitType="SOS_SCHEDULER_YIELD" WaitTimeMs="83" WaitCount="1268" />
+            </WaitStats>
+            <QueryTimeStats CpuTime="76230" ElapsedTime="26819" />
+            <RelOp AvgRowSize="4493" EstimateCPU="20.7854" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="482677" LogicalOp="Gather Streams" NodeId="0" Parallel="true" PhysicalOp="Parallelism" EstimatedTotalSubtreeCost="16976.5">
+              <OutputList>
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                <ColumnReference Column="Expr1003" />
+                <ColumnReference Column="Expr1005" />
+                <ColumnReference Column="Expr1006" />
+                <ColumnReference Column="Expr1007" />
+              </OutputList>
+              <RunTimeInformation>
+                <RunTimeCountersPerThread Thread="0" ActualRows="5829" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26537" ActualCPUms="16" />
+              </RunTimeInformation>
+              <Parallelism>
+                <OrderBy>
+                  <OrderByColumn Ascending="false">
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                  </OrderByColumn>
+                  <OrderByColumn Ascending="false">
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                  </OrderByColumn>
+                </OrderBy>
+                <RelOp AvgRowSize="4493" EstimateCPU="0.940287" EstimateIO="679.445" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="482677" LogicalOp="Sort" NodeId="1" Parallel="true" PhysicalOp="Sort" EstimatedTotalSubtreeCost="16955.7">
+                  <OutputList>
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                    <ColumnReference Column="Expr1003" />
+                    <ColumnReference Column="Expr1005" />
+                    <ColumnReference Column="Expr1006" />
+                    <ColumnReference Column="Expr1007" />
+                  </OutputList>
+                  <MemoryFractions Input="0.0523035" Output="1" />
+                  <RunTimeInformation>
+                    <RunTimeCountersPerThread Thread="8" ActualRebinds="1" ActualRewinds="0" ActualRows="710" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26520" ActualCPUms="15" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="71312" OutputMemoryGrant="1353904" UsedMemoryGrant="1696" />
+                    <RunTimeCountersPerThread Thread="7" ActualRebinds="1" ActualRewinds="0" ActualRows="746" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26520" ActualCPUms="16" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="71312" OutputMemoryGrant="1353904" UsedMemoryGrant="1600" />
+                    <RunTimeCountersPerThread Thread="6" ActualRebinds="1" ActualRewinds="0" ActualRows="703" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26520" ActualCPUms="17" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="71312" OutputMemoryGrant="1353904" UsedMemoryGrant="1712" />
+                    <RunTimeCountersPerThread Thread="5" ActualRebinds="1" ActualRewinds="0" ActualRows="719" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26520" ActualCPUms="16" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="71312" OutputMemoryGrant="1353904" UsedMemoryGrant="1720" />
+                    <RunTimeCountersPerThread Thread="4" ActualRebinds="1" ActualRewinds="0" ActualRows="714" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26520" ActualCPUms="16" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="71312" OutputMemoryGrant="1353904" UsedMemoryGrant="1776" />
+                    <RunTimeCountersPerThread Thread="3" ActualRebinds="1" ActualRewinds="0" ActualRows="738" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26520" ActualCPUms="17" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="71312" OutputMemoryGrant="1353904" UsedMemoryGrant="1792" />
+                    <RunTimeCountersPerThread Thread="2" ActualRebinds="1" ActualRewinds="0" ActualRows="746" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26520" ActualCPUms="16" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="71312" OutputMemoryGrant="1353904" UsedMemoryGrant="1728" />
+                    <RunTimeCountersPerThread Thread="1" ActualRebinds="1" ActualRewinds="0" ActualRows="753" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26520" ActualCPUms="17" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="71312" OutputMemoryGrant="1353904" UsedMemoryGrant="1712" />
+                    <RunTimeCountersPerThread Thread="0" ActualRebinds="0" ActualRewinds="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="0" />
+                  </RunTimeInformation>
+                  <Sort Distinct="false">
+                    <OrderBy>
+                      <OrderByColumn Ascending="false">
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                      </OrderByColumn>
+                      <OrderByColumn Ascending="false">
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                      </OrderByColumn>
+                    </OrderBy>
+                    <RelOp AvgRowSize="4493" EstimateCPU="7.79011" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="482677" LogicalOp="Left Outer Join" NodeId="2" Parallel="true" PhysicalOp="Hash Match" EstimatedTotalSubtreeCost="16275.3">
+                      <OutputList>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                        <ColumnReference Column="Expr1003" />
+                        <ColumnReference Column="Expr1005" />
+                        <ColumnReference Column="Expr1006" />
+                        <ColumnReference Column="Expr1007" />
+                      </OutputList>
+                      <MemoryFractions Input="0.00172742" Output="0.00163707" />
+                      <RunTimeInformation>
+                        <RunTimeCountersPerThread Thread="8" ActualRows="710" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26515" ActualCPUms="10" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="3360" OutputMemoryGrant="3240" UsedMemoryGrant="640" />
+                        <RunTimeCountersPerThread Thread="7" ActualRows="746" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26515" ActualCPUms="11" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="3360" OutputMemoryGrant="3240" UsedMemoryGrant="640" />
+                        <RunTimeCountersPerThread Thread="6" ActualRows="703" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26514" ActualCPUms="11" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="3360" OutputMemoryGrant="3240" UsedMemoryGrant="640" />
+                        <RunTimeCountersPerThread Thread="5" ActualRows="719" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26515" ActualCPUms="11" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="3360" OutputMemoryGrant="3240" UsedMemoryGrant="648" />
+                        <RunTimeCountersPerThread Thread="4" ActualRows="714" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26515" ActualCPUms="11" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="3360" OutputMemoryGrant="3240" UsedMemoryGrant="640" />
+                        <RunTimeCountersPerThread Thread="3" ActualRows="738" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26514" ActualCPUms="12" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="3360" OutputMemoryGrant="3240" UsedMemoryGrant="640" />
+                        <RunTimeCountersPerThread Thread="2" ActualRows="746" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26515" ActualCPUms="10" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="3360" OutputMemoryGrant="3240" UsedMemoryGrant="640" />
+                        <RunTimeCountersPerThread Thread="1" ActualRows="753" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26514" ActualCPUms="12" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="3360" OutputMemoryGrant="3240" UsedMemoryGrant="648" />
+                        <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="0" />
+                      </RunTimeInformation>
+                      <Hash>
+                        <DefinedValues />
+                        <HashKeysBuild>
+                          <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                        </HashKeysBuild>
+                        <HashKeysProbe>
+                          <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                        </HashKeysProbe>
+                        <ProbeResidual>
+                          <ScalarOperator ScalarString="[StackOverflow2013].[dbo].[Users].[Id] as [u].[Id]=[StackOverflow2013].[dbo].[Posts].[OwnerUserId] as [p].[OwnerUserId]">
+                            <Compare CompareOp="EQ">
+                              <ScalarOperator>
+                                <Identifier>
+                                  <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                                </Identifier>
+                              </ScalarOperator>
+                              <ScalarOperator>
+                                <Identifier>
+                                  <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                </Identifier>
+                              </ScalarOperator>
+                            </Compare>
+                          </ScalarOperator>
+                        </ProbeResidual>
+                        <RelOp AvgRowSize="59" EstimateCPU="0.0343934" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="7064.08" LogicalOp="Bitmap Create" NodeId="3" Parallel="true" PhysicalOp="Bitmap" EstimatedTotalSubtreeCost="33.3882">
+                          <OutputList>
+                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                          </OutputList>
+                          <RunTimeInformation>
+                            <RunTimeCountersPerThread Thread="8" ActualRows="710" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="32" />
+                            <RunTimeCountersPerThread Thread="7" ActualRows="746" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="32" />
+                            <RunTimeCountersPerThread Thread="6" ActualRows="703" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="32" />
+                            <RunTimeCountersPerThread Thread="5" ActualRows="719" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="32" />
+                            <RunTimeCountersPerThread Thread="4" ActualRows="714" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="32" />
+                            <RunTimeCountersPerThread Thread="3" ActualRows="738" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="32" />
+                            <RunTimeCountersPerThread Thread="2" ActualRows="746" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="32" />
+                            <RunTimeCountersPerThread Thread="1" ActualRows="753" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="32" />
+                            <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="0" />
+                          </RunTimeInformation>
+                          <Bitmap>
+                            <DefinedValues>
+                              <DefinedValue>
+                                <ColumnReference Column="Bitmap1010" />
+                              </DefinedValue>
+                            </DefinedValues>
+                            <HashKeys>
+                              <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                            </HashKeys>
+                            <RelOp AvgRowSize="59" EstimateCPU="0.0343934" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="7064.08" LogicalOp="Repartition Streams" NodeId="4" Parallel="true" PhysicalOp="Parallelism" EstimatedTotalSubtreeCost="33.3882">
+                              <OutputList>
+                                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                              </OutputList>
+                              <RunTimeInformation>
+                                <RunTimeCountersPerThread Thread="8" ActualRows="710" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" />
+                                <RunTimeCountersPerThread Thread="7" ActualRows="746" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" />
+                                <RunTimeCountersPerThread Thread="6" ActualRows="703" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" />
+                                <RunTimeCountersPerThread Thread="5" ActualRows="719" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" />
+                                <RunTimeCountersPerThread Thread="4" ActualRows="714" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" />
+                                <RunTimeCountersPerThread Thread="3" ActualRows="738" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" />
+                                <RunTimeCountersPerThread Thread="2" ActualRows="746" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" />
+                                <RunTimeCountersPerThread Thread="1" ActualRows="753" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="0" />
+                                <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" />
+                              </RunTimeInformation>
+                              <Parallelism PartitioningType="Hash">
+                                <PartitionColumns>
+                                  <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                                </PartitionColumns>
+                                <RelOp AvgRowSize="59" EstimateCPU="0.339055" EstimateIO="32.8668" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="7064.08" EstimatedRowsRead="2465710" LogicalOp="Clustered Index Scan" NodeId="5" Parallel="true" PhysicalOp="Clustered Index Scan" EstimatedTotalSubtreeCost="33.2059" TableCardinality="2465710">
+                                  <OutputList>
+                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                                  </OutputList>
+                                  <RunTimeInformation>
+                                    <RunTimeCountersPerThread Thread="8" ActualRows="860" ActualRowsRead="314208" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25" ActualCPUms="25" ActualScans="1" ActualLogicalReads="5845" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                    <RunTimeCountersPerThread Thread="7" ActualRows="994" ActualRowsRead="309381" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25" ActualCPUms="25" ActualScans="1" ActualLogicalReads="5728" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                    <RunTimeCountersPerThread Thread="6" ActualRows="701" ActualRowsRead="346317" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26" ActualCPUms="26" ActualScans="1" ActualLogicalReads="6267" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                    <RunTimeCountersPerThread Thread="5" ActualRows="560" ActualRowsRead="306119" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26" ActualCPUms="26" ActualScans="1" ActualLogicalReads="5558" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                    <RunTimeCountersPerThread Thread="4" ActualRows="362" ActualRowsRead="287789" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="24" ActualCPUms="24" ActualScans="1" ActualLogicalReads="5016" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                    <RunTimeCountersPerThread Thread="3" ActualRows="1472" ActualRowsRead="298688" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25" ActualCPUms="25" ActualScans="1" ActualLogicalReads="5643" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                    <RunTimeCountersPerThread Thread="2" ActualRows="486" ActualRowsRead="336371" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26" ActualCPUms="25" ActualScans="1" ActualLogicalReads="5923" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                    <RunTimeCountersPerThread Thread="1" ActualRows="394" ActualRowsRead="266840" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="27" ActualCPUms="25" ActualScans="1" ActualLogicalReads="4755" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                    <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" ActualScans="1" ActualLogicalReads="2" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                  </RunTimeInformation>
+                                  <IndexScan Ordered="false" ForcedIndex="false" ForceScan="false" NoExpandHint="false" Storage="RowStore">
+                                    <DefinedValues>
+                                      <DefinedValue>
+                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                                      </DefinedValue>
+                                      <DefinedValue>
+                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                                      </DefinedValue>
+                                      <DefinedValue>
+                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                                      </DefinedValue>
+                                    </DefinedValues>
+                                    <Object Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Index="[PK_Users_Id]" Alias="[u]" IndexKind="Clustered" Storage="RowStore" />
+                                    <Predicate>
+                                      <ScalarOperator ScalarString="[StackOverflow2013].[dbo].[Users].[Reputation] as [u].[Reputation]&gt;=(20000)">
+                                        <Compare CompareOp="GE">
+                                          <ScalarOperator>
+                                            <Identifier>
+                                              <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                                            </Identifier>
+                                          </ScalarOperator>
+                                          <ScalarOperator>
+                                            <Const ConstValue="(20000)" />
+                                          </ScalarOperator>
+                                        </Compare>
+                                      </ScalarOperator>
+                                    </Predicate>
+                                  </IndexScan>
+                                </RelOp>
+                              </Parallelism>
+                            </RelOp>
+                          </Bitmap>
+                        </RelOp>
+                        <RelOp AvgRowSize="4447" EstimateCPU="342.264" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="8820150" LogicalOp="Repartition Streams" NodeId="6" Parallel="true" PhysicalOp="Parallelism" EstimatedTotalSubtreeCost="16234.2">
+                          <OutputList>
+                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                            <ColumnReference Column="Expr1003" />
+                            <ColumnReference Column="Expr1005" />
+                            <ColumnReference Column="Expr1006" />
+                            <ColumnReference Column="Expr1007" />
+                          </OutputList>
+                          <RunTimeInformation>
+                            <RunTimeCountersPerThread Thread="8" ActualRows="694" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26485" ActualCPUms="8" />
+                            <RunTimeCountersPerThread Thread="7" ActualRows="732" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26485" ActualCPUms="9" />
+                            <RunTimeCountersPerThread Thread="6" ActualRows="694" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26484" ActualCPUms="9" />
+                            <RunTimeCountersPerThread Thread="5" ActualRows="706" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26485" ActualCPUms="9" />
+                            <RunTimeCountersPerThread Thread="4" ActualRows="699" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26485" ActualCPUms="8" />
+                            <RunTimeCountersPerThread Thread="3" ActualRows="730" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26485" ActualCPUms="9" />
+                            <RunTimeCountersPerThread Thread="2" ActualRows="730" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26485" ActualCPUms="8" />
+                            <RunTimeCountersPerThread Thread="1" ActualRows="738" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26485" ActualCPUms="9" />
+                            <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" />
+                          </RunTimeInformation>
+                          <Parallelism PartitioningType="Hash">
+                            <PartitionColumns>
+                              <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                            </PartitionColumns>
+                            <Predicate>
+                              <ScalarOperator ScalarString="PROBE([Bitmap1010],[StackOverflow2013].[dbo].[Posts].[OwnerUserId] as [p].[OwnerUserId])">
+                                <Intrinsic FunctionName="PROBE">
+                                  <ScalarOperator>
+                                    <Identifier>
+                                      <ColumnReference Column="Bitmap1010" />
+                                    </Identifier>
+                                  </ScalarOperator>
+                                  <ScalarOperator>
+                                    <Identifier>
+                                      <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                    </Identifier>
+                                  </ScalarOperator>
+                                </Intrinsic>
+                              </ScalarOperator>
+                            </Predicate>
+                            <RelOp AvgRowSize="4447" EstimateCPU="0.529209" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="8820150" LogicalOp="Filter" NodeId="7" Parallel="true" PhysicalOp="Filter" EstimatedTotalSubtreeCost="15891.9">
+                              <OutputList>
+                                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                <ColumnReference Column="Expr1003" />
+                                <ColumnReference Column="Expr1005" />
+                                <ColumnReference Column="Expr1006" />
+                                <ColumnReference Column="Expr1007" />
+                              </OutputList>
+                              <RunTimeInformation>
+                                <RunTimeCountersPerThread Thread="8" ActualRows="71244" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25995" ActualCPUms="6418" />
+                                <RunTimeCountersPerThread Thread="7" ActualRows="70968" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26117" ActualCPUms="6378" />
+                                <RunTimeCountersPerThread Thread="6" ActualRows="71335" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26289" ActualCPUms="6884" />
+                                <RunTimeCountersPerThread Thread="5" ActualRows="71387" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26183" ActualCPUms="6858" />
+                                <RunTimeCountersPerThread Thread="4" ActualRows="71216" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26025" ActualCPUms="6255" />
+                                <RunTimeCountersPerThread Thread="3" ActualRows="71347" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25916" ActualCPUms="6045" />
+                                <RunTimeCountersPerThread Thread="2" ActualRows="70650" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26270" ActualCPUms="6631" />
+                                <RunTimeCountersPerThread Thread="1" ActualRows="71221" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26412" ActualCPUms="7324" />
+                                <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" />
+                              </RunTimeInformation>
+                              <Filter StartupExpression="false">
+                                <RelOp AvgRowSize="4455" EstimateCPU="0.110252" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="8820150" LogicalOp="Compute Scalar" NodeId="8" Parallel="true" PhysicalOp="Compute Scalar" EstimatedTotalSubtreeCost="15891.4">
+                                  <OutputList>
+                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                    <ColumnReference Column="Expr1002" />
+                                    <ColumnReference Column="Expr1003" />
+                                    <ColumnReference Column="Expr1005" />
+                                    <ColumnReference Column="Expr1006" />
+                                    <ColumnReference Column="Expr1007" />
+                                  </OutputList>
+                                  <ComputeScalar>
+                                    <DefinedValues>
+                                      <DefinedValue>
+                                        <ColumnReference Column="Expr1003" />
+                                        <ScalarOperator ScalarString="[StackOverflow2013].[dbo].[Posts].[Body] as [p].[Body]">
+                                          <Identifier>
+                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Body" />
+                                          </Identifier>
+                                        </ScalarOperator>
+                                      </DefinedValue>
+                                      <DefinedValue>
+                                        <ColumnReference Column="Expr1005" />
+                                        <ScalarOperator ScalarString="[StackOverflow2013].[dbo].[Posts].[Score] as [p].[Score]">
+                                          <Identifier>
+                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Score" />
+                                          </Identifier>
+                                        </ScalarOperator>
+                                      </DefinedValue>
+                                      <DefinedValue>
+                                        <ColumnReference Column="Expr1006" />
+                                        <ScalarOperator ScalarString="[StackOverflow2013].[dbo].[Posts].[Tags] as [p].[Tags]">
+                                          <Identifier>
+                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Tags" />
+                                          </Identifier>
+                                        </ScalarOperator>
+                                      </DefinedValue>
+                                      <DefinedValue>
+                                        <ColumnReference Column="Expr1007" />
+                                        <ScalarOperator ScalarString="[StackOverflow2013].[dbo].[Posts].[Title] as [p].[Title]">
+                                          <Identifier>
+                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Title" />
+                                          </Identifier>
+                                        </ScalarOperator>
+                                      </DefinedValue>
+                                    </DefinedValues>
+                                    <RelOp AvgRowSize="4455" EstimateCPU="0.0882015" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="8820150" LogicalOp="Compute Scalar" NodeId="9" Parallel="true" PhysicalOp="Sequence Project" EstimatedTotalSubtreeCost="15891.3">
+                                      <OutputList>
+                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Body" />
+                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Score" />
+                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Tags" />
+                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Title" />
+                                        <ColumnReference Column="Expr1002" />
+                                      </OutputList>
+                                      <RunTimeInformation>
+                                        <RunTimeCountersPerThread Thread="8" ActualRows="889490" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25949" ActualCPUms="6372" />
+                                        <RunTimeCountersPerThread Thread="7" ActualRows="924168" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26071" ActualCPUms="6332" />
+                                        <RunTimeCountersPerThread Thread="6" ActualRows="925585" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26239" ActualCPUms="6834" />
+                                        <RunTimeCountersPerThread Thread="5" ActualRows="936339" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26136" ActualCPUms="6811" />
+                                        <RunTimeCountersPerThread Thread="4" ActualRows="922490" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25979" ActualCPUms="6209" />
+                                        <RunTimeCountersPerThread Thread="3" ActualRows="878777" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25871" ActualCPUms="6001" />
+                                        <RunTimeCountersPerThread Thread="2" ActualRows="931540" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26223" ActualCPUms="6585" />
+                                        <RunTimeCountersPerThread Thread="1" ActualRows="977568" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26364" ActualCPUms="7277" />
+                                        <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" />
+                                      </RunTimeInformation>
+                                      <SequenceProject>
+                                        <DefinedValues>
+                                          <DefinedValue>
+                                            <ColumnReference Column="Expr1002" />
+                                            <ScalarOperator ScalarString="row_number">
+                                              <Sequence FunctionName="row_number" />
+                                            </ScalarOperator>
+                                          </DefinedValue>
+                                        </DefinedValues>
+                                        <RelOp AvgRowSize="4455" EstimateCPU="0.0220504" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="8820150" LogicalOp="Segment" NodeId="10" Parallel="true" PhysicalOp="Segment" EstimatedTotalSubtreeCost="15891.2">
+                                          <OutputList>
+                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Body" />
+                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Score" />
+                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Tags" />
+                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Title" />
+                                            <ColumnReference Column="Segment1009" />
+                                          </OutputList>
+                                          <RunTimeInformation>
+                                            <RunTimeCountersPerThread Thread="8" ActualRows="889490" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25875" ActualCPUms="6299" />
+                                            <RunTimeCountersPerThread Thread="7" ActualRows="924168" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25996" ActualCPUms="6257" />
+                                            <RunTimeCountersPerThread Thread="6" ActualRows="925585" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26152" ActualCPUms="6747" />
+                                            <RunTimeCountersPerThread Thread="5" ActualRows="936339" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26059" ActualCPUms="6734" />
+                                            <RunTimeCountersPerThread Thread="4" ActualRows="922490" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25905" ActualCPUms="6136" />
+                                            <RunTimeCountersPerThread Thread="3" ActualRows="878777" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25799" ActualCPUms="5928" />
+                                            <RunTimeCountersPerThread Thread="2" ActualRows="931540" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26148" ActualCPUms="6510" />
+                                            <RunTimeCountersPerThread Thread="1" ActualRows="977568" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26288" ActualCPUms="7201" />
+                                            <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" />
+                                          </RunTimeInformation>
+                                          <Segment>
+                                            <GroupBy>
+                                              <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                            </GroupBy>
+                                            <SegmentColumn>
+                                              <ColumnReference Column="Segment1009" />
+                                            </SegmentColumn>
+                                            <RelOp AvgRowSize="4447" EstimateCPU="38.3942" EstimateIO="12415.8" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="8820150" LogicalOp="Sort" NodeId="11" Parallel="true" PhysicalOp="Sort" EstimatedTotalSubtreeCost="15891.1">
+                                              <OutputList>
+                                                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Body" />
+                                                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Score" />
+                                                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Tags" />
+                                                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Title" />
+                                              </OutputList>
+                                              <Warnings>
+                                                <SpillToTempDb SpillLevel="1" SpilledThreadCount="8" />
+                                                <SortSpillDetails GrantedMemoryKb="10815552" UsedMemoryKb="10220984" WritesToTempDb="1512936" ReadsFromTempDb="1512936" />
+                                              </Warnings>
+                                              <MemoryFractions Input="0.998273" Output="0.946059" />
+                                              <RunTimeInformation>
+                                                <RunTimeCountersPerThread Thread="8" ActualRebinds="1" ActualRewinds="0" ActualRows="889490" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25822" ActualCPUms="6245" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="180930" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="1351944" OutputMemoryGrant="1280880" UsedMemoryGrant="1231456" />
+                                                <RunTimeCountersPerThread Thread="7" ActualRebinds="1" ActualRewinds="0" ActualRows="924168" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25941" ActualCPUms="6202" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="188972" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="1351944" OutputMemoryGrant="1280880" UsedMemoryGrant="1251232" />
+                                                <RunTimeCountersPerThread Thread="6" ActualRebinds="1" ActualRewinds="0" ActualRows="925585" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26090" ActualCPUms="6684" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="191428" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="1351944" OutputMemoryGrant="1280880" UsedMemoryGrant="1291120" />
+                                                <RunTimeCountersPerThread Thread="5" ActualRebinds="1" ActualRewinds="0" ActualRows="936339" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26004" ActualCPUms="6679" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="193567" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="1351944" OutputMemoryGrant="1280880" UsedMemoryGrant="1298672" />
+                                                <RunTimeCountersPerThread Thread="4" ActualRebinds="1" ActualRewinds="0" ActualRows="922490" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25851" ActualCPUms="6082" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="189300" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="1351944" OutputMemoryGrant="1280880" UsedMemoryGrant="1294984" />
+                                                <RunTimeCountersPerThread Thread="3" ActualRebinds="1" ActualRewinds="0" ActualRows="878777" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="25746" ActualCPUms="5875" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="177953" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="1351944" OutputMemoryGrant="1280880" UsedMemoryGrant="1204264" />
+                                                <RunTimeCountersPerThread Thread="2" ActualRebinds="1" ActualRewinds="0" ActualRows="931540" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26093" ActualCPUms="6455" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="189938" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="1351944" OutputMemoryGrant="1280880" UsedMemoryGrant="1297312" />
+                                                <RunTimeCountersPerThread Thread="1" ActualRebinds="1" ActualRewinds="0" ActualRows="977568" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="26232" ActualCPUms="7145" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="200848" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="1351944" OutputMemoryGrant="1280880" UsedMemoryGrant="1351944" />
+                                                <RunTimeCountersPerThread Thread="0" ActualRebinds="0" ActualRewinds="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" ActualScans="0" ActualLogicalReads="0" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" InputMemoryGrant="0" OutputMemoryGrant="0" UsedMemoryGrant="0" />
+                                              </RunTimeInformation>
+                                              <Sort Distinct="false">
+                                                <OrderBy>
+                                                  <OrderByColumn Ascending="true">
+                                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                                  </OrderByColumn>
+                                                  <OrderByColumn Ascending="false">
+                                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Score" />
+                                                  </OrderByColumn>
+                                                </OrderBy>
+                                                <RelOp AvgRowSize="4447" EstimateCPU="342.264" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="8820150" LogicalOp="Repartition Streams" NodeId="12" Parallel="true" PhysicalOp="Parallelism" EstimatedTotalSubtreeCost="3436.99">
+                                                  <OutputList>
+                                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Body" />
+                                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Score" />
+                                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Tags" />
+                                                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Title" />
+                                                  </OutputList>
+                                                  <RunTimeInformation>
+                                                    <RunTimeCountersPerThread Thread="8" ActualRows="889490" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="12724" ActualCPUms="1560" />
+                                                    <RunTimeCountersPerThread Thread="7" ActualRows="924168" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="12970" ActualCPUms="1581" />
+                                                    <RunTimeCountersPerThread Thread="6" ActualRows="925585" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="12658" ActualCPUms="1699" />
+                                                    <RunTimeCountersPerThread Thread="5" ActualRows="936339" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="12758" ActualCPUms="1742" />
+                                                    <RunTimeCountersPerThread Thread="4" ActualRows="922490" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="13121" ActualCPUms="1541" />
+                                                    <RunTimeCountersPerThread Thread="3" ActualRows="878777" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="12774" ActualCPUms="1469" />
+                                                    <RunTimeCountersPerThread Thread="2" ActualRows="931540" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="13406" ActualCPUms="1688" />
+                                                    <RunTimeCountersPerThread Thread="1" ActualRows="977568" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="12621" ActualCPUms="2024" />
+                                                    <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" />
+                                                  </RunTimeInformation>
+                                                  <Parallelism PartitioningType="Hash">
+                                                    <PartitionColumns>
+                                                      <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                                    </PartitionColumns>
+                                                    <RelOp AvgRowSize="4451" EstimateCPU="2.35707" EstimateIO="3090.49" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="8820150" EstimatedRowsRead="17142200" LogicalOp="Clustered Index Scan" NodeId="13" Parallel="true" PhysicalOp="Clustered Index Scan" EstimatedTotalSubtreeCost="3092.84" TableCardinality="17142200">
+                                                      <OutputList>
+                                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Body" />
+                                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Score" />
+                                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Tags" />
+                                                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Title" />
+                                                      </OutputList>
+                                                      <RunTimeInformation>
+                                                        <RunTimeCountersPerThread Thread="8" ActualRows="997718" ActualRowsRead="2334840" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="1266" ActualCPUms="1265" ActualScans="1" ActualLogicalReads="573440" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                                        <RunTimeCountersPerThread Thread="7" ActualRows="876223" ActualRowsRead="2003368" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="1053" ActualCPUms="1052" ActualScans="1" ActualLogicalReads="483333" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                                        <RunTimeCountersPerThread Thread="6" ActualRows="890241" ActualRowsRead="2061627" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="1087" ActualCPUms="1085" ActualScans="1" ActualLogicalReads="501209" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                                        <RunTimeCountersPerThread Thread="5" ActualRows="1007995" ActualRowsRead="2360502" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="1294" ActualCPUms="1292" ActualScans="1" ActualLogicalReads="580479" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                                        <RunTimeCountersPerThread Thread="4" ActualRows="898472" ActualRowsRead="2082936" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="1096" ActualCPUms="1096" ActualScans="1" ActualLogicalReads="506778" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                                        <RunTimeCountersPerThread Thread="3" ActualRows="978026" ActualRowsRead="2268254" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="1205" ActualCPUms="1204" ActualScans="1" ActualLogicalReads="554745" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                                        <RunTimeCountersPerThread Thread="2" ActualRows="855499" ActualRowsRead="1992010" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="1044" ActualCPUms="1042" ActualScans="1" ActualLogicalReads="487372" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                                        <RunTimeCountersPerThread Thread="1" ActualRows="881783" ActualRowsRead="2038632" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="1084" ActualCPUms="1082" ActualScans="1" ActualLogicalReads="497103" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                                        <RunTimeCountersPerThread Thread="0" ActualRows="0" Batches="0" ActualEndOfScans="0" ActualExecutions="0" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" ActualScans="1" ActualLogicalReads="49" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                                                      </RunTimeInformation>
+                                                      <IndexScan Ordered="false" ForcedIndex="false" ForceScan="false" NoExpandHint="false" Storage="RowStore">
+                                                        <DefinedValues>
+                                                          <DefinedValue>
+                                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Body" />
+                                                          </DefinedValue>
+                                                          <DefinedValue>
+                                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="OwnerUserId" />
+                                                          </DefinedValue>
+                                                          <DefinedValue>
+                                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Score" />
+                                                          </DefinedValue>
+                                                          <DefinedValue>
+                                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Tags" />
+                                                          </DefinedValue>
+                                                          <DefinedValue>
+                                                            <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Title" />
+                                                          </DefinedValue>
+                                                        </DefinedValues>
+                                                        <Object Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Index="[PK_Posts_Id]" Alias="[p]" IndexKind="Clustered" Storage="RowStore" />
+                                                        <Predicate>
+                                                          <ScalarOperator ScalarString="[StackOverflow2013].[dbo].[Posts].[PostTypeId] as [p].[PostTypeId]=(2) AND [StackOverflow2013].[dbo].[Posts].[Score] as [p].[Score]&gt;(0)">
+                                                            <Logical Operation="AND">
+                                                              <ScalarOperator>
+                                                                <Compare CompareOp="EQ">
+                                                                  <ScalarOperator>
+                                                                    <Identifier>
+                                                                      <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="PostTypeId" />
+                                                                    </Identifier>
+                                                                  </ScalarOperator>
+                                                                  <ScalarOperator>
+                                                                    <Const ConstValue="(2)" />
+                                                                  </ScalarOperator>
+                                                                </Compare>
+                                                              </ScalarOperator>
+                                                              <ScalarOperator>
+                                                                <Compare CompareOp="GT">
+                                                                  <ScalarOperator>
+                                                                    <Identifier>
+                                                                      <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Posts]" Alias="[p]" Column="Score" />
+                                                                    </Identifier>
+                                                                  </ScalarOperator>
+                                                                  <ScalarOperator>
+                                                                    <Const ConstValue="(0)" />
+                                                                  </ScalarOperator>
+                                                                </Compare>
+                                                              </ScalarOperator>
+                                                            </Logical>
+                                                          </ScalarOperator>
+                                                        </Predicate>
+                                                      </IndexScan>
+                                                    </RelOp>
+                                                  </Parallelism>
+                                                </RelOp>
+                                              </Sort>
+                                            </RelOp>
+                                          </Segment>
+                                        </RelOp>
+                                      </SequenceProject>
+                                    </RelOp>
+                                  </ComputeScalar>
+                                </RelOp>
+                                <Predicate>
+                                  <ScalarOperator ScalarString="[Expr1002]=(1)">
+                                    <Compare CompareOp="EQ">
+                                      <ScalarOperator>
+                                        <Identifier>
+                                          <ColumnReference Column="Expr1002" />
+                                        </Identifier>
+                                      </ScalarOperator>
+                                      <ScalarOperator>
+                                        <Const ConstValue="(1)" />
+                                      </ScalarOperator>
+                                    </Compare>
+                                  </ScalarOperator>
+                                </Predicate>
+                              </Filter>
+                            </RelOp>
+                          </Parallelism>
+                        </RelOp>
+                      </Hash>
+                    </RelOp>
+                  </Sort>
+                </RelOp>
+              </Parallelism>
+            </RelOp>
+          </QueryPlan>
+        </StmtSimple>
+      </Statements>
+    </Batch>
+  </BatchSequence>
+</ShowPlanXML>

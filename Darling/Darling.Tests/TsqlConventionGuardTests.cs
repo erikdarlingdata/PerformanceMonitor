@@ -515,6 +515,20 @@ public sealed class TsqlConventionGuardTests
                    this would mean resolving concatenation rather than reading literals. */
                 "FactRemediation.cs: FETCH NEXT FROM plan_cursor INTO @plan_handle;",
                 "FactRemediation.cs: FETCH NEXT FROM plan_cursor INTO @plan_handle;",
+                /* The self-hosted PostgreSQL log tail's opening CTEs (PgServerLogTail.cs), read and confirmed
+                   PostgreSQL, not T-SQL: they read the monitored PostgreSQL target's log directory through
+                   pg_ls_logdir(). Npgsql binds @name parameters, so the @log_resume_file / @log_resume_offset
+                   spelling alone cannot tell the dialects apart here, and nothing else in the first chunk
+                   is a T-SQL marker. SIX entries, three distinct strings: the stderr, csvlog and jsonlog
+                   routes each have a plain and a binary-read constant, and each pair opens with the same
+                   chunk (the pair differs only after the TailBytesLiteral splice, and those later chunks
+                   open no statement, so they are outside this enumeration). */
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name !~* '\\.(csv|json)$' AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name !~* '\\.(csv|json)$' AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name ~* '\\.csv$' AND 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name ~* '\\.csv$' AND 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name ~* '\\.json$' AND 'jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
+                "PgServerLogTail.cs: WITH params AS ( SELECT CAST(@log_resume_file AS text) AS file, CAST(@log_resume_offset AS bigint) AS off ), listing AS MATERIALIZED ( SELECT name, size, modification FROM pg_catalog.pg_ls_logdir() WHERE pg_catalog.current_setting('logging_collector') = 'on' AND name ~* '\\.json$' AND 'jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')) ), newest AS ( SELECT name, size, modification FROM listing ORDER BY modification DESC, name DESC LIMIT 1 ), marked AS ( SELECT l.name, l.size, l.modification, p.off FROM listing AS l JOIN params AS p ON l.name = p.file ), ranges AS ( SELECT 1 AS part, m.name, CASE WHEN m.size - m.off >",
             },
             candidates.OrderBy(c => c, StringComparer.Ordinal).ToArray());
     }
@@ -1494,12 +1508,23 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs Local",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs Timestamp",
         "Lite/Services/LocalDataService.CollectionHealth.cs OutputFinding",
+        /* #4917: an expression-bodied property whose body opens with a property pattern
+           (`Newest is { } newest`) before the rest of the expression. The walk's brace match closes the
+           range at the pattern's own closing brace, stranding the trailing `newest && DateTime.UtcNow -
+           newest > TimeSpan.FromDays(ArchiveService.HotDataDays)`, an age comparison on the newest snapshot
+           time, not T-SQL and not a tempdb label, so no census reads a site of that kind here. */
+        "Lite/Services/LocalDataService.DatabaseStates.cs IsStale",
         /* #3541 A12: the Lite twin of the four DarlingObjectStatsReader growth derivations above — the same
            `is { } b ? … : null` shape, the same absence of any string literal. */
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs DailyGrowthRateMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth30dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth7dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs GrowthOverAvailableHistoryMb",
+        /* #4766: the history rows' expression-bodied formatter, `naiveUtc is not { } instant ? "" : ...`. The
+           property pattern's braces are where the walk stops. What it strands is the "yyyy-MM-dd HH:mm:ss" grid
+           format and nothing else: not T-SQL and not a tempdb label, so no census reads a site of that kind here. */
+        "Lite/Services/LocalDataService.QueryStats.cs Worded",
+        "Lite/Services/LocalDataService.QueryStore.cs Worded",
         /* #3691 lane 27 (#3798): the plan-flip record's expression-bodied `Ratio` property (`MeanAfter / MeanBefore`,
            null unless both sides exist) — the same expression-shaped member as the formatter lines above. What its
            range strands is the pattern-matched quotient and nothing else: no T-SQL, no tempdb label, no SQL literal a

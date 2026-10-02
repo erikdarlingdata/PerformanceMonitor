@@ -110,6 +110,9 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfReaders =
     {
+        /* Its fieldRow pin takes the text from that function's declaration to the closing brace on the next
+           line start, and its stylesheet pins anchor rule bodies across the lines they span. */
+        "AlertHistoryDetailLabelsTests.cs",
         /* #4194: its live-mount-guard pin anchors the `if (live …) { … return; }` block in renderAlerts across
            its four source lines as one literal, so the guard's return is told apart from just those words
            appearing somewhere else in the file. */
@@ -119,7 +122,14 @@ public sealed class RepoFileAdoptionTests
            not tripped by the file's own prose comment saying "never innerHTML". */
         "AlertNotebookRenderClientTests.cs",
         "BuiltinAlertPersistenceRungTests.cs",
+        /* Its count-chart pins anchor the `COUNT_SERIES, {` panels' option blocks across their line breaks (the
+           subtitle line and the format line that follows it) and slice niceScale's own body, so the panels that
+           chart counts are told apart from the constant's prose and the function from its callers. */
+        "ChartIntegerTicksPinTests.cs",
         "ChartWindowDomainTests.cs",
+        /* #4887: its StoredEventCopies census takes each helper's table from that class's own source, on an anchor
+           that runs from the helper's `=>` across the line break to the `Read("v_` on the next line. */
+        "ConsumedTimestampFrameDisciplineTests.cs",
         "DarlingPathFilterGateTests.cs",
         /* #3653 (A8e, PostgreSQL host): its per-arm fire-site pin anchors `Severity: null,` on the line break
            that follows it, so the CODE spelling is told apart from the same words inside the arms' own
@@ -136,6 +146,14 @@ public sealed class RepoFileAdoptionTests
            reasoning as the fleet twin above, which is the file this one was written beside. */
         "PerServerCollectionHealthMemoTests.cs",
         "FleetPageAttentionFilterTests.cs",
+        /* Its every-site pins match each `new AlertMuteContext { ... };` initializer across its line breaks in
+           AlertEngine.cs and the Darling producers, and assert each one sets ServerId. */
+        "MuteRuleServerIdTests.cs",
+        /* Its store-SQL pin slices PgMuteRuleStore's SELECT, INSERT and UPDATE texts across their line breaks. */
+        "MuteRuleServerIdRungTests.cs",
+        /* #4731: its twin pin slices EventBaselineSql out of both products' provider SOURCES (from the signature
+           line to the SQL's closing `GROUP BY hh, dw";`) and asserts the two multi-line bodies are byte-identical. */
+        "DarlingEventBaselineCoveredDaysTests.cs",
         /* #3653 item 12 (Q6): its cross-SKU pin slices the multi-line `keyed` CTE out of the Darling provider's
            SOURCE (from `keyed AS (` to `FROM clean` + `)` on the next line) and asserts Lite's source carries the
            identical text; the clock-read twin pin likewise compares a multi-line const body one token apart. */
@@ -164,6 +182,9 @@ public sealed class RepoFileAdoptionTests
         /* Reads the lineage comment blocks above the flipped PostgreSQL bars; a block is several lines and
            is collapsed to one before its citation is matched, so the read has to be LF-normalised first. */
         "PgTargetMeasuredLineageTests.cs",
+        /* #4825: its source pins slice the Collection Health tab's purge members (PurgeNow_Click, StartPurgeWatch,
+           RunPurgeWatchAsync, the unload handler) by brace balance, and compare the order of calls inside them. */
+        "PurgeNowTotalsWatchTests.cs",
         /* #3797: its viewer-surface pins slice regions out of ViewerServerTab.xaml and server-tabs.js between
            anchors several lines apart (the Queries group's sub-tab block, a column array, one DataGrid's
            column list), and its dispatch pin anchors `case QueryStoreClutterSubTabIndex:` on the awaited
@@ -171,13 +192,16 @@ public sealed class RepoFileAdoptionTests
         "QueryStoreClutterViewerSurfacesTests.cs",
         /* #4231: its web source pin counts noteKey: "truncation_note" occurrences across server-tabs.js and
            view-templates.js, which an LF-normalised read makes exact instead of CRLF-fragile. */
-        /* #4427: its wiring pin slices RunPurgeNowAsync's body by brace balance and matches calls that span line breaks. */
+        /* #4427: its wiring pins slice RunPurgeNowBackgroundAsync's body by brace balance and matches calls that span line breaks. */
         "RawPurgeNowWiringTests.cs",
         "RawWindowFloorViewerPortTests.cs",
         /* #3653 item 3: its twin pin extracts the multi-line GetPriorOccurrencesSql const body from BOTH finding
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */
         "RecurrenceLabelStoreReadTests.cs",
+        /* Its heading pin slices fillServerHead's body out of server.js, from its declaration to the closing brace
+           on its own line, and asserts the display-name assignment sits inside it and ahead of the dot update. */
+        "ServerPageTitlePinTests.cs",
         "ServerPageTabsTests.cs",
         // #4218: reads build.yml to pin the SignPath action version.
         "SignPathActionVersionTests.cs",
@@ -189,6 +213,7 @@ public sealed class RepoFileAdoptionTests
            the CODE shape is told apart from the same words inside the comments beside it. */
         "SwallowedItemFailureTests.cs",
         "ViewTemplatesTests.cs",
+        "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
     };
 

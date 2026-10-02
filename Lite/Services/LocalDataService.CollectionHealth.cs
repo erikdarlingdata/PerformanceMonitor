@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
@@ -214,8 +215,9 @@ SELECT
     -- reads are ordinal twins and the shared classifier takes the count. APPENDED, read positionally.
     SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
     -- #3754: runs whose XE session was missing or could not be created - Darling's SESSION_MISSING
-    -- status. Lite never writes it: its tolerant XE readers swallow a permission-denied session read to
-    -- zero rows and an ensure failure classifies PERMISSIONS / ERROR through XeSessionEnsureException,
+    -- status. Lite never writes it: its long-query XE reader swallows a permission-denied session read to
+    -- zero rows, and an ensure failure (and, since #4731, a blocked-process or deadlock read failure)
+    -- classifies PERMISSIONS / ERROR through XeSessionEnsureException,
     -- so this counts 0 on this SKU; selected anyway because the two health reads are ordinal twins and
     -- the shared output finding takes the count beside error_count as the runs that could not read.
     -- Counted apart from error_count on purpose - it is not fed to the band. APPENDED, read positionally.
@@ -262,7 +264,14 @@ SELECT
                            AND COALESCE(rows_collected, 0) = 0
                            AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
                  THEN recency_rank END) - 1,
-        COUNT(*)) AS trailing_zero_row_success_runs
+        COUNT(*)) AS trailing_zero_row_success_runs,
+    -- #4748: the note the collector's NEWEST run left, which is not last_note above. last_note is the newest
+    -- run that CARRIED a note (note_rank), so a clean run after a partial-failure cycle still shows the
+    -- older cycle's note there; the band must not read that, because the loss it names is not the
+    -- collector's current state. recency_rank = 1 is the newest run of any status, and the SUCCESS gate
+    -- matches last_note's (only the SUCCESS write carries a note). APPENDED, read positionally; Darling's
+    -- twin carries it at the same ordinal.
+    MAX(CASE WHEN recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note
 FROM
 (
     -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
@@ -389,7 +398,9 @@ ORDER BY collector_name";
                 /* Appended (#3885), for the same reason every column before it was. ToInt64 rather than
                    Convert, like RowsStored above: DuckDB widens the COUNT(*) fallback to HUGEINT, which
                    arrives as a BigInteger that Convert.ToInt64 cannot take. */
-                TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : ToInt64(reader.GetValue(29))
+                TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : ToInt64(reader.GetValue(29)),
+                /* Appended (#4748), for the same reason every column before it was. */
+                LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30)
             });
         }
 
@@ -422,7 +433,7 @@ LIMIT 1";
     /// <summary>
     /// Gets recent collection log entries for a server, most recent first, bounded to the tab's
     /// settable window. A preset ends "now" (<paramref name="hoursBack"/> from now); a custom range
-    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both already server-time) bounds
+    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both naive UTC as the tab holds them, #4766) bounds
     /// <c>collection_time</c> on BOTH sides EXACTLY via <see cref="GetTimeRange"/> — mirroring how
     /// <see cref="GetWaitStatsAsync"/> windows its read. The old single now-relative lower bound ignored
     /// the custom To, rounding a custom range to a hours-back-from-now span.
@@ -452,7 +463,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         /* NULLS LAST is belt-and-braces on the ranked arm: a NULL duration_ms cannot satisfy the floor, so no
            unmeasured run reaches it. Written anyway because DESC sorts NULLs first, so decoupling the filter
@@ -554,7 +565,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         var ordering = minDurationMs is null
             ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"
@@ -659,6 +670,19 @@ ORDER BY collection_time DESC";
     }
 }
 
+/// <summary>
+/// The one place the Collection Health rows word a collector-written UTC instant (#4766): "g" in the zone the display
+/// mode names for the row's own server (<paramref name="rowClock"/>, else the active tab's), then a space and the UTC
+/// offset when that wall time is one of the two of a repeated autumn hour
+/// (<see cref="ServerTimeHelper.FormatInstant"/>).
+/// </summary>
+internal static class CollectionHealthTime
+{
+    internal static string Format(DateTime utc, ServerClock? rowClock) =>
+        ServerTimeHelper.FormatInstant(
+            utc, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, rowClock ?? ServerTimeHelper.ActiveServerClock), "g");
+}
+
 public class CollectionLogRow
 {
     public string CollectorName { get; set; } = "";
@@ -671,7 +695,21 @@ public class CollectionLogRow
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
 
-    public string CollectionTimeFormatted => CollectionTime.ToLocalTime().ToString("g");
+    /// <summary>
+    /// The clock of the server this run belongs to (#4766), stamped by the tab or window that lists it; null (a row
+    /// built without one, such as the fleet-wide log the MCP tool serializes on its own) falls back to the active
+    /// tab's. The Collection Health grids sit in a server's own tab, and the run-history window is opened from it, but
+    /// a row that carries its clock reads its own server's wall time whichever tab is active when it renders.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// <see cref="CollectionTime"/> (a collector-written UTC instant) in the selected display mode (#4766): UTC as stored,
+    /// this machine's zone, or the row's server's own clock, with a space and its UTC offset when the wall time is one
+    /// of the two of a repeated autumn hour ("11/1/2026 1:30 AM -05:00" in a US locale; the "g" pattern is the
+    /// current culture's). This used to be the machine's local time in every mode.
+    /// </summary>
+    public string CollectionTimeFormatted => CollectionHealthTime.Format(CollectionTime, Clock);
 
     public string DurationFormatted => DurationMs.HasValue
         ? (DurationMs.Value < 1000 ? $"{DurationMs.Value} ms" : $"{DurationMs.Value / 1000.0:F1} s")
@@ -850,6 +888,15 @@ public class CollectorHealthRow
     public long NoteCount { get; set; }
 
     /// <summary>
+    /// The note the collector's NEWEST run left (#4748), or null when that run left none. Unlike
+    /// <see cref="LastNote"/>, which is the newest note in the window whatever run wrote it, this is the
+    /// newest RUN's, so a clean run after a partial-failure cycle clears it. It is the one note the band reads
+    /// (<see cref="CollectorHealthClassifier.Classify"/>): a cycle that lost half or more of its databases
+    /// still records SUCCESS, and the note is the only record of the loss.
+    /// </summary>
+    public string? LatestRunNote { get; set; }
+
+    /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
     /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
     /// enumerating nothing despite having databases. False also covers "no inventory to go on", which
@@ -994,8 +1041,9 @@ public class CollectorHealthRow
     /// answer everywhere else.
     ///
     /// <para>The floor is applied outside <c>Classify</c> rather than as an eleventh parameter, and
-    /// deliberately: that signature takes RUN-CLASS COUNTS and nothing about output or currency, a
-    /// discipline both SKUs' suites pin off the type. A regression is a fact about rows stored and the
+    /// deliberately: that signature takes RUN-CLASS COUNTS (plus, since #4748, the newest run's
+    /// partial-failure note - the run's own outcome, still a run-class fact) and nothing about output or
+    /// currency, a discipline both SKUs' suites pin off the type. A regression is a fact about rows stored and the
     /// order of two instants, so feeding it in would be exactly the leak those pins refuse. The ladder
     /// stays a function of the counts; the floor is a separate, strictly-louder decision composed on
     /// top of it.</para>
@@ -1003,7 +1051,7 @@ public class CollectorHealthRow
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
            would return HEALTHY forever. */
@@ -1013,16 +1061,28 @@ public class CollectorHealthRow
         ? $"{AvgDurationMs:F0} ms"
         : $"{AvgDurationMs / 1000:F1} s";
 
+    /// <summary>
+    /// The clock of the server this row belongs to (#4766), stamped by the tab that lists it; null (a row built without
+    /// one) falls back to the active tab's. The three time columns below read on it, so a row shows its own server's
+    /// wall time in Server mode whichever tab is active when it renders.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// The last success, run and error (collector-written UTC instants) in the selected display mode (#4766): UTC as
+    /// stored, this machine's zone, or the row's server's own clock, with a space and the UTC offset when the wall
+    /// time is one of the two of a repeated autumn hour. They used to be the machine's local time in every mode.
+    /// </summary>
     public string LastSuccessFormatted => LastSuccessTime.HasValue
-        ? LastSuccessTime.Value.ToLocalTime().ToString("g")
+        ? CollectionHealthTime.Format(LastSuccessTime.Value, Clock)
         : "Never";
 
     public string LastRunFormatted => LastRunTime.HasValue
-        ? LastRunTime.Value.ToLocalTime().ToString("g")
+        ? CollectionHealthTime.Format(LastRunTime.Value, Clock)
         : "Never";
 
     public string LastErrorFormatted => LastErrorTime.HasValue
-        ? LastErrorTime.Value.ToLocalTime().ToString("g")
+        ? CollectionHealthTime.Format(LastErrorTime.Value, Clock)
         : "";
 
     /// <summary>

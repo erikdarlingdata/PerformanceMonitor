@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -21,12 +22,13 @@ public sealed class McpJobTools
         try
         {
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
             var rows = await dataService.GetRunningJobsAsync(resolved.ServerId);
             if (rows.Count == 0)
@@ -45,11 +47,7 @@ public sealed class McpJobTools
                        and the collector's own recorded PERMISSIONS outcome answers first. */
                     ?? await McpRuntimePrecondition.GatedOffStatusAsync(
                         dataService, resolved.ServerId, resolved.ServerName, "running_jobs",
-                        "For this collector the gate is: this is an AWS RDS instance, where the Agent job "
-                        + "tables are not reachable to a monitoring login at all and no grant changes that. "
-                        + "Since #2559 msdb access is NOT a gate — a login without it now attempts and is "
-                        + "reported as a permission denial, so the grant takes effect on the next cycle "
-                        + "rather than the next reconnect.")
+                        CollectorRuntimePrecondition.RunningJobsPossibleCauses)
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or collector has not run yet).");
             }
 
@@ -58,7 +56,7 @@ public sealed class McpJobTools
                 job_name = r.JobName,
                 job_id = r.JobId,
                 job_enabled = r.JobEnabled,
-                start_time = r.StartTime.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                start_time = serverClock.ToUtc(r.StartTime).ToString("o"),
                 current_duration_seconds = r.CurrentDurationSeconds,
                 current_duration_formatted = r.CurrentDurationFormatted,
                 avg_duration_seconds = r.AvgDurationSeconds,

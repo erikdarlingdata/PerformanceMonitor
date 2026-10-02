@@ -9,6 +9,7 @@
 using System;
 using System.Diagnostics;
 using System.Windows;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Windows;
@@ -135,11 +136,7 @@ public partial class EntraDeviceCodeWindow : Window
 
     private void CopyCode_Click(object sender, RoutedEventArgs e)
     {
-        try
-        {
-            Clipboard.SetText(UserCodeBox.Text);
-        }
-        catch (Exception ex)
+        if (!ClipboardText.TrySetText(UserCodeBox.Text))
         {
             /* The clipboard is a shared OS resource another process can hold, and a locked-down
                desktop can refuse it outright. The code is still on screen and selectable, so this is
@@ -147,7 +144,7 @@ public partial class EntraDeviceCodeWindow : Window
                the user is reading the code off. */
             AppLogger.Warn(
                 EntraDeviceCodeAuth.LogSource,
-                $"Could not copy the device code to the clipboard: {ex.Message}");
+                "Could not copy the device code to the clipboard: the clipboard is in use.");
         }
     }
 

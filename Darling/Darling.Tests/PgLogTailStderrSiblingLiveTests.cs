@@ -133,12 +133,12 @@ public sealed class PgLogTailStderrSiblingLiveTests
         /* Now the real production SQL, against the SAME target, through the SAME connection this test used
            to provoke everything above — proving the fixed tail picks up the stderr file that this session's
            own backend just wrote to, not the csvlog sibling PostgreSQL wrote beside it. */
-        var planSql = PgPlanCaptureCollector.Instance.BuildQuery(context).Text;
-        var deadlockSql = PgDeadlocksCollector.Instance.BuildQuery(context).Text;
-        var eventsSql = PgLogEventsCollector.Instance.BuildQuery(context).Text;
+        var planSql = PgPlanCaptureCollector.Instance.BuildQuery(context);
+        var deadlockSql = PgDeadlocksCollector.Instance.BuildQuery(context);
+        var eventsSql = PgLogEventsCollector.Instance.BuildQuery(context);
 
         List<PgPlanCaptureCollector.Row> planRows;
-        await using (var read = new NpgsqlCommand(planSql, connection))
+        await using (var read = LiveTailQuery.Command(planSql, connection))
         await using (var reader = await read.ExecuteReaderAsync(ct))
         {
             /* Throws PgLoggingCollectorOffException or PgNoStderrLogFileException if the tail picked a
@@ -147,14 +147,14 @@ public sealed class PgLogTailStderrSiblingLiveTests
         }
 
         List<PgDeadlocksCollector.Row> deadlockRows;
-        await using (var read = new NpgsqlCommand(deadlockSql, connection))
+        await using (var read = LiveTailQuery.Command(deadlockSql, connection))
         await using (var reader = await read.ExecuteReaderAsync(ct))
         {
             deadlockRows = await PgDeadlocksCollector.Instance.ReadAsync(reader, context, ct);
         }
 
         List<PgLogEvent> eventRows;
-        await using (var read = new NpgsqlCommand(eventsSql, connection))
+        await using (var read = LiveTailQuery.Command(eventsSql, connection))
         await using (var reader = await read.ExecuteReaderAsync(ct))
         {
             eventRows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, ct);
@@ -224,19 +224,19 @@ public sealed class PgLogTailStderrSiblingLiveTests
             },
         };
 
-        await AssertRefusedAsync(connection, PgPlanCaptureCollector.Instance.BuildQuery(context).Text,
+        await AssertRefusedAsync(connection, PgPlanCaptureCollector.Instance.BuildQuery(context),
             async (reader, token) => await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, token), ct);
-        await AssertRefusedAsync(connection, PgDeadlocksCollector.Instance.BuildQuery(context).Text,
+        await AssertRefusedAsync(connection, PgDeadlocksCollector.Instance.BuildQuery(context),
             async (reader, token) => await PgDeadlocksCollector.Instance.ReadAsync(reader, context, token), ct);
-        await AssertRefusedAsync(connection, PgLogEventsCollector.Instance.BuildQuery(context).Text,
+        await AssertRefusedAsync(connection, PgLogEventsCollector.Instance.BuildQuery(context),
             async (reader, token) => await PgLogEventsCollector.Instance.ReadAsync(reader, context, token), ct);
     }
 
     private static async Task AssertRefusedAsync(
-        NpgsqlConnection connection, string sql,
+        NpgsqlConnection connection, CollectorQuery sql,
         Func<NpgsqlDataReader, System.Threading.CancellationToken, Task> read, System.Threading.CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(sql, connection);
+        await using var command = LiveTailQuery.Command(sql, connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
         await Assert.ThrowsAsync<PgNoStderrLogFileException>(() => read(reader, ct));
     }

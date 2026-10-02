@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
+using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
 
@@ -9,7 +10,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpBlockingTools
 {
-    [McpServerTool(Name = "get_deadlocks"), Description("Recent deadlock events with victim process info, newest first, window ends at as_of. Use get_deadlock_detail for the graph XML. not_collected wins if the engine can't run deadlocks; then precondition names a fixable gap (e.g. XE session gone); else empty means none in the window, or none collected in it. limit caps ROWS, not hours_back: truncated true means raise limit or narrow the window, not widen hours_back. Darling: dedup_key scans the whole window before limit, up to a stated ceiling (rows_examined/scan_truncated); a no-match answer is still empty. <<GUIDE>> Gets recent deadlock events with victim process info, NEWEST FIRST. Deadlocks occur when two or more sessions permanently block each other. Use get_deadlock_detail for the full deadlock graph XML. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: deadlocks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_deadlock_time / newest_returned_deadlock_time bound the page — under the newest-first ordering the oldest stamp IS how far back this read reached, so a truncated page says nothing about the earlier part of the window. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help, because the cap is on rows.")]
+    [McpServerTool(Name = "get_deadlocks"), Description("Recent deadlock events with victim process info, newest first, window ends at as_of. Use get_deadlock_detail for the graph XML. not_collected wins if the engine can't run deadlocks; then precondition names a fixable gap (e.g. XE session gone); else empty means none in the window, or none collected in it. limit caps ROWS, not hours_back: truncated true means raise limit or narrow the window, not widen hours_back. Darling: dedup_key scans the whole window before limit, up to a stated ceiling (rows_examined/scan_truncated); a no-match answer is still empty. <<GUIDE>> Gets recent deadlock events with victim process info, NEWEST FIRST. Deadlocks occur when two or more sessions permanently block each other. Use get_deadlock_detail for the full deadlock graph XML. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: deadlocks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_deadlock_time / newest_returned_deadlock_time bound the page — under the newest-first ordering the oldest stamp IS how far back this read reached, so a truncated page says nothing about the earlier part of the window. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help, because the cap is on rows. database_name: the database the deadlock is recorded under: the event's own database on an Azure SQL Database master target, otherwise the capture database on Azure, or the victim's database. A cross-database deadlock lists every database in get_deadlock_detail's graph.")]
     public static async Task<string> GetDeadlocks(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -52,6 +53,7 @@ public sealed class McpBlockingTools
             {
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
+                database_name = r.DatabaseName,
                 victim_process_id = r.VictimProcessId,
                 victim_sql_text = McpHelpers.Truncate(r.VictimSqlText, 2000),
                 process_summary = r.ProcessSummary,
@@ -69,6 +71,7 @@ public sealed class McpBlockingTools
                 oldest_returned_deadlock_time = page.Min(r => r.DeadlockTime)?.ToString("o"),
                 newest_returned_deadlock_time = page.Max(r => r.DeadlockTime)?.ToString("o"),
                 order = "deadlock_time_desc",
+                separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 deadlocks = result
             }, McpHelpers.JsonOptions);
         }
@@ -178,12 +181,14 @@ public sealed class McpBlockingTools
             if (limitError != null) return limitError;
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
+            string? UtcOrNull(DateTime? serverLocal) => serverLocal is { } stamp ? serverClock.ToUtc(stamp).ToString("o") : null;
 
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the OBSERVED truncation
                signal. The reader capped at 200 newest-first whatever `limit` said, so a 24-hour request on a
@@ -201,6 +206,10 @@ public sealed class McpBlockingTools
             var result = page.Select(r => new
             {
                 event_time = r.EventTime?.ToString("o"),
+                /* BlockedProcessAlertRow.XeReportSource or .DmvSnapshotSource, the labels Darling's get_blocking
+                   publishes: the page mixes reports with DMV snapshots of blocks no report covers (shorter than
+                   the report threshold, or on a server that raises no reports). */
+                source = r.Source,
                 database_name = r.DatabaseName,
                 blocked_spid = r.BlockedSpid,
                 blocked_ecid = r.BlockedEcid,
@@ -227,12 +236,12 @@ public sealed class McpBlockingTools
                 blocking_sql_text_truncated = !full_text && r.BlockingSqlText != null && r.BlockingSqlText.Length > SqlTextPreviewLength,
                 blocked_transaction_name = r.BlockedTransactionName,
                 blocking_transaction_name = r.BlockingTransactionName,
-                blocked_last_tran_started = r.BlockedLastTranStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocking_last_tran_started = r.BlockingLastTranStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocked_last_batch_started = r.BlockedLastBatchStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocking_last_batch_started = r.BlockingLastBatchStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocked_last_batch_completed = r.BlockedLastBatchCompleted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocking_last_batch_completed = r.BlockingLastBatchCompleted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                blocked_last_tran_started = UtcOrNull(r.BlockedLastTranStarted),
+                blocking_last_tran_started = UtcOrNull(r.BlockingLastTranStarted),
+                blocked_last_batch_started = UtcOrNull(r.BlockedLastBatchStarted),
+                blocking_last_batch_started = UtcOrNull(r.BlockingLastBatchStarted),
+                blocked_last_batch_completed = UtcOrNull(r.BlockedLastBatchCompleted),
+                blocking_last_batch_completed = UtcOrNull(r.BlockingLastBatchCompleted),
                 blocked_priority = r.BlockedPriority,
                 blocking_priority = r.BlockingPriority
             });
@@ -251,6 +260,7 @@ public sealed class McpBlockingTools
                 oldest_returned_event_time = page.Min(r => r.EventTime)?.ToString("o"),
                 newest_returned_event_time = page.Max(r => r.EventTime)?.ToString("o"),
                 order = "event_time_desc",
+                separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 reports = result
             }, McpHelpers.JsonOptions);
         }
@@ -347,10 +357,10 @@ public sealed class McpBlockingTools
                twin pins a single now for exactly this reason. That instant is the as_of anchor when one
                was sent, so both reads move together onto the past window rather than one of them.
 
-               Threaded as asOfUtc rather than as fromDate/toDate: those two are SERVER-LOCAL and are
-               converted back to UTC inside GetTimeRange, so handing them an instant that is already UTC
-               shifts the window by the monitored server's offset -- silently, and in the unanchored case
-               too (review catch). asOfUtc is the UTC-safe branch, and one value still means one instant. */
+               Threaded as asOfUtc rather than as fromDate/toDate: those two are the UTC bounds of a custom
+               range (#4766), and this tool has one instant, the end of an hours_back window. asOfUtc states
+               that end once (hours_back gives the length), both reads take their window from it, and one
+               value still means one instant. */
             var points = await dataService.GetBlockingTrendAsync(
                 resolved.ServerId, hours_back, asOfUtc: anchorEnd);
 

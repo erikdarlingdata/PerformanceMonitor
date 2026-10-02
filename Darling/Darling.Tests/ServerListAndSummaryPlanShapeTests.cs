@@ -54,11 +54,14 @@ public sealed class ServerListAndSummaryPlanShapeTests
     [Fact]
     public async Task TheShippedReads_TouchFarFewerChunks_AndReturnTheSameNewestCollection_AgainstDevPostgres()
     {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the #3976 plan-shape test.");
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the #3976 plan-shape test (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        // #4650: a scratch database, so no other class's leftover chunks shape the plan under test.
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -68,6 +71,11 @@ public sealed class ServerListAndSummaryPlanShapeTests
         {
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
             await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct);
+            /* No background policy job reshapes the chunks under the plan assertion. */
+            await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+            {
+                await stop.ExecuteNonQueryAsync(ct);
+            }
         }
 
         var bodySucceeded = false;

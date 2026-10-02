@@ -535,6 +535,9 @@ public sealed class MeasurementContractCensusTests
     {
         ("PerformanceMonitor.Collectors/CpuUtilizationCollector.cs", "ObserveInstance"),
         ("PerformanceMonitor.Collectors/PgStatementStatsCollector.cs", "ObserveStatements"),
+        /* #4677: the eviction count rides the same carrier and the same epoch answer. It forgets nothing (no ClearGroups
+           or ClearServer), so it adds an observer but no forget site. */
+        ("PerformanceMonitor.Collectors/PgStatementStatsCollector.cs", "ObserveStatementsDealloc"),
         ("PerformanceMonitor.Collectors/PgWaitStatsCollector.cs", "ObservePostmaster"),
         ("PerformanceMonitor.Collectors/WaitStatsCollector.cs", "ObserveInstance"),
     };
@@ -674,6 +677,7 @@ public sealed class MeasurementContractCensusTests
         /* The labels, as the constants the carriers measure under — a reader greps collection_log for these. */
         Assert.Equal("identity_epoch_changes", ServerEpoch.IdentityChangesMeasurement);
         Assert.Equal("statements_epoch_changes", ServerEpoch.StatementsChangesMeasurement);
+        Assert.Equal("statements_dealloc", ServerEpoch.StatementsDeallocMeasurement);
         Assert.Equal("postmaster_epoch_changes", ServerEpoch.PostmasterChangesMeasurement);
 
         /* And the persisted pair, old beside new, under the carriers' declared state keys — the other half
@@ -682,7 +686,7 @@ public sealed class MeasurementContractCensusTests
            own name. */
         Assert.Equal(new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey }, WaitStatsCollector.Instance.StateKeys);
         Assert.Equal(new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey }, CpuUtilizationCollector.Instance.StateKeys);
-        Assert.Equal(new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey }, PgStatementStatsCollector.Instance.StateKeys);
+        Assert.Equal(new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey, ServerEpoch.StatementsDeallocStateKey }, PgStatementStatsCollector.Instance.StateKeys);
         Assert.Equal(new[] { ServerEpoch.PostmasterStateKey, ServerEpoch.PostmasterPreviousStateKey }, PgWaitStatsCollector.Instance.StateKeys);
     }
 
@@ -798,24 +802,24 @@ public sealed class MeasurementContractCensusTests
     /// inside a literal (<c>WHERE ms_per_sec = 0</c>) is blank where this looks. Not <c>==</c>, not
     /// <c>=&gt;</c>.</summary>
     private static readonly Regex IdentifierPayloadKey = new(
-        @"(?<![\w.])(?<key>\w+_per_sec(?:ond)?)\s*=(?![=>])", RegexOptions.Compiled);
+        @"(?<![\w.])(?<key>(?:\w+_)?per_sec(?:ond)?)\s*=(?![=>])", RegexOptions.Compiled);
 
     /// <summary>A payload key spelled as a string and given a value through an indexer:
     /// <c>["current_ms_per_sec"] = peakRate</c>. Read off the comments-blanked text, where the literal is
     /// still legible and the brackets and the <c>=</c> are code.</summary>
     private static readonly Regex QuotedPayloadKey = new(
-        @"\[\s*""(?<key>\w+_per_sec(?:ond)?)""\s*\]\s*=(?![=>])", RegexOptions.Compiled);
+        @"\[\s*""(?<key>(?:\w+_)?per_sec(?:ond)?)""\s*\]\s*=(?![=>])", RegexOptions.Compiled);
 
     /// <summary>The same key given a value through <c>Add("…", value)</c> / <c>TryAdd</c>. No product site writes
     /// this shape today; it is swept so the day one does it is a site and not a gap.</summary>
     private static readonly Regex AddedPayloadKey = new(
-        @"\.(?:Try)?Add\(\s*""(?<key>\w+_per_sec(?:ond)?)""\s*,", RegexOptions.Compiled);
+        @"\.(?:Try)?Add\(\s*""(?<key>(?:\w+_)?per_sec(?:ond)?)""\s*,", RegexOptions.Compiled);
 
     /// <summary>A <c>const string</c> whose VALUE is a per-second name (<c>IoOpsPerSecKey = "ops_per_sec"</c>), so a
     /// key written through the constant (<c>[PgTargetScorer.IoOpsPerSecKey] = …</c>) is swept under the name it
     /// really writes.</summary>
     private static readonly Regex PerSecondKeyConstant = new(
-        @"\bconst\s+string\s+(?<name>\w+)\s*=\s*""(?<key>\w+_per_sec(?:ond)?)""\s*;", RegexOptions.Compiled);
+        @"\bconst\s+string\s+(?<name>\w+)\s*=\s*""(?<key>(?:\w+_)?per_sec(?:ond)?)""\s*;", RegexOptions.Compiled);
 
     /// <summary>An indexer keyed by an identifier (<c>[X.Y] = …</c>), a candidate constant-keyed site; it counts only
     /// when the last identifier is one of <see cref="PerSecondKeyConstant"/>'s names.</summary>
@@ -1001,6 +1005,7 @@ public sealed class MeasurementContractCensusTests
                 ["assumed_per_sec"] = row.DeltaValue / 60.0,
                 [Keys.ConstPerSecKey] = ops / observedSeconds,
                 ["unknown_per_sec"] = something,
+                ["per_second"] = PerSecond(row.DeltaValue, row.SampleIntervalSeconds),
             };
             stamped.Add("added_per_sec", total / elapsed.TotalSeconds);
             var page = new
@@ -1013,6 +1018,7 @@ public sealed class MeasurementContractCensusTests
                 halved_per_second = total / count,
                 renamed_per_second = p.Value,
                 mapped_per_second = "a_table",
+                per_sec = row.DeltaValue,
                 compared = ms_per_sec == 0,
             };
             """;
@@ -1040,6 +1046,7 @@ public sealed class MeasurementContractCensusTests
                 ("assumed_per_sec", "OFFENDER"),            /* a delta over a cadence literal */
                 ("constant_per_sec", Quotient),             /* through a const, divided by observedSeconds */
                 ("unknown_per_sec", UnderAnotherName),      /* a local nothing explains, under a name no SQL divides for */
+                ("per_second", RateHelper),                 /* a bare key, no prefix: swept all the same */
                 ("added_per_sec", Quotient),                /* Add(key, total / elapsed.TotalSeconds) */
                 ("divided_per_second", Quotient),
                 ("helped_per_second", RateHelper),
@@ -1049,6 +1056,7 @@ public sealed class MeasurementContractCensusTests
                 ("halved_per_second", "OFFENDER"),          /* divides by a count, not a span */
                 ("renamed_per_second", UnderAnotherName),   /* p.Value: not the field of its own name */
                 ("mapped_per_second", MapEntry),            /* a name mapped to a name — outside the rule */
+                ("per_sec", "OFFENDER"),                    /* a bare key over a stored delta */
             },
             verdicts);
 

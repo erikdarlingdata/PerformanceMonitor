@@ -66,7 +66,7 @@ public sealed class DarlingMcpAgToolsSurfaceTests
     }
 
     [Theory]
-    [InlineData("get_ag_health", "server_name")]
+    [InlineData("get_ag_health", "server_name,limit")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)
     {
         Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());
@@ -292,7 +292,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
                 "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://AGNODE1:5022");
 
             /* Straight through the reader, exactly as the /api/ag endpoint calls it — no server filter. */
-            var result = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var result = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
 
             var group = Assert.Single(result.AvailabilityGroups, g => g.ServerName == ServerName);
             Assert.Equal("AG_FLEET", group.AgName);
@@ -340,7 +340,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             /* Newest sweep: one replica, healthy. */
             await InsertReplicaAsync(connection, ct, newest, "AG_SNAP", "NEW1", "PRIMARY", "HEALTHY");
 
-            var result = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var result = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
 
             var group = Assert.Single(result.AvailabilityGroups, g => g.ServerName == ServerName);
             Assert.Equal(newest, group.CollectionTime);
@@ -386,10 +386,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             await InsertReplicaAsync(connection, ct, when, "AG_MINE", "MINE1", "PRIMARY", "HEALTHY");
             await InsertReplicaAsync(connection, ct, when, "AG_THEIRS", "THEIRS1", "PRIMARY", "HEALTHY", otherId, OtherName);
 
-            var filtered = await DarlingAgReader.GetAgHealthAsync(postgres, ServerId, DateTime.UtcNow, ct);
+            var filtered = await DarlingAgReader.GetAgHealthAsync(postgres, ServerId, DateTime.UtcNow, cancellationToken: ct);
             Assert.Equal("AG_MINE", Assert.Single(filtered.AvailabilityGroups).AgName);
 
-            var unfiltered = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var unfiltered = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
             var names = unfiltered.AvailabilityGroups.Select(g => g.AgName).ToList();
             Assert.Contains("AG_MINE", names);
             Assert.Contains("AG_THEIRS", names);
@@ -428,13 +428,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             var when = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5);
             await InsertReplicaAsync(connection, ct, when, "AG_DISABLED", "NODE1", "PRIMARY", "HEALTHY");
 
-            var before = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var before = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
             Assert.Contains("AG_DISABLED", before.AvailabilityGroups.Select(g => g.AgName));
 
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "UPDATE servers SET is_enabled = FALSE WHERE server_id = $1", ServerId);
 
-            var after = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var after = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
             Assert.DoesNotContain("AG_DISABLED", after.AvailabilityGroups.Select(g => g.AgName));
 
             bodySucceeded = true;
@@ -502,6 +502,145 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4471: the cap. Seeds 42 HEALTHY single-replica groups, then one CRITICAL group (a suspended database)
+    /// LAST in insertion order, so a naive "first N inserted" cap would return only healthy groups and a naive
+    /// name sort would bury the critical one under "AG_A0" through "AG_A9". Asserts the default call (no
+    /// <c>limit</c> argument) returns exactly the default page, flags the cut with the right counts, and puts
+    /// the critical group FIRST — the reason this cap exists at all.
+    /// </summary>
+    [Fact]
+    public async Task AgHealth_DefaultLimitCapsMostSevereFirstAndFlagsTruncation_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live AG-health test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var when = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5);
+
+            const int HealthyGroupCount = 42;
+            for (var i = 0; i < HealthyGroupCount; i++)
+            {
+                await InsertReplicaAsync(connection, ct, when, $"AG_A{i:D2}", $"NODE{i:D2}", "PRIMARY", "HEALTHY");
+            }
+
+            /* The one unhealthy group, planted LAST — after every healthy one both by insertion order and by
+               name ("AG_ZZZ" sorts after every "AG_A.."), so only severity-first ordering can put it first. */
+            await InsertReplicaAsync(connection, ct, when, "AG_ZZZ_CRITICAL", "CRITNODE", "PRIMARY", "HEALTHY");
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, replica_server_name, is_local, synchronization_state_desc, last_hardened_lsn, last_commit_lsn, log_send_queue_size, redo_queue_size, log_send_rate, redo_rate, is_suspended, suspend_reason_desc, availability_mode_desc, secondary_lag_seconds)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(when), ServerId, ServerName, "AG_ZZZ_CRITICAL", "StoppedDb", "CRITNODE", false,
+                "NOT SYNCHRONIZING", "0x0003", "0x0004", 9000L, 0L, 0L, 0L, true, "SUSPEND_FROM_USER", "SYNCHRONOUS_COMMIT", 0L);
+
+            const int TotalGroupCount = HealthyGroupCount + 1;
+
+            /* No limit argument — the default (DarlingMcpAgTools.DefaultGroupLimit) must cap the response. */
+            var json = await DarlingMcpAgTools.GetAgHealth(postgres, ServerName);
+            Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var groups = root.GetProperty("availability_groups").EnumerateArray().ToList();
+
+            Assert.Equal(DarlingMcpAgTools.DefaultGroupLimit, groups.Count);
+            Assert.Equal(DarlingMcpAgTools.DefaultGroupLimit, root.GetProperty("groups_returned").GetInt32());
+            Assert.Equal(TotalGroupCount, root.GetProperty("groups_total").GetInt32());
+            Assert.True(root.GetProperty("groups_truncated").GetBoolean());
+            Assert.Contains("TRUNCATED", root.GetProperty("groups_truncated_note").GetString());
+
+            /* THE reason this cap exists: the one critical group is first, ahead of every healthy one. */
+            Assert.Equal("AG_ZZZ_CRITICAL", groups[0].GetProperty("ag_name").GetString());
+            Assert.Equal("Critical", groups[0].GetProperty("severity").GetString());
+
+            /* #4474: an explicit limit >= total is an UPPER BOUND, not a promise -- the byte budget still
+               applies underneath it, so this fleet's wide rows can still get byte-cut even though the caller
+               asked for every group. Assert what the tool actually promises (truthful counts, the budget's
+               wording when it is the one that cut, AG_ZZZ_CRITICAL still first), not a hard-coded group count. */
+            var uncappedJson = await DarlingMcpAgTools.GetAgHealth(postgres, ServerName, limit: TotalGroupCount);
+            using var uncappedDoc = JsonDocument.Parse(uncappedJson);
+            var uncappedRoot = uncappedDoc.RootElement;
+            var uncappedGroups = uncappedRoot.GetProperty("availability_groups").EnumerateArray().ToList();
+            var uncappedReturned = uncappedRoot.GetProperty("groups_returned").GetInt32();
+
+            Assert.Equal(TotalGroupCount, uncappedRoot.GetProperty("groups_total").GetInt32());
+            Assert.Equal(uncappedGroups.Count, uncappedReturned);
+            Assert.InRange(uncappedReturned, 1, TotalGroupCount);
+
+            var uncappedTruncated = uncappedReturned < TotalGroupCount;
+            Assert.Equal(uncappedTruncated, uncappedRoot.GetProperty("groups_truncated").GetBoolean());
+
+            if (uncappedTruncated)
+            {
+                var note = uncappedRoot.GetProperty("groups_truncated_note").GetString();
+                Assert.NotNull(note);
+                Assert.Contains($"{McpResponseBudget.DefaultBytes:#,0}-byte response budget", note);
+                Assert.DoesNotContain("raise limit", note);
+
+                /* uncappedJson IS the tool's own serialized response text -- the same UTF-8 byte count
+                   DarlingAgReader.Build's byte-fit walk measures (envelope + paged groups), so this checks
+                   the budget on the identical measure Build enforced it against. */
+                var uncappedBytes = System.Text.Encoding.UTF8.GetByteCount(uncappedJson);
+                Assert.True(uncappedBytes <= McpResponseBudget.DefaultBytes,
+                    $"a budget-truncated response must itself fit the budget; measured {uncappedBytes}");
+            }
+            else
+            {
+                Assert.Equal(JsonValueKind.Null, uncappedRoot.GetProperty("groups_truncated_note").ValueKind);
+            }
+
+            Assert.Equal("AG_ZZZ_CRITICAL", uncappedGroups[0].GetProperty("ag_name").GetString());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4471: an out-of-range <c>limit</c> is REFUSED through the shared <see cref="McpHelpers.ValidateTop"/>,
+    /// never clamped or ignored, the same rule <c>get_alert_history</c> and <c>get_blocking_snapshots</c> apply
+    /// to their own <c>limit</c>. No topology needs to be planted: the refusal happens before any read.
+    /// </summary>
+    [Fact]
+    public async Task AgHealth_RefusesOutOfRangeLimit_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live AG-health test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        foreach (var badLimit in new[] { 0, -1, 1001 })
+        {
+            var refused = await DarlingMcpAgTools.GetAgHealth(postgres, limit: badLimit);
+            Assert.True(McpHelpers.IsRefusalEnvelope(refused), $"limit {badLimit} must be refused: {refused}");
+            Assert.Equal("limit", JsonDocument.Parse(refused).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        }
+
+        foreach (var okLimit in new[] { 1, 1000 })
+        {
+            var accepted = await DarlingMcpAgTools.GetAgHealth(postgres, limit: okLimit);
+            Assert.False(McpHelpers.IsErrorEnvelope(accepted), $"limit {okLimit} must be accepted: {accepted}");
         }
     }
 

@@ -25,10 +25,12 @@
  *   #/notebook/{id}     — a saved notebook, rendered as a document (#1563 D7; renderView kind-detects)
  *   #/notebook/{id}/edit— the notebook composer editing a saved notebook (#1563 D7)
  *   #/notebook/new      — the notebook composer creating a new notebook (optionally /new/{template})
- * The refresh loop re-renders the active page every 60s and PAUSES while the tab is hidden (the interval skips
- * work when document.hidden), refreshing once immediately when the tab becomes visible again. It also pauses
- * on the operator's own say-so — the shell's "Pause auto-refresh" control (#4222d), persisted in localStorage,
- * which resuming clears by running one refresh immediately. The 60s refresh DELIBERATELY does NOT re-render
+ * The refresh loop refreshes the shell (sidebar, view list, AG nav) every 60s and re-renders the active page on
+ * that page's own interval (60s for the built-in pages; a saved view or notebook carries its own `refresh`
+ * setting), backing off when a page renders slowly (refresh-policy.js). It PAUSES while the tab is hidden,
+ * refreshing once immediately when the tab becomes visible again (the page only if it is due). It also pauses
+ * on the operator's own say-so — the shell's "Pause all auto-refresh" master control (#4222d), persisted in
+ * localStorage, which resuming clears by running one refresh immediately. The refresh DELIBERATELY does NOT re-render
  * either composer route or #/triage (the poll guard in refresh()) — a background rebuild would discard an
  * in-progress edit, or waste a read against a page opened to read once — while the sidebar (server list + view
  * list) still refreshes.
@@ -42,14 +44,18 @@ import { renderSweeps } from "./pages/sweeps.js";
 import { renderServer } from "./pages/server.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
-import { renderViewList, renderView } from "./pages/views.js";
+import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
+import { REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel } from "./refresh-policy.js";
 import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
 import { renderAlertEditor } from "./alert-editor.js";
 import { getSession, listViews } from "./views-api.js";
 
+/* The shell (sidebar, view list, AG nav) refreshes every POLL_MS; the page re-renders on its own interval. */
 const POLL_MS = 60000;
+/* How often the scheduler looks at the clock. It does no reads itself. */
+const SCHEDULER_TICK_MS = 1000;
 
 const main = document.getElementById("main");
 const serverList = document.getElementById("server-list");
@@ -128,6 +134,7 @@ function route(opts) {
   if (isSessionExpired()) return;
 
   const r = currentRoute();
+  markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab, opts);
   else if (r.name === "ag") renderAg(main);
@@ -297,39 +304,142 @@ function updateStatusBar(d) {
     el("span", { class: "sb-item", text: healthy + " collectors healthy · " + failing + " failing" }),
     el("span", { class: "sb-sep", text: "·" }),
     el("span", { class: "sb-item", text: "Updated " + localTime(d.generated_at) }),
+    el("span", { class: "sb-sep", text: "·" }),
+    el("span", { class: "sb-item", id: "refresh-hint" }),
   ]);
+  updateRefreshHint();
 }
 
 /* ─────────────────────────── refresh loop ─────────────────────────── */
 
-function refresh() {
-  if (isSessionExpired()) return;
+/* Routes whose page the poll never re-renders.
+   Poll-clobber guard (#1563, extended #3285): never re-render an editor (dashboard/notebook composer OR the
+   alert-rule editor) from the background poll — a rebuild would discard an in-progress edit. hashchange still
+   routes to it normally; only the periodic refresh skips it.
+   Triage cost guard (#4222d): #/triage is the alert-notebook deep link's landing page. Its cost item says the
+   periodic poll must not re-render it every 60s — the same reason the composer routes are skipped, just for
+   "don't waste a read against a page you opened to read once" rather than "don't discard an edit". hashchange
+   still routes there normally on first load / a fresh alert link. */
+function isNoPollRoute(routeName) {
+  return routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
+    || routeName === "triage";
+}
 
-  /* Poll-clobber guard (#1563, extended #3285): never re-render an editor (dashboard/notebook composer OR the
-     alert-rule editor) from the background poll — a rebuild would discard an in-progress edit. hashchange still
-     routes to it normally; only this periodic refresh skips it.
-     Overlap guard (#4191): also skip re-rendering the route while its OWN last render's reads are still
-     outstanding — evaluated here, before refreshSidebar/refreshViewList/refreshAgNav below start any of THIS
-     tick's reads, so it reflects only what the PREVIOUS render left running. A poll landing mid-load would
-     otherwise fire every one of the page's panel reads a second time on top of the first, which is exactly what
-     doubled audit_config on the Config tab. The sidebar/view-list/AG-nav probe keep refreshing every tick
-     regardless — only the heavier per-page render waits for the last one to settle. */
-  /* Triage cost guard (#4222d): #/triage is the alert-notebook deep link's landing page. Its cost item says
-     the periodic poll must not re-render it every 60s — the same reason the composer routes below are
-     skipped, just for "don't waste a read against a page you opened to read once" rather than "don't discard
-     an edit". hashchange still routes there normally on first load / a fresh alert link. */
-  const routeName = currentRoute().name;
-  const skipRoute = routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
-    || routeName === "triage"
-    || hasInFlightReads();
+/* Per-page schedule (#4666). pageNextRefreshAt is when the page may re-render next (Infinity = never);
+   pageRenderStart is set while a render's reads are outstanding, and its end is the moment hasInFlightReads()
+   next reads false, on a hidden or paused tick as much as a visible one (#4774) — that duration feeds the
+   back-off. */
+let pageNextRefreshAt = Infinity;
+let pageRenderStart = 0;
+let pageRendering = false;
+let pageLastRenderMs = 0;
+let shellLastRefreshAt = Date.now();
 
+/* The page's own interval in ms; 0 means no automatic re-render. */
+function pageIntervalMs() {
+  const name = currentRoute().name;
+  if (isNoPollRoute(name)) return 0;
+  if (name === "view" || name === "notebook") {
+    const choice = currentViewRefresh() || defaultRefreshChoice(name === "notebook");
+    return REFRESH_CHOICES[choice] ?? 0;
+  }
+  return POLL_MS;
+}
+
+function markPageRenderStart(routeName, isPoll) {
+  if (!isPoll && (routeName === "view" || routeName === "notebook")) clearViewRefresh();
+  if (isNoPollRoute(routeName)) {
+    pageRendering = false;
+    pageNextRefreshAt = Infinity;
+    return;
+  }
+  pageRendering = true;
+  pageRenderStart = Date.now();
+  pageNextRefreshAt = Infinity;
+}
+
+function settlePageRender(now) {
+  pageRendering = false;
+  pageLastRenderMs = now - pageRenderStart;
+  scheduleNextPageRefresh(now);
+}
+
+function scheduleNextPageRefresh(from) {
+  const delay = nextRefreshDelayMs(pageIntervalMs(), pageLastRenderMs);
+  pageNextRefreshAt = delay === null ? Infinity : from + delay;
+  updateRefreshHint();
+}
+
+function pageIsDue(now) {
+  return !pageRendering && now >= pageNextRefreshAt;
+}
+
+function refreshShell() {
+  shellLastRefreshAt = Date.now();
   /* The sidebar and the route() below both read /api/fleet in this same synchronous pass; apiGetFleet hands the
      second caller the first one's request, so a tick costs the store ONE fleet roll-up, not two (#3895). */
   refreshSidebar();
   refreshViewList();
   refreshAgNav();
-  if (skipRoute) return;
+}
+
+/* Re-render the page from the poll. Editors and #/triage are never re-rendered from the poll (a rebuild would
+   discard an in-progress edit, or waste a read against a page opened to read once), and neither is a page whose
+   own last render's reads are still outstanding (#4191): a poll landing mid-load would fire every one of its
+   panel reads a second time on top of the first, which is exactly what doubled audit_config on the Config tab.
+   The check runs before refreshShell() starts any of THIS tick's reads (refresh() and schedulerTick() call the
+   shell first, but its reads are the sidebar/view-list/AG-nav probes, not the page's), so it reflects only what
+   the PREVIOUS render left running. The sidebar/view-list/AG-nav probe keep refreshing regardless — only the
+   heavier per-page render waits for the last one to settle. */
+function refreshPage() {
+  if (isNoPollRoute(currentRoute().name) || hasInFlightReads()) return;
   route({ poll: true });
+}
+
+/* The refresh entry the master pause and the tab-visible handler use: always the shell, and the page when
+   `force` is set or it is due. */
+function refresh(force) {
+  if (isSessionExpired()) return;
+  refreshShell();
+  if (force || pageIsDue(Date.now())) refreshPage();
+}
+
+function schedulerTick() {
+  const now = Date.now();
+  /* A render ends when its reads do, whether or not the tab is hidden or auto-refresh is paused (#4774). This
+     check used to sit below the return that follows, so a render whose reads finished while the tab was hidden
+     or paused stayed open until the first visible, unpaused tick: its duration then counted the whole span (10
+     minutes hidden read as a 10-minute render), the back-off pushed the next refresh out to 15 minutes with
+     "(slow page)", and pageIsDue never fired because it needs !pageRendering. Settling here stamps the end at
+     the first tick that sees no reads outstanding and schedules the next refresh from that moment. */
+  if (pageRendering && !hasInFlightReads()) settlePageRender(now);
+  if (document.hidden || isAutoRefreshPaused() || isSessionExpired()) {
+    updateRefreshHint();
+    return;
+  }
+  if (now - shellLastRefreshAt >= POLL_MS) refreshShell();
+  if (pageIsDue(now)) refreshPage();
+  updateRefreshHint();
+}
+
+function hhmm(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function updateRefreshHint() {
+  const hint = document.getElementById("refresh-hint");
+  if (!hint) return;
+  const interval = pageIntervalMs();
+  let text;
+  if (isAutoRefreshPaused()) text = "Auto-refresh paused";
+  else if (interval === 0) text = "Auto-refresh off";
+  else if (isBackedOff(interval, pageLastRenderMs) && Number.isFinite(pageNextRefreshAt)) {
+    text = "Next refresh " + hhmm(pageNextRefreshAt) + " (slow page)";
+  } else {
+    const choice = Object.keys(REFRESH_CHOICES).find((k) => REFRESH_CHOICES[k] === interval);
+    text = "Auto-refresh: " + (choice ? refreshLabel(choice) : "1 min");
+  }
+  hint.textContent = text;
 }
 
 /* The session-expired takeover (#4187): the FIRST read anywhere on the page to report the session is gone (an
@@ -369,7 +479,7 @@ function setAutoRefreshPaused(paused) {
 }
 
 function updateAutoRefreshToggle(button, paused) {
-  const label = paused ? "Resume auto-refresh" : "Pause auto-refresh";
+  const label = paused ? "Resume auto-refresh" : "Pause all auto-refresh";
   button.textContent = label;
   button.setAttribute("aria-label", label);
   button.setAttribute("title", label);
@@ -385,18 +495,21 @@ function initAutoRefreshToggle() {
     const paused = !isAutoRefreshPaused();
     setAutoRefreshPaused(paused);
     updateAutoRefreshToggle(button, paused);
-    if (!paused) refresh();
+    if (!paused) refresh(true);
+    updateRefreshHint();
   });
 }
 
 function start() {
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && !isAutoRefreshPaused()) refresh();
+    if (!document.hidden && !isAutoRefreshPaused()) refresh(false);
   });
-  setInterval(() => {
-    if (!document.hidden && !isAutoRefreshPaused()) refresh();
-  }, POLL_MS);
+  onViewRefreshChange(() => {
+    if (!pageRendering) scheduleNextPageRefresh(Date.now());
+    else updateRefreshHint();
+  });
+  setInterval(schedulerTick, SCHEDULER_TICK_MS);
   onSessionExpired(showSignedOutState);
   initAutoRefreshToggle();
 

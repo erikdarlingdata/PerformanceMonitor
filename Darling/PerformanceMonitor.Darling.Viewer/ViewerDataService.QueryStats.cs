@@ -326,7 +326,9 @@ public sealed partial class ViewerDataService
     /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (out of scope for this lane).
     /// An hourly-routed page carries only what the rollup has: <c>host_object_name</c>/
     /// <c>module_*</c>/DOP/grant/spill/thread columns are unavailable and read as their defaults, exactly the
-    /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. Use
+    /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. An hourly-routed page
+    /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
+    /// does not add the hour that begins there). Use
     /// <see cref="GetTopQueriesByCpuTierAsync"/> to also learn which tier answered.</para>
     /// </summary>
     public async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuAsync(
@@ -369,25 +371,7 @@ public sealed partial class ViewerDataService
     {
         var fromClause = coverage.StitchedRelationSql(
             TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = $"""
-            SELECT
-                database_name,
-                query_hash,
-                CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
-                CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-                CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
-                MIN(worker_time_min) AS min_worker_time,
-                MAX(worker_time_max) AS max_worker_time
-            FROM {fromClause}
-            WHERE server_id = $1
-            AND   bucket >= $2
-            AND   bucket <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            GROUP BY database_name, query_hash
-            HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
-            ORDER BY SUM(elapsed_time_sum) DESC
-            LIMIT $4
-            """;
+        var sql = BuildTopQueriesHourlySql(fromClause);
 
         var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long MinWorkerTime, long MaxWorkerTime)>();
         await using (var command = _dataSource.CreateCommand(sql))
@@ -445,6 +429,31 @@ public sealed partial class ViewerDataService
 
         return rows;
     }
+
+    /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
+    /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>): a range whose To is 14:00 sums the
+    /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
+    /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
+    /// test can read the text.</summary>
+    internal static string BuildTopQueriesHourlySql(string fromClause) => $"""
+        SELECT
+            database_name,
+            query_hash,
+            CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
+            CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
+            MIN(worker_time_min) AS min_worker_time,
+            MAX(worker_time_max) AS max_worker_time
+        FROM {fromClause}
+        WHERE server_id = $1
+        AND   bucket >= $2
+        AND   bucket < $3
+        AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        GROUP BY database_name, query_hash
+        HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
+        ORDER BY SUM(elapsed_time_sum) DESC
+        LIMIT $4
+        """;
 
     /// <summary>The Raw-tier read, unchanged — what <see cref="GetTopQueriesByCpuAsync"/> ran before #4231
     /// stage 3 added the hourly arm.</summary>
@@ -769,12 +778,13 @@ public sealed partial class ViewerDataService
     /// for <see cref="FormatServerClock"/> instead — <c>query_store_stats</c>' first- and last-execution
     /// times, which Query Store returns as <c>datetimeoffset</c> and <c>QueryStoreCollector</c> normalises
     /// through <c>DateTimeOffset.UtcDateTime</c>. Inlining
-    /// <c>ViewerTimeHelper.ForDisplay(x).ToString(...)</c> would work identically; a named method beside its
-    /// opposite is what makes the choice reviewable.</para>
+    /// <c>ViewerTimeHelper.FormatForDisplay(x, ...)</c> would work identically; a named method beside its
+    /// opposite is what makes the choice reviewable. A time in the repeated autumn hour carries its UTC offset
+    /// (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>).</para>
     /// </summary>
     public static string FormatStoredUtc(DateTime? naiveUtc)
         => naiveUtc.HasValue
-            ? ViewerTimeHelper.ForDisplay(naiveUtc.Value).ToString("yyyy-MM-dd HH:mm:ss")
+            ? ViewerTimeHelper.FormatForDisplay(naiveUtc.Value, "yyyy-MM-dd HH:mm:ss")
             : "";
 
     /// <summary>

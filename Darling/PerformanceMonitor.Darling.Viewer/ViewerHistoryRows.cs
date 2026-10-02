@@ -32,7 +32,7 @@ internal static class HistoryTime
 {
     /// <summary>Formats a naive-UTC collection timestamp in the current display mode (Server / Local / UTC).</summary>
     public static string CollectionLocal(DateTime collectionTimeUtc)
-        => ViewerTimeHelper.ForDisplay(collectionTimeUtc).ToString("yyyy-MM-dd HH:mm:ss");
+        => ViewerTimeHelper.FormatForDisplay(collectionTimeUtc, "yyyy-MM-dd HH:mm:ss");
 }
 
 /// <summary>One collected query_stats snapshot for a single (database, query_hash) — Lite's

@@ -17,7 +17,8 @@ namespace PerformanceMonitor.Collectors;
 /// Server memory statistics from sys.dm_os_sys_memory + performance counters, with an Azure SQL
 /// DB variant (edition 5) that approximates from sys.dm_os_sys_info committed targets and reports
 /// current_workers_count as NULL — elastic pools enforce VIEW SERVER PERFORMANCE STATE on
-/// sys.dm_os_schedulers regardless of DB-scoped grants (#857). Azure MI (edition 8) behaves like
+/// sys.dm_os_schedulers regardless of DB-scoped grants (#857). The NULL is stored as NULL, not as 0, so a reader can tell
+/// "not collected" from "no workers in use". Azure MI (edition 8) behaves like
 /// on-prem. Extracted verbatim from Lite's RemoteCollectorService.Memory.cs. Single row per cycle;
 /// zero rows when the query returns none.
 /// </summary>
@@ -41,7 +42,7 @@ public sealed class MemoryStatsCollector : CollectorDefinitionBase<MemoryStatsCo
         decimal BufferPoolMb,
         decimal PlanCacheMb,
         int MaxWorkersCount,
-        int CurrentWorkersCount);
+        int? CurrentWorkersCount);
 
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -188,7 +189,7 @@ OPTION(RECOMPILE);";
             reader.IsDBNull(8) ? 0m : reader.GetDecimal(8),
             reader.IsDBNull(9) ? 0m : reader.GetDecimal(9),
             reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
-            reader.IsDBNull(11) ? 0 : reader.GetInt32(11)));
+            reader.IsDBNull(11) ? null : reader.GetInt32(11)));
 
         return rows;
     }

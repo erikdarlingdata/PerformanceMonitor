@@ -15,6 +15,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -24,9 +25,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// untouched). Its bucket timestamps are UTC (matching the Darling store's naive-UTC collection_time),
 /// so <see cref="SelectionStartUtc"/>/<see cref="SelectionEndUtc"/> and the <see cref="RangeChanged"/>
 /// payload are UTC and flow straight into the viewer's naive-UTC reads with no clock conversion. The
-/// only deviation from Lite is the two display strings (axis labels + range label): Lite's per-server
-/// <c>ServerTimeHelper.FormatServerTime</c> becomes <see cref="ViewerTimeHelper.ForDisplay"/> (the
-/// viewer's one machine-local convention).
+/// only deviation from Lite is the axis labels: Lite's per-server tick words become
+/// <see cref="ViewerTimeHelper.ForDisplay"/> (the viewer's mode-aware Server/Local/UTC text conversion). The range
+/// caption is worded exactly as Lite's is (#4766): <see cref="DisplayZone.Format"/> in the current display zone, so
+/// the two instants of a repeated autumn hour differ by their UTC offset.
 /// </summary>
 public partial class TimeRangeSlicerControl : UserControl
 {
@@ -373,8 +375,12 @@ public partial class TimeRangeSlicerControl : UserControl
     private void UpdateRangeLabel()
     {
         if (_data.Count == 0) { RangeLabel.Text = ""; return; }
-        var startDisplay = ViewerTimeHelper.ForDisplay(UtcAtNorm(_rangeStart)).ToString("yyyy-MM-dd HH:mm");
-        var endDisplay = ViewerTimeHelper.ForDisplay(UtcAtNorm(_rangeEnd)).ToString("yyyy-MM-dd HH:mm");
+        /* #4766: worded as Lite's slicer words it (DisplayZone.Format, invariant culture), so the two instants of the
+           repeated autumn hour read "01:30 -04:00" and "01:30 -05:00" instead of both "01:30". The tick labels stay
+           the plain wall time. */
+        var zone = ViewerTimeHelper.CurrentDisplayZone();
+        var startDisplay = DisplayZone.Format(UtcAtNorm(_rangeStart), zone, "yyyy-MM-dd HH:mm");
+        var endDisplay = DisplayZone.Format(UtcAtNorm(_rangeEnd), zone, "yyyy-MM-dd HH:mm");
         var spanHours = (UtcAtNorm(_rangeEnd) - UtcAtNorm(_rangeStart)).TotalHours;
         var spanLabel = spanHours >= 1 ? $"{spanHours:F0}h" : $"{spanHours * 60:F0}m";
         RangeLabel.Text = $"{startDisplay} → {endDisplay}  ({spanLabel})";

@@ -135,12 +135,18 @@ public sealed class DarlingAnalysisService
     private readonly ILogger? _logger;
 
     /// <summary>
+    /// #4726: the shared baseline tier this instance was handed (null when it keeps a private one). The MCP host
+    /// builds one service per call, so a test reads this to prove every one of them shares the host's ONE cache.
+    /// </summary>
+    internal BaselineCache? SharedBaselineCache { get; }
+
+    /// <summary>
     /// Minimum hours of collected data required before analysis will run.
     /// Short collection windows distort fraction-of-period calculations —
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
     /// 24 hours has been validated empirically as sufficient.
     /// </summary>
-    internal double MinimumDataHours { get; set; } = 24;
+    internal double MinimumDataHours { get; set; } = AnalysisHistoryGate.MinimumDataHours;
 
     /// <summary>
     /// Raised after each analysis run completes, providing the findings — the twins' UI
@@ -228,6 +234,38 @@ public sealed class DarlingAnalysisService
     /// </summary>
     public AnalysisAbandonKind? EndedEarlyAs { get; private set; }
 
+    /// <summary>
+    /// The databases monitored as their own targets, when this pass is for an Azure SQL Database master
+    /// target; the host fills it once per pass. Copied onto every <see cref="AnalysisContext"/> this
+    /// instance builds, so the blocking and deadlock facts and spikes skip those databases. Null or empty
+    /// changes nothing.
+    /// </summary>
+    public IReadOnlyList<string>? SeparatelyMonitoredDatabases { get; set; }
+
+    /// <summary>
+    /// Resolves the list per call, by server id, for hosts that keep one service for many servers (the web host)
+    /// or build one per MCP call. Used only when <see cref="SeparatelyMonitoredDatabases"/> is unset, so an
+    /// explicit list always wins and the shared instance carries no per-server state.
+    /// </summary>
+    public Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? SeparatelyMonitoredResolver { get; set; }
+
+    /// <summary>The explicit list, else the resolver's answer. A resolver that throws (a store timeout on the
+    /// server-properties read) leaves the call unscoped and logs, rather than failing it.</summary>
+    internal async Task<IReadOnlyList<string>?> ScopeForAsync(int serverId, CancellationToken cancellationToken)
+    {
+        if (SeparatelyMonitoredDatabases is { } explicitList) return explicitList;
+        if (SeparatelyMonitoredResolver is null) return null;
+        try
+        {
+            return await SeparatelyMonitoredResolver(serverId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(ex, "Could not resolve the separately monitored databases for server {ServerId}; analysing unscoped", serverId);
+            return null;
+        }
+    }
+
     /// <param name="postgres">The store, read as whatever role this data source connects as.</param>
     /// <param name="planFetcher">Optional; the SQL Server drill-down's cached-plan fetch.</param>
     /// <param name="logger">Optional.</param>
@@ -235,21 +273,30 @@ public sealed class DarlingAnalysisService
     /// (see <see cref="IsAnalyzing"/>), so without it every pass recomputed every 30-day baseline and the MCP and web
     /// hosts paid for them again; with it, all of them share one compute per series per analysis hour. Null keeps each
     /// provider's cache private to this instance, as before.</param>
+    /// <param name="analyzerConfig">#4535: the plan analyzer's per-rule config (darling.json's
+    /// optional "analyzer" section), forwarded to the fact and drill-down collectors' plan-analysis
+    /// calls. Null (the default) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>
+    /// — today's behavior, byte-for-byte.</param>
     public DarlingAnalysisService(
-        NpgsqlDataSource postgres, IPlanFetcher? planFetcher = null, ILogger? logger = null, BaselineCache? baselineCache = null)
+        NpgsqlDataSource postgres,
+        IPlanFetcher? planFetcher = null,
+        ILogger? logger = null,
+        BaselineCache? baselineCache = null,
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        SharedBaselineCache = baselineCache;
         _findingStore = new PgFindingStore(postgres, logger);
         _scorer = new FactScorer();
 
         /* The SQL Server set: the five objects this service always composed, in the same order. */
         var sqlServerBaselines = new PgBaselineProvider(postgres, logger, baselineCache);
         _sqlServerEngine = new AnalysisEngineSet(
-            new PgFactCollector(postgres, logger),
+            new PgFactCollector(postgres, logger, analyzerConfig),
             new PgAnomalyDetector(postgres, sqlServerBaselines, logger),
             new InferenceEngine(new RelationshipGraph()),
-            new PgDrillDownCollector(postgres, planFetcher, logger),
+            new PgDrillDownCollector(postgres, planFetcher, logger, analyzerConfig),
             sqlServerBaselines,
             TotalDataSpanSql);
 
@@ -294,6 +341,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -341,18 +389,9 @@ public sealed class DarlingAnalysisService
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
             var dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, context.CancellationToken);
-            if (dataSpanHours < MinimumDataHours)
+            if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
-                var needed = MinimumDataHours >= 24
-                    ? $"{MinimumDataHours / 24:F1} days"
-                    : $"{MinimumDataHours:F0} hours";
-                var have = dataSpanHours >= 24
-                    ? $"{dataSpanHours / 24:F1} days"
-                    : $"{dataSpanHours:F1} hours";
-
-                InsufficientDataMessage =
-                    $"Not enough data for reliable analysis. Need {needed} of collected data, " +
-                    $"have {have}. Keep the collector running and try again later.";
+                InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
 
                 /* #3542: an UNSTAMPED registry row took the SQL Server set above (a NULL makes no claim,
                    #2530). For a SQL Server target that is today's answer exactly; for a PostgreSQL target
@@ -576,7 +615,7 @@ public sealed class DarlingAnalysisService
             // so an exploratory pass is labelled relative to the instant it explores. A read the store could
             // not make labels nothing and costs the pass nothing (PgFindingStore.GetPriorOccurrencesAsync).
             var priorOccurrences = await _findingStore.GetPriorOccurrencesAsync(context, context.TimeRangeEnd);
-            RecurrenceLabeler.Label(stories, facts, context.TimeRangeEnd, priorOccurrences);
+            RecurrenceLabeler.Label(stories, facts, priorOccurrences);
 
             // 4. Mute-filter the stories into the surviving findings (the Dashboard twin's D2/P2
             //    reorder) — WITHOUT inserting yet, so enrichment + action-build happen on the
@@ -726,6 +765,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -749,8 +789,12 @@ public sealed class DarlingAnalysisService
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Cancellation (an abandoned web/MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault — this read has no per-pass budget
+               of its own, so the only source of a cancelled context.CancellationToken is the caller's own
+               token, the same reasoning CollectConfigAuditFactsAsync's catch already states (#4203). */
             _logger?.LogError("[DarlingAnalysisService] Fact collection or anomaly detection failed for {Server}: {Message}",
                 serverName, ex.Message);
             return ([], null, CollectionCaveatState.From(context));
@@ -839,9 +883,11 @@ public sealed class DarlingAnalysisService
         DateTime comparisonStart, DateTime comparisonEnd,
         CancellationToken cancellationToken = default)
     {
+        var separatelyMonitored = await ScopeForAsync(serverId, cancellationToken);
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = separatelyMonitored,
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
@@ -851,6 +897,7 @@ public sealed class DarlingAnalysisService
         var comparisonContext = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = separatelyMonitored,
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,
@@ -870,8 +917,12 @@ public sealed class DarlingAnalysisService
 
             return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Cancellation (an abandoned web/MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault — this read has no per-pass budget
+               of its own, so the only source of a cancelled comparisonContext.CancellationToken is the
+               caller's own token, the same reasoning CollectConfigAuditFactsAsync's catch already states (#4203). */
             _logger?.LogError("[DarlingAnalysisService] Period comparison failed for {Server}: {Message}",
                 serverName, ex.Message);
             return ([], [], null, null, new Dictionary<string, BaselineBucket>());
@@ -1095,17 +1146,21 @@ ORDER BY capture_time, trace_flag";
     ///
     /// <para><b>The stored <c>event_time</c> is the monitored server's LOCAL wall clock</b> —
     /// <c>fn_trace_gettable</c>'s <c>StartTime</c>, stored raw so the collector's watermark compares like with
-    /// like — while the capture times this is bounded by are naive UTC, so the column is de-skewed by the
-    /// collected <c>server_properties.utc_offset_minutes</c> on BOTH the projection and both bounds, in the
-    /// exact spelling <c>DarlingDefaultTraceReader.EventsByWindowSql</c> and the viewer's System Events read
-    /// use (<c>ServerLocalReadFrameDisciplineTests</c> counts the three sites and forbids an un-de-skewed
-    /// read of the aliased column). Getting this wrong is not a cosmetic skew: at UTC−4 an un-de-skewed line would
-    /// sit four hours later than its capture and fall OUT of the span, so the anchor would silently never
-    /// resolve on the very fleet it was built for. A server with no collected offset yet falls back to 0
-    /// (local == UTC) through the single-row COALESCE CTE, which also keeps the cross join from dropping the
-    /// events; one offset covers the span, so a span straddling a DST transition is off by an hour on its
-    /// far side — the same single-snapshot approximation every reader of this column makes, stated here
-    /// rather than implied.</para>
+    /// like — while the capture times this is bounded by are naive UTC. The column comes back RAW as
+    /// <c>event_time_local</c>, with the newest snapshot's <c>offset_minutes</c> and <c>time_zone_id</c> (one
+    /// <c>server_properties</c> row, so the two describe one snapshot), and
+    /// <see cref="ServerLocalTimes.TraceLinesInWindow"/> converts each line to UTC with the server's
+    /// <see cref="PerformanceMonitor.Analysis.Baselines.ServerClock"/> and applies the exact <c>($2, $3]</c>
+    /// window to the converted time (#4821). Converting in SQL with the one newest offset put a line from
+    /// before the zone's last daylight saving change an hour off, which could push it out of a span it was
+    /// inside. The SQL window is only a rough first filter: it still subtracts the newest offset, but widens
+    /// each bound by an hour, because the offset in force at a line can differ from the newest by an hour.
+    /// The read has no LIMIT, so the extra hour drops nothing; the lines inside the widened window and
+    /// outside the real one are dropped after the exact conversion. Getting the frame wrong is not a cosmetic
+    /// skew: at UTC−4 an unconverted line would sit four hours later than its capture and fall OUT of the
+    /// span, so the anchor would silently never resolve on the very fleet it was built for. A server with
+    /// no collected offset yet reads as UTC (<c>offset_minutes</c> 0, no zone) through the single-row
+    /// <c>svr</c> CTE, which also keeps the cross join from dropping the events.</para>
     ///
     /// <para><b>Cost.</b> No <c>event_time</c> index exists (the table is indexed <c>(server_id,
     /// collection_time)</c>), so this is a scan of the server's rows in a curated, low-volume table with a
@@ -1113,24 +1168,30 @@ ORDER BY capture_time, trace_flag";
     /// the connect cadence makes rare. Exposed const for the dialect pins.</para>
     /// </summary>
     public const string ReconfigureTraceLinesForAttributionSql = @"
-WITH svr AS (
-    SELECT COALESCE((
-        SELECT sp.utc_offset_minutes
-        FROM server_properties AS sp
-        WHERE sp.server_id = $1
-        AND   sp.utc_offset_minutes IS NOT NULL
-        ORDER BY sp.collection_time DESC
-        LIMIT 1), 0) AS offset_minutes
+WITH newest AS (
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+),
+svr AS (
+    SELECT
+        COALESCE((SELECT utc_offset_minutes FROM newest), 0) AS offset_minutes,
+        (SELECT time_zone_id FROM newest) AS time_zone_id
 )
 SELECT
-    dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc,
-    dte.text_data
+    dte.event_time AS event_time_local,
+    dte.text_data,
+    svr.offset_minutes,
+    svr.time_zone_id
 FROM default_trace_events AS dte, svr
 WHERE dte.server_id = $1
 AND   dte.error_number = 15457
-AND   dte.event_time - make_interval(mins => svr.offset_minutes) > $2
-AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3
-ORDER BY event_time_utc";
+AND   dte.event_time - make_interval(mins => svr.offset_minutes) > $2 - interval '1 hour'
+AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
+ORDER BY event_time_local";
 
     /// <summary>
     /// Step 2.5 of the pass (#3653 A10, Q2 and slice two): if a configuration value was first observed
@@ -1249,16 +1310,23 @@ ORDER BY event_time_utc";
                 ? null
                 : ComparisonBanding.Compare(before, after, dispersion, ConfigChangeAttribution.CoverageCaveatFor(beforeCoverage, afterCoverage));
 
-            facts.Add(ConfigChangeAttribution.BuildFact(
-                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor));
+            var attributionFact = ConfigChangeAttribution.BuildFact(
+                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor);
+            facts.Add(attributionFact);
+
+            /* The log reports the CARD's counts, not the compare's raw ones: a pass whose card says "not yet
+               comparable" must not log "1 better" for the same row (#4729). Stable stays the compare's. */
+            var worse = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaWorse);
+            var better = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaBetter);
+            var notYetComparable = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
 
             _logger?.LogInformation(
-                "[DarlingAnalysisService] Configuration change attributed for {Server} ({Families}): {Settings} {Verb} {AnchorAt:u} ({AnchorSource}), compare over ±{Hours} h ({AfterHours:0.#} h after so far) — {Worse} worse, {Better} better, {Stable} stable{Unavailable}",
+                "[DarlingAnalysisService] Configuration change attributed for {Server} ({Families}): {Settings} {Verb} {AnchorAt:u} ({AnchorSource}), compare over ±{Hours} h ({AfterHours:0.#} h after so far) — {Worse} worse, {Better} better{NotYetComparable}, {Stable} stable{Unavailable}",
                 context.ServerName, latest.Families, string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name)),
                 anchor is null ? "first observed at" : "changed at", anchorTime,
                 anchor is null ? "configuration snapshot" : "default trace, msg 15457",
                 ConfigChangeAttribution.CompareWindowHours, windows.AfterHoursObserved,
-                compare?.Worse ?? 0, compare?.Better ?? 0, compare?.Stable ?? 0,
+                worse, better, notYetComparable > 0 ? $", {notYetComparable} not yet comparable" : string.Empty, compare?.Stable ?? 0,
                 compare is null ? " (compare unavailable this pass)" : string.Empty);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
@@ -1349,22 +1417,32 @@ ORDER BY event_time_utc";
     {
         try
         {
-            var lines = new List<ConfigChangeAttribution.TraceLine>();
+            var windowStart = DateTime.SpecifyKind(change.PreviousCaptureTime, DateTimeKind.Unspecified);
+            var windowEnd = DateTime.SpecifyKind(change.ChangeTime, DateTimeKind.Unspecified);
+            var rows = new List<(DateTime? EventTimeLocal, string? TextData)>();
+            ServerClock? clock = null;
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
             using var cmd = new NpgsqlCommand(ReconfigureTraceLinesForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(change.PreviousCaptureTime, DateTimeKind.Unspecified));
-            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(change.ChangeTime, DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue(windowStart);
+            cmd.Parameters.AddWithValue(windowEnd);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
-                if (reader.IsDBNull(0))
-                    continue;
-                lines.Add(new ConfigChangeAttribution.TraceLine(
-                    reader.GetDateTime(0),
+                /* Every row carries the same newest-snapshot zone and offset (a one-row CTE), so the clock is built once. */
+                clock ??= ServerLocalTimes.ClockFrom(
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(2) ? null : reader.GetInt32(2));
+                rows.Add((
+                    reader.IsDBNull(0) ? null : reader.GetDateTime(0),
                     reader.IsDBNull(1) ? null : reader.GetString(1)));
             }
+
+            /* #4821: the exact ($2, $3] window on each line's own converted time; the SQL window was only a pre-filter. */
+            var lines = clock is null
+                ? new List<ConfigChangeAttribution.TraceLine>()
+                : ServerLocalTimes.TraceLinesInWindow(rows, clock, windowStart, windowEnd);
 
             return ConfigChangeAttribution.ResolveServerConfigTraceAnchor(change, lines);
         }

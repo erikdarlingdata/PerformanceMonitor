@@ -61,12 +61,36 @@ public sealed class DarlingSecretsDecryptFailureTests
     [Fact]
     public void TheExplanationListsRemediesThatAllRunOnTheServiceHost()
     {
-        var message = DarlingSecrets.DescribeDecryptFailure("the store credential");
+        var message = DarlingSecrets.DescribeDecryptFailure("the stored password for server 'sql01'");
 
         Assert.Contains("--add-server", message, StringComparison.Ordinal);
         Assert.Contains("--encrypt-password", message, StringComparison.Ordinal);
         Assert.Contains("env:", message, StringComparison.Ordinal);
         Assert.Contains("not machine-bound", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The store's own credential file is not a monitored server's password (#4744): the explanation names the
+    /// file the operator is looking at, says it is DPAPI on this machine and not PostgreSQL rejecting a login, and
+    /// offers none of the monitored-server remedies, because re-adding a server or encrypting a password does
+    /// nothing for the store owner's generated password.
+    /// </summary>
+    [Fact]
+    public void TheStoreCredentialExplanationNamesItsFileAndOffersNoServerPasswordRemedies()
+    {
+        var message = DarlingSecrets.DescribeStoreCredentialDecryptFailure(DarlingManagedPostgres.CredentialFileName);
+
+        Assert.Contains("DPAPI-decrypt", message, StringComparison.Ordinal);
+        Assert.Contains("pg-credential.dpapi", message, StringComparison.Ordinal);
+        Assert.Contains("not PostgreSQL rejecting a login", message, StringComparison.Ordinal);
+        Assert.Contains("LocalMachine", message, StringComparison.Ordinal);
+        Assert.Contains("run this command on the machine that created it", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("--add-server", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("--encrypt-password", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("re-add", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("env:", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("SQL Server", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("DIFFERENT PC", message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -142,7 +166,7 @@ public sealed class DarlingSecretsDecryptFailureTests
         var source = ReadWorkerSource();
 
         Assert.Contains("LastConnectFailureLogged", source, StringComparison.Ordinal);
-        Assert.Contains("Connect still failing, retrying in 60s (same cause as logged above)", source, StringComparison.Ordinal);
+        Assert.Contains("Connect still failing, retrying in {Delay}s (same cause as logged above)", source, StringComparison.Ordinal);
         /* A permanent credential fault is an Error, not a Warning — nothing about it clears on its own. */
         Assert.Contains("Connect failed and will keep failing until fixed", source, StringComparison.Ordinal);
         Assert.Contains("server.LastConnectFailureLogged = null;", source, StringComparison.Ordinal);

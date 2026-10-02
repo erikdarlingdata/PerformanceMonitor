@@ -61,11 +61,17 @@ public static class DarlingPgDeadlockReader
     /// <para>Windowed on <c>occurred_at</c> rather than <c>collection_time</c>, and the difference is not
     /// cosmetic: a report is collected some minutes AFTER it happened, and can be collected repeatedly for
     /// as long as it stays in the log tail. Filtering on collection time would put a deadlock in the wrong
-    /// window and would move it every cycle.</para>
+    /// window and would move it every cycle. <c>occurred_at</c> is nullable (a report whose timestamp the parser
+    /// could not read), so the window falls back to <c>collection_time</c> for it, the same expression the
+    /// analysis' exemplar count and list use. <c>$5</c> is the <see cref="EventWindowFloor"/> for
+    /// <c>$2</c> (bound after the limit so <c>LIMIT $4</c> keeps its number), a lower bound on
+    /// <c>collection_time</c> only so a late-collected report still counts.</para>
     /// </summary>
     public const string DeadlocksSql = """
         SELECT
-            MIN(d.occurred_at)          AS occurred_at,
+            /* The window's own expression, so a row with no occurred_at is stamped (and sorted, and given an
+               identity) by its collection time rather than coming back as 0001-01-01. */
+            MIN(COALESCE(d.occurred_at, d.collection_time)) AS occurred_at,
             MIN(d.victim_pid)           AS victim_pid,
             MAX(d.participant_count)    AS participant_count,
             d.deadlock_hash,
@@ -85,11 +91,12 @@ public static class DarlingPgDeadlockReader
             (upper(left(encode(sha256(convert_to(MIN(d.graph_text), 'UTF8')), 'hex'), 32)) = d.deadlock_hash) AS raw_hash
         FROM pg_deadlocks AS d
         WHERE d.server_id = $1
-        AND   d.occurred_at >= $2
-        AND   d.occurred_at <= $3
+        AND   COALESCE(d.occurred_at, d.collection_time) >= $2
+        AND   COALESCE(d.occurred_at, d.collection_time) <= $3
+        AND   d.collection_time >= $5
         AND   d.deadlock_hash IS NOT NULL
         GROUP BY d.deadlock_hash
-        ORDER BY MIN(d.occurred_at) DESC
+        ORDER BY MIN(COALESCE(d.occurred_at, d.collection_time)) DESC
         LIMIT $4
         """;
 
@@ -116,7 +123,7 @@ public static class DarlingPgDeadlockReader
     /// </summary>
     public const string DeadlockDetailSql = """
         SELECT
-            r.occurred_at,
+            COALESCE(r.occurred_at, r.collection_time) AS occurred_at,
             r.victim_pid,
             r.participant_count,
             r.lock_modes,
@@ -135,6 +142,7 @@ public static class DarlingPgDeadlockReader
             (
                 SELECT DISTINCT ON (d.deadlock_hash)
                     d.occurred_at,
+                    d.collection_time,
                     d.victim_pid,
                     d.participant_count,
                     d.lock_modes,
@@ -144,7 +152,7 @@ public static class DarlingPgDeadlockReader
                 FROM pg_deadlocks AS d
                 WHERE d.server_id = $1
                 AND   ($2::text IS NULL OR d.deadlock_hash = $2::text)
-                AND   ($3::timestamp IS NULL OR (d.occurred_at = $3::timestamp AND d.victim_pid = $4::integer))
+                AND   ($3::timestamp IS NULL OR (COALESCE(d.occurred_at, d.collection_time) = $3::timestamp AND d.victim_pid = $4::integer))
                 AND   d.deadlock_hash IS NOT NULL
                 /* The DISTINCT ON key must lead the sort; the earliest sighting of each report is the one
                    closest to when it actually happened. */
@@ -152,7 +160,7 @@ public static class DarlingPgDeadlockReader
             ) AS report
         ) AS r
         WHERE ($2::text IS NULL OR NOT r.raw_hash)
-        ORDER BY r.occurred_at DESC NULLS LAST, r.deadlock_hash
+        ORDER BY COALESCE(r.occurred_at, r.collection_time) DESC, r.deadlock_hash
         LIMIT $5
         """;
 
@@ -170,6 +178,7 @@ public static class DarlingPgDeadlockReader
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(limit);
+        command.Parameters.AddWithValue(EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

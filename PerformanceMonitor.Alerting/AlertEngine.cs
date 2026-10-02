@@ -227,6 +227,13 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, int> _lastAlertedBlockingCount = new();
     private readonly ConcurrentDictionary<string, int> _lastAlertedDeadlockCount = new();
 
+    /* #4752: consecutive fires per (family, key) whose every channel failed. Grows the retry delay in
+       AfterFire (1, 2, 4 ... minutes, capped at the cooldown) and is dropped by the next fire that reached
+       an operator, or by a failure more than twice the cooldown after the last one. Every fire site in this
+       engine calls AfterFire, so every SQL Server alert family is covered. In memory only: a restart starts
+       the backoff over, which is the safe direction. */
+    private readonly FailedSendBackoff _failedSends = new();
+
     /* Newest already-alerted failed-job run time (SERVER-LOCAL) — Lite's MainWindow.xaml.cs:96;
        persisted through IAlertStateStore on change (#1145 parity). */
     private readonly ConcurrentDictionary<string, DateTime> _lastAlertedFailedJobTime = new();
@@ -404,19 +411,24 @@ public sealed class AlertEngine
 
         await EnsureWatermarksSeededAsync(key, ct);
 
-        await CheckCpuAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckBlockingAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckDeadlocksAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckPoisonWaitsAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckLongRunningQueriesAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckTempDbSpaceAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckPvsPressureAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckFileGrowthAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckAnomalousJobsAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckDatabaseStateAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckForcePlanFailuresAsync(key, serverName, now, alertCooldown, suppressed, ct);
+        await CheckCpuAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        /* On an Azure SQL Database master target, blocking and deadlock events for databases monitored as
+           their own targets alert on those targets; the user's excluded list is extended with them here. */
+        IReadOnlyList<string> blockingDeadlockExcluded = snapshot.SeparatelyMonitoredDatabases is { Count: > 0 } separate
+            ? _settings.ExcludedDatabases.Concat(separate).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+            : _settings.ExcludedDatabases;
+        await CheckBlockingAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
+        await CheckDeadlocksAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
+        await CheckPoisonWaitsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckPvsPressureAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckFileGrowthAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckAnomalousJobsAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckDatabaseStateAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckForcePlanFailuresAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
 
         return new AlertSweepResult(true, lowDiskConditionPresent, failedJobConditionPresent);
     }
@@ -726,7 +738,7 @@ public sealed class AlertEngine
     public const int ActiveMaintenanceProbeMaxRows = 50;
 
     private async Task CheckCpuAsync(
-        AlertServerSnapshot snapshot, string key, string serverName,
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         /* Mode selection INSIDE the engine — ServerSummaryItem.CpuPercentForAlert semantics
@@ -776,7 +788,7 @@ public sealed class AlertEngine
         {
             if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
             {
-                var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "High CPU" }; /* :74 */
+                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
                 bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
                 _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
 
@@ -853,7 +865,7 @@ public sealed class AlertEngine
                    BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
                    Lite's deliverer persists only the context, Darling's folds the outcome in. */
                 var cpuGrade = GradeCpuFire(alertCpuValue.Value);
-                await FireAsync(new AlertOutcome(
+                var delivery = await FireAsync(new AlertOutcome(
                     key, serverName, "High CPU",
                     $"{alertCpuValue:F0}% ({cpuMetricLabel})",
                     $"{_settings.CpuThresholdPercent}%",
@@ -861,6 +873,7 @@ public sealed class AlertEngine
                     NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
                     Muted: isMuted, Severity: cpuGrade,
                     ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
+                AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
             }
         }
         else if (outcome == PersistenceOutcome.Resolve)                              /* :101 */
@@ -1011,7 +1024,8 @@ public sealed class AlertEngine
     /* ---------------- blocking (Lite AlertEngine.cs:116-194) ---------------- */
 
     private async Task CheckBlockingAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
@@ -1035,12 +1049,17 @@ public sealed class AlertEngine
 
                 /* :118-127 — with excluded databases configured and the raw count at/over the
                    threshold, recount only rows outside the excluded set (no-database rows pass). */
-                if (_settings.ExcludedDatabases.Count > 0
+                if (excludedDatabases.Count > 0
                     && effectiveBlockingCount >= _settings.BlockingCountThreshold)
                 {
-                    effectiveBlockingCount = blockingRows
+                    /* The recount applies the raw count's own rule to the same row set: XE rows when any
+                       exist, otherwise every row. */
+                    var recountRows = xeCount > 0
+                        ? blockingRows.Where(r => r.Source == BlockedProcessAlertRow.XeReportSource)
+                        : blockingRows;
+                    effectiveBlockingCount = recountRows
                         .Count(r => string.IsNullOrEmpty(r.DatabaseName) ||
-                            !_settings.ExcludedDatabases.Any(e =>
+                            !excludedDatabases.Any(e =>
                                 string.Equals(e, r.DatabaseName, StringComparison.OrdinalIgnoreCase)));
                 }
             }
@@ -1083,27 +1102,27 @@ public sealed class AlertEngine
         {
             blockingOccurrences = await ObserveOccurrencesAsync(
                 key, BlockingWatermarkMetric,
-                AlertContextBuilders.BlockingIncidents(serverName, blockingRows, _settings.ExcludedDatabases),
+                AlertContextBuilders.BlockingIncidents(fingerprintServer, blockingRows, excludedDatabases),
                 now);
         }
 
         if (blockingDecision.Fire)                                                  /* :155 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Detected" }; /* :157 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Detected" }; /* :157 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :158 */
             _lastBlockingAlert[key] = now;                                          /* :159 */
 
             /* :172-173 — Lite's BuildBlockingContextAsync refetches the same rows; the engine
                reuses this sweep's fetch (identical query/window). */
             var blockingContext = AlertContextBuilders.BuildBlockingContext(
-                serverName, blockingRows, _settings.ExcludedDatabases, blockingOccurrences.Decorate);
+                fingerprintServer, blockingRows, excludedDatabases, blockingOccurrences.Decorate);
             var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
             /* :175-183 — SendDetectedAlertAsync's #1141/#1236 delivery-mode fan-out is an
                IAlertDeliverer concern; the engine emits one outcome. ShortMessage = the toast body
                of :167. Numerics carried explicitly (#1830): the count text happens to parse today,
                but the stored value must not depend on parse luck. */
-            await FireAsync(new AlertOutcome(
+            var delivery = await FireAsync(new AlertOutcome(
                 key, serverName, "Blocking Detected",
                 effectiveBlockingCount.ToString(),
                 _settings.BlockingCountThreshold.ToString(),
@@ -1111,6 +1130,19 @@ public sealed class AlertEngine
                 NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: _settings.BlockingCountThreshold,
                 Muted: isMuted, Severity: blockingContext?.SeverityOverride,
                 ShortMessage: $"{effectiveBlockingCount} blocking session(s)"), ct);
+            AfterFire("Blocking Detected", _lastBlockingAlert, key, now, alertCooldown, delivery);
+
+            /* #4752: the gate advanced the watermark to this count, and it was saved, BEFORE delivery. A fire
+               whose every channel failed would leave the retry sweep seeing no new blocking, and the alert
+               would stay lost until the count rose. Put the watermark back to its decayed pre-fire value (the
+               gate's own rule: a watermark above the current count drops to it) and save that, so the retry
+               sees the count above the watermark and fires again. */
+            if (EveryChannelFailed(delivery))
+            {
+                var unannouncedWatermark = Math.Min(blockingWatermark, effectiveBlockingCount);
+                _lastAlertedBlockingCount[key] = unannouncedWatermark;
+                await _stateStore.SaveEdgeTriggerWatermarkAsync(key, BlockingWatermarkMetric, unannouncedWatermark);
+            }
         }
         else if (!blockingDecision.Active && wasBlockingActive)                     /* :185 */
         {
@@ -1140,7 +1172,7 @@ public sealed class AlertEngine
            processes it can't answer for blocking snapshots either, and firing a wait alert with no
            incident content is worse than skipping the sweep (state untouched, same as every other
            check's failure shape). */
-        await CheckBlockingWaitAsync(key, serverName, now, alertCooldown, suppressed, blockingRows, ct);
+        await CheckBlockingWaitAsync(key, serverName, serverId, fingerprintServer, now, alertCooldown, suppressed, blockingRows, excludedDatabases, ct);
     }
 
     /* ---------------- per-fingerprint occurrence counters (#2216) ---------------- */
@@ -1297,8 +1329,8 @@ public sealed class AlertEngine
     /// </para>
     /// </summary>
     private async Task CheckBlockingWaitAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed,
-        List<BlockedProcessAlertRow>? blockingRows, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        List<BlockedProcessAlertRow>? blockingRows, IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         int thresholdSeconds = _settings.BlockingWaitSecondsThreshold;
         bool enabled = _settings.BlockingEnabled && thresholdSeconds > 0;
@@ -1423,7 +1455,7 @@ public sealed class AlertEngine
         {
             if (!suppressed && CooldownElapsed(_lastBlockingWaitAlert, key, now, alertCooldown))
             {
-                var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Wait Time" };
+                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Wait Time" };
                 bool isMuted = _isAlertMuted(muteCtx);
                 _lastBlockingWaitAlert[key] = now;                                  /* stamped even when muted */
 
@@ -1433,7 +1465,7 @@ public sealed class AlertEngine
                    context_json sees is which arm admitted this delivery and the numbers it was judged on;
                    the blocked-process rows may be absent (a DMV-only episode has no report), and the item
                    exists regardless, so the context is never null on a fire from this arm. */
-                var blockingContext = AlertContextBuilders.BuildBlockingContext(serverName, blockingRows, _settings.ExcludedDatabases)
+                var blockingContext = AlertContextBuilders.BuildBlockingContext(fingerprintServer, blockingRows, excludedDatabases)
                     ?? new AlertContext();
                 blockingContext.Details.Insert(0, AlertContextBuilders.BuildBlockingWaitGateItem(
                     current, thresholdSeconds, singleSnapshot ? BlockingWaitFiredBySingleSnapshot : BlockingWaitFiredByConsecutive));
@@ -1443,7 +1475,7 @@ public sealed class AlertEngine
                    which no history-store parser could turn back into a number — the value has to travel
                    as a number or every history row lands at 0, which is the defect #1830 just fixed. */
                 double totalWaitSeconds = current.TotalWaitSeconds;
-                await FireAsync(new AlertOutcome(
+                var delivery = await FireAsync(new AlertOutcome(
                     key, serverName, "Blocking Wait Time",
                     $"{totalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked session(s)",
                     $"{thresholdSeconds}s",
@@ -1451,6 +1483,7 @@ public sealed class AlertEngine
                     NumericCurrentValue: totalWaitSeconds, NumericThresholdValue: thresholdSeconds,
                     Muted: isMuted, Severity: blockingContext.SeverityOverride,
                     ShortMessage: $"{totalWaitSeconds:F0}s total blocked wait across {current.BlockedSessionCount} session(s) (threshold: {thresholdSeconds}s)"), ct);
+                AfterFire("Blocking Wait Time", _lastBlockingWaitAlert, key, now, alertCooldown, delivery);
             }
         }
         else if (outcome == PersistenceOutcome.Resolve)
@@ -1471,7 +1504,8 @@ public sealed class AlertEngine
     /* ---------------- deadlocks (Lite AlertEngine.cs:196-271) ---------------- */
 
     private async Task CheckDeadlocksAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         List<DeadlockAlertRow>? deadlockRows = null;
         int effectiveDeadlockCount = 0;
@@ -1488,11 +1522,11 @@ public sealed class AlertEngine
 
                 /* :198-205 — recount excluding deadlocks whose processes ALL ran in excluded
                    databases (graph-XML parse via the shared IsDeadlockExcluded). */
-                if (_settings.ExcludedDatabases.Count > 0
+                if (excludedDatabases.Count > 0
                     && effectiveDeadlockCount >= _settings.DeadlockCountThreshold)
                 {
                     effectiveDeadlockCount = deadlockRows
-                        .Count(r => !AlertContextBuilders.IsDeadlockExcluded(r, _settings.ExcludedDatabases));
+                        .Count(r => !AlertContextBuilders.IsDeadlockExcluded(r, excludedDatabases));
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1529,19 +1563,19 @@ public sealed class AlertEngine
         {
             deadlockOccurrences = await ObserveOccurrencesAsync(
                 key, DeadlockWatermarkMetric,
-                AlertContextBuilders.DeadlockIncidents(serverName, deadlockRows, _settings.ExcludedDatabases),
+                AlertContextBuilders.DeadlockIncidents(fingerprintServer, deadlockRows, excludedDatabases),
                 now);
         }
 
         if (deadlockDecision.Fire)                                                  /* :232 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Deadlocks Detected" }; /* :234 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Deadlocks Detected" }; /* :234 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :235 */
             _lastDeadlockAlert[key] = now;                                          /* :236 */
 
             /* :249-250 — context from this sweep's fetch. */
             var deadlockContext = AlertContextBuilders.BuildDeadlockContext(
-                serverName, deadlockRows, _settings.ExcludedDatabases, deadlockOccurrences.Decorate);
+                fingerprintServer, deadlockRows, excludedDatabases, deadlockOccurrences.Decorate);
 
             /* #3653 (A8e): GRADE the fire the gate already decided on. Until now this alert carried no tier,
                so every row rendered by NAME — red for one deadlock and red for a hundred — while the fleet
@@ -1564,7 +1598,7 @@ public sealed class AlertEngine
 
             /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
                the count text happens to parse today, but the stored value must not depend on parse luck. */
-            await FireAsync(new AlertOutcome(
+            var delivery = await FireAsync(new AlertOutcome(
                 key, serverName, "Deadlocks Detected",
                 effectiveDeadlockCount.ToString(),
                 _settings.DeadlockCountThreshold.ToString(),
@@ -1572,6 +1606,17 @@ public sealed class AlertEngine
                 NumericCurrentValue: effectiveDeadlockCount, NumericThresholdValue: _settings.DeadlockCountThreshold,
                 Muted: isMuted, Severity: deadlockContext.SeverityOverride,
                 ShortMessage: $"{effectiveDeadlockCount} deadlock(s) in the last hour"), ct);
+            AfterFire("Deadlocks Detected", _lastDeadlockAlert, key, now, alertCooldown, delivery);
+
+            /* #4752: the blocking twin above explains it — the watermark moved to this count, and was saved,
+               before delivery, so a fire whose every channel failed goes back to the decayed pre-fire value
+               and the retry sweep fires again at the same count. */
+            if (EveryChannelFailed(delivery))
+            {
+                var unannouncedWatermark = Math.Min(deadlockWatermark, effectiveDeadlockCount);
+                _lastAlertedDeadlockCount[key] = unannouncedWatermark;
+                await _stateStore.SaveEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric, unannouncedWatermark);
+            }
         }
         else if (!deadlockDecision.Active && wasDeadlockActive)                     /* :262 */
         {
@@ -1620,7 +1665,7 @@ public sealed class AlertEngine
     /// retired shape announced "Cleared" on that same silence.</para>
     /// </summary>
     private async Task CheckPoisonWaitsAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.PoisonWaitEnabled)                                           /* :274 */
         {
@@ -1656,7 +1701,7 @@ public sealed class AlertEngine
 
                     /* :288-293 — mute keys on the worst (highest severity, then most accumulated wait)
                        firing wait type; same documented limitation as Lite. */
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Poison Wait", WaitType = worst.WaitType };
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Poison Wait", WaitType = worst.WaitType };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[key] = now;                                /* :294 */
                     _lastPoisonWaitCollectionTime[key] = newestCollectionTime;
@@ -1693,7 +1738,7 @@ public sealed class AlertEngine
                        accumulated milliseconds against the bar it crossed, also in milliseconds — the unit
                        the history formatter already renders this metric in, and the PostgreSQL twin's
                        exact numeric pair. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Poison Wait",
                         allWaitNames,
                         worst.ThresholdValue,
@@ -1702,6 +1747,15 @@ public sealed class AlertEngine
                         NumericThresholdValue: worst.NumericThresholdValue,
                         Muted: isMuted, Severity: worst.Severity,
                         ShortMessage: worst.ShortMessage), ct);
+                    AfterFire("Poison Wait", _lastPoisonWaitAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: the newest-collection marker was written before delivery too, and the retry
+                       sweep would see the same collection as already reported. A fire nobody received
+                       forgets it, so the retry counts the window as fresh. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        _lastPoisonWaitCollectionTime.TryRemove(key, out _);
+                    }
                     readClock.Restart();
                 }
             }
@@ -1734,7 +1788,7 @@ public sealed class AlertEngine
     /* ---------------- long-running queries (Lite AlertEngine.cs:341-411) ---------------- */
 
     private async Task CheckLongRunningQueriesAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LongRunningQueryEnabled)                                     /* :342 */
         {
@@ -1773,7 +1827,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var lrqOccurrences = await ObserveOccurrencesAsync(
-                key, LongRunningQueryWatermarkMetric, AlertContextBuilders.LongRunningQueryIncidents(serverName, longRunning), now);
+                key, LongRunningQueryWatermarkMetric, AlertContextBuilders.LongRunningQueryIncidents(fingerprintServer, longRunning), now);
             readClock.Restart();
             if (longRunning.Count > 0)
             {
@@ -1789,6 +1843,7 @@ public sealed class AlertEngine
                     var muteCtx = new AlertMuteContext                              /* :358-364 */
                     {
                         ServerName = serverName,
+                        ServerId = serverId,
                         MetricName = "Long-Running Query",
                         DatabaseName = worst.DatabaseName,
                         QueryText = worst.QueryText
@@ -1861,7 +1916,7 @@ public sealed class AlertEngine
                        — the clock-to-itself rule, applied on the operation's EXIT as well as its entry. */
                     readClock.Restart();
 
-                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
+                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(fingerprintServer, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
 
                     /* #3653 (A5, Q5): the knob's own evidence on the card — how many sessions it removed this
                        evaluation, split by the arm that removed them — so an operator can see it working and
@@ -1894,7 +1949,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Query",
                         $"{longRunning.Count} query(s), longest {elapsedMinutes}m",
                         $"{_settings.LongRunningQueryThresholdMinutes}m",
@@ -1903,6 +1958,7 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LongRunningQueryThresholdMinutes,
                         Muted: isMuted, Severity: lrqContext?.SeverityOverride,
                         ShortMessage: $"Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}"), ct);
+                    AfterFire("Long-Running Query", _lastLongRunningQueryAlert, key, now, alertCooldown, delivery);
                     readClock.Restart();
                 }
             }
@@ -1934,7 +1990,7 @@ public sealed class AlertEngine
     /* ---------------- tempdb space (Lite AlertEngine.cs:413-473) ---------------- */
 
     private async Task CheckTempDbSpaceAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.TempDbSpaceEnabled)                                          /* :414 */
         {
@@ -1979,7 +2035,7 @@ public sealed class AlertEngine
             {
                 if (!suppressed && CooldownElapsed(_lastTempDbSpaceAlert, key, now, alertCooldown)) /* :423 */
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "tempdb Space" }; /* :425 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "tempdb Space" }; /* :425 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :426 */
                     _lastTempDbSpaceAlert[key] = now;                               /* :427 */
 
@@ -2003,7 +2059,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(tempDbContext); /* :441 */
 
                     /* :443-453. ShortMessage = the toast body of :435. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "tempdb Space",
                         $"{tempDb.ReservedPercent:F0}% reserved ({tempDb.TotalReservedMb:F0} MB)",
                         $"{_settings.TempDbSpaceThresholdPercent}%",
@@ -2012,6 +2068,7 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.TempDbSpaceThresholdPercent,
                         Muted: isMuted, Severity: tempDbContext.SeverityOverride,
                         ShortMessage: $"tempdb {tempDb.ReservedPercent:F0}% reserved"), ct);
+                    AfterFire("tempdb Space", _lastTempDbSpaceAlert, key, now, alertCooldown, delivery);
                     readClock.Restart();
                 }
             }
@@ -2049,7 +2106,7 @@ public sealed class AlertEngine
     /// suppression gates. False when the check is disabled or the read failed.
     /// </returns>
     private async Task<bool> CheckLowDiskAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LowDiskEnabled)                                              /* :476 */
         {
@@ -2070,7 +2127,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var lowDiskOccurrences = await ObserveOccurrencesAsync(
-                key, VolumeFreeSpaceWatermarkMetric, AlertContextBuilders.VolumeFreeSpaceIncidents(serverName, breached), now);
+                key, VolumeFreeSpaceWatermarkMetric, AlertContextBuilders.VolumeFreeSpaceIncidents(fingerprintServer, breached), now);
             readClock.Restart();
             if (breached.Count > 0)
             {
@@ -2083,12 +2140,12 @@ public sealed class AlertEngine
                     && LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)
                     && CooldownElapsed(_lastLowDiskAlert, key, now, alertCooldown))
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Volume Free Space" }; /* :499 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Volume Free Space" }; /* :499 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :500 */
                     _lastLowDiskAlert[key] = now;                                   /* :501 */
                     _lastAlertedLowDiskPercent[key] = worst.FreePercent;            /* :502 */
 
-                    var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(serverName, breached, lowDiskOccurrences.Decorate); /* :515 */
+                    var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(fingerprintServer, breached, lowDiskOccurrences.Decorate); /* :515 */
                     /* :516-522 — #1136: grade WARNING normally, CRITICAL when critically low. */
                     if (lowDiskContext is not null && LowDiskAlertGate.IsCriticallyLow(
                         worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb))
@@ -2098,7 +2155,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(lowDiskContext); /* :523 */
 
                     /* :525-535. ShortMessage = the toast body of :510. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Volume Free Space",
                         $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)",
                         AlertContextBuilders.FormatLowDiskThreshold(_settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb),
@@ -2107,6 +2164,15 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LowDiskThresholdPercent,
                         Muted: isMuted, Severity: lowDiskContext?.SeverityOverride,
                         ShortMessage: $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)"), ct);
+                    AfterFire("Volume Free Space", _lastLowDiskAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: the worsening gate's last-alerted level was written before delivery. A fire
+                       nobody received puts back the level the operator was last told about, so the retry
+                       is still a fresh or worsening breach against it. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        RestoreAlertedLevel(_lastAlertedLowDiskPercent, key, lastLowDiskPercent);
+                    }
                     readClock.Restart();
                 }
             }
@@ -2151,7 +2217,7 @@ public sealed class AlertEngine
     /// deliberately avoided. Level-triggered with a resolved transition when no database breaches.
     /// </summary>
     private async Task CheckPvsPressureAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.PvsEnabled || _settings.PvsThresholdPercent <= 0)
         {
@@ -2170,7 +2236,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var pvsOccurrences = await ObserveOccurrencesAsync(
-                key, PvsWatermarkMetric, AlertContextBuilders.PvsPressureIncidents(serverName, breached), now);
+                key, PvsWatermarkMetric, AlertContextBuilders.PvsPressureIncidents(fingerprintServer, breached), now);
             readClock.Restart();
             if (breached.Count > 0)
             {
@@ -2182,15 +2248,15 @@ public sealed class AlertEngine
                     && PvsAlertGate.ShouldAlert(worst.PvsPercent, lastPvsPercent)
                     && CooldownElapsed(_lastPvsAlert, key, now, alertCooldown))
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Version Store (PVS)" };
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Version Store (PVS)" };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPvsAlert[key] = now;
                     _lastAlertedPvsPercent[key] = worst.PvsPercent;
 
-                    var pvsContext = AlertContextBuilders.BuildPvsPressureContext(serverName, breached, pvsOccurrences.Decorate);
+                    var pvsContext = AlertContextBuilders.BuildPvsPressureContext(fingerprintServer, breached, pvsOccurrences.Decorate);
                     var detailText = AlertContextBuilders.ContextToDetailText(pvsContext);
 
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Version Store (PVS)",
                         $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)",
                         AlertContextBuilders.FormatPvsThreshold(_settings.PvsThresholdPercent, _settings.PvsFloorGb),
@@ -2199,6 +2265,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.PvsThresholdPercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)"), ct);
+                    AfterFire("Version Store (PVS)", _lastPvsAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: same as the low-disk twin — the last-alerted level goes back to what the
+                       operator was last told, so the retry is still a fresh or worsening breach. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        RestoreAlertedLevel(_lastAlertedPvsPercent, key, lastPvsPercent);
+                    }
                     readClock.Restart();
                 }
             }
@@ -2267,7 +2341,7 @@ public sealed class AlertEngine
     /// silence.</para>
     /// </summary>
     private async Task CheckFileGrowthAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.FileGrowthEnabled)
         {
@@ -2289,7 +2363,7 @@ public sealed class AlertEngine
 
             var fileGrowthOccurrences = await ObserveOccurrencesAsync(
                 key, FileGrowthWatermarkMetric,
-                AlertContextBuilders.FileGrowthIncidents(serverName, breached), now);
+                AlertContextBuilders.FileGrowthIncidents(fingerprintServer, breached), now);
             readClock.Restart();
 
             if (breached.Count > 0)
@@ -2321,28 +2395,36 @@ public sealed class AlertEngine
 
                 if (!suppressed && anyNewObservation && CooldownElapsed(_lastFileGrowthAlert, key, now, alertCooldown))
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Database File Growth" };
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Database File Growth" };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastFileGrowthAlert[key] = now;
+
+                    /* #4752: what each file's memory held before this fire (or that it held none), so a fire
+                       nobody received can put it back. If two files ever shared a key, the first prior wins. */
+                    var priorObservations = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
                     foreach (var f in breached)
                     {
                         /* #3636: stamped even when muted, like the cooldown — the operator muted the server's
                            file growth, not the engine's memory of which observation it already reported. */
                         if (f.ObservedAtUtc is { } reported)
                         {
-                            alertedObservations[FileGrowthObservationKey(f)] = reported;
+                            var observationKey = FileGrowthObservationKey(f);
+                            priorObservations.TryAdd(
+                                observationKey,
+                                alertedObservations.TryGetValue(observationKey, out var before) ? before : (DateTime?)null);
+                            alertedObservations[observationKey] = reported;
                         }
                     }
 
                     var context = AlertContextBuilders.BuildFileGrowthContext(
-                        serverName, breached, fileGrowthOccurrences.Decorate);
+                        fingerprintServer, breached, fileGrowthOccurrences.Decorate);
                     var detailText = AlertContextBuilders.ContextToDetailText(context);
 
                     /* The headline names the file, its size and its share of the volume — the three facts that
                        decide whether this is worth getting up for. The rise is in the card. */
                     var headline =
                         $"{worst.DatabaseName}.{worst.FileName} is {worst.TotalSizeGb:F1} GB "
-                        + $"({worst.VolumePercent:F0}% of {worst.VolumeMountPoint}), "
+                        + $"({(worst.VolumeTotalMb is double worstTotal && worstTotal > 0 ? $"{worst.VolumePercent:F0}% of {(string.IsNullOrEmpty(worst.VolumeMountPoint) ? "(unknown)" : worst.VolumeMountPoint)}" : "volume unknown")}), "
                         + $"grew {worst.GrowthGb:F1} GB in {worst.GrowthWindowMinutes:F0} min";
 
                     /* The threshold line states the rate AND the window it was averaged over, in the same unit
@@ -2353,7 +2435,7 @@ public sealed class AlertEngine
                        compared without knowing that. */
                     var riseBarMb = AlertContextBuilders.FileGrowthRiseBarMb(
                         _settings.FileGrowthRiseMb, _settings.FileGrowthLookbackMinutes);
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Database File Growth",
                         headline,
                         $"rise ≥ {_settings.FileGrowthRiseMb} {AlertContextBuilders.FileGrowthRiseUnit} averaged over {_settings.FileGrowthLookbackMinutes} min "
@@ -2363,6 +2445,26 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.FileGrowthVolumePercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: headline), ct);
+                    AfterFire("Database File Growth", _lastFileGrowthAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: the observation stamps above were written before delivery. A fire nobody received
+                       puts each file's memory back (no entry for a file that had none), so the retry sweep still
+                       reads a file whose rise is under the level gate as news; with the stamp left in place,
+                       "not newer than the one this file last fired on" would hold it silent for the cooldown. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        foreach (var (observationKey, prior) in priorObservations)
+                        {
+                            if (prior is { } told)
+                            {
+                                alertedObservations[observationKey] = told;
+                            }
+                            else
+                            {
+                                alertedObservations.Remove(observationKey);
+                            }
+                        }
+                    }
                     readClock.Restart();
                 }
             }
@@ -2405,7 +2507,7 @@ public sealed class AlertEngine
     /* ---------------- anomalous Agent jobs (Lite AlertEngine.cs:557-632) ---------------- */
 
     private async Task CheckAnomalousJobsAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LongRunningJobEnabled)                                       /* :558 */
         {
@@ -2446,7 +2548,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var jobOccurrences = await ObserveOccurrencesAsync(
-                key, AnomalousJobWatermarkMetric, AlertContextBuilders.AnomalousJobIncidents(serverName, anomalousJobs), now);
+                key, AnomalousJobWatermarkMetric, AlertContextBuilders.AnomalousJobIncidents(fingerprintServer, anomalousJobs), now);
             readClock.Restart();
             if (anomalousJobs.Count > 0)
             {
@@ -2454,18 +2556,18 @@ public sealed class AlertEngine
                 var worst = anomalousJobs[0];                                       /* :578 */
                 var jobKey = $"{key}:{worst.JobId}:{worst.StartTime:O}";            /* :579 */
 
-                if (!suppressed && (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastJob) || now - lastJob >= alertCooldown)) /* :581 */
+                if (!suppressed && CooldownElapsed(_lastLongRunningJobAlert, jobKey, now, alertCooldown)) /* :581 */
                 {
                     var currentMinutes = worst.CurrentDurationSeconds / 60;         /* :583 — feeds ShortMessage (the toast body) */
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Long-Running Job", JobName = worst.JobName }; /* :585 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Long-Running Job", JobName = worst.JobName }; /* :585 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :586 */
                     _lastLongRunningJobAlert[jobKey] = now;                         /* :587 */
 
-                    var jobContext = AlertContextBuilders.BuildAnomalousJobContext(serverName, anomalousJobs, jobOccurrences.Decorate); /* :600 */
+                    var jobContext = AlertContextBuilders.BuildAnomalousJobContext(fingerprintServer, anomalousJobs, jobOccurrences.Decorate); /* :600 */
                     var detailText = AlertContextBuilders.ContextToDetailText(jobContext);                     /* :601 */
 
                     /* :603-613. ShortMessage = the toast body of :595. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Job",
                         $"{anomalousJobs.Count} job(s) exceeding {_settings.LongRunningJobMultiplier}x average",
                         $"{_settings.LongRunningJobMultiplier}x historical avg",
@@ -2474,6 +2576,11 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LongRunningJobMultiplier * 100,
                         Muted: isMuted, Severity: jobContext?.SeverityOverride,
                         ShortMessage: $"{worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)"), ct);
+
+                    /* #4752: the cooldown is per RUN and there is no second marker to put back. The back-dated
+                       stamp of a fire nobody received is dropped by the stale-entry pass above once
+                       `delay` has gone by, which is when the gate opens for this run again. */
+                    AfterFire("Long-Running Job", _lastLongRunningJobAlert, jobKey, now, alertCooldown, delivery);
                     readClock.Restart();
                 }
             }
@@ -2511,7 +2618,7 @@ public sealed class AlertEngine
     /// server is offline/Azure SQL DB, or the fetch failed.
     /// </returns>
     private async Task<bool> CheckFailedJobsAsync(
-        AlertServerSnapshot snapshot, string key, string serverName,
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId, string fingerprintServer,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.FailedJobEnabled || _failedJobsFetcher is null)              /* :639 */
@@ -2540,7 +2647,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var failedJobOccurrences = await ObserveOccurrencesAsync(
-                key, FailedJobWatermarkMetric, AlertContextBuilders.FailedJobIncidents(serverName, failedJobs), now);
+                key, FailedJobWatermarkMetric, AlertContextBuilders.FailedJobIncidents(fingerprintServer, failedJobs), now);
 
             /* No ClearOccurrencesAsync counterpart, and that is not an omission: a failed job is an EVENT,
                not a condition that resolves, so this check has no else-branch to clear from. The accumulator's
@@ -2558,20 +2665,19 @@ public sealed class AlertEngine
                     var mostRecent = failedJobs[0]; /* ORDER BY run_datetime DESC — :672 */
                     var jobNames = string.Join(", ", failedJobs.Select(j => j.JobName).Distinct().Take(3)); /* :673 */
 
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Failed Agent Job", JobName = mostRecent.JobName }; /* :675 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Failed Agent Job", JobName = mostRecent.JobName }; /* :675 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :676 */
+                    DateTime? priorWatermark = hasWatermark ? lastFailure : null;   /* #4752: what a fire nobody received puts back in memory */
                     _lastFailedJobAlert[key] = now;                                 /* :677 */
                     _lastAlertedFailedJobTime[key] = newestFailure;                 /* :678 */
-                    /* :679-682 — persist the SERVER-LOCAL watermark on-change only (#1145 parity). */
-                    await _stateStore.SaveFailedJobWatermarkAsync(key, newestFailure);
 
                     var failedJobContext = AlertContextBuilders.BuildFailedJobContext(
-                        serverName, failedJobs, failedJobOccurrences.Decorate,
+                        fingerprintServer, failedJobs, failedJobOccurrences.Decorate,
                         windowEndUtc: now, lookbackMinutes: _settings.FailedJobLookbackMinutes); /* :695 */
                     var detailText = AlertContextBuilders.ContextToDetailText(failedJobContext);               /* :696 */
 
                     /* :698-708. ShortMessage = the toast body of :690. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Failed Agent Job",
                         $"{failedJobs.Count} job failure(s) in last {_settings.FailedJobLookbackMinutes}m — {jobNames}",
                         $"last {_settings.FailedJobLookbackMinutes}m",
@@ -2580,6 +2686,35 @@ public sealed class AlertEngine
                         NumericThresholdValue: 0,
                         Muted: isMuted, Severity: failedJobContext?.SeverityOverride,
                         ShortMessage: $"{failedJobs.Count} job failure(s) — {jobNames}"), ct);
+                    AfterFire("Failed Agent Job", _lastFailedJobAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: the in-memory watermark moved to the newest failure BEFORE the fire; the saved one
+                       moves only AFTER it, and not at all when every channel failed. A fire nobody received
+                       puts the in-memory entry back to the value the operator was last told about, or removes
+                       it when there was none, so the retry sweep still sees a failure above it. The saved row
+                       never received the new value, so there is nothing to put back there: it still holds the
+                       prior value, or none, and a restart inside the retry delay reads the failure as not yet
+                       announced instead of losing it. The gate is the failed delivery alone, not the mute: a
+                       muted fire attempts no channel, is not "every channel failed", and saves as it always did.
+                       The trade is that this family is at-least-once: a crash after a send and before this save
+                       can send the same failure again after the restart, where saving first lost a failure no
+                       channel had received. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        if (priorWatermark is { } prior)
+                        {
+                            _lastAlertedFailedJobTime[key] = prior;
+                        }
+                        else
+                        {
+                            _lastAlertedFailedJobTime.TryRemove(key, out _);
+                        }
+                    }
+                    else
+                    {
+                        /* :679-682 — persist the SERVER-LOCAL watermark on-change only (#1145 parity). */
+                        await _stateStore.SaveFailedJobWatermarkAsync(key, newestFailure);
+                    }
                 }
             }
         }
@@ -2618,18 +2753,18 @@ public sealed class AlertEngine
     /// its state returns to expected. Severity is graded at the fire site
     /// (<see cref="DatabaseStateTokens.SeverityFor"/>): CRITICAL for the integrity-failure states,
     /// WARNING otherwise. The shared <see cref="IAlertEngineSettings.ExcludedDatabases"/> list is
-    /// honoured (parity with the other database-scoped alerts). The read is not freshness-gated (a
-    /// standing condition).
+    /// honoured (parity with the other database-scoped alerts). A null read is "no verdict" and changes
+    /// nothing here (no fire, no resolve); otherwise the read has no freshness limit (a standing condition).
     /// </summary>
     private async Task CheckDatabaseStateAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.DatabaseStateEnabled)
         {
             return;
         }
 
-        List<DatabaseStateInfo> deviations;
+        List<DatabaseStateInfo>? deviations;
         var readClock = Stopwatch.StartNew();
         try
         {
@@ -2645,6 +2780,12 @@ public sealed class AlertEngine
                failed fetch (that would fabricate a recovery), and never fire on absent evidence. */
             _logger?.LogError("Failed to check database state for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "database state", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        if (deviations is null)
+        {
+            /* No verdict this pass (see IAlertReadAdapter.GetDatabaseStatesAsync): fire nothing, resolve nothing. */
             return;
         }
 
@@ -2711,6 +2852,7 @@ public sealed class AlertEngine
                 var muteCtx = new AlertMuteContext
                 {
                     ServerName = serverName,
+                    ServerId = serverId,
                     MetricName = DatabaseStateTokens.MetricName,
                     DatabaseName = dbName
                 };
@@ -2741,7 +2883,7 @@ public sealed class AlertEngine
 
                 var detailText = AlertContextBuilders.ContextToDetailText(stateContext);
 
-                await FireAsync(new AlertOutcome(
+                var delivery = await FireAsync(new AlertOutcome(
                     key, serverName, DatabaseStateTokens.MetricName,
                     $"{dbName}: {stateText}",
                     expectedText,
@@ -2749,10 +2891,12 @@ public sealed class AlertEngine
                     NumericCurrentValue: null, NumericThresholdValue: null,
                     Muted: isMuted, Severity: severity,
                     ShortMessage: shortMessage), ct);
+                AfterFire(DatabaseStateTokens.MetricName, _lastDatabaseStateAlert, cooldownKey, now, alertCooldown, delivery);
 
-                /* Stamped AFTER delivery so a failed fire is retried next cycle rather than silenced, and
-                   written for every state rather than only the edge-triggered ones, so that reclassifying a
-                   state later has correct history to work from.
+                /* Stamped AFTER delivery so a fire whose every channel failed (#4752) is retried after the
+                   backoff rather than silenced: it is not stamped, so the retry reads an edge-triggered state
+                   as not yet announced. Written for every state rather than only the edge-triggered ones, so
+                   that reclassifying a state later has correct history to work from.
 
                    NOT stamped when MUTED, which is the one place this memory and the cooldown beside it must
                    disagree. The cooldown is rate limiting and applies whether or not anyone was told; this
@@ -2763,7 +2907,7 @@ public sealed class AlertEngine
                    operator's mute silently became irreversible for as long as the state held. Skipping the
                    stamp costs a repeat inside the mute (invisible by definition, and exactly the pre-#2166
                    cooldown behavior) and keeps unmuting meaningful. */
-                if (!isMuted)
+                if (!isMuted && !FailedSendBackoff.EveryChannelFailed(delivery))
                 {
                     await _stateStore.SaveDatabaseStateAlertedAsync(key, dbName, db.StateDesc);
                 }
@@ -2859,7 +3003,7 @@ public sealed class AlertEngine
     /// to silence.</para>
     /// </summary>
     private async Task CheckForcePlanFailuresAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.ForcePlanFailureEnabled)
         {
@@ -2940,10 +3084,12 @@ public sealed class AlertEngine
                 var muteCtx = new AlertMuteContext
                 {
                     ServerName = serverName,
+                    ServerId = serverId,
                     MetricName = ForcePlanTokens.MetricName,
                     DatabaseName = failure.DatabaseName
                 };
                 bool isMuted = _isAlertMuted(muteCtx);
+                var priorObservedAtUtc = plan.LastAlertedObservedAtUtc; /* #4752: what a fire nobody received puts back */
                 _lastForcePlanAlert[cooldownKey] = now; /* stamped even when muted, like the others */
                 plan.LastAlertedObservedAtUtc = failure.ObservedAtUtc; /* #3579: and so is the observation */
 
@@ -2972,7 +3118,7 @@ public sealed class AlertEngine
 
                 var detailText = AlertContextBuilders.ContextToDetailText(context);
 
-                await FireAsync(new AlertOutcome(
+                var delivery = await FireAsync(new AlertOutcome(
                     key, serverName, ForcePlanTokens.MetricName,
                     $"{failure.DatabaseName}: plan {failure.PlanId} failing to force ({reasonText})",
                     reasonText,
@@ -2980,6 +3126,15 @@ public sealed class AlertEngine
                     NumericCurrentValue: failure.FailureDelta, NumericThresholdValue: null,
                     Muted: isMuted, Severity: ForcePlanTokens.SeverityFor(failure),
                     ShortMessage: $"{failure.DatabaseName} plan {failure.PlanId} failed to force {failure.FailureDelta}x ({reasonText})"), ct);
+                AfterFire(ForcePlanTokens.MetricName, _lastForcePlanAlert, cooldownKey, now, alertCooldown, delivery);
+
+                /* #4752: the observation was stamped before delivery. A fire nobody received puts back the
+                   one this plan last fired on, so the retry reads the same observation as news rather than
+                   as one the operator already has a card for. */
+                if (EveryChannelFailed(delivery))
+                {
+                    plan.LastAlertedObservedAtUtc = priorObservedAtUtc;
+                }
             }
         }
 
@@ -3019,11 +3174,16 @@ public sealed class AlertEngine
     /// can key it structurally instead of concatenating a string. Every existing caller is string-keyed and
     /// infers unchanged; the database-state family keys by (server, database, state), where a string key
     /// would need a delimiter no <c>sysname</c> can contain — and SQL Server permits <c>|</c>.</para>
+    ///
+    /// <para>#4732: a stamp AHEAD of <paramref name="now"/> (the wall clock stepped back since it was written) is
+    /// replaced by <paramref name="now"/> in <paramref name="lastFired"/> and counted from there, by
+    /// <see cref="LastFiredStamp.TryGet"/>, so the repeat is due one cooldown after the first check that sees the
+    /// step, not the step plus the cooldown. A cooldown of zero or less still never holds.</para>
     /// </summary>
     private static bool CooldownElapsed<TKey>(
         ConcurrentDictionary<TKey, DateTime> lastFired, TKey key, DateTime now, TimeSpan cooldown)
         where TKey : notnull =>
-        !lastFired.TryGetValue(key, out var last) || now - last >= cooldown;
+        !LastFiredStamp.TryGet(lastFired, key, now, out var last) || now - last >= cooldown;
 
     /// <summary>
     /// The tier a "Deadlocks Detected" fire wears (#3653, A8e): Critical when the window's deadlock RATE
@@ -3082,8 +3242,14 @@ public sealed class AlertEngine
     /// <para>The log happens BEFORE delivery on purpose. Delivery does I/O (SMTP, webhooks, a history-row
     /// write) and swallows its own failures, so logging afterwards would lose the record of an alert whose
     /// delivery hung or failed — and that alert is precisely the one an operator later goes looking for.</para>
+    ///
+    /// <para>Returns what the channels did (#4752): the deliverer's <see cref="IAlertDeliverer.DeliverAndReportAsync"/>
+    /// answer, so a family can tell "every channel failed" from "delivered" and retry the first
+    /// (<see cref="AfterFire"/>). Delivery itself is unchanged. A per-event split reports the one delivery
+    /// <see cref="FailedSendBackoff.ReportForSplit"/> picks (#4822). <c>null</c> — a split in which no send was
+    /// attempted, a throw outside the channels — is "unreported" and reads as delivered.</para>
     /// </summary>
-    private async Task FireAsync(AlertOutcome outcome, CancellationToken ct)
+    private async Task<AlertDelivery?> FireAsync(AlertOutcome outcome, CancellationToken ct)
     {
         _logger?.LogWarning(
             "{Line}",
@@ -3094,7 +3260,77 @@ public sealed class AlertEngine
                 outcome.ShortMessage,
                 outcome.Muted));
 
-        await _deliverer.DeliverAsync(outcome, ct);
+        return await _deliverer.DeliverAndReportAsync(outcome, ct);
+    }
+
+    /// <summary>
+    /// True when the send was attempted and NOTHING reached an operator (#4752). The rule lives in
+    /// <see cref="FailedSendBackoff.EveryChannelFailed"/>, so the engine's fire sites and every other caller of
+    /// that class read a delivery the same way; this is its short name here.
+    /// </summary>
+    private static bool EveryChannelFailed(AlertDelivery? delivery) =>
+        FailedSendBackoff.EveryChannelFailed(delivery);
+
+    /// <summary>
+    /// How long to wait before the alert whose <paramref name="consecutiveFailures"/>-th consecutive send
+    /// failed is tried again (#4752): a minute, doubling with each further failure (1, 2, 4, 8 ... minutes),
+    /// never longer than the family's own <paramref name="cooldown"/> — the wait a failed alert used to get
+    /// in every case. The exponent is bounded so a channel that stays down for days cannot overflow the
+    /// arithmetic.
+    /// </summary>
+    public static TimeSpan ChannelFailureRetryDelay(int consecutiveFailures, TimeSpan cooldown)
+    {
+        var exponent = Math.Clamp(consecutiveFailures - 1, 0, 20);
+        var delay = TimeSpan.FromMinutes(1L << exponent);
+        return delay < cooldown ? delay : (cooldown < TimeSpan.Zero ? TimeSpan.Zero : cooldown);
+    }
+
+    /// <summary>
+    /// Runs after a family's fire (#4752), and every fire site in this engine calls it. The families stamp
+    /// their cooldown BEFORE delivery, so an alert whose every channel failed (an HTTP 429 or 5xx, a timeout,
+    /// an unreachable mail server) used to be silent for the whole cooldown. When <see cref="EveryChannelFailed"/>,
+    /// this counts the failure in <c>_failedSends</c> and back-dates the stamp so the cooldown opens again after
+    /// <see cref="ChannelFailureRetryDelay"/>: <c>CooldownElapsed</c> is <c>now - last &gt;= cooldown</c>, so
+    /// <c>last = now - cooldown + delay</c> opens exactly <c>delay</c> after this fire. The next sweep that still
+    /// sees the condition fires it again. Any other result — delivered, muted, unreported — ends the failure
+    /// streak.
+    /// </summary>
+    private void AfterFire<TKey>(
+        string family, ConcurrentDictionary<TKey, DateTime> stamps, TKey key, DateTime now,
+        TimeSpan cooldown, AlertDelivery? delivery)
+        where TKey : notnull
+    {
+        /* Families with a second "already reported" marker (a count watermark, a collection time, a
+           last-alerted level, a saved watermark) put it back at their own call site: this method only
+           knows the cooldown. */
+        var streakKey = Convert.ToString(key, CultureInfo.InvariantCulture) ?? string.Empty;
+        if (!EveryChannelFailed(delivery))
+        {
+            _failedSends.RecordDelivered(family, streakKey);
+            return;
+        }
+
+        var delay = _failedSends.RecordFailure(family, streakKey, now, cooldown, out var failures);
+        stamps[key] = now - cooldown + delay;
+        _logger?.LogInformation(
+            "Every channel failed for {Family} on {Key} (failure {Failures}); trying again in {Delay}",
+            family, streakKey, failures, delay);
+    }
+
+    /// <summary>
+    /// Puts a worsening gate's last-alerted level back to what it was before a fire (#4752): the prior
+    /// level when there was one, no entry when the failed fire was the first.
+    /// </summary>
+    private static void RestoreAlertedLevel(ConcurrentDictionary<string, double> levels, string key, double? prior)
+    {
+        if (prior is { } level)
+        {
+            levels[key] = level;
+        }
+        else
+        {
+            levels.TryRemove(key, out _);
+        }
     }
 
     /// <summary>

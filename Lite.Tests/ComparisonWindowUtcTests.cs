@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -36,16 +37,14 @@ public sealed class ComparisonWindowUtcTests
     /// (ruling item 3: after a slicer drag, the baseline is the dragged window shifted back, not the whole
     /// preset range).
     /// </summary>
-    [Theory]
-    [InlineData(300)]   // UTC+5
-    [InlineData(-420)]  // UTC-7
-    public void ShiftComparisonRange_MatchesGridsUtcWindow_ShiftedByOneOrSevenDays(int utcOffsetMinutes)
+    [Fact]
+    public void ShiftComparisonRange_MatchesGridsUtcWindow_ShiftedByOneOrSevenDays()
     {
         // The same derivation CompareToCombo_SelectionChanged and the six ServerTab.Refresh.cs call sites
-        // now use for "current": server-local pickers converted back to UTC by LocalDataService.GetQueriesTabWindowUtc.
-        var fromServerLocal = new DateTime(2026, 3, 10, 9, 0, 0, DateTimeKind.Unspecified);
-        var toServerLocal = new DateTime(2026, 3, 10, 17, 0, 0, DateTimeKind.Unspecified);
-        var (currentStartUtc, currentEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromServerLocal, toServerLocal, utcOffsetMinutes);
+        // now use for "current": the tab's held UTC pair, handed to LocalDataService.GetQueriesTabWindowUtc as it is (#4766).
+        var fromUtc = new DateTime(2026, 3, 10, 9, 0, 0, DateTimeKind.Unspecified);
+        var toUtc = new DateTime(2026, 3, 10, 17, 0, 0, DateTimeKind.Unspecified);
+        var (currentStartUtc, currentEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromUtc, toUtc);
 
         var yesterday = ServerTab.ShiftComparisonRange(1, currentStartUtc, currentEndUtc);
         Assert.NotNull(yesterday);
@@ -117,7 +116,7 @@ public sealed class ComparisonWindowUtcTests
         // CompareToCombo_SelectionChanged routes its three comparison refreshes through the same
         // GetQueriesTabWindowUtc tuple the grid reads use, not a bare DateTime.UtcNow/fromDate pair.
         Assert.Contains(
-            "var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);",
+            "var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);",
             comparisonSource);
     }
 

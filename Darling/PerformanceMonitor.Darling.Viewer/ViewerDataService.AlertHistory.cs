@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -37,8 +38,14 @@ public sealed class ViewerAlertRow
     /// <summary>The server the alert fired for (dismiss keys on it; the Server column shows the name).</summary>
     public int ServerId { get; init; }
 
-    /// <summary>The alert's server display name (the Server column + mute-from-alert context).</summary>
+    /// <summary>The server's registry display name where the row's server is registered, else the stored name
+    /// (the Server column).</summary>
     public string ServerName { get; init; } = "";
+
+    /// <summary>The spelling the alert log STORED for the server (an analysis alert stores the storage name,
+    /// an engine alert the display name). Mute rules are authored from and judged against this spelling, so
+    /// <see cref="ToMuteContext"/> uses it, not <see cref="ServerName"/>.</summary>
+    public string StoredServerName { get; init; } = "";
 
     public required string MetricName { get; init; }
 
@@ -58,8 +65,22 @@ public sealed class ViewerAlertRow
 
     public string? ContextJson { get; init; }
 
-    /// <summary>Stored naive-UTC; shown in the viewer machine's local time (the viewer convention).</summary>
-    public string TimeLocal => ViewerTimeHelper.ForDisplay(AlertTime).ToString("yyyy-MM-dd HH:mm:ss");
+    /// <summary>This row's own server's clock (its time zone where one is known, else its UTC offset; the viewer
+    /// machine's offset while none is collected), set by <see cref="ViewerDataService.GetAlertHistoryAsync"/>
+    /// from the fleet's clocks, which it reads at most once per <see cref="ViewerDataService.AlertClockLifetime"/>
+    /// (#4766). The all-servers list holds rows of many servers, so each converts on
+    /// its own clock and not on the active server tab's. Null (a row built without one) falls back to the active
+    /// server's clock.</summary>
+    public ServerClock? Clock { get; init; }
+
+    /// <summary>Stored naive-UTC; shown in the viewer's time display mode (Server/Local/UTC), Server on this row's
+    /// own server's clock (<see cref="Clock"/>). An alert in the repeated hour after a fall-back reads the same wall
+    /// time in both of its occurrences, so it takes a space and its UTC offset ("2026-11-01 01:30:00 -05:00"), as
+    /// Lite's alert row and <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> do for the other
+    /// grids (#4766).</summary>
+    public string TimeLocal => ViewerTimeHelper.FormatForDisplay(
+        AlertTime, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock),
+        "yyyy-MM-dd HH:mm:ss");
 
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
 
@@ -110,7 +131,9 @@ public sealed class ViewerAlertRow
     {
         var context = new AlertMuteContext
         {
-            ServerName = ServerName,
+            /* Ids are signed hashes: only 0 means "no id". */
+            ServerId = ServerId != 0 ? ServerId : null,
+            ServerName = StoredServerName.Length > 0 ? StoredServerName : ServerName,
             MetricName = MetricName,
         };
         context.PopulateFromDetailText(DetailText, MetricName);
@@ -127,37 +150,47 @@ public sealed partial class ViewerDataService
        server_id + server_name so the grid's Server column and the dismiss key have them. */
 
     private const string AlertHistorySelectColumns = @"
-    alert_time,
-    server_id,
-    server_name,
-    metric_name,
-    current_value,
-    threshold_value,
-    alert_sent,
-    notification_type,
-    send_error,
-    muted,
-    detail_text,
-    context_json";
+    a.alert_time,
+    a.server_id,
+    COALESCE(s.display_name, a.server_name) AS server_name,
+    a.metric_name,
+    a.current_value,
+    a.threshold_value,
+    a.alert_sent,
+    a.notification_type,
+    a.send_error,
+    a.muted,
+    a.detail_text,
+    a.context_json,
+    a.server_name AS stored_server_name";
 
     /// <summary>Per-server read. $1 window start, $2 server_id, $3 limit (naive UTC / int / int).</summary>
     public const string AlertHistorySql = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time >= $1
-AND   server_id = $2
-AND   dismissed = FALSE
-ORDER BY alert_time DESC
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.server_id = $2
+AND   a.dismissed = FALSE
+ORDER BY a.alert_time DESC
 LIMIT $3";
 
     /// <summary>All-servers read (the Alert History default). $1 window start, $2 limit (naive UTC / int).</summary>
     public const string AlertHistoryAllServersSql = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time >= $1
-AND   dismissed = FALSE
-ORDER BY alert_time DESC
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.dismissed = FALSE
+ORDER BY a.alert_time DESC
 LIMIT $2";
+
+    /// <summary>How long the alert-history reads serve the fleet's server clocks before reading them again
+    /// (#4766). The shell polls the history on every refresh tick (30s by default, 10s at the fastest), and a
+    /// server's clock only changes with a new <c>server_properties</c> row, which lands when the server connects
+    /// and once a day after that. Five minutes is the longest a server added since the last read shows the
+    /// viewer machine's offset in Server mode.</summary>
+    internal static readonly TimeSpan AlertClockLifetime = TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History tab's read. With no
@@ -168,6 +201,14 @@ LIMIT $2";
         DateTime sinceUtc, int? serverId = null, int limit = 500, CancellationToken cancellationToken = default)
     {
         var rows = new List<ViewerAlertRow>();
+
+        /* One clock read for the whole list (#4766): each row is stamped with its own server's clock, or the
+           viewer machine's offset where none is collected, so the list's times are each server's own hour in
+           Server mode. The read is the fleet's, held for AlertClockLifetime (see ServerClockCache): this method
+           runs on every refresh tick, and re-sorting server_properties' whole retained history each time gave the
+           same answer each time. A server filter reads the same fleet snapshot and looks its rows up in it. */
+        var clocks = await _alertClocks.GetAsync(cancellationToken);
+        var nowUtc = DateTime.UtcNow;
 
         await using var command = _dataSource.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -184,10 +225,12 @@ LIMIT $2";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var rowServerId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
             rows.Add(new ViewerAlertRow
             {
                 AlertTime = reader.GetDateTime(0),
-                ServerId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                ServerId = rowServerId,
+                Clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, rowServerId, TimeZoneInfo.Local, nowUtc),
                 ServerName = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 MetricName = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 CurrentValue = reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
@@ -198,6 +241,7 @@ LIMIT $2";
                 Muted = !reader.IsDBNull(9) && reader.GetBoolean(9),
                 DetailText = reader.IsDBNull(10) ? null : reader.GetString(10),
                 ContextJson = reader.IsDBNull(11) ? null : reader.GetString(11),
+                StoredServerName = reader.IsDBNull(12) ? "" : reader.GetString(12),
             });
         }
 

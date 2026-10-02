@@ -42,6 +42,17 @@ public sealed class DarlingConfig
     [JsonPropertyName("postgres")]
     public PostgresConfig Postgres { get; set; } = new();
 
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule disable/severity-override config, read from an optional
+    /// <c>analyzer</c> section in darling.json — the same shape as erikdarlingdata/PerformanceStudio's
+    /// <c>.planview.json</c> root (<see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig"/>). Null
+    /// (the section omitted entirely) behaves exactly like an explicit <c>AnalyzerConfig.Default</c>:
+    /// no rule disabled, no severity overridden. Not auto-discovered from any other file — PM does not
+    /// couple to PlanViewer's <c>~/.planview.json</c> convention.
+    /// </summary>
+    [JsonPropertyName("analyzer")]
+    public PerformanceMonitor.PlanAnalysis.AnalyzerConfig? Analyzer { get; set; }
+
     [JsonPropertyName("servers")]
     public List<MonitoredServer> Servers { get; set; } = new();
 
@@ -205,8 +216,9 @@ public sealed class DarlingConfig
     public AlertsConfig Alerts { get; set; } = new();
 
     /// <summary>
-    /// SMTP delivery for fired alerts. Delivery is enabled when host + from + to are all set
-    /// (no separate flag — defaults over speculative config); the password uses the same DPAPI
+    /// SMTP delivery for fired alerts. Delivery is enabled when host + from are set (no separate
+    /// flag — defaults over speculative config); <c>to</c> is the default recipient list, which a
+    /// notification route can stand in for (#4751). The password uses the same DPAPI
     /// --encrypt-password pattern as SQL auth. Optional.
     /// </summary>
     [JsonPropertyName("smtp")]

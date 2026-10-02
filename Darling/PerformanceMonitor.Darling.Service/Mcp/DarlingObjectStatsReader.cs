@@ -8,9 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -108,10 +111,19 @@ internal static class DarlingObjectStatsReader
         double ReservedMb, long TotalRows, long RowLockWaitCount, long RowLockWaitInMs, long PageLockWaitCount,
         long PageLockWaitInMs, long IndexLockPromotionCount, long PageLatchWaitInMs, long PageIoLatchWaitInMs);
 
-    /// <summary>One database file's latest size snapshot.</summary>
+    /// <summary>One database file's latest size snapshot. <c>TotalSizeMb</c> is null for the LOG file of an Azure SQL
+    /// Database Hyperscale database (the log service): see <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.
+    /// <c>FileId</c> is null for the one row another database on an Azure SQL Database server gets, which holds
+    /// that database's data size only: see <see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>.</summary>
     public sealed record DatabaseSizeRow(
-        DateTime CollectionTime, string DatabaseName, string? FileName, string? FileTypeDesc, double TotalSizeMb,
-        double? UsedSizeMb, double? AutoGrowthMb, double? MaxSizeMb, string? VolumeMountPoint, double? VolumeTotalMb, double? VolumeFreeMb);
+        DateTime CollectionTime, string DatabaseName, string? FileName, string? FileTypeDesc, double? TotalSizeMb,
+        double? UsedSizeMb, double? AutoGrowthMb, double? MaxSizeMb, string? VolumeMountPoint, double? VolumeTotalMb, double? VolumeFreeMb,
+        int? FileId = null)
+    {
+        /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the
+        /// database's data size, and its log size is not reported.</summary>
+        public bool IsAzureSiblingRow => PerformanceMonitor.Common.AzureSiblingDatabaseSize.IsSiblingRow(FileId, FileName);
+    }
 
     /* ─────────────────────────── table / index sizes + growth ─────────────────────────── */
 
@@ -242,35 +254,26 @@ internal static class DarlingObjectStatsReader
     /// healthy collection, full retention and zero returned rows, which reads exactly like a collection
     /// failure. The database filter is what makes the question answerable; the count below is what stops the
     /// answer being read as complete.</para>
-    /// <para><b><c>last_user_access</c> is de-skewed to naive UTC.</b> The four columns it is the
-    /// <c>GREATEST</c> of come straight off <c>sys.dm_db_index_usage_stats</c>
+    /// <para><b><c>last_user_access</c> comes back as the server's local clock and is converted to naive UTC in
+    /// C#.</b> The four columns it is the <c>GREATEST</c> of come straight off <c>sys.dm_db_index_usage_stats</c>
     /// (<c>IndexObjectStatsCollector</c> ships <c>us.last_user_seek</c> and its three siblings verbatim), so
-    /// the stored values are the monitored server's LOCAL wall clock. All four share one offset, so
-    /// subtracting after the <c>GREATEST</c> is equivalent to subtracting before it and costs one expression
-    /// instead of four. <c>GREATEST</c> ignoring NULLs is what is wanted here — an index used in only one of
-    /// the four ways still reports that one access — and subtracting an interval from the all-NULL case
-    /// keeps it NULL. This read returns NO other timestamp, which is why converting rather than labelling
-    /// matters more here than elsewhere: there is nothing else in the payload for a reader to notice a
-    /// disagreement against.</para>
-    /// <para><b>The de-skew is exact only inside the current DST period, and this is the read where that
-    /// matters most.</b> <c>server_properties.utc_offset_minutes</c> is
-    /// <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — the offset in force AT COLLECTION TIME, one
-    /// current value. The other de-skewed reads describe current state (a running job, an open transaction,
-    /// a cleaner that ran seconds ago), so their timestamps and that offset sit on the same side of any
-    /// transition. These four do not: <c>sys.dm_db_index_usage_stats</c> persists since the instance
-    /// restarted, which on a stable production box is routinely months, so a large share of values predate
-    /// the most recent transition and come back <b>60 minutes early</b> — silently, and in the plausible
-    /// direction. This is not a theoretical exposure: any target in a DST-observing zone has it, a target
-    /// configured to UTC does not, and on AWS RDS the instance takes its time zone from a creation-time
-    /// parameter — so a non-UTC zone is an ordinary configuration rather than an exotic one, and "it is
-    /// RDS, so it is probably UTC" is not a safe assumption. #2932 records the measured offset behind the
-    /// four-hour figure quoted above. <c>sqlserver_start_time</c> on the same row is the bound on how far
-    /// back the affected values can reach.</para>
-    /// <para>Fixing it properly needs a ZONE rather than an offset — <c>CURRENT_TIMEZONE_ID()</c>
-    /// (SQL Server 2019+) collected alongside the offset, then <c>AT TIME ZONE</c> at the read boundary,
-    /// which handles transitions. That is a collected-column addition and a migration rung, so what is
-    /// carried here is the SCOPE of the claim, in the #2993 shape: this read places a timestamp exactly
-    /// when it falls inside the current DST period, and within an hour otherwise.</para>
+    /// the stored values are the monitored server's LOCAL wall clock. <c>GREATEST</c> ignoring NULLs is what is
+    /// wanted here — an index used in only one of the four ways still reports that one access — and it stays
+    /// NULL when all four are. <see cref="MapIndexUsageRow"/> then converts the result through the server's
+    /// <see cref="ServerClock"/> (<see cref="DarlingServerClockReader"/>): its time zone where SQL Server reports
+    /// one, else the newest collected offset. This read returns NO other timestamp, which is why converting
+    /// rather than labelling matters more here than elsewhere: there is nothing else in the payload for a
+    /// reader to notice a disagreement against.</para>
+    /// <para><b>The conversion follows the server's time zone, and this is the read where that matters most
+    /// (#4793).</b> <c>sys.dm_db_index_usage_stats</c> persists since the instance restarted, which on a stable
+    /// production box is routinely months, so a large share of values predate the most recent daylight saving
+    /// change. Subtracting the ONE newest offset put those values 60 minutes early — silently, and in the
+    /// plausible direction. Any target in a DST-observing zone had this, a target configured to UTC did not, and
+    /// on AWS RDS the instance takes its time zone from a creation-time parameter, so a non-UTC zone is an
+    /// ordinary configuration. #2932 records the measured offset behind the four-hour figure quoted above.
+    /// Known edge: the <c>GREATEST</c> of the four stored local times is taken before converting, which equals
+    /// converting each first except inside the repeated hour of a fall back, where a local time cannot say which
+    /// occurrence it was and takes the first.</para>
     /// <para>The alias deliberately does NOT carry a <c>_utc</c> suffix, unlike the other fifteen. This one
     /// is a projection alias rather than a column, and <c>ConsumedTimestampFrameDisciplineTests</c> reaches
     /// the payload field through the alias — a suffix here would make the field name and the alias diverge
@@ -279,15 +282,6 @@ internal static class DarlingObjectStatsReader
     /// than a suffix nothing checks.</para>
     /// </summary>
     public const string IndexUsageSql = """
-        WITH svr AS (
-            SELECT COALESCE((
-                SELECT sp.utc_offset_minutes
-                FROM server_properties AS sp
-                WHERE sp.server_id = $1
-                AND   sp.utc_offset_minutes IS NOT NULL
-                ORDER BY sp.collection_time DESC
-                LIMIT 1), 0) AS offset_minutes
-        )
         SELECT
             database_name,
             schema_name,
@@ -301,7 +295,7 @@ internal static class DarlingObjectStatsReader
             COALESCE(user_lookups, 0) AS user_lookups,
             COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) AS total_reads,
             COALESCE(user_updates, 0) AS user_updates,
-            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access,
+            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,
             CASE
                 WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
                      AND COALESCE(user_updates, 0) = 0 THEN 'Unused'
@@ -309,7 +303,7 @@ internal static class DarlingObjectStatsReader
                      AND COALESCE(user_updates, 0) > 0 THEN 'Write-only'
                 ELSE 'Active'
             END AS classification
-        FROM v_index_object_stats, svr
+        FROM v_index_object_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
         AND   ($2::text IS NULL OR database_name = $2::text)
@@ -347,6 +341,7 @@ internal static class DarlingObjectStatsReader
         NpgsqlDataSource postgres, int serverId, int top, string? databaseName = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexUsageRow>();
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(IndexUsageSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
@@ -355,25 +350,29 @@ internal static class DarlingObjectStatsReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new IndexUsageRow(
-                reader.IsDBNull(0) ? "" : reader.GetString(0),
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? "" : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
-                reader.IsDBNull(13) ? "" : reader.GetString(13)));
+            rows.Add(MapIndexUsageRow(reader, clock));
         }
 
         return rows;
     }
+
+    /// <summary>Maps one row of <see cref="IndexUsageSql"/> (14 columns, in the SELECT's order).</summary>
+    internal static IndexUsageRow MapIndexUsageRow(DbDataReader reader, ServerClock clock) =>
+        new(
+            reader.IsDBNull(0) ? "" : reader.GetString(0),
+            reader.IsDBNull(1) ? "" : reader.GetString(1),
+            reader.IsDBNull(2) ? "" : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
+            reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+            reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+            reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+            reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+            reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+            DarlingServerClockReader.ToUtc(clock, reader, 12),
+            reader.IsDBNull(13) ? "" : reader.GetString(13));
 
     /// <summary>
     /// How many index rows the same server and database filter match at the latest snapshot, ignoring the
@@ -460,6 +459,34 @@ internal static class DarlingObjectStatsReader
         LIMIT $2
         """;
 
+    /// <summary>
+    /// The newest stored <c>is_optimized_locking_on</c> flag per database on the server. The anchor is the newest
+    /// <c>capture_time</c> of the whole server, as <see cref="DarlingCurrentConfigReader.DatabaseConfigSql"/> reads
+    /// it: one collection run writes every database with one capture time, so that capture is the server's whole
+    /// snapshot, and a dropped database's old true flag does not outlive it. <c>capture_time</c> is projected so the
+    /// latest-anchor census sees the anchor. A NULL flag means unknown. $1 server_id.
+    /// </summary>
+    public const string OptimizedLockingFlagsSql = """
+        SELECT is_optimized_locking_on, capture_time
+        FROM database_config
+        WHERE server_id = $1
+        AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+        """;
+
+    /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise.</summary>
+    public static async Task<string?> GetOptimizedLockingNoteAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        var flags = new List<bool?>();
+        await using var command = postgres.CreateCommand(OptimizedLockingFlagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            flags.Add(reader.IsDBNull(0) ? null : reader.GetBoolean(0));
+        return OptimizedLockingNote.For(flags);
+    }
+
     public static async Task<List<IndexLockingRow>> GetIndexLockingAsync(
         NpgsqlDataSource postgres, int serverId, int top, CancellationToken cancellationToken = default)
     {
@@ -520,7 +547,8 @@ internal static class DarlingObjectStatsReader
             CAST(max_size_mb AS double precision) AS max_size_mb,
             volume_mount_point,
             CAST(volume_total_mb AS double precision) AS volume_total_mb,
-            CAST(volume_free_mb AS double precision) AS volume_free_mb
+            CAST(volume_free_mb AS double precision) AS volume_free_mb,
+            file_id
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time = $2
@@ -569,13 +597,16 @@ internal static class DarlingObjectStatsReader
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                /* NULL is the Hyperscale log file: it stays null, never 0. */
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? null : reader.GetDouble(5),
                 reader.IsDBNull(6) ? null : reader.GetDouble(6),
                 reader.IsDBNull(7) ? null : reader.GetDouble(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 reader.IsDBNull(9) ? null : reader.GetDouble(9),
-                reader.IsDBNull(10) ? null : reader.GetDouble(10)));
+                reader.IsDBNull(10) ? null : reader.GetDouble(10),
+                /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
+                reader.IsDBNull(11) ? null : reader.GetInt32(11)));
         }
 
         return rows;

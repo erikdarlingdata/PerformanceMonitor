@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -86,7 +87,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var baselineParamIndex = 4 + dbValues.Count;
@@ -251,7 +252,7 @@ LIMIT $" + limitIndex;
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
 
         command.CommandText = @"

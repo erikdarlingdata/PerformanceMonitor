@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using PerformanceMonitor.Common;
@@ -121,22 +120,38 @@ public sealed class AvailabilityGroupsTabRefreshTests
     }
 
     [Fact]
-    public void Render_UnchangedRows_StaysUnderTheHundredMillisecondBudget()
+    public void Render_UnchangedRows_ReplacesNoCardReplicaOrDatabaseInstances()
     {
-        /* The production shape from #4238: 42 AGs, 84 replicas, 398 database rows. */
+        /* The production shape from #4238: 42 AGs, 84 replicas, 398 database rows. This used to assert a 100 ms
+           wall-clock budget around the second Render call; that measured 191 ms during a loaded full-suite run
+           (and has flaked in other lanes' full runs too) while passing alone -- a loaded box, not a correctness
+           regression. This asserts the property #4238 actually protects instead: an unchanged refresh must
+           reconcile every card, replica and database IN PLACE and never rebuild any of them. A regression that
+           tears down and rebuilds rows -- or an O(n^2) loop that amounts to the same thing -- shows up here as a
+           nonzero replaced count, independent of how loaded the runner is. */
         OnStaThread(() =>
         {
             var tab = new AvailabilityGroupsTab();
             var topology = BuildTopology(agCount: 42, replicasPerAg: 2, dbRowsPerAg: 9, extraDbRowsOnFirst: 20);
 
-            tab.Render(topology); // first render always does full work; only the SECOND is timed.
+            tab.Render(topology); // first render always does full work; only the SECOND is checked.
+            var before = Flatten(tab);
 
-            var sw = Stopwatch.StartNew();
             tab.Render(BuildTopology(agCount: 42, replicasPerAg: 2, dbRowsPerAg: 9, extraDbRowsOnFirst: 20));
-            sw.Stop();
+            var after = Flatten(tab);
 
-            Assert.True(sw.Elapsed.TotalMilliseconds < 100,
-                $"unchanged-rows refresh took {sw.Elapsed.TotalMilliseconds:N1} ms, budget is 100 ms (#4238)");
+            Assert.Equal(before.Cards.Count, after.Cards.Count);
+            Assert.Equal(before.Replicas.Count, after.Replicas.Count);
+            Assert.Equal(before.Databases.Count, after.Databases.Count);
+
+            var replacedCards = ReplacedCount(before.Cards, after.Cards);
+            var replacedReplicas = ReplacedCount(before.Replicas, after.Replicas);
+            var replacedDatabases = ReplacedCount(before.Databases, after.Databases);
+
+            Assert.True(replacedCards == 0 && replacedReplicas == 0 && replacedDatabases == 0,
+                $"unchanged-rows refresh replaced {replacedCards} of {after.Cards.Count} cards, " +
+                $"{replacedReplicas} of {after.Replicas.Count} replicas, " +
+                $"{replacedDatabases} of {after.Databases.Count} databases instead of updating them in place (#4238)");
         });
     }
 
@@ -144,6 +159,39 @@ public sealed class AvailabilityGroupsTabRefreshTests
 
     private static List<AgTopologyCard> CardsOf(AvailabilityGroupsTab tab) =>
         ((IEnumerable<AgTopologyCard>)tab.AgCards.ItemsSource).ToList();
+
+    /// <summary>Every card, and every one of its nested replicas and databases, in render order -- so a work-
+    /// count comparison across two renders can see a rebuild at any level, not only the top one.</summary>
+    private static (List<AgTopologyCard> Cards, List<AgTopologyReplica> Replicas, List<AgTopologyDatabase> Databases) Flatten(AvailabilityGroupsTab tab)
+    {
+        var cards = CardsOf(tab);
+        var replicas = new List<AgTopologyReplica>();
+        var databases = new List<AgTopologyDatabase>();
+        foreach (var card in cards)
+        {
+            replicas.AddRange(card.Replicas);
+            databases.AddRange(card.Databases);
+        }
+
+        return (cards, replicas, databases);
+    }
+
+    /// <summary>Counts positions where <paramref name="after"/> holds a DIFFERENT instance than
+    /// <paramref name="before"/> held at the same position -- the direct "items replaced" work count for an
+    /// unchanged refresh, which should reconcile in place and replace nothing.</summary>
+    private static int ReplacedCount<T>(List<T> before, List<T> after) where T : class
+    {
+        var replaced = 0;
+        for (var i = 0; i < Math.Min(before.Count, after.Count); i++)
+        {
+            if (!ReferenceEquals(before[i], after[i]))
+            {
+                replaced++;
+            }
+        }
+
+        return replaced;
+    }
 
     private static List<AgTopologyCard> BuildTopology(int agCount, int replicasPerAg, int dbRowsPerAg, int extraDbRowsOnFirst = 0)
     {

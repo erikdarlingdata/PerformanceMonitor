@@ -24,8 +24,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// type, blocked sessions by database) precede the existing "Blocked Process Reports" grid, which is
 /// re-hosted unchanged as the third sub-tab. The five trend-chart bodies are COPIES of Lite's
 /// <c>ServerTab.Charts.cs</c> Update* methods, reads rewired to <see cref="ViewerDataService"/> Postgres.
-/// Two render-body deviations from Lite: (1) the time axis runs through
-/// <see cref="ViewerTimeHelper.ForDisplay"/> instead of Lite's per-server <c>UtcOffsetMinutes</c> shift;
+/// Two render-body deviations from Lite: (1) the time axis plots the naive-UTC instant and labels it in
+/// <see cref="ViewerTimeHelper.CurrentDisplayZone"/> instead of Lite's per-server <c>UtcOffsetMinutes</c> shift;
 /// (2) the per-server toolbar's settable window supplies the X-axis range. The spike-plot /
 /// zero-line-when-empty shapes, the fixed
 /// <see cref="ChartPalette.SeriesColor"/> identities for the single-series charts, and the cycling
@@ -81,15 +81,15 @@ public partial class ViewerServerTab
         ApplyTheme(CurrentWaitsBlockedChart);
         CurrentWaitsBlockedChart.Refresh();
 
-        _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec");
-        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents");
-        _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks");
-        _blockingDurationHover = new ChartHoverHelper(BlockingDurationChart, "ms");
-        _blockingTotalDurationHover = new ChartHoverHelper(BlockingTotalDurationChart, "ms");
-        _deadlockWaitHover = new ChartHoverHelper(DeadlockWaitChart, "ms");
-        _deadlockTotalWaitHover = new ChartHoverHelper(DeadlockTotalWaitChart, "ms");
-        _currentWaitsDurationHover = new ChartHoverHelper(CurrentWaitsDurationChart, "ms");
-        _currentWaitsBlockedHover = new ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
+        _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _blockingDurationHover = new ChartHoverHelper(BlockingDurationChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _blockingTotalDurationHover = new ChartHoverHelper(BlockingTotalDurationChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _deadlockWaitHover = new ChartHoverHelper(DeadlockWaitChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _deadlockTotalWaitHover = new ChartHoverHelper(DeadlockTotalWaitChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _currentWaitsDurationHover = new ChartHoverHelper(CurrentWaitsDurationChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _currentWaitsBlockedHover = new ChartHoverHelper(CurrentWaitsBlockedChart, "sessions", displayZone: ViewerTimeHelper.CurrentDisplayZone);
 
         /* The Blocked Process Reports + Deadlocks sub-tabs each carry a UTC slicer; dragging it re-reads
            its grid over the selection (Lite's OnBlockingSlicerChanged / OnDeadlockSlicerChanged). */
@@ -156,7 +156,8 @@ public partial class ViewerServerTab
                    source selection); the deadlock COUNT is the cheap sibling of the Trends tab's deadlock
                    trend, summed here for the summary strip. The deadlock SEVERITY aggregate (victim_count +
                    total/max/avg wait, parsed on-the-fly from deadlock_graph_xml) is drawn from the SAME
-                   v_deadlocks/collection_time window as the count, so the two reconcile in period. */
+                   v_deadlocks window as the count (deadlock_time in the window, plus the collection_time
+                   floor), so the two reconcile in period. */
                 var durationStatsTask = _dataService.GetBlockingDurationStatsAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockCountTask = _dataService.GetDeadlockTrendAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockSeverityTask = _dataService.GetDeadlockSeverityStatsAsync(_server.ServerId, startUtc, endUtc);
@@ -203,7 +204,22 @@ public partial class ViewerServerTab
     {
         var rows = await _dataService.GetRecentBlockedProcessReportsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _blockedProcessFilterMgr!.UpdateData(rows);
+        await ShowSeparatelyMonitoredNotesAsync();
         await LoadBlockingSlicerAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// A master target's Blocking and Deadlocks lists keep its server-wide rows while its counts skip the databases
+    /// monitored as their own servers; one line above each grid says so. Shown only when the same resolver the card
+    /// uses returns a non-empty list (<see cref="ViewerDataService.SeparatelyMonitoredListNoteFor"/>).
+    /// </summary>
+    private async Task ShowSeparatelyMonitoredNotesAsync()
+    {
+        var note = ViewerDataService.SeparatelyMonitoredListNoteFor(await _dataService.GetSeparatelyMonitoredAsync(_server.ServerId));
+        BlockingSeparatelyMonitoredNote.Text = note ?? "";
+        BlockingSeparatelyMonitoredNote.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
+        DeadlockSeparatelyMonitoredNote.Text = note ?? "";
+        DeadlockSeparatelyMonitoredNote.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>
@@ -216,6 +232,7 @@ public partial class ViewerServerTab
         var rows = await _dataService.GetRecentDeadlocksAsync(_server.ServerId, startUtc, endUtc);
         var details = await ParseDeadlocksOffUiThreadAsync(rows);
         _deadlockFilterMgr!.UpdateData(details);
+        await ShowSeparatelyMonitoredNotesAsync();
         await LoadDeadlockSlicerAsync(startUtc, endUtc);
     }
 
@@ -359,8 +376,8 @@ public partial class ViewerServerTab
         ApplyTheme(LockWaitTrendChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(winStartUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(winEndUtc);
+        var rangeStart = winStartUtc;
+        var rangeEnd = winEndUtc;
 
         _lockWaitTrendHover?.Clear();
         if (data.Count == 0)
@@ -371,7 +388,7 @@ public partial class ViewerServerTab
             zeroLine.LegendText = "Lock Waits";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("LockWaits"));
             zeroLine.MarkerSize = 0;
-            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(LockWaitTrendChart);
             LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
@@ -387,7 +404,7 @@ public partial class ViewerServerTab
         for (int i = 0; i < grouped.Count; i++)
         {
             var group = grouped[i];
-            var times = group.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+            var times = group.Select(t => t.CollectionTime.ToOADate()).ToArray();
             var values = group.Select(t => t.WaitTimeMsPerSecond).ToArray();
 
             var plot = LockWaitTrendChart.Plot.Add.TimeSeries(times, values);
@@ -399,7 +416,7 @@ public partial class ViewerServerTab
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(LockWaitTrendChart);
         LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
@@ -414,8 +431,8 @@ public partial class ViewerServerTab
         ApplyTheme(BlockingTrendChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(winStartUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(winEndUtc);
+        var rangeStart = winStartUtc;
+        var rangeEnd = winEndUtc;
 
         _blockingTrendHover?.Clear();
         if (data.Count == 0)
@@ -427,7 +444,7 @@ public partial class ViewerServerTab
             zeroLine.LegendText = "Blocking Incidents";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
             zeroLine.MarkerSize = 0;
-            BlockingTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
             BlockingTrendChart.Plot.YLabel("Blocking Incidents");
@@ -447,7 +464,7 @@ public partial class ViewerServerTab
 
         foreach (var point in data.OrderBy(d => d.Time))
         {
-            var time = ViewerTimeHelper.ForDisplay(point.Time).ToOADate();
+            var time = point.Time.ToOADate();
             /* Go to zero just before the spike */
             expandedTimes.Add(time - 0.0001);
             expandedCounts.Add(0);
@@ -469,7 +486,7 @@ public partial class ViewerServerTab
         plot.MarkerSize = 0; /* No markers, just lines */
         _blockingTrendHover?.Add(plot, "Blocking Incidents");
 
-        BlockingTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
         BlockingTrendChart.Plot.YLabel("Blocking Incidents");
@@ -484,8 +501,8 @@ public partial class ViewerServerTab
         ApplyTheme(DeadlockTrendChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(winStartUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(winEndUtc);
+        var rangeStart = winStartUtc;
+        var rangeEnd = winEndUtc;
 
         _deadlockTrendHover?.Clear();
         if (data.Count == 0)
@@ -497,7 +514,7 @@ public partial class ViewerServerTab
             zeroLine.LegendText = "Deadlocks";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
             zeroLine.MarkerSize = 0;
-            DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockTrendChart);
             DeadlockTrendChart.Plot.YLabel("Deadlocks");
@@ -517,7 +534,7 @@ public partial class ViewerServerTab
 
         foreach (var point in data.OrderBy(d => d.Time))
         {
-            var time = ViewerTimeHelper.ForDisplay(point.Time).ToOADate();
+            var time = point.Time.ToOADate();
             /* Go to zero just before the spike */
             expandedTimes.Add(time - 0.0001);
             expandedCounts.Add(0);
@@ -539,7 +556,7 @@ public partial class ViewerServerTab
         plot.MarkerSize = 0; /* No markers, just lines */
         _deadlockTrendHover?.Add(plot, "Deadlocks");
 
-        DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockTrendChart);
         DeadlockTrendChart.Plot.YLabel("Deadlocks");
@@ -560,8 +577,8 @@ public partial class ViewerServerTab
         ApplyTheme(BlockingDurationChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(winStartUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(winEndUtc);
+        var rangeStart = winStartUtc;
+        var rangeEnd = winEndUtc;
 
         _blockingDurationHover?.Clear();
         if (data.Count == 0)
@@ -572,7 +589,7 @@ public partial class ViewerServerTab
             zeroLine.LegendText = "Max Block Duration";
             zeroLine.Color = ScottPlot.Color.FromHex(SeriesColors[0]);
             zeroLine.MarkerSize = 0;
-            BlockingDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            BlockingDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             BlockingDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingDurationChart);
             BlockingDurationChart.Plot.YLabel("Block Duration (ms)");
@@ -583,7 +600,7 @@ public partial class ViewerServerTab
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => ViewerTimeHelper.ForDisplay(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => d.Time.ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var maxValues = PadEnds(ordered.Select(d => (double)d.MaxDurationMs).ToArray(), 0, 0);
         var avgValues = PadEnds(ordered.Select(d => d.AvgDurationMs).ToArray(), 0, 0);
 
@@ -601,7 +618,7 @@ public partial class ViewerServerTab
 
         double globalMax = maxValues.Length > 0 ? maxValues.Max() : 0;
 
-        BlockingDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        BlockingDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingDurationChart);
         BlockingDurationChart.Plot.YLabel("Block Duration (ms)");
@@ -622,8 +639,8 @@ public partial class ViewerServerTab
         ApplyTheme(BlockingTotalDurationChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(winStartUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(winEndUtc);
+        var rangeStart = winStartUtc;
+        var rangeEnd = winEndUtc;
 
         _blockingTotalDurationHover?.Clear();
         if (data.Count == 0)
@@ -634,7 +651,7 @@ public partial class ViewerServerTab
             zeroLine.LegendText = "Total Block Duration";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
             zeroLine.MarkerSize = 0;
-            BlockingTotalDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            BlockingTotalDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             BlockingTotalDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTotalDurationChart);
             BlockingTotalDurationChart.Plot.YLabel("Total Block Duration (ms)");
@@ -645,7 +662,7 @@ public partial class ViewerServerTab
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => ViewerTimeHelper.ForDisplay(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => d.Time.ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var totals = PadEnds(ordered.Select(d => (double)d.TotalDurationMs).ToArray(), 0, 0);
 
         var plot = BlockingTotalDurationChart.Plot.Add.TimeSeries(times, totals);
@@ -656,7 +673,7 @@ public partial class ViewerServerTab
 
         double globalMax = totals.Length > 0 ? totals.Max() : 0;
 
-        BlockingTotalDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        BlockingTotalDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTotalDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTotalDurationChart);
         BlockingTotalDurationChart.Plot.YLabel("Total Block Duration (ms)");
@@ -678,8 +695,8 @@ public partial class ViewerServerTab
         ApplyTheme(DeadlockWaitChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(winStartUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(winEndUtc);
+        var rangeStart = winStartUtc;
+        var rangeEnd = winEndUtc;
 
         _deadlockWaitHover?.Clear();
         if (data.Count == 0)
@@ -690,7 +707,7 @@ public partial class ViewerServerTab
             zeroLine.LegendText = "Max Deadlock Wait";
             zeroLine.Color = ScottPlot.Color.FromHex(SeriesColors[0]);
             zeroLine.MarkerSize = 0;
-            DeadlockWaitChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            DeadlockWaitChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             DeadlockWaitChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockWaitChart);
             DeadlockWaitChart.Plot.YLabel("Deadlock Wait (ms)");
@@ -701,7 +718,7 @@ public partial class ViewerServerTab
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => ViewerTimeHelper.ForDisplay(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => d.Time.ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var maxValues = PadEnds(ordered.Select(d => (double)d.MaxWaitMs).ToArray(), 0, 0);
         var avgValues = PadEnds(ordered.Select(d => d.AvgWaitMs).ToArray(), 0, 0);
 
@@ -719,7 +736,7 @@ public partial class ViewerServerTab
 
         double globalMax = maxValues.Length > 0 ? maxValues.Max() : 0;
 
-        DeadlockWaitChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        DeadlockWaitChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         DeadlockWaitChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockWaitChart);
         DeadlockWaitChart.Plot.YLabel("Deadlock Wait (ms)");
@@ -740,8 +757,8 @@ public partial class ViewerServerTab
         ApplyTheme(DeadlockTotalWaitChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(winStartUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(winEndUtc);
+        var rangeStart = winStartUtc;
+        var rangeEnd = winEndUtc;
 
         _deadlockTotalWaitHover?.Clear();
         if (data.Count == 0)
@@ -752,7 +769,7 @@ public partial class ViewerServerTab
             zeroLine.LegendText = "Total Deadlock Wait";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
             zeroLine.MarkerSize = 0;
-            DeadlockTotalWaitChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            DeadlockTotalWaitChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             DeadlockTotalWaitChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockTotalWaitChart);
             DeadlockTotalWaitChart.Plot.YLabel("Total Deadlock Wait (ms)");
@@ -763,7 +780,7 @@ public partial class ViewerServerTab
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => ViewerTimeHelper.ForDisplay(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => d.Time.ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var totals = PadEnds(ordered.Select(d => (double)d.TotalWaitMs).ToArray(), 0, 0);
 
         var plot = DeadlockTotalWaitChart.Plot.Add.TimeSeries(times, totals);
@@ -774,7 +791,7 @@ public partial class ViewerServerTab
 
         double globalMax = totals.Length > 0 ? totals.Max() : 0;
 
-        DeadlockTotalWaitChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        DeadlockTotalWaitChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         DeadlockTotalWaitChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockTotalWaitChart);
         DeadlockTotalWaitChart.Plot.YLabel("Total Deadlock Wait (ms)");
@@ -836,8 +853,8 @@ public partial class ViewerServerTab
         ApplyTheme(CurrentWaitsDurationChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(winStartUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(winEndUtc);
+        var rangeStart = winStartUtc;
+        var rangeEnd = winEndUtc;
 
         _currentWaitsDurationHover?.Clear();
         if (data.Count == 0)
@@ -848,7 +865,7 @@ public partial class ViewerServerTab
             zeroLine.LegendText = "Current Waits";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("CurrentWaits"));
             zeroLine.MarkerSize = 0;
-            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsDurationChart);
             CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
@@ -865,7 +882,7 @@ public partial class ViewerServerTab
         {
             var group = grouped[i];
             var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+            var times = ordered.Select(t => t.CollectionTime.ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.TotalWaitMs).ToArray();
 
             var plot = CurrentWaitsDurationChart.Plot.Add.TimeSeries(times, values);
@@ -877,7 +894,7 @@ public partial class ViewerServerTab
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsDurationChart);
         CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
@@ -892,8 +909,8 @@ public partial class ViewerServerTab
         ApplyTheme(CurrentWaitsBlockedChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(winStartUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(winEndUtc);
+        var rangeStart = winStartUtc;
+        var rangeEnd = winEndUtc;
 
         _currentWaitsBlockedHover?.Clear();
         if (data.Count == 0)
@@ -904,7 +921,7 @@ public partial class ViewerServerTab
             zeroLine.LegendText = "Blocked Sessions";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("BlockedSessions"));
             zeroLine.MarkerSize = 0;
-            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsBlockedChart);
             CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
@@ -921,7 +938,7 @@ public partial class ViewerServerTab
         {
             var group = grouped[i];
             var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+            var times = ordered.Select(t => t.CollectionTime.ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.BlockedCount).ToArray();
 
             var plot = CurrentWaitsBlockedChart.Plot.Add.TimeSeries(times, values);
@@ -933,7 +950,7 @@ public partial class ViewerServerTab
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsBlockedChart);
         CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");

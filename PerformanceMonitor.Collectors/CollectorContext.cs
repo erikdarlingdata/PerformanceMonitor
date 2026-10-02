@@ -61,6 +61,15 @@ public sealed class CollectorContext
     public DateTime? Watermark { get; set; }
 
     /// <summary>
+    /// How far back an event collector (blocked process reports, long query completions, system_health
+    /// events) reads when <see cref="Watermark"/> is null: on its first run, and on a run whose watermark read
+    /// failed. Such a run can store again an event the store already holds, so Lite's event reads look this
+    /// far back before a window's start to find the first copy (<c>StoredEventCopies</c>). The collectors and
+    /// that read share this one value, so the read always looks back at least as far as a collector does.
+    /// </summary>
+    public static readonly TimeSpan EventFallbackWindow = TimeSpan.FromMinutes(10);
+
+    /// <summary>
     /// Which of the definition's two watermark columns <see cref="Watermark"/> was read from (#3778): true
     /// when the host resolved it from <c>UtcWatermarkColumn</c> (the store held at least one row with the UTC
     /// twin, so the value is a UTC instant), false when it came from <c>WatermarkColumn</c> — which for the one
@@ -141,6 +150,40 @@ public sealed class CollectorContext
     public Dictionary<string, string> PendingState { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// State a definition stages for the ITEM it is reading right now (one database of a per-database run,
+    /// or the single item of a server-scoped one), keyed exactly like <see cref="PendingState"/>.
+    ///
+    /// <para><b>The rule: state a definition stages here is saved only if this item's rows were written.</b>
+    /// The host lands it into <see cref="PendingState"/> from the item's completion point, after the item's
+    /// read AND write both succeeded, and drops it when the item's read, a later result set or the write
+    /// throws. A definition that records how far it has read (a cursor, a ring-buffer position) must stage
+    /// it here, never in <see cref="PendingState"/> directly: the per-database loops tolerate one item's
+    /// failure and save <see cref="PendingState"/> as long as a sibling succeeded, so a value written
+    /// straight there would advance past rows no one stored and the next run would never read them again.</para>
+    ///
+    /// <para>The host clears it before each item's read, so one item's staged state cannot leak into a
+    /// sibling's landing. Landing and dropping go through <see cref="LandStagedItemState"/> and
+    /// <see cref="DropStagedItemState"/>.</para>
+    /// </summary>
+    public Dictionary<string, string> StagedItemState { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Moves everything staged for the current item into <see cref="PendingState"/>. Host-only: call
+    /// it once the item's read and write have both succeeded.</summary>
+    public void LandStagedItemState()
+    {
+        foreach (var (key, value) in StagedItemState)
+        {
+            PendingState[key] = value;
+        }
+
+        StagedItemState.Clear();
+    }
+
+    /// <summary>Discards everything staged for the current item. Host-only: call it before an item's read,
+    /// and whenever the item's read or write did not complete.</summary>
+    public void DropStagedItemState() => StagedItemState.Clear();
+
+    /// <summary>
     /// The labelled COUNTS this definition measured on the target during the round trip it had already
     /// made, rendered onto this run's <c>collection_log.error_message</c> by whichever host is running it
     /// (#3161). Empty for every collector that measures nothing, which leaves the column NULL exactly as
@@ -180,6 +223,8 @@ public sealed class CollectorContext
     /// so it cannot reach a release either. The renderer counts rejects instead of throwing, for a list some
     /// caller assembled by hand.</para>
     /// </summary>
+    /// <para>Counts are non-negative by convention: nothing emits a negative, and the health read's detector
+    /// (<c>CollectorHealthClassifier.HasMeasurements</c>) does not accept a leading <c>-</c>.</para>
     /// <exception cref="ArgumentException">The label is not a legal count name.</exception>
     public void Measure(string label, long value)
     {
@@ -253,6 +298,14 @@ public sealed class CollectorContext
     /// definition, the same shape as <see cref="CurrentDatabaseName"/> and <see cref="Watermark"/>.
     /// </summary>
     public bool PgReadBinaryFileGranted { get; set; }
+
+    /// <summary>
+    /// How many bytes the text log tails move their read start forward (#4735), 0 for an ordinary read. A read with
+    /// no saved position starts <see cref="PgServerLogTail.TailBytes"/> before the end of the file, and PostgreSQL
+    /// refuses a <c>pg_read_file</c> slice whose first byte is inside a multi-byte character (22021). The host
+    /// repeats the read with 1, then 2, then 3 here, and <see cref="PgServerLogTail.WithResume"/> binds it.
+    /// </summary>
+    public int PgLogReadShiftBytes { get; set; }
 
     /// <summary>
     /// Whether this target's <c>log_destination</c> includes <c>csvlog</c> (#4053 part a1b), resolved by the

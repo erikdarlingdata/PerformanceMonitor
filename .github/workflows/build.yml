@@ -130,6 +130,10 @@ jobs:
             dashboard:
               - 'deprecated/Dashboard/**/!(*.md)'
               - 'deprecated/Dashboard.Tests/**/!(*.md)'
+              # ThemeParityTests compares the Dashboard's theme files with Lite's, so a change to Lite's
+              # themes alone must run it too. #4658 changed a Lite theme color, its CI skipped the test,
+              # and the next run that included it failed on dev (#4668).
+              - 'Lite/Themes/**/!(*.md)'
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
@@ -296,6 +300,17 @@ jobs:
             echo "::notice title=Full build::At least one changed file is off the documentation allowlist (${DOCS_COUNT:-0} of ${ALL_COUNT:-0} classified as documentation)."
           fi
 
+      # Every web-dashboard module must parse and link (#4666, #4672). The C# tests only READ the
+      # dashboard's JavaScript, so a syntax error, a missing file or a missing named export passes
+      # every other check and blanks the whole dashboard in the browser. A step INSIDE build, not a
+      # job of its own: a failing job that build `needs:` would SKIP build, and a skipped build reads
+      # as success, so the gate would fail open. It runs on every change the docs fast path does not
+      # engage for (about two seconds), so a docs-only change stays fast.
+      - name: Parse and link every wwwroot/js module
+        if: steps.fastpath.outputs.engaged != 'true'
+        shell: bash
+        run: bash .github/scripts/check-web-js.sh
+
       - name: Setup .NET 10.0
         if: steps.fastpath.outputs.engaged != 'true'
         uses: actions/setup-dotnet@v6
@@ -367,8 +382,10 @@ jobs:
       # compiler warnings and three broken ThemeParityTests accumulated unnoticed (#1643). Deprecated means
       # bug-fix-only, not unverified: it still compiles warning-free and its tests still guard cross-app
       # parity (the theme palettes it checks are LITE's too).
+      # installer_core too: the Dashboard references Installer.Core, and the filter's own comment says a
+      # change there rebuilds both products, which only held for the CLI Installer until now.
       - name: Build Dashboard.Tests
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet build deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-restore
 
       - name: Build Darling
@@ -398,7 +415,7 @@ jobs:
         run: dotnet run --project deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build -- -class- "Installer.Tests.VersionDetectionTests" -class- "Installer.Tests.IdempotencyTests" -class- "Installer.Tests.AdversarialTests"
 
       - name: Run Dashboard tests
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
 
       - name: Run Darling tests
@@ -632,7 +649,7 @@ jobs:
         run: |
           # Pin vpk to the Velopack library version (keep in sync with the Velopack
           # PackageReference in PerformanceMonitorLite.csproj).
-          dotnet tool install -g vpk --version 1.2.0
+          dotnet tool install -g vpk --version 1.2.158
           New-Item -ItemType Directory -Force -Path releases/velopack-lite
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
 
@@ -873,9 +890,13 @@ jobs:
         env:
           DARLING: ${{ steps.filter.outputs.darling }}
           DARLING_COUNT: ${{ steps.filter.outputs.darling_count }}
-          DARLING_FILES: ${{ steps.filter.outputs.darling_files }}
+          # A list goes into the environment only up to 1,000 files. Linux refuses to start a process whose
+          # single environment string passes 128 KiB, so the 2,843-file dev-to-main release PR failed here
+          # before the script ran ("Argument list too long"). The counts always print; the Detect changed
+          # paths step above lists every file either way.
+          DARLING_FILES: ${{ fromJSON(steps.filter.outputs.darling_count || '0') <= 1000 && steps.filter.outputs.darling_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
           ALL_COUNT: ${{ steps.filter.outputs.all_count }}
-          ALL_FILES: ${{ steps.filter.outputs.all_files }}
+          ALL_FILES: ${{ fromJSON(steps.filter.outputs.all_count || '0') <= 1000 && steps.filter.outputs.all_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
         run: |
           set -euo pipefail
 
@@ -926,6 +947,27 @@ jobs:
           [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
           if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
 
+      # store-upgrade-gated (#4326): the same fixture nightly.yml builds, only when a changed path is in
+      # .github/darling-paths-filter.yml's store-upgrade filter, so a PR that cannot move the upgrade E2Es'
+      # answer does not pay for the ~680MB of pinned archives. This runs on every shard, not just the ones
+      # today's upgrade classes happen to hash into: a class's shard must never decide whether it runs, so a
+      # renamed class or a new upgrade E2E landing on a different shard still gets the fixture. Same cache
+      # key as nightly.yml, so a warm cache from either means no download here.
+      - name: Cache upgrade-fixture downloads (previous-major runtime)
+        if: steps.filter.outputs.darling == 'true' && steps.filter.outputs.store-upgrade == 'true'
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/upgrade-fixture/work/downloads
+          key: upgrade-fixture-${{ runner.os }}-${{ hashFiles('Darling/tools/new-upgraded-store-fixture.ps1') }}
+
+      # -SkipNew: the CURRENT runtime is already extracted above from pg-runtime.zip, which is what
+      # DARLING_TEST_PGRUNTIME_NEWZIP points at below. This step only needs the old sides: the previous
+      # major, and (#3906) the previous release on the current major.
+      - name: Build previous-major runtime for the upgrade fixture
+        if: steps.filter.outputs.darling == 'true' && steps.filter.outputs.store-upgrade == 'true'
+        shell: pwsh
+        run: ./Darling/tools/new-upgraded-store-fixture.ps1 -SkipNew
+
       - name: Restore Darling.Tests
         if: steps.filter.outputs.darling == 'true'
         run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
@@ -968,7 +1010,7 @@ jobs:
           $logFile = "$env:RUNNER_TEMP\darling-pg.log"
           & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
           if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
@@ -995,6 +1037,21 @@ jobs:
       #   5544 (stderr,csvlog): PgPlanCaptureLiveTests (DARLING_TEST_PG_AUTOEXPLAIN) and
       #     PgLogTailStderrSiblingLiveTests (DARLING_TEST_PG_CSVLOG_SIBLING) — both need stderr
       #     present alongside csvlog, and the %Q-bearing log_line_prefix those tests parse.
+      #   5545 (stderr, %u@%d prefix): TheSelfHostedCollector_ReadsTheTargetsOwnLog_EndToEnd
+      #     (DARLING_TEST_PG_LOG_TARGET) and AgainstAUtcTarget_TheLogQueriesReadTheSettingWithTheTail_
+      #     AndStoreWhatTheServerWrote (DARLING_TEST_PG_UTC_LOG_TARGET) share this one cluster: both need
+      #     logging_collector on and log_timezone UTC, and the first also needs log_connections,
+      #     log_disconnections and log_lock_waits on so its workload (the next step) leaves a real event of
+      #     each family — error, connection, lock_wait — in the log before the tests run. The %u@%d-bearing
+      #     prefix is what the second test's live assertion (reader.GetName(1) == "log_timezone") needs.
+      #   5546 (stderr), 5547 (csvlog), 5548 (jsonlog): the #4699 log-rotation pins
+      #     (PgServerLogTailRotationLiveTests and PgDeadlocksResumeLiveTests share 5546 through
+      #     DARLING_TEST_PG_LOGROTATE; PgServerLogTailCsvJsonRotationLiveTests uses 5547/5548 through
+      #     DARLING_TEST_PG_LOGROTATE_CSV/_JSON). They call pg_rotate_logfile(), so each gets its own
+      #     cluster: a rotation on 5542/5543/5545 would move the file under the other log classes reading
+      #     them (#4702). All three need logging_collector on, log_timezone UTC, log_lock_waits on and the
+      #     short deadlock_timeout the helper sets; 5546 also needs the %m [%p] %Q prefix the deadlock reader
+      #     parses. The three classes share one serial xunit collection (pg-log-rotation).
       - name: Initialize and start the log-format PostgreSQL clusters
         if: steps.filter.outputs.darling == 'true'
         shell: pwsh
@@ -1036,6 +1093,77 @@ jobs:
             "log_destination = 'stderr,csvlog'",
             "log_line_prefix = '%m [%p] %Q '"
           )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-logtarget" "$env:RUNNER_TEMP\darling-pg-logtarget.log" 5545 @(
+            "logging_collector = on",
+            "log_destination = 'stderr'",
+            "log_timezone = 'UTC'",
+            "log_line_prefix = '%m %u@%d [%p] '",
+            "log_connections = on",
+            "log_disconnections = on",
+            "log_lock_waits = on"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-rotate-stderr" "$env:RUNNER_TEMP\darling-pg-rotate-stderr.log" 5546 @(
+            "logging_collector = on",
+            "log_destination = 'stderr'",
+            "log_timezone = 'UTC'",
+            "log_line_prefix = '%m [%p] %Q '",
+            "log_lock_waits = on"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-rotate-csvlog" "$env:RUNNER_TEMP\darling-pg-rotate-csvlog.log" 5547 @(
+            "logging_collector = on",
+            "log_destination = 'csvlog'",
+            "log_timezone = 'UTC'",
+            "log_lock_waits = on"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-rotate-jsonlog" "$env:RUNNER_TEMP\darling-pg-rotate-jsonlog.log" 5548 @(
+            "logging_collector = on",
+            "log_destination = 'jsonlog'",
+            "log_timezone = 'UTC'",
+            "log_lock_waits = on"
+          )
+
+          # The workload the first test's doc comment promises: one real event of each family — error,
+          # connection, lock_wait — written by the server itself before the tests read the log. Bounded and
+          # loud: every step has its own timeout, and a missing precondition throws rather than leaving the
+          # log quiet and the later test assertion to fail with no explanation of why.
+          # psql takes libpq flags, not an Npgsql-style connection string (the tests' own env vars below
+          # stay in Npgsql form; they're read by Npgsql, not psql).
+          $logTargetArgs = @("-h", "127.0.0.1", "-p", "5545", "-U", "darling", "-d", "darling")
+
+          # Connection + disconnection: an ordinary short-lived connection, which with log_connections/
+          # log_disconnections on writes both a "connection received"/"connection authorized" pair and a
+          # "disconnection" line.
+          & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "SELECT 1"
+          if ($LASTEXITCODE -ne 0) { throw "5545 connection-event workload failed ($LASTEXITCODE)" }
+
+          # Error: a division by zero the server itself reports at ERROR.
+          & "$bin\psql.exe" @logTargetArgs -c "SELECT 1/0"
+          if ($LASTEXITCODE -eq 0) { throw "5545 error-event workload: SELECT 1/0 unexpectedly succeeded" }
+
+          # Lock wait: one background session holds LOCK TABLE inside a transaction and sleeps past
+          # deadlock_timeout (100ms on this cluster, see Start-LogFormatCluster) while a second session
+          # requests the same table and blocks, so log_lock_waits fires a "still waiting for"/"acquired" pair.
+          # Both are bounded jobs so a stuck lock can never hang the workflow.
+          & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS lock_target_5545 (id int)"
+          if ($LASTEXITCODE -ne 0) { throw "5545 lock-wait workload: table setup failed ($LASTEXITCODE)" }
+          $holder = Start-Job -ScriptBlock {
+            param($bin, $connArgs)
+            & "$bin\psql.exe" @connArgs -v ON_ERROR_STOP=1 -c "BEGIN; LOCK TABLE lock_target_5545; SELECT pg_sleep(3); COMMIT;"
+          } -ArgumentList $bin, $logTargetArgs
+          Start-Sleep -Milliseconds 500
+          & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "BEGIN; LOCK TABLE lock_target_5545; COMMIT;"
+          if ($LASTEXITCODE -ne 0) { throw "5545 lock-wait workload: waiter session failed ($LASTEXITCODE)" }
+          Wait-Job $holder -Timeout 15 | Out-Null
+          if ($holder.State -ne 'Completed') { throw "5545 lock-wait workload: holder job did not complete ($($holder.State))" }
+          Receive-Job $holder | Out-Null
+          Remove-Job $holder
+
+          # Failed login: a FATAL the target's own authentication path writes, distinct from the ERROR above.
+          # Targets a deliberately nonexistent database.
+          & "$bin\psql.exe" "-h" "127.0.0.1" "-p" "5545" "-U" "darling" "-d" "does_not_exist_5545" -c "SELECT 1" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "5545 failed-login workload: connecting to a nonexistent database unexpectedly succeeded" }
+          # the failed login is expected; don't let its exit code end the step
+          $global:LASTEXITCODE = 0
 
       # DARLING_TEST_PG lights up the [Collection("live-postgres")] classes; DARLING_TEST_PGRUNTIME
       # lights up the managed-bootstrap E2E. DARLING_TEST_SQL is intentionally unset — the one
@@ -1043,10 +1171,11 @@ jobs:
       # subset): the ungated ~3s overlap with the build job is negligible and a filter could hide a
       # test the way narrow filters have bitten before.
       #
-      # #4160: DARLING_TEST_PG_CSVLOG/_CSVLOG_AUTOEXPLAIN point at the 5542 csvlog cluster,
-      # DARLING_TEST_PG_JSONLOG at the 5543 jsonlog cluster, and DARLING_TEST_PG_AUTOEXPLAIN/
-      # _CSVLOG_SIBLING at the 5544 stderr+csvlog cluster. DARLING_TEST_PG (5541) stays the store
-      # for the classes that read one target's log while writing to a separate store.
+      # DARLING_TEST_PG_CSVLOG/_CSVLOG_AUTOEXPLAIN point at the 5542 csvlog cluster,
+      # DARLING_TEST_PG_JSONLOG at the 5543 jsonlog cluster, DARLING_TEST_PG_AUTOEXPLAIN/
+      # _CSVLOG_SIBLING at the 5544 stderr+csvlog cluster, and DARLING_TEST_PG_LOG_TARGET/
+      # _UTC_LOG_TARGET at the 5545 cluster (the two self-hosted log end-to-end tests). DARLING_TEST_PG
+      # (5541) stays the store for the classes that read one target's log while writing to a separate store.
       - name: Run Darling PG tests
         if: steps.filter.outputs.darling == 'true'
         shell: pwsh
@@ -1057,9 +1186,24 @@ jobs:
           DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
           # csvlog-only from its first start, with log_timezone = 'UTC': PgLogTailStderrSiblingLiveTests' #4019 case.
           DARLING_TEST_PG_CSVLOG_ONLY: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          # store-upgrade-gated, exactly as nightly.yml sets them (#1706, #3906); empty when the fixture
+          # above did not run, which the consuming tests treat as "not set" (Environment.GetEnvironmentVariable
+          # returns null for an empty value read this way, and every one of them guards with
+          # string.IsNullOrWhiteSpace before touching the path), so they SkipWhen on a PR where the gate did
+          # not match rather than fail on a missing fixture. Set on every shard: a class's shard must never
+          # decide whether it runs.
+          DARLING_TEST_PGRUNTIME_OLD: ${{ steps.filter.outputs.store-upgrade == 'true' && format('{0}\Darling\artifacts\upgrade-fixture\old\pg-runtime', github.workspace) || '' }}
+          DARLING_TEST_PGRUNTIME_NEWZIP: ${{ steps.filter.outputs.store-upgrade == 'true' && format('{0}\Darling\artifacts\pg-runtime.zip', github.workspace) || '' }}
+          DARLING_TEST_PGRUNTIME_PREVIOUS: ${{ steps.filter.outputs.store-upgrade == 'true' && format('{0}\Darling\artifacts\upgrade-fixture\previous\pg-runtime', github.workspace) || '' }}
           DARLING_TEST_PG_JSONLOG: "Host=127.0.0.1;Port=5543;Username=darling;Database=darling"
           DARLING_TEST_PG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
           DARLING_TEST_PG_CSVLOG_SIBLING: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
+          DARLING_TEST_PG_LOG_TARGET: "Host=127.0.0.1;Port=5545;Username=darling;Database=darling"
+          DARLING_TEST_PG_UTC_LOG_TARGET: "Host=127.0.0.1;Port=5545;Username=darling;Database=darling"
+          # #4704: dedicated rotation clusters (5546 stderr, 5547 csvlog, 5548 jsonlog), set on every shard.
+          DARLING_TEST_PG_LOGROTATE: "Host=127.0.0.1;Port=5546;Username=darling;Database=darling"
+          DARLING_TEST_PG_LOGROTATE_CSV: "Host=127.0.0.1;Port=5547;Username=darling;Database=darling"
+          DARLING_TEST_PG_LOGROTATE_JSON: "Host=127.0.0.1;Port=5548;Username=darling;Database=darling"
         run: |
           $ErrorActionPreference = 'Stop'
           $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json)
@@ -1096,7 +1240,11 @@ jobs:
               "$env:RUNNER_TEMP\darling-pgdata",
               "$env:RUNNER_TEMP\darling-pgdata-csvlog",
               "$env:RUNNER_TEMP\darling-pgdata-jsonlog",
-              "$env:RUNNER_TEMP\darling-pgdata-stderrcsvlog"
+              "$env:RUNNER_TEMP\darling-pgdata-stderrcsvlog",
+              "$env:RUNNER_TEMP\darling-pgdata-logtarget",
+              "$env:RUNNER_TEMP\darling-pgdata-rotate-stderr",
+              "$env:RUNNER_TEMP\darling-pgdata-rotate-csvlog",
+              "$env:RUNNER_TEMP\darling-pgdata-rotate-jsonlog"
             )) {
               if (Test-Path $dataDir) { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
             }
@@ -1114,6 +1262,10 @@ jobs:
             ${{ runner.temp }}/darling-pg-csvlog.log
             ${{ runner.temp }}/darling-pg-jsonlog.log
             ${{ runner.temp }}/darling-pg-stderrcsvlog.log
+            ${{ runner.temp }}/darling-pg-logtarget.log
+            ${{ runner.temp }}/darling-pg-rotate-stderr.log
+            ${{ runner.temp }}/darling-pg-rotate-csvlog.log
+            ${{ runner.temp }}/darling-pg-rotate-jsonlog.log
             TestResults/
           if-no-files-found: ignore
 
@@ -1210,9 +1362,13 @@ jobs:
         env:
           DARLING: ${{ steps.filter.outputs.darling }}
           DARLING_COUNT: ${{ steps.filter.outputs.darling_count }}
-          DARLING_FILES: ${{ steps.filter.outputs.darling_files }}
+          # A list goes into the environment only up to 1,000 files. Linux refuses to start a process whose
+          # single environment string passes 128 KiB, so the 2,843-file dev-to-main release PR failed here
+          # before the script ran ("Argument list too long"). The counts always print; the Detect changed
+          # paths step above lists every file either way.
+          DARLING_FILES: ${{ fromJSON(steps.filter.outputs.darling_count || '0') <= 1000 && steps.filter.outputs.darling_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
           ALL_COUNT: ${{ steps.filter.outputs.all_count }}
-          ALL_FILES: ${{ steps.filter.outputs.all_files }}
+          ALL_FILES: ${{ fromJSON(steps.filter.outputs.all_count || '0') <= 1000 && steps.filter.outputs.all_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
         run: |
           set -euo pipefail
 

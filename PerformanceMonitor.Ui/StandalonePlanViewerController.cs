@@ -45,6 +45,16 @@ public sealed class StandalonePlanViewerController
        notifications cannot pile up multiple inserts. Cleared by Reset() so re-opening the surface re-arms it. */
     private bool _addTabInsertDeferred;
 
+    /* Gesture latch for the "+" sentinel (#4684): the sub-tab the CURRENT "+" gesture just added, or null when no
+       gesture is open. A UI Automation select on "+" is not one selection: the UIA core sets focus on the item
+       and then selects it, as two dispatcher operations back to back, and a TabItem selects itself when it gets
+       focus -- so "+" is selected twice within one gesture (the first add having moved the selection off "+",
+       the second is a real selection change). While the latch is open a further "+" selection re-selects the
+       tab just added instead of adding another. Cleared once the dispatcher has drained down to Background
+       priority (everything the add queued, layout included, has run), so a later click is a new gesture. Cleared
+       by Reset() too. */
+    private TabItem? _gestureAddedSubTab;
+
     /* Re-entrancy latch shared by this controller's two paste entry points -- the "Paste XML" button and the
        Ctrl+V HandleKeyDown (#2870). #2837 moved the clipboard-can't-open retry off Thread.Sleep onto an awaited
        Task.Delay, which keeps the UI pump responsive but also yields the thread for the ~175 ms retry window;
@@ -86,6 +96,8 @@ public sealed class StandalonePlanViewerController
             VerticalAlignment = VerticalAlignment.Center,
             ToolTip = "Open a new plan sub-tab"
         };
+        /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only (an element's own Resources are the first place its implicit style is looked up), so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
+        addTabHeader.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
         var addTab = new TabItem
         {
             Header = addTabHeader,
@@ -109,13 +121,29 @@ public sealed class StandalonePlanViewerController
     /// a REAL sub-tab synchronously right after triggering this, so the deferred pass finds "+" no longer selected
     /// and no-ops -- no duplicate tab, no reordering. When real sub-tabs already exist the control is fully
     /// realized and idle, so the click path stays synchronous exactly as before (no dispatcher hop, no flash).
+    ///
+    /// <para>One more trap (#4684): a UI Automation <c>SelectionItemPattern.Select()</c> selects "+" TWICE in one
+    /// gesture -- the UIA core focuses the item first (a TabItem selects itself on focus), then selects it -- and
+    /// each is a real selection change, so a screen reader added two tabs per select. The duplicate cannot be
+    /// stopped at its source (the pair comes from the UIA core, and focus-selects-tab is WPF's), so the first
+    /// add opens a gesture (<see cref="_gestureAddedSubTab"/>) and a "+" selection landing before the dispatcher
+    /// has drained to Background priority re-selects the tab just added instead of adding another.</para>
     /// </summary>
     private void HandleAddTabSelected()
     {
         // Steady state: real sub-tab(s) already present => a genuine user click on "+". Safe to mutate now.
         if (_planTabControl.Items.Count > 1)
         {
+            // #4684: a second "+" selection inside the gesture that already added a tab -- absorb it. Only while
+            // that tab still exists; a closed one is never re-selected, the click adds a live tab instead.
+            if (_gestureAddedSubTab is { } gestureTab && _planTabControl.Items.Contains(gestureTab))
+            {
+                _planTabControl.SelectedItem = gestureTab;
+                return;
+            }
+
             var newSub = AddNewEmptyPlanSubTab();
+            OpenAddGesture(newSub);
             _planTabControl.SelectedItem = newSub;
             return;
         }
@@ -134,6 +162,22 @@ public sealed class StandalonePlanViewerController
                 var newSub = AddNewEmptyPlanSubTab();
                 _planTabControl.SelectedItem = newSub;
             }
+        }));
+    }
+
+    /// <summary>
+    /// Opens the "+" gesture (#4684) for the sub-tab it just added, and closes it again once the dispatcher has
+    /// drained to Background priority: the add's own queued work (layout, render, data bind) and a UIA client's
+    /// second, back-to-back operation both outrank Background, so the pair lands inside the gesture and the next
+    /// click, at a later dispatcher turn, does not.
+    /// </summary>
+    private void OpenAddGesture(TabItem added)
+    {
+        _gestureAddedSubTab = added;
+        _planTabControl.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            if (ReferenceEquals(_gestureAddedSubTab, added))
+                _gestureAddedSubTab = null;
         }));
     }
 
@@ -221,6 +265,8 @@ public sealed class StandalonePlanViewerController
         };
         var subCloseBtn = new Button { Style = (Style)_planTabControl.FindResource("TabCloseButton") };
         var subTabHeader = new StackPanel { Orientation = Orientation.Horizontal };
+        /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only, so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
+        subTabHeader.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
         subTabHeader.Children.Add(labelBlock);
         subTabHeader.Children.Add(subCloseBtn);
 
@@ -509,6 +555,7 @@ public sealed class StandalonePlanViewerController
         _planTabControl.Items.Clear();
         _initialized = false;
         _addTabInsertDeferred = false;
+        _gestureAddedSubTab = null;
     }
 
     private static bool IsPlanFile(string path)

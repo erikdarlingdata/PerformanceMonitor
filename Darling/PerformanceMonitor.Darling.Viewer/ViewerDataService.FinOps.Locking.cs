@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -186,6 +187,27 @@ AND (
     OR COALESCE(ios.index_lock_promotion_count, 0) > 0
 )
 ORDER BY ios.database_name";
+
+    /// <summary>The newest stored <c>is_optimized_locking_on</c> flag per database on the server. $1 server_id.</summary>
+    public const string OptimizedLockingFlagsSql = @"
+SELECT is_optimized_locking_on
+FROM database_config
+WHERE server_id = $1
+AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)";
+
+    /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise.</summary>
+    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(OptimizedLockingFlagsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+
+        var flags = new List<bool?>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            flags.Add(reader.IsDBNull(0) ? null : reader.GetBoolean(0));
+        return OptimizedLockingNote.For(flags);
+    }
 
     public async Task<List<string>> GetIndexLockingDatabasesAsync(int serverId, CancellationToken cancellationToken = default)
     {

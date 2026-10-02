@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -308,10 +309,18 @@ ORDER BY trace_flag";
         }
     }
 
+    /// <summary>
+    /// The newest <c>server_properties</c> row for the SERVER_HARDWARE fact. On an Azure SQL Database (engine_edition 5) the CPU
+    /// count is the vcore_count parsed from the service objective (NULL for a DTU objective or an elastic pool, which leaves no
+    /// fact), not the stored cpu_count: that is the number of schedulers the database can see, which can be higher than its vCores
+    /// (a 1-vCore database reads 2). There hyperthread_ratio, physical_memory_mb, socket_count and cores_per_socket describe the
+    /// HOST, and <see cref="FactCollectorHelpers.BuildServerHardwareFact"/> carries none of them; the recommended MAXDOP is taken
+    /// from the vCores. Every other edition reads as it always did. Lite's DuckDbFactCollector carries the same CASE.
+    /// </summary>
     public const string ServerPropertiesSql = @"
-SELECT COALESCE(vcore_count, cpu_count) AS cpu_count, hyperthread_ratio, physical_memory_mb,
+SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, hyperthread_ratio, physical_memory_mb,
        socket_count, cores_per_socket, is_hadr_enabled, edition, product_version,
-       lock_pages_in_memory, instant_file_initialization_enabled, memory_dump_count
+       lock_pages_in_memory, instant_file_initialization_enabled, memory_dump_count, engine_edition
 FROM server_properties
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -343,30 +352,19 @@ LIMIT 1";
             bool? lpim = reader.IsDBNull(8) ? (bool?)null : Convert.ToBoolean(reader.GetValue(8));
             bool? ifi = reader.IsDBNull(9) ? (bool?)null : Convert.ToBoolean(reader.GetValue(9));
             int? dumpCount = reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10));
+            int? engineEdition = reader.IsDBNull(11) ? (int?)null : Convert.ToInt32(reader.GetValue(11));
+            var hardwareIsTheHosts = ServerHardwareScope.HardwareIsTheHosts(engineEdition);
 
-            if (cpuCount == 0) return;
+            var hardwareFact = FactCollectorHelpers.BuildServerHardwareFact(
+                context, hardwareIsTheHosts, cpuCount, htRatio, physicalMemMb, socketCount, coresPerSocket, hadrEnabled);
+            if (hardwareFact is null) return;
 
-            facts.Add(new Fact
-            {
-                Source = "config",
-                Key = "SERVER_HARDWARE",
-                Value = cpuCount,
-                ServerId = context.ServerId,
-                Metadata = new Dictionary<string, double>
-                {
-                    ["cpu_count"] = cpuCount,
-                    ["hyperthread_ratio"] = htRatio,
-                    ["physical_memory_mb"] = physicalMemMb,
-                    ["socket_count"] = socketCount,
-                    ["cores_per_socket"] = coresPerSocket,
-                    ["hadr_enabled"] = hadrEnabled ? 1 : 0
-                }
-            });
+            facts.Add(hardwareFact);
 
             // WS5 server-health advisories (advise-only). Gating mirrors the Lite/Dashboard
             // collectors so all consumers agree on what is worth flagging; a fact that would
             // score 0 is simply never emitted (noise control).
-            FactCollectorHelpers.EmitServerHealthFacts(context, facts, edition, physicalMemMb, lpim, ifi, dumpCount);
+            FactCollectorHelpers.EmitServerHealthFacts(context, facts, edition, physicalMemMb, lpim, ifi, dumpCount, hardwareIsTheHosts);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {

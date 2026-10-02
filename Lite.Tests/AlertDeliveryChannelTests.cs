@@ -83,6 +83,12 @@ public sealed class AlertDeliveryChannelTests
     /// excluding them from the parity comparison costs nothing real, and
     /// <see cref="EveryDisagreement_IsUnreachableOrTheDeliberateChange"/> holds the exclusion to exactly
     /// this predicate plus the one deliberate change, <see cref="WebhookFailureNowNamed"/>.</para>
+    ///
+    /// <para>The last clause is the shape that stores <c>undelivered</c>: a configured channel that nothing
+    /// consulted. Lite's settings still cannot produce it, because Lite has no notification routes and a
+    /// configured channel is always consulted there. Darling can (#4751): an alert no route covers, on a
+    /// deployment whose email is set up only through routes. <c>Darling.Tests.AlertDeliveryChannelTests</c>
+    /// and <c>EmailRouteRecipientsTests</c> pin that side.</para>
     /// </summary>
     private static bool Unreachable(EmailFanoutResult result, bool muted)
         => (result.SendError is not null) != (result.EmailOutcome == AlertChannelOutcome.Failed)
@@ -311,7 +317,9 @@ public sealed class AlertDeliveryChannelTests
         var text = File.ReadAllText(RepoPath("Lite/Services/EmailAlertService.cs"));
 
         Assert.Contains("trayChannelPresent: trayShown)", text, StringComparison.Ordinal);
-        Assert.Contains("bool trayShown = true)", text, StringComparison.Ordinal);
+        /* #4752: the cancellation token is now the last parameter, so the default is followed by a comma
+           instead of the closing parenthesis. The pin is the same fact as before: the declared default. */
+        Assert.Contains("bool trayShown = true,", text, StringComparison.Ordinal);
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(text, @"trayShown: false\)"));
         Assert.DoesNotContain("trayChannelPresent: false", text, StringComparison.Ordinal);
         Assert.DoesNotContain("trayChannelPresent: true)", text, StringComparison.Ordinal);

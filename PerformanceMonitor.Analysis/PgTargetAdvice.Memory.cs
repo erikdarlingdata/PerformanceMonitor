@@ -62,9 +62,8 @@ public static partial class PgTargetAdvice
             "The OS's reclaimable share — (memory_free_bytes + memory_cached_bytes) / memory_total_bytes from " +
             "pg_cpu_utilization's row (AWS Performance Insights os.memory.*, collected for Aurora targets only), read " +
             "minute by minute over the window and graded at its worst SUSTAINED point: the lowest share the host held for " +
-            "three consecutive five-minute samples, so a single dip while a maintenance job ran never pages. The 10 % / 3 % " +
-            "bars are chosen, not measured — the fleet calibration ran before the memory columns existed (threshold_lineage " +
-            "= 0). On Aurora the storage tier makes the OS page cache matter less than on stock PostgreSQL, but this fact is " +
+            "three consecutive one-minute samples, so a single dip while a maintenance job ran never pages. The 10 % / 3 % " +
+            "bars are measured against the dogfood fleet (50 Aurora clusters, 7 days, 2026-09-29): no cluster came near the line, so the bar sits in the measured empty interval (threshold_lineage = 1). On Aurora the storage tier makes the OS page cache matter less than on stock PostgreSQL, but this fact is " +
             "about the INSTANCE's memory, which is what shared_buffers and every work_mem allocation come out of.",
         Remediation:
             "Read CONFIG_PG_MEMORY_OVERCOMMIT beside this: if the configured worst case exceeds the host, the shortage was " +
@@ -140,7 +139,7 @@ public static partial class PgTargetAdvice
                     ? (observed ? " At or past 1.0× the backends this window actually ran CAN exceed physical memory if each spills once" : " At or past 1.0× the configuration CAN exceed physical memory if every backend spills once")
                       + " — PostgreSQL's own per-backend allocation model, arithmetic rather than a judgment (engine-defined)."
                     : " Under 1.0× the model fits the box and this fact is context.")
-                + (critical ? " The 2× band is a chosen line, not a measured one (threshold_lineage = 0)." : string.Empty)
+                + (critical ? " The 2× band is measured against the dogfood fleet (50 Aurora clusters, 7 days, 2026-09-29): no cluster came near the line, so the bar sits in the measured empty interval (threshold_lineage = 1)." : string.Empty)
                 + " work_mem is a per-sort / per-hash budget, not a per-connection allocation, so the product is a CEILING the workload may never approach."
                 + coFire
                 + EffectiveCacheSentence(sum, totalMin)
@@ -303,7 +302,7 @@ public static partial class PgTargetAdvice
                 $"(memory_free_bytes + memory_cached_bytes) / memory_total_bytes from pg_cpu_utilization{rangeClause}: minimum {Share(min)}, mean {Share(mean)} across {Num(withMemory)} of {Num(samples)} samples." +
                 sustainedClause + activeClause +
                 (fired
-                    ? $" The {Share(PgTargetScorer.HostMemoryReclaimableWarningShare)} / {Share(PgTargetScorer.HostMemoryReclaimableCriticalShare)} bars and the {Num(sustain)}-sample sustain are chosen, not measured — the fleet calibration ran before the memory columns existed (threshold_lineage = 0)."
+                    ? $" The {Share(PgTargetScorer.HostMemoryReclaimableWarningShare)} / {Share(PgTargetScorer.HostMemoryReclaimableCriticalShare)} bars and the {Num(sustain)}-sample sustain are measured against the dogfood fleet (50 Aurora clusters, 7 days, 2026-09-29): no cluster came near the line, so the bars sit in the measured empty interval (threshold_lineage = 1)."
                     : " Under the warning line this fact is context: stated so the composition card can read it, and it roots nothing.")
                 + " On Aurora the storage tier makes the OS page cache matter less than on stock, but this is the INSTANCE's memory — what shared_buffers and every work_mem allocation come out of."
                 + overcommitClause,

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
@@ -92,13 +93,63 @@ public static class McpPlanAnalysisFormatter
     /// <summary>
     /// Parses plan XML, runs the analyzer, and builds a structured JSON result.
     /// </summary>
-    public static string BuildAnalysisResult(string xml, string? serverName, string source, string? identifier)
-    {
-        var plan = ShowPlanParser.Parse(xml);
-        PlanAnalyzer.Analyze(plan);
+    public static string BuildAnalysisResult(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        CancellationToken cancellationToken = default) =>
+        BuildAnalysisResult(xml, serverName, source, identifier, config: null, serverMetadata: null, cancellationToken);
 
-        var statements = plan.Batches
-            .SelectMany(b => b.Statements)
+    /// <summary>
+    /// #4535: the config-aware form. A rule the host's <c>analyzer</c> section disables never attaches
+    /// its finding to <paramref name="xml"/>'s plan, so it drops out of the result's warnings/
+    /// critical_count; an overridden severity is already applied before this projects the result.
+    /// Null <paramref name="config"/> behaves exactly like the overload above.
+    /// </summary>
+    public static string BuildAnalysisResult(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        AnalyzerConfig? config,
+        CancellationToken cancellationToken = default) =>
+        BuildAnalysisResult(xml, serverName, source, identifier, config, serverMetadata: null, cancellationToken);
+
+    /// <summary>
+    /// #4530: the <see cref="ServerMetadata"/> overload. Passing the resolved server's metadata through
+    /// lets rule 38 (Standard Edition DOP 2 limitation) give its Warning instead of its uninformative Info
+    /// branch. The 6-argument overload forwards <c>null</c>, which <see cref="PlanAnalysisPipeline.Run"/>
+    /// treats the same as no metadata available.
+    /// </summary>
+    public static string BuildAnalysisResult(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        ServerMetadata? serverMetadata,
+        CancellationToken cancellationToken = default) =>
+        BuildAnalysisResult(xml, serverName, source, identifier, config: null, serverMetadata, cancellationToken);
+
+    /// <summary>
+    /// #4535/#4530 combined: threads both <paramref name="config"/> and <paramref name="serverMetadata"/>.
+    /// </summary>
+    public static string BuildAnalysisResult(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        AnalyzerConfig? config,
+        ServerMetadata? serverMetadata,
+        CancellationToken cancellationToken = default)
+    {
+        var plan = ShowPlanParser.Parse(xml, cancellationToken);
+        PlanAnalysisPipeline.Run(plan, config, serverMetadata, cancellationToken);
+
+        // #4514: includes statements nested inside a stored procedure or UDF body, so the MCP
+        // analyze_plan_xml/analyze_query_plan/analyze_query_store_plan tools see the same
+        // findings PlanAnalyzer.Analyze actually attached, instead of only the outer EXEC.
+        var statements = PlanStatements.EnumerateAll(plan)
             .Where(s => s.RootNode != null)
             .Select(s =>
             {
@@ -150,12 +201,23 @@ public static class McpPlanAnalysisFormatter
                     query_hash = s.QueryHash,
                     query_plan_hash = s.QueryPlanHash,
                     has_actual_stats = hasActuals,
-                    warnings = allWarnings.Select(w => new
-                    {
-                        severity = w.Severity.ToString(),
-                        type = w.WarningType,
-                        message = w.Message
-                    }),
+                    /* #4546: ordered by max_benefit_percent descending, nulls (unscored findings) last —
+                       same ordering PerformanceStudio's viewer and advice builder apply, so the highest-payoff
+                       finding for this statement is always first regardless of parse order. */
+                    warnings = allWarnings
+                        .OrderByDescending(w => w.MaxBenefitPercent ?? -1)
+                        .Select(w => new
+                        {
+                            severity = w.Severity.ToString(),
+                            type = w.WarningType,
+                            message = w.Message,
+                            source = w.Source.ToString(),
+                            origin_node_ids = w.OriginNodeIds,
+                            max_benefit_percent = w.MaxBenefitPercent,
+                            // #4566: PerformanceStudio dev (85492a1) src/PlanViewer.Core/Output/ResultMapper.cs:255,
+                            // JSON name "is_legacy".
+                            is_legacy = w.IsLegacy
+                        }),
                     warning_count = allWarnings.Count,
                     critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
                     /* #3653 A15/A16: impact is labelled for what it is (MissingIndexImpactBasis). #3805: the
@@ -215,6 +277,10 @@ public static class McpPlanAnalysisFormatter
             server = serverName,
             source,
             identifier,
+            /* #4551: a refused or exception-terminated plan still returns whatever parsed before the
+               failure, so statement_count/statements below can be 0 or partial. parse_error surfaces the
+               reason instead of letting a partial result look complete; null when the plan parsed fine. */
+            parse_error = plan.ParseError,
             statement_count = statements.Count,
             total_warnings = totalWarnings,
             total_critical = totalCritical,

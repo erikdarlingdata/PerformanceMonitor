@@ -63,7 +63,9 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack), cancellationToken);
+        /* On collection_time, unlike the grids: the alert read is a delivery cursor ("rows collected since the
+           last sweep"), so a report collected late still alerts once it lands. */
+        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
         return new List<BlockedProcessAlertRow>(rows);
     }
 
@@ -93,7 +95,9 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var rows = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(serverId, hoursBack), cancellationToken);
+        /* On collection_time, as the blocked-process read above: a delivery cursor, so a late-collected deadlock
+           still alerts. */
+        var rows = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
         return new List<DeadlockAlertRow>(rows);
     }
 
@@ -186,9 +190,10 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
     /// Databases deviating from their expected (baseline/override) state — delegates to
     /// <see cref="LocalDataService.GetDatabaseStateDeviationsAsync"/>, which also auto-seeds the
     /// first-observation baseline. Task.Run-wrapped like the other reads to keep DuckDB's synchronous
-    /// I/O off the WPF dispatcher (#1202).
+    /// I/O off the WPF dispatcher (#1202). Null passes through unchanged: it is "no verdict this pass" (see
+    /// <see cref="IAlertReadAdapter.GetDatabaseStatesAsync"/>).
     /// </summary>
-    public async Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
+    public async Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);

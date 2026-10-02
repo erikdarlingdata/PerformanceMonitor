@@ -185,7 +185,7 @@ public partial class ViewerServerTab
             var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(rows);
             LatestSnapshotIndicator.Text = batchTime.HasValue
-                ? $"Latest snapshot: {ViewerTimeHelper.ForDisplay(batchTime.Value):yyyy-MM-dd HH:mm:ss}"
+                ? $"Latest snapshot: {ViewerTimeHelper.FormatForDisplay(batchTime.Value, "yyyy-MM-dd HH:mm:ss")}"
                 : "No snapshots stored";
         }
         catch (Exception ex)
@@ -304,7 +304,7 @@ public partial class ViewerServerTab
     /// Deep-link entry from the aggregate Recommendations tab's "Open in Active Queries" button: navigate
     /// this (possibly freshly-opened) server tab straight to Active Queries scoped to a finding's window.
     /// The shell opens/focuses the tab first (its existing per-server-tab path); this then points the
-    /// process-wide time helper at THIS server's offset (so the grid/indicator render in the tab's own
+    /// process-wide time helper at THIS server's clock (so the grid/indicator render in the tab's own
     /// time), sets a one-shot window <see cref="_pendingActiveQueriesWindow">shield</see> so the concurrent
     /// tab-activation refresh loads the SAME narrow window (race-free — see the field comment), builds the
     /// indicator, then reuses the shared <see cref="NavigateToActiveQueriesForWindowAsync"/> the within-tab
@@ -313,13 +313,12 @@ public partial class ViewerServerTab
     /// </summary>
     internal async Task DeepLinkToActiveQueriesAsync(DateTime fromUtc, DateTime toUtc)
     {
-        /* Load + apply this server's UTC offset before rendering (the tab may be freshly opened and not yet
-           refreshed). EnsureServerOffsetLoadedAsync caches its Task, so this shares the one load with any
-           concurrent activation refresh. */
-        await EnsureServerOffsetLoadedAsync();
-        ApplyServerOffsetToHelper();
+        /* Read + apply this server's clock before rendering (the tab may be freshly opened and not yet
+           refreshed). */
+        await RefreshServerClockAsync();
+        ApplyServerClockToHelper();
 
-        var indicator = $"Finding window: {ViewerTimeHelper.ForDisplay(fromUtc):yyyy-MM-dd HH:mm} → {ViewerTimeHelper.ForDisplay(toUtc):HH:mm}";
+        var indicator = $"Finding window: {ViewerTimeHelper.FormatForDisplay(fromUtc, "yyyy-MM-dd HH:mm")} → {ViewerTimeHelper.FormatForDisplay(toUtc, "HH:mm")}";
         _pendingActiveQueriesWindow = (fromUtc, toUtc, indicator);
         await NavigateToActiveQueriesForWindowAsync(fromUtc, toUtc, indicator);
     }

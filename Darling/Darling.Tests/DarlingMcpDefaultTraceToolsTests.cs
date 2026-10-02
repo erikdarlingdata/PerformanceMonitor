@@ -63,21 +63,21 @@ public sealed class DarlingMcpDefaultTraceToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// #3198: the stored <c>event_time</c> is the Default Trace <c>StartTime</c> — the monitored server's
-    /// LOCAL wall clock — so this read de-skews it to naive UTC by the collected offset and both RETURNS and
-    /// WINDOWS that one expression. The half that was missing is the projection: skewing the bounds into the
-    /// local frame selects exactly the right rows, so the filter looked correct while every returned
-    /// timestamp came back a whole UTC offset from the frame of <c>as_of</c>, <c>collection_time</c> and
-    /// <c>last_collection</c>. At UTC-4 that renders a 04:28 event as 00:28, which reads as having PRECEDED
-    /// the 04:28 collector error it actually coincided with.
+    /// #3198, #4793: the stored <c>event_time</c> is the Default Trace <c>StartTime</c> — the monitored server's
+    /// LOCAL wall clock. The read returns it RAW and converts each row to naive UTC in C# with the server's
+    /// time zone, so an event across a daylight saving change is not an hour off, and it keeps the collected
+    /// offset only as an hour-wide pre-filter on the window. The frame still matters as #3198 found: a
+    /// returned timestamp left a whole UTC offset from the frame of <c>as_of</c>, <c>collection_time</c> and
+    /// <c>last_collection</c> renders a 04:28 event at UTC-4 as 00:28, which reads as having PRECEDED the
+    /// 04:28 collector error it actually coincided with; the conversion itself is pinned by
+    /// <c>DarlingDefaultTraceReaderServerClockTests</c>.
     ///
-    /// <para>Asserted as the same three expressions <c>ViewerSystemEventsTests</c> pins on
-    /// <c>ViewerDataService.DefaultTraceEventsByWindowSql</c>, because the two constants read the same column
-    /// out of the same store and a second convention on one of them is worse than either convention.
-    /// <c>ServerLocalReadFrameDisciplineTests</c> holds the corpus-level version of that.</para>
+    /// <para>The viewer's twin <c>ViewerDataService.DefaultTraceEventsByWindowSql</c> has the same shape (#4766),
+    /// which <c>ViewerSystemEventsTests</c> pins. <c>ServerLocalReadFrameDisciplineTests</c> holds the
+    /// corpus-level version.</para>
     /// </summary>
     [Fact]
-    public void EventsByWindowSql_ReadsBaseTables_DeSkewsLocalEventTimeToUtc_AndWindowsOnIt()
+    public void EventsByWindowSql_ReadsBaseTables_ReturnsTheRawLocalEventTime_AndPreFiltersTheWindowAnHourWide()
     {
         var sql = DarlingDefaultTraceReader.EventsByWindowSql;
 
@@ -89,18 +89,21 @@ public sealed class DarlingMcpDefaultTraceToolsSurfaceAndSqlTests
 
         Assert.Contains("dte.server_id = $1", sql, StringComparison.Ordinal);
 
-        /* De-skew by the collected utc_offset_minutes (single-row COALESCE CTE, 0 when none yet), returned
-           AND windowed AND ordered as the one expression. */
+        /* The stored event_time is server-local and comes back RAW: the reader converts each row in C# with the
+           server's ServerClock (#4793), so one subtracted offset cannot put an event across a daylight saving
+           change an hour off. The collected utc_offset_minutes (single-row COALESCE CTE, 0 when none yet) stays
+           only in the window PRE-FILTER, an hour wide on each side; the exact window is applied in C#. */
         Assert.Contains("server_properties", sql, StringComparison.Ordinal);
         Assert.Contains("utc_offset_minutes", sql, StringComparison.Ordinal);
         Assert.Contains("COALESCE(", sql, StringComparison.Ordinal);
-        Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc", sql, StringComparison.Ordinal);
-        Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY event_time_utc DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("dte.event_time AS event_time_local", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AS event_time_utc", sql, StringComparison.Ordinal);
+        Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY event_time_local DESC", sql, StringComparison.Ordinal);
 
-        /* And no bare occurrence survives: a bound skewed INTO the local frame is the shape that shipped, and
-           it selects the same rows, so only the absence of this form distinguishes fixed from broken. */
+        /* And no bound skewed INTO the local frame (the shape that shipped in #3198), and no ordering on the
+           raw column by its table alias. */
         Assert.DoesNotContain("$2 + make_interval", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("$3 + make_interval", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ORDER BY dte.event_time", sql, StringComparison.Ordinal);

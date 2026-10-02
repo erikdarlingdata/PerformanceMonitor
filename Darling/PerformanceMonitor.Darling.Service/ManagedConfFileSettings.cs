@@ -53,10 +53,15 @@ internal static class ManagedConfFileSettings
     /// touch stays exactly as broken as it always was. A NEW error row in <paramref name="after"/> — a name
     /// with no error row in <paramref name="before"/> that gained one — is always a mismatch: Step A must
     /// never make a previously-clean setting start failing to parse.</para>
+    ///
+    /// <para><paramref name="allowedAdditions"/> names settings the migration itself adds: a name with no
+    /// applied row in <paramref name="before"/> whose applied row in <paramref name="after"/> carries exactly
+    /// the given value is not a mismatch. Any other value, and any name not in the map, still is.</para>
     /// </summary>
     internal static (bool Match, IReadOnlyList<string> Mismatches) Compare(
         IReadOnlyList<FileSettingRow> before,
-        IReadOnlyList<FileSettingRow> after)
+        IReadOnlyList<FileSettingRow> after,
+        IReadOnlyDictionary<string, string>? allowedAdditions = null)
     {
         var beforeApplied = AppliedByName(before);
         var afterApplied = AppliedByName(after);
@@ -88,6 +93,13 @@ internal static class ManagedConfFileSettings
             }
 
             // In afterApplied but not beforeApplied (the loop above only adds names it saw in beforeApplied).
+            if (allowedAdditions is not null
+                && allowedAdditions.TryGetValue(name, out var allowedValue)
+                && string.Equals(afterApplied[name], allowedValue, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             mismatches.Add(name);
         }
 

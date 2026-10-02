@@ -364,9 +364,16 @@ public sealed class McpPayloadContractCensusTests
     /// <c>precondition</c>) computed above the read and passed through by the same idiom — not refusals, but
     /// shared builders, which is what the sweep is holding. CARRIED: the health-parser family's
     /// <c>CollectAsync</c>, whose <c>Collected.EarlyReturn</c> is a resolver or validator result carried through
-    /// the nine-tool helper that <see cref="CallsAValidatingHelper"/> already holds to the shared validators.</summary>
+    /// the nine-tool helper that <see cref="CallsAValidatingHelper"/> already holds to the shared validators.
+    /// WRITE OUTCOMES (#4734): <c>mute_analysis_finding</c> resolves <c>server_name</c> with the removal rule, whose
+    /// two refusals are the write's own <c>ambiguous</c> / <c>not_found</c> outcomes (the words <c>remove_server</c>
+    /// answers), built by the pure <c>DarlingMcpTools.ResolveMuteScope</c> (pinned in
+    /// <c>MuteAnalysisFindingScopeTests</c>), and it reads the registry through
+    /// <c>DarlingServerResolver.LoadEnabledOrFaultAsync</c>, the read the resolvers themselves pass their fault
+    /// sentence through. Both are passed through by the same idiom, from a producer the census can name.</summary>
     private static readonly Regex SharedPassThroughProducer = new(
-        @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync)\("
+        @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync|LoadEnabledOrFaultAsync)\("
+        + @"|\bResolveMuteScope\("
         + @"|\bMcpHelpers\.(?:ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate|ValidateChoice|ValidateMinMs|Refusal)\("
         + @"|\bDarlingFleetSweepEndpoints\.ValidateWatchState\("
         + @"|\bTrendBuckets\.(?:Resolve|ValidateWidth|RequireWholeHours)\("
@@ -1374,7 +1381,9 @@ public sealed class McpPayloadContractCensusTests
     public static readonly string[] GeneralTimestampParsesWithUtcStyles =
     [
         "DarlingMcpAlertTools.cs BuildMuteRuleUpdate",
-        "DarlingMcpAlertTools.cs CreateMuteRule",
+        /* #4734: create_mute_rule's body moved into CreateMuteRuleOver (the tool hands it the Postgres-backed
+           store), so the expires_at parse, unchanged, is found under the new method name. */
+        "DarlingMcpAlertTools.cs CreateMuteRuleOver",
     ];
 
     private static readonly Regex GeneralTimestampParse = new(
@@ -1486,9 +1495,10 @@ public sealed class McpPayloadContractCensusTests
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
     ///
-    /// <para>Two more keys the inventory's regex caught are NOT about a cut at all and are excluded by name
+    /// <para>Three more keys the inventory's regex caught are NOT about a cut at all and are excluded by name
     /// with the reason (<see cref="CutHomonyms"/>): <c>is_partial</c> is a PARTIAL INDEX (<c>CREATE INDEX …
-    /// WHERE</c>), <c>partial_count</c> counts logging-audit facets whose verdict is <c>partial</c>. And one
+    /// WHERE</c>), <c>partial_count</c> counts logging-audit facets whose verdict is <c>partial</c>, and
+    /// <c>partial</c> on <c>get_store_metrics</c>' daily growth marks the day still in progress (#4734). And one
     /// page count survives under a neutral noun (<see cref="PageCountsUnderANeutralNoun"/>): <c>shown</c>
     /// beside an honest whole <c>total_*</c> on the health-parser, default-trace and analysis-facts tools —
     /// the cut is exact (<c>total − shown</c>) and disclosed by the pair, and its rename to <c>*_returned</c> +
@@ -1572,6 +1582,7 @@ public sealed class McpPayloadContractCensusTests
     [
         ("is_partial", ["DarlingMcpPgIndexUsageTools.cs"], "a PARTIAL INDEX (CREATE INDEX … WHERE) — an index property the collector reads off pg_index, not a cut"),
         ("partial_count", ["DarlingMcpPgLoggingAuditTools.cs"], "the number of logging-audit facets whose verdict is `partial` (DarlingPgLoggingAudit.Partial) — a verdict tally, not a cut"),
+        ("partial", ["DarlingMcpStoreMetricsTools.cs"], "get_store_metrics' store.daily_growth point (#4734): true for the UTC day still in progress, whose delta runs from the previous day's last snapshot to the latest one so far and is not a full day's growth — whether the day is over, not a page or window cut"),
     ];
 
     /// <summary>The spellings this lane retired, named so their return fails as THE regression rather than as
@@ -1758,11 +1769,12 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Idiom, int Blocks)[] WindowFloorBlocks =
     [
-        /* Four: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
+        /* Five: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
            read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer
            holds; plus (#4231) get_top_queries_by_cpu's and get_top_procedures_by_cpu's payloads, the same
-           disclosure over query_stats and procedure_stats. */
-        ("DarlingMcpDataTools.cs", "initializer", 4),
+           disclosure over query_stats and procedure_stats; plus get_top_queries_by_cpu's
+           empty min_dop/parallel_only status, which hands back the window it read. */
+        ("DarlingMcpDataTools.cs", "initializer", 6),
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),
@@ -2068,6 +2080,8 @@ public sealed class McpPayloadContractCensusTests
             "audit_config's edition-NAME fallback (Enterprise / Standard / … / Unknown) — a name, spelled as the canon by coincidence"),
         ("Unknown", "McpAnalysisTools.cs",
             "audit_config's edition-NAME fallback — the Lite twin of the above"),
+        ("unknown", "DarlingMcpTools.cs",
+            "mute_analysis_finding's kind (plain / read-only / per-database) for a resolved server that has no definition row in the store (one defined in darling.json) — a registration kind, not a band"),
         ("unknown", "DarlingMcpPgWaitSamplingTools.cs",
             "the wait-instrument token for an arm this build does not know (PgWaitInstrument's service_sampled / pg_wait_sampling / … vocabulary) — an instrument, not a band"),
         ("unknown", "DarlingPgLoggingAudit.cs",

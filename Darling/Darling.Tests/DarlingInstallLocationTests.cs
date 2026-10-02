@@ -62,10 +62,10 @@ public class DarlingInstallLocationTests
         foreach (var (marker, what) in new[]
         {
             ("& $serviceExe --test-connection", "the --test-connection pre-flight"),
-            ("Copy-Item $samplePath $configPath", "copying darling.sample.json to darling.json"),
+            ("Copy-Item -LiteralPath $samplePath -Destination $configPath", "copying darling.sample.json to darling.json"),
             ("New-EventLog -LogName Application", "registering the Event Log source"),
             ("& sc.exe create $serviceName", "creating the service"),
-            ("Set-Acl -Path $secretFile", "hardening the config's ACL"),
+            ("Set-Acl -LiteralPath $secretFile", "hardening the config's ACL"),
             ("Start-Service -Name $serviceName", "starting the service"),
         })
         {
@@ -143,11 +143,14 @@ public class DarlingInstallLocationTests
     {
         var script = InstallScript;
 
+        /* The script names every path with -LiteralPath since #4745, so this looks for that spelling: a loop over
+           "Set-Acl -Path " would find no call and check nothing. The window holds the whole 32-character
+           "Set-Acl -LiteralPath $secretFile", which the old 30-character one could not. */
         var applications = 0;
-        for (var at = script.IndexOf("Set-Acl -Path ", StringComparison.Ordinal); at >= 0; at = script.IndexOf("Set-Acl -Path ", at + 1, StringComparison.Ordinal))
+        for (var at = script.IndexOf("Set-Acl -LiteralPath ", StringComparison.Ordinal); at >= 0; at = script.IndexOf("Set-Acl -LiteralPath ", at + 1, StringComparison.Ordinal))
         {
             applications++;
-            Assert.Contains("Set-Acl -Path $secretFile", script.Substring(at, Math.Min(30, script.Length - at)), StringComparison.Ordinal);
+            Assert.Contains("Set-Acl -LiteralPath $secretFile", script.Substring(at, Math.Min(40, script.Length - at)), StringComparison.Ordinal);
         }
 
         Assert.True(applications == 2, $"expected exactly 2 Set-Acl calls (the hardened DACL and the owner), found {applications}");
@@ -156,6 +159,7 @@ public class DarlingInstallLocationTests
            contain are remediation instructions PRINTED for the operator, which is a different thing from the
            product reaching into a profile and changing permissions itself. */
         Assert.DoesNotContain("Set-Acl -Path $root", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("Set-Acl -LiteralPath $root", script, StringComparison.Ordinal);
         Assert.DoesNotContain("icacls $root", script, StringComparison.Ordinal);
     }
 
@@ -1265,11 +1269,11 @@ function Get-CimInstance {
             new[]
             {
                 ("Invoke-InstallTreeLock $lockAccount -StopOnOpen", "the step 1b2 install-tree lock"),
-                ("Copy-Item $samplePath $configPath", "copying darling.sample.json to darling.json"),
+                ("Copy-Item -LiteralPath $samplePath -Destination $configPath", "copying darling.sample.json to darling.json"),
                 ("& $serviceExe --test-connection", "the --test-connection pre-flight"),
                 ("New-EventLog -LogName Application", "registering the Event Log source"),
                 ("& sc.exe create $serviceName", "creating the service"),
-                ("Set-Acl -Path $secretFile", "hardening the config's ACL"),
+                ("Set-Acl -LiteralPath $secretFile", "hardening the config's ACL"),
                 ("Start-Service -Name $serviceName", "starting the service"),
             });
 
@@ -1285,7 +1289,7 @@ function Get-CimInstance {
                 ("Lock-DarlingInstallTree $InstallRoot $logonAccount", "locking the install tree"),
                 ("New-Item -ItemType Directory -Path $backupPath", "creating the rollback backup"),
                 ("Expand-Archive -LiteralPath $Source -DestinationPath $InstallRoot", "extracting a zip over the tree"),
-                ("Copy-Item -Path (Join-Path $Source '*') -Destination $InstallRoot", "copying a folder over the tree"),
+                ("Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Destination $InstallRoot", "copying a folder over the tree"),
                 ("Start-Service -Name $serviceName", "starting the service"),
             });
 

@@ -32,6 +32,63 @@ public sealed class AxesExtensionsTests
     }
 
     [Fact]
+    public void HoverAndCrosshairTime_WithNoZone_AreTodaysDisplayModeConversion()
+    {
+        var original = UiTimeContext.ConvertForDisplay;
+        try
+        {
+            UiTimeContext.ConvertForDisplay = t => t.AddHours(1);
+            var plotted = new DateTime(2026, 11, 1, 6, 30, 15);
+
+            Assert.Equal("07:30:15", ChartHoverHelper.FormatHoverTime(plotted, null));
+            Assert.Equal("2026-11-01 07:30:15", CorrelatedCrosshairManager.FormatCrosshairTime(plotted, null));
+        }
+        finally
+        {
+            UiTimeContext.ConvertForDisplay = original;
+        }
+    }
+
+    [Fact]
+    public void HoverAndCrosshairTime_WithAZone_AreTheInstantInThatZone_AndIgnoreTheHook()
+    {
+        var original = UiTimeContext.ConvertForDisplay;
+        try
+        {
+            UiTimeContext.ConvertForDisplay = t => t.AddHours(1);
+            var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+            var second = new DateTime(2026, 11, 1, 6, 30, 15);
+            var first = new DateTime(2026, 11, 1, 5, 30, 15);
+            var after = new DateTime(2026, 11, 1, 7, 30, 15);
+
+            Assert.Equal("01:30:15 -05:00", ChartHoverHelper.FormatHoverTime(second, () => eastern));
+            Assert.Equal("01:30:15 -04:00", ChartHoverHelper.FormatHoverTime(first, () => eastern));
+            Assert.Equal("02:30:15", ChartHoverHelper.FormatHoverTime(after, () => eastern));
+            Assert.Equal("2026-11-01 01:30:15 -05:00", CorrelatedCrosshairManager.FormatCrosshairTime(second, () => eastern));
+            Assert.Equal("2026-11-01 06:30:15", CorrelatedCrosshairManager.FormatCrosshairTime(second, () => TimeZoneInfo.Utc));
+        }
+        finally
+        {
+            UiTimeContext.ConvertForDisplay = original;
+        }
+    }
+
+    [Fact]
+    public void TheAxisExtensions_InstallTheZoneGenerator_OnlyWhenAZoneIsGiven()
+    {
+        var plot = new ScottPlot.Plot();
+
+        plot.Axes.DateTimeTicksBottomUtc(() => TimeZoneInfo.Utc);
+        Assert.IsType<DisplayZoneTickGenerator>(plot.Axes.Bottom.TickGenerator);
+
+        plot.Axes.DateTimeTicksBottomFor(null);
+        Assert.IsType<ScottPlot.TickGenerators.DateTimeAutomatic>(plot.Axes.Bottom.TickGenerator);
+
+        plot.Axes.DateTimeTicksBottomFor(() => TimeZoneInfo.Utc);
+        Assert.IsType<DisplayZoneTickGenerator>(plot.Axes.Bottom.TickGenerator);
+    }
+
+    [Fact]
     public void LabelFormatter_ConvertsThroughUiTimeContext()
     {
         var original = UiTimeContext.ConvertForDisplay;

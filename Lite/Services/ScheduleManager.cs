@@ -221,6 +221,15 @@ public class ScheduleManager
     /// unchanged.</para>
     /// </summary>
     public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId)
+        => GetDueCollectorsForServer(serverId, DateTime.UtcNow);
+
+    /// <summary>The collectors due at <paramref name="atUtc"/>: the same rule as the one-argument overload, evaluated
+    /// at the caller's logical cycle time (#4640). A collector whose recorded run is later than
+    /// <paramref name="atUtc"/> is due now (#4732, <see cref="CollectorCadence.ClampDue"/>). That is a wall clock that
+    /// stepped backwards since the run was recorded, or a tab-open or refresh run
+    /// (<see cref="RemoteCollectorService.RunAllCollectorsForServerAsync"/>) that recorded its own start time after the
+    /// cycle's time was taken.</summary>
+    public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId, DateTime atUtc)
     {
         lock (_lock)
         {
@@ -244,8 +253,14 @@ public class ScheduleManager
                     continue;
                 }
 
-                var elapsed = DateTime.UtcNow - lastRun;
-                if (elapsed.TotalMinutes >= intervalMinutes)
+                /* #4732: due when lastRun plus the interval has come, decided through the shared clamp. A run recorded
+                   after atUtc is either what a wall clock that stepped backwards leaves behind for every collector (the
+                   plain elapsed check would hold each one back for as long as the step), or a tab-open or refresh run
+                   that recorded its own start time after this cycle's time was taken (RemoteCollectorService, only the
+                   collectors it ran); the clamp counts either as due now. A run one interval or more before atUtc is
+                   due and one less than an interval before is not, exactly as before. */
+                var interval = TimeSpan.FromMinutes(intervalMinutes);
+                if (CollectorCadence.ClampDue(lastRun + interval, atUtc, interval) <= atUtc)
                 {
                     due.Add(s);
                 }

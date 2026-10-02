@@ -173,7 +173,15 @@ public sealed class DarlingPathFilterGateTests
         var step = StepBlock(job, stepName);
 
         Assert.Contains("ALL_COUNT: ${{ steps.filter.outputs.all_count }}", step, StringComparison.Ordinal);
-        Assert.Contains("ALL_FILES: ${{ steps.filter.outputs.all_files }}", step, StringComparison.Ordinal);
+        /* The lists reach the environment only up to 1,000 files: Linux refuses to start a process whose
+           single environment string passes 128 KiB, so a dev-to-main release PR of 2,843 files failed
+           before the script ran. The cap is pinned with the source, so a later edit cannot drop either. */
+        var allFiles = step.Split('\n').Single(line => line.TrimStart().StartsWith("ALL_FILES: ", StringComparison.Ordinal));
+        Assert.Contains("steps.filter.outputs.all_files", allFiles, StringComparison.Ordinal);
+        Assert.Contains("fromJSON(steps.filter.outputs.all_count || '0') <= 1000", allFiles, StringComparison.Ordinal);
+        var darlingFiles = step.Split('\n').Single(line => line.TrimStart().StartsWith("DARLING_FILES: ", StringComparison.Ordinal));
+        Assert.Contains("steps.filter.outputs.darling_files", darlingFiles, StringComparison.Ordinal);
+        Assert.Contains("fromJSON(steps.filter.outputs.darling_count || '0') <= 1000", darlingFiles, StringComparison.Ordinal);
 
         /* Every branch that decides against running says how many changed files it classified, so the number
            is the run's own rather than a sentence about it. */
@@ -186,6 +194,56 @@ public sealed class DarlingPathFilterGateTests
 
         Assert.NotEmpty(skipNotices);
         Assert.All(skipNotices, line => Assert.Contains("${ALL_COUNT", line, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The store-upgrade filter (#4326) exists, includes the store schema and the two fixture scripts the
+    /// gated upgrade E2Es are gated on, and covers the source of every type those E2Es construct directly.
+    ///
+    /// <para>The type list is the closure the E2Es actually reach, read off their own <c>new</c>/static-call
+    /// sites rather than judged: <see cref="DarlingManagedPostgres"/> and <see cref="DarlingStoreUpgrade"/>
+    /// (constructed in DarlingStoreUpgradeTests, DarlingManagedPostgresTests and ManagedConfUpgradePathTests),
+    /// both declared in PerformanceMonitor.Darling.Service, which the second pattern below already covers as a
+    /// whole directory rather than by file — the managed-conf migration machinery those two drive
+    /// (ManagedConfMigration, ManagedConfMigrationRunner, ManagedConfMigrationSteps, ManagedConfMigrationState,
+    /// ManagedConfFile) lives beside them in the same project, so one directory pattern is the correct
+    /// granularity rather than five file entries nothing keeps in sync with a class move.</para>
+    /// </summary>
+    [Fact]
+    public void TheStoreUpgradeGate_CoversTheSchemaAndTheFixtureScriptsAndTheServiceProject()
+    {
+        var gateYaml = ReadRepoFileLf(s_gateSegments);
+        var patterns = FilterPatterns(gateYaml, "store-upgrade");
+
+        Assert.True(patterns.Count > 0,
+            $"{GatePath} has no 'store-upgrade' filter \u2014 find where it moved before editing this test");
+
+        Assert.Contains("Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)", patterns, StringComparer.Ordinal);
+        Assert.Contains("Darling/PerformanceMonitor.Darling.Service/**/!(*.md)", patterns, StringComparer.Ordinal);
+        Assert.Contains("Darling/tools/new-upgraded-store-fixture.ps1", patterns, StringComparer.Ordinal);
+        Assert.Contains("Darling/tools/fetch-pg-runtime.ps1", patterns, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The coverage check reports an injected gap, the same shape as
+    /// <see cref="TheCoverageCheck_ReportsAnInjectedGap"/> above and for the same reason: a parser that
+    /// matched nothing would report this gate complete too, which is the failure this test would otherwise
+    /// share with the one it is guarding.
+    /// </summary>
+    [Fact]
+    public void TheStoreUpgradeGate_MissingTheStorageEntry_IsDetected()
+    {
+        var real = ReadRepoFileLf(s_gateSegments);
+        Assert.Contains("Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)",
+            FilterPatterns(real, "store-upgrade"), StringComparer.Ordinal);
+
+        var mutated = real.Replace(
+            "  - 'Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)'\n",
+            string.Empty,
+            StringComparison.Ordinal);
+        Assert.NotEqual(real, mutated);
+        Assert.DoesNotContain("Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)",
+            FilterPatterns(mutated, "store-upgrade"), StringComparer.Ordinal);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────────

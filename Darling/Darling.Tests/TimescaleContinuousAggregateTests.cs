@@ -888,7 +888,9 @@ public sealed class TimescaleContinuousAggregateTests
         var sql = TimescaleSupport.CreateQueryStoreStatsHourlySql;
 
         Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_hourly", sql, StringComparison.Ordinal);
-        Assert.Contains("WITH (timescaledb.continuous)", sql, StringComparison.Ordinal);
+        /* #4503: a production catalog read found zero lifetime idx_scan on this rollup's group indexes, so it
+           earned the same timescaledb.create_group_indexes = false option #3597 gave the interval-hourly L1. */
+        Assert.Contains("WITH (timescaledb.continuous, timescaledb.create_group_indexes = false)", sql, StringComparison.Ordinal);
         Assert.Contains("time_bucket('1 hour', collection_time) AS bucket", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.query_store_stats", sql, StringComparison.Ordinal);
         /* The COMPOSER's QS dimensions (module_name / query_hash) so a composed QS panel can route here — NOT
@@ -1431,7 +1433,9 @@ public sealed class TimescaleContinuousAggregateTests
         var sql = TimescaleSupport.CreateQueryStoreStatsIntervalDailySql;
 
         Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_daily", sql, StringComparison.Ordinal);
-        Assert.Contains("WITH (timescaledb.continuous)", sql, StringComparison.Ordinal);
+        /* #4503: a production catalog read found zero lifetime idx_scan on this rollup's group indexes (eleven
+           of them on this view alone), so it earned the same option #3597 gave the interval-hourly L1. */
+        Assert.Contains("WITH (timescaledb.continuous, timescaledb.create_group_indexes = false)", sql, StringComparison.Ordinal);
         Assert.Contains($"FROM collect.{TimescaleSupport.QueryStoreStatsIntervalHourlyView}", sql, StringComparison.Ordinal);
 
         /* WIDENING, and that is what makes the level legal at all: an identity-width hierarchical CAGG is a

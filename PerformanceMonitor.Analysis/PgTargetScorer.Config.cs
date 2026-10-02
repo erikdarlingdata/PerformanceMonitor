@@ -129,6 +129,10 @@ public static partial class PgTargetScorer
             case PgTargetFactKeys.ConfigWorkMem:
                 return ScoreConfigWorkMem(fact);
 
+            /* Presence-based: the fact exists only when the eviction evidence does, so the advisory base is flat. */
+            case PgTargetFactKeys.ConfigStatStatementsEviction:
+                return fact.Value > 0 ? ConfigAdvisoryBase : 0.0;
+
             /* ── owner: vacuum (lane 4) ── */
 
             /* engine-defined / posture: AutovacuumOffPostureSeverity when autovacuum = off (Value 1), 0 when on. */

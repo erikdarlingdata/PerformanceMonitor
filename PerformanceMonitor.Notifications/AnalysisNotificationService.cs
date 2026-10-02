@@ -353,7 +353,12 @@ public sealed class AnalysisNotificationService : IDisposable
                         continue;
                     var lastPersisted = await _sender.GetLastDeliveredPageUtcAsync(serverId, FindingMessageFormatter.MetricName(m));
                     if (lastPersisted.HasValue)
-                        _cooldowns.TryAdd(seedKey, new BucketState(lastPersisted.Value, threshold, now, Delivered: true));
+                    {
+                        /* #4732: a persisted notification time ahead of the clock (it stepped back across the restart)
+                           seeds as this cycle's reading, the rule the gate below applies to an in-memory bucket. */
+                        var seededAt = lastPersisted.Value > now ? now : lastPersisted.Value;
+                        _cooldowns.TryAdd(seedKey, new BucketState(seededAt, threshold, now, Delivered: true));
+                    }
                 }
             }
 
@@ -380,9 +385,22 @@ public sealed class AnalysisNotificationService : IDisposable
             {
                 if (route == FindingRoute.Page && decisions[m].Route != FindingRoute.Page)
                     continue;
-                if (_cooldowns.TryGetValue(BucketKey(m), out var state)
-                    && (now - state.LastNotified < cooldown || (state.Delivered && m.Severity < state.LastNotifiedSeverity + WorseningStep)))
-                    continue;
+                var gateKey = BucketKey(m);
+                if (_cooldowns.TryGetValue(gateKey, out var state))
+                {
+                    /* #4732: a last-notified time AHEAD of the clock (it stepped back since the send) is replaced by
+                       this cycle's reading and counted from there, so the cooldown holds one window from the first
+                       cycle that sees the step, not the step plus the window. (This assembly does not reference
+                       PerformanceMonitor.Common, where LastFiredStamp holds the rule for the stamps kept in maps.) */
+                    if (state.LastNotified > now)
+                    {
+                        state = state with { LastNotified = now };
+                        _cooldowns[gateKey] = state;
+                    }
+
+                    if (now - state.LastNotified < cooldown || (state.Delivered && m.Severity < state.LastNotifiedSeverity + WorseningStep))
+                        continue;
+                }
                 lead = m;
                 break;
             }
@@ -956,6 +974,10 @@ internal static class FindingMessageFormatter
         if (finding.DrillDown is not { Count: > 0 })
             return result;
 
+        /* Not ServerIdentity: finding.ServerName is the STORAGE name (host[:database][:RO]) on both Darling call
+           sites and in Lite, and the store id is a hash of that same string, so it is already unique per
+           registration. The display-name collision the alert engine suffixes for cannot occur here, and
+           suffixing would re-key every live analysis incident for nothing. */
         var server = finding.ServerName ?? string.Empty;
 
         if (TryGetRows(finding.DrillDown, "top_deadlocks", out var deadlockRows))

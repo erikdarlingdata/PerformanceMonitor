@@ -511,7 +511,7 @@ public sealed class DarlingDeployStaleFileTests
     /// again.
     ///
     /// <para><b>Why the order is load-bearing, which review had to point out.</b> A folder source is copied
-    /// wholesale — <c>Copy-Item -Path "$Source\*" -Recurse -Force</c> takes everything in it, unfiltered —
+    /// wholesale — <c>Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Recurse -Force</c> takes everything in it, unfiltered —
     /// so a staging directory made from a box that has already run carries THAT box's manifest, and
     /// <c>-Force</c> lays it over this install's. Reading afterwards computes this run's stale-file list
     /// against another install's history. It self-heals on the next upgrade, because the manifest written
@@ -576,6 +576,276 @@ public sealed class DarlingDeployStaleFileTests
 
         Assert.Contains($"$manifestName = '{ManifestFileName}'", script, StringComparison.Ordinal);
         Assert.Contains($"$leaf.Equals('{ManifestFileName}', [StringComparison]::OrdinalIgnoreCase)", script, StringComparison.Ordinal);
+    }
+
+    private static string InstallScriptPath => Path.Combine(RepoRoot, "Darling", "tools", "install-darling.ps1");
+
+    private static string InstallScript => File.ReadAllText(InstallScriptPath);
+
+    /// <summary>What the upgrade runs to lay a folder -Source over the install root (#4745).</summary>
+    private const string FolderCopyStatement = "Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Destination $InstallRoot -Recurse -Force";
+
+    private const string CopyCompleteLine = "if (-not $copied) { Fail \"The copy did not complete.\" }";
+
+    private const string NewBuildLine = "Good \"New build in place.\"";
+
+    /// <summary>
+    /// A folder -Source is listed with <c>-LiteralPath</c> and the listing is piped into <c>Copy-Item</c>
+    /// (#4745).
+    ///
+    /// <para>PowerShell reads <c>[</c> and <c>]</c> in a <c>-Path</c> value as wildcard characters. The old
+    /// <c>Copy-Item -Path (Join-Path $Source '*')</c> over a staging folder named <c>build[1]</c> matched
+    /// nothing and threw nothing, so the script printed "New build in place." over the old build.
+    /// <c>-LiteralPath</c> on <c>Copy-Item</c> alone is no fix, because it makes the <c>*</c> literal too;
+    /// piping the listing in binds each item's own literal path instead.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_CopiesAFolderSourceByLiteralPath_NotThroughAWildcard()
+    {
+        var script = DeployScript;
+
+        Assert.Contains(FolderCopyStatement, script, StringComparison.Ordinal);
+        Assert.DoesNotContain("-Path (Join-Path $Source '*')", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The install's search for older <c>darling.json.bak-*</c> copies uses <c>-LiteralPath</c> (#4745).
+    /// With <c>-Path</c>, an install folder named with <c>[</c> or <c>]</c> finds no backups, so the older
+    /// copies of the config's secrets are never hardened.
+    /// </summary>
+    [Fact]
+    public void TheInstallScript_FindsOlderConfigBackupsByLiteralPath()
+    {
+        var script = InstallScript;
+
+        Assert.Contains("Get-ChildItem -LiteralPath $root -Filter 'darling.json.bak-*' -File -ErrorAction SilentlyContinue", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-ChildItem -Path $root", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// No cmdlet that expands wildcards in a path is handed a bare path in the upgrade or install script
+    /// (#4745): each names its path with <c>-LiteralPath</c>, or takes it from the pipeline. A new site
+    /// that passes <c>-Path</c> or a positional path fails here.
+    ///
+    /// <para>Not only a <c>-Path</c> search: <c>Test-Path $serviceExe</c> answers False for a file that is
+    /// there when the folder name holds <c>[</c>, and <c>Get-Acl -Path</c> under a folder named
+    /// <c>a[bc]d</c> resolved to the same file name in a sibling folder <c>abd</c> - hardening the wrong
+    /// file. Read from the parsed script, so a comment that quotes the old form does not count. A constant
+    /// registry path (<c>HKLM:</c>) is exempt: it names no folder of ours.</para>
+    /// </summary>
+    [Fact]
+    public void TheUpgradeAndInstallScripts_NameEveryPathLiterally()
+    {
+        var paths = "'" + DeployScriptPath + "', '" + InstallScriptPath + "'";
+        Assert.DoesNotContain("''", paths, StringComparison.Ordinal);
+
+        var answers = RunWindowsPowerShell(WildcardCensusProbe.Replace("__PATHS__", paths, StringComparison.Ordinal));
+
+        Assert.True(
+            answers.Count == 1 && answers[0] == "DONE",
+            "a wildcard-expanding cmdlet is given a path without -LiteralPath, so a folder name holding [ or ] "
+            + "makes it match nothing (or the wrong sibling) - use -LiteralPath (#4745):\n  "
+            + string.Join("\n  ", answers));
+    }
+
+    private const string WildcardCensusProbe = """
+        $cmdlets = @('Copy-Item', 'Get-ChildItem', 'Test-Path', 'Remove-Item', 'Get-Item', 'Move-Item', 'Resolve-Path', 'Rename-Item', 'Get-Acl', 'Set-Acl', 'Get-Content', 'Set-Content', 'Add-Content', 'Clear-Content', 'Out-File', 'Get-FileHash', 'Expand-Archive', 'Compress-Archive', 'Get-ItemProperty', 'Set-ItemProperty', 'Select-String', 'Invoke-Item', 'Unblock-File', 'Set-Location', 'Push-Location')
+        $found = @()
+        foreach ($path in @(__PATHS__)) {
+            $name = [IO.Path]::GetFileName($path)
+            $errors = $null
+            $tokens = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+            foreach ($e in @($errors)) { $found += "$name PARSE-ERROR line $($e.Extent.StartLineNumber): $($e.Message)" }
+            $commands = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)
+            foreach ($command in $commands) {
+                $written = $command.GetCommandName()
+                if (-not $written) { continue }
+                $alias = Get-Alias -Name $written -ErrorAction SilentlyContinue
+                $resolved = if ($alias) { $alias.ResolvedCommandName } else { $written }
+                if ($cmdlets -notcontains $resolved) { continue }
+                $parameters = @($command.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
+                if ($parameters -contains 'LiteralPath') { continue }
+                $constants = @($command.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.StringConstantExpressionAst] } | ForEach-Object { $_.Value })
+                if (@($constants | Where-Object { $_ -match '^HK(LM|CU|CR|U|CC):' }).Count -gt 0) { continue }
+                $pipeline = $command.Parent
+                $fed = ($pipeline -is [System.Management.Automation.Language.PipelineAst]) -and (-not [object]::ReferenceEquals($pipeline.PipelineElements[0], $command))
+                if ($fed -and ($parameters -notcontains 'Path')) { continue }
+                $first = ($command.Extent.Text -split '\r?\n')[0]
+                if ($first.Length -gt 140) { $first = $first.Substring(0, 140) }
+                $found += "$name line $($command.Extent.StartLineNumber): $first"
+            }
+        }
+        foreach ($f in @($found)) { $f }
+        'DONE'
+        """;
+
+    /// <summary>
+    /// After a folder copy, the script compares the SHA-256 of the service executable in the source and in
+    /// the install root, between the "copy did not complete" check and "New build in place." (#4745). A copy
+    /// that reports success can still have laid down nothing; this is what says so before the message does.
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_ChecksTheInstalledServiceExecutableBeforeItReportsTheNewBuildInPlace()
+    {
+        var script = DeployScript;
+
+        var complete = script.IndexOf(CopyCompleteLine, StringComparison.Ordinal);
+        Assert.True(complete >= 0, "upgrade-darling.ps1 no longer checks that the copy completed");
+
+        var inPlace = script.IndexOf(NewBuildLine, complete, StringComparison.Ordinal);
+        Assert.True(inPlace > complete, "upgrade-darling.ps1 no longer reports the new build in place after the copy");
+        Assert.Equal(1, CountOccurrences(script, NewBuildLine));
+
+        var between = script.Substring(complete, inPlace - complete);
+        Assert.Contains("if (-not $sourceIsZip) {", between, StringComparison.Ordinal);
+        Assert.Contains("Get-FileHash -LiteralPath (Join-Path $Source $serviceExeName)", between, StringComparison.Ordinal);
+        Assert.Contains("Get-FileHash -LiteralPath (Join-Path $InstallRoot $serviceExeName)", between, StringComparison.Ordinal);
+        Assert.Contains("Fail ", between, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The copy statement the script really runs for a folder -Source, taken by its place in the script (the
+    /// <c>else</c> branch after the zip's <c>Expand-Archive</c>) rather than by its wording, run against a
+    /// staging folder named <c>a[x]b</c>: every file arrives, a file the install already had is overwritten,
+    /// and one the new build does not ship survives (#4745). Before the fix nothing arrived and nothing threw.
+    /// </summary>
+    [Fact]
+    public void TheShippedFolderCopy_CarriesEveryFileOutOfAStagingFolderWhoseNameHasBrackets()
+    {
+        var statement = ShippedFolderCopyStatement(DeployScript);
+
+        var root = Directory.CreateTempSubdirectory("darling-4745-");
+        try
+        {
+            var source = Path.Combine(root.FullName, "a[x]b");
+            var installRoot = Path.Combine(root.FullName, "install");
+            Assert.DoesNotContain("'", root.FullName, StringComparison.Ordinal);
+
+            WriteFile(source, "one.txt", "new one");
+            WriteFile(source, "two.dll", "new two");
+            WriteFile(source, @"viewer\three.txt", "new three");
+            var hidden = WriteFile(source, "hidden.cfg", "new hidden");
+            File.SetAttributes(hidden, File.GetAttributes(hidden) | FileAttributes.Hidden);
+            WriteFile(installRoot, "one.txt", "old one");
+            WriteFile(installRoot, "kept.txt", "not in the new build");
+
+            var probe = new StringBuilder();
+            probe.AppendLine("$ErrorActionPreference = 'Stop'");
+            probe.AppendLine($"$Source = '{source}'");
+            probe.AppendLine($"$InstallRoot = '{installRoot}'");
+            probe.AppendLine(statement);
+            probe.AppendLine("'DONE'");
+
+            Assert.Equal(["DONE"], RunWindowsPowerShell(probe.ToString()));
+
+            Assert.Equal("new one", File.ReadAllText(Path.Combine(installRoot, "one.txt")));
+            Assert.Equal("new two", File.ReadAllText(Path.Combine(installRoot, "two.dll")));
+            Assert.Equal("new three", File.ReadAllText(Path.Combine(installRoot, "viewer", "three.txt")));
+            Assert.Equal("new hidden", File.ReadAllText(Path.Combine(installRoot, "hidden.cfg")));
+            Assert.Equal("not in the new build", File.ReadAllText(Path.Combine(installRoot, "kept.txt")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The shipped executable check, lifted out of the script and run: identical bytes pass, different bytes
+    /// stop the script with a message, and a zip -Source is not checked at all - its <c>$Source</c> is a
+    /// file, not a folder holding the executable (#4745).
+    /// </summary>
+    [Theory]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, false)]
+    public void TheShippedExecutableCheck_StopsOnlyWhenAFolderCopyLeftADifferentServiceExecutable(bool sourceIsZip, bool sameBytes, bool expectStop)
+    {
+        var script = DeployScript;
+        var complete = script.IndexOf(CopyCompleteLine, StringComparison.Ordinal);
+        Assert.True(complete >= 0, "upgrade-darling.ps1 no longer checks that the copy completed");
+        var inPlace = script.IndexOf(NewBuildLine, complete, StringComparison.Ordinal);
+        Assert.True(inPlace > complete, "upgrade-darling.ps1 no longer reports the new build in place after the copy");
+        var check = script.Substring(complete + CopyCompleteLine.Length, inPlace - complete - CopyCompleteLine.Length);
+
+        var root = Directory.CreateTempSubdirectory("darling-4745-");
+        try
+        {
+            Assert.DoesNotContain("'", root.FullName, StringComparison.Ordinal);
+            const string exe = "PerformanceMonitor.Darling.Service.exe";
+            var source = Path.Combine(root.FullName, sourceIsZip ? "build.zip" : "build");
+            var installRoot = Path.Combine(root.FullName, "install");
+            if (sourceIsZip)
+            {
+                WriteFile(root.FullName, "build.zip", "not a folder");
+            }
+            else
+            {
+                WriteFile(source, exe, "new service");
+            }
+
+            WriteFile(installRoot, exe, sameBytes ? "new service" : "old service");
+
+            var probe = new StringBuilder();
+            probe.AppendLine("function Fail([string]$message) { Write-Output \"FAIL: $message\"; exit 1 }");
+            probe.AppendLine("$ErrorActionPreference = 'Stop'");
+            probe.AppendLine($"$serviceExeName = '{exe}'");
+            probe.AppendLine($"$Source = '{source}'");
+            probe.AppendLine($"$InstallRoot = '{installRoot}'");
+            probe.AppendLine("$sourceIsZip = " + (sourceIsZip ? "$true" : "$false"));
+            probe.AppendLine(check);
+            probe.AppendLine("'REACHED'");
+
+            var answers = RunWindowsPowerShell(probe.ToString());
+
+            if (expectStop)
+            {
+                Assert.Single(answers);
+                Assert.StartsWith("FAIL: ", answers[0], StringComparison.Ordinal);
+                Assert.Contains(exe, answers[0], StringComparison.Ordinal);
+                Assert.Contains("same arguments", answers[0], StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Equal(["REACHED"], answers);
+            }
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>The statement the upgrade runs for a FOLDER -Source: what sits in the <c>else</c> branch after
+    /// the zip's <c>Expand-Archive</c>, comment lines dropped.</summary>
+    private static string ShippedFolderCopyStatement(string script)
+    {
+        var zip = script.IndexOf("Expand-Archive -LiteralPath $Source -DestinationPath $InstallRoot -Force", StringComparison.Ordinal);
+        Assert.True(zip >= 0, "upgrade-darling.ps1 no longer expands a zip -Source into the install root");
+
+        const string marker = "else {";
+        var open = script.IndexOf(marker, zip, StringComparison.Ordinal);
+        Assert.True(open >= 0, "expected an else branch after the zip expansion");
+
+        var lines = new List<string>();
+        foreach (var raw in script[(open + marker.Length)..].Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line == "}") { break; }
+            if (line.Length > 0 && !line.StartsWith('#')) { lines.Add(line); }
+        }
+
+        Assert.NotEmpty(lines);
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string WriteFile(string root, string relativePath, string content)
+    {
+        var full = Path.Combine(root, relativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        File.WriteAllText(full, content);
+        return full;
     }
 
     /// <summary>
@@ -781,6 +1051,12 @@ public sealed class DarlingDeployStaleFileTests
         return full;
     }
 
+    /// <summary>Upper bound on one <c>powershell.exe</c> probe. A cold Windows PowerShell 5.1 start (plus
+    /// module auto-load) or a busy runner has exceeded 60 s with no output on a small probe, so the limit
+    /// leaves a wide margin. A probe that really hangs still fails at this limit rather than hanging the
+    /// job, because both output streams are drained concurrently.</summary>
+    private static readonly TimeSpan PowerShellExitLimit = TimeSpan.FromSeconds(180);
+
     /// <summary>Runs <paramref name="script"/> under Windows PowerShell 5.1 and returns its non-empty output
     /// lines. Written to a temp file rather than passed with -Command: the script under test is a set of
     /// whole function bodies, and quoting those through a command line fails for reasons that have nothing
@@ -792,13 +1068,24 @@ public sealed class DarlingDeployStaleFileTests
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
+            var startInfo = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            });
+            };
+
+            /* A parent pwsh (the CI runner's default shell) leaves its own module directories in PSModulePath,
+               and Windows PowerShell 5.1 then fails to find Microsoft.PowerShell.Utility cmdlets such as
+               Get-FileHash. The machine-level value is what an operator's own 5.1 session starts with (#4745). */
+            var machineModulePath = Environment.GetEnvironmentVariable("PSModulePath", EnvironmentVariableTarget.Machine);
+            if (!string.IsNullOrEmpty(machineModulePath))
+            {
+                startInfo.Environment["PSModulePath"] = machineModulePath;
+            }
+
+            using var process = Process.Start(startInfo);
             Assert.NotNull(process);
 
             /* BOTH streams drained CONCURRENTLY, and that is not style. Reading stdout to the end and then
@@ -812,7 +1099,7 @@ public sealed class DarlingDeployStaleFileTests
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
 
-            var exited = process.WaitForExit(60_000);
+            var exited = process.WaitForExit(PowerShellExitLimit);
             if (!exited)
             {
                 try { process.Kill(entireProcessTree: true); }
@@ -825,7 +1112,7 @@ public sealed class DarlingDeployStaleFileTests
             var stdout = stdoutTask.GetAwaiter().GetResult();
             var stderr = stderrTask.GetAwaiter().GetResult();
 
-            Assert.True(exited, $"powershell.exe did not exit within 60 seconds running the extracted functions. Output so far:\n{stdout}\n{stderr}");
+            Assert.True(exited, $"powershell.exe did not exit within {PowerShellExitLimit.TotalSeconds:0} seconds running the extracted functions. Output so far:\n{stdout}\n{stderr}");
             Assert.True(string.IsNullOrWhiteSpace(stderr), $"powershell.exe reported an error running the extracted functions:\n{stderr}");
 
             var lines = new List<string>();

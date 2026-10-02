@@ -135,6 +135,8 @@ public sealed partial class ViewerDataService
         public string StoreTable { get; init; } = "";
         public string Status { get; init; } = "";
         public string LastRun { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastRun"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastRunUtc { get; init; }
         public long Runs { get; init; }
         public long FailedRuns { get; init; }
         public long RowsCollected { get; init; }
@@ -213,8 +215,9 @@ public sealed partial class ViewerDataService
                 StoreTable = definition.TargetTable,
                 Status = status,
                 LastRun = facts?.LastRunAt is { } at
-                    ? ViewerTimeHelper.ForDisplay(at).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
+                    ? ViewerTimeHelper.FormatForDisplay(at, "yyyy-MM-dd HH:mm")
                     : "",
+                LastRunUtc = facts?.LastRunAt,
                 Runs = facts?.Runs ?? 0,
                 FailedRuns = facts?.FailedRuns ?? 0,
                 RowsCollected = facts?.RowsCollected ?? 0,
@@ -281,6 +284,11 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgBlockingReader.GetPgBlockingCyclesAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
+    /// <summary>Activity tab, panel 4 — the eviction inputs behind <see cref="PgStatementEvictionNote"/>.</summary>
+    public Task<DarlingPgStatementReader.PgEvictionInfo> GetPgStatementEvictionsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DarlingPgStatementReader.GetEvictionInfoAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+
     /// <summary>Activity tab, panel 4 — top statement shapes by total execution time.</summary>
     public Task<List<DarlingPgStatementReader.PgStatementRow>> GetPgTopQueriesAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
@@ -339,6 +347,8 @@ public sealed partial class ViewerDataService
     public sealed record PgCpuUtilizationRow
     {
         public required string Time { get; init; }
+        /// <summary>The UTC instant <see cref="Time"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime SampleTimeUtc { get; init; }
         public required double CpuPercent { get; init; }
     }
 
@@ -352,7 +362,8 @@ public sealed partial class ViewerDataService
             .OrderByDescending(s => s.SampleTimeUtc)
             .Select(s => new PgCpuUtilizationRow
             {
-                Time = ViewerTimeHelper.ForDisplay(s.SampleTimeUtc).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture),
+                Time = ViewerTimeHelper.FormatForDisplay(s.SampleTimeUtc, "yyyy-MM-dd HH:mm"),
+                SampleTimeUtc = s.SampleTimeUtc,
                 CpuPercent = s.CpuPercent,
             })
             .ToList();

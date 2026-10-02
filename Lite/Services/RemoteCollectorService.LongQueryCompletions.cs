@@ -34,8 +34,9 @@ public partial class RemoteCollectorService
     /* #3754: the ENABLE failure the reconcile below caught, per server, kept until a later reconcile
        succeeds. The reconcile runs from the per-server collection loop, OUTSIDE the collector's run - so
        when the session could not be created (every monitored database refused it on Azure SQL DB; the
-       one CREATE refused on-prem) the run still went ahead, its tolerant ring-buffer read found no
-       session, returned zero rows exactly as a quiet session would, and the cycle recorded SUCCESS.
+       one CREATE refused on-prem) the run still went ahead, its ring-buffer read (tolerant of a missing
+       session then, before #4731) found no session, returned zero rows exactly as a quiet session
+       would, and the cycle recorded SUCCESS.
        The blocked-process and deadlock collectors do not have this hole because their ensure runs
        INSIDE RunCollectorAsync and throws XeSessionEnsureException straight into its classification;
        this slot is how the long-query collector's out-of-run ensure reaches the same arm. The
@@ -262,12 +263,15 @@ END;", connection);
     /// <summary>
     /// Collects long-query completions via the shared <see cref="LongQueryCompletionsCollector"/>
     /// definition. The session lifecycle stays in the reconcile above; a missing/inaccessible session
-    /// is tolerated here as zero rows, exactly like the blocked-process reader — EXCEPT (#3754) when the
-    /// reconcile has already recorded that the session could not be created: then the read is not
-    /// attempted and the reconcile's own exception is rethrown into <c>RunCollectorAsync</c>'s
-    /// classification, the way the blocked-process and deadlock ensures throw into it from inside the
-    /// run. Zero rows off a session that does not exist is not a collection; recording it as SUCCESS was
-    /// the defect.
+    /// is NOT tolerated as zero rows (#4731): the read raises <see cref="XeSessionEnsureException"/> like the
+    /// ensure does (see <see cref="ReadXeSessionAsync"/>), the way the blocked-process and deadlock reads do, so
+    /// the run records PERMISSIONS or ERROR with the XE session flagged unavailable, and never a SUCCESS over a
+    /// source it could not read. Also (#3754) when the reconcile has already recorded that the session could not
+    /// be created: then the read is not attempted and the reconcile's own exception is rethrown into
+    /// <c>RunCollectorAsync</c>'s classification, the way the blocked-process and deadlock ensures throw into it
+    /// from inside the run. Zero rows off a session that does not exist is not a collection; recording it as
+    /// SUCCESS was the defect. The tray notice that names the failed captures (<c>MainWindow.NameXeCaptures</c>)
+    /// calls this one long-query.
     /// </summary>
     private async Task<int> CollectLongQueryCompletionsAsync(ServerConnection server, CancellationToken cancellationToken)
     {
@@ -280,14 +284,8 @@ END;", connection);
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ensureFailure).Throw();
         }
 
-        try
-        {
-            return await RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, server, cancellationToken);
-        }
-        catch (SqlException ex) when (ex.Number == 297 || ex.Number == 15151 || ex.Message.Contains("XE session"))
-        {
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Long-query completion XE session not available: {ex.Message}");
-            return 0;
-        }
+        return await ReadXeSessionAsync(
+            "long query completions",
+            () => RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, server, cancellationToken));
     }
 }

@@ -10,6 +10,7 @@ using System;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -470,4 +471,110 @@ public sealed class CollectorHealthClassifierTests
         };
         Assert.Equal("STOPPED", serviceRow.HealthStatus);
     }
+
+    /* -- #4748: a collector that lost half or more of its databases bands Warning -- */
+
+    private static string PartialNote(int failed, int total) =>
+        string.Format(System.Globalization.CultureInfo.InvariantCulture, PartialDatabaseFailureNote.Format, failed, total, "db_a, db_b", "login failed");
+
+    private static string ClassifyWithNote(string? note, double hoursSinceLastSuccess = 0.1, double hoursSinceLastRun = 0.1) =>
+        CollectorHealthClassifier.Classify(
+            totalRuns: 100, successCount: 100, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
+            abandonedCount: 0, hoursSinceLastSuccess: hoursSinceLastSuccess, hoursSinceLastRun: hoursSinceLastRun,
+            frequencyMinutes: 5, latestRunNote: note);
+
+    /// <summary>The run still records SUCCESS, so the counts read clean; the newest run's note is the only
+    /// record of the loss. Half or more of the attempted databases failing bands Warning, fewer stays Healthy.</summary>
+    [Fact]
+    public void Classify_BandsWarning_WhenTheNewestRunLostHalfOrMoreOfItsDatabases()
+    {
+        Assert.Equal(CollectorHealthClassifier.Warning, ClassifyWithNote(PartialNote(9, 10)));
+        Assert.Equal(CollectorHealthClassifier.Warning, ClassifyWithNote(PartialNote(5, 10)));
+        Assert.Equal(CollectorHealthClassifier.Healthy, ClassifyWithNote(PartialNote(1, 10)));
+        Assert.Equal(CollectorHealthClassifier.Healthy, ClassifyWithNote(PartialNote(4, 10)));
+    }
+
+    [Fact]
+    public void Classify_StaysHealthy_WithNoNoteOrANoteThatIsNotAPartialFailure()
+    {
+        Assert.Equal(CollectorHealthClassifier.Healthy, ClassifyWithNote(null));
+        Assert.Equal(CollectorHealthClassifier.Healthy, ClassifyWithNote(""));
+        Assert.Equal(CollectorHealthClassifier.Healthy, ClassifyWithNote("enumeration returned 0 item(s)"));
+    }
+
+    /// <summary>The note is read only where the ladder would otherwise say Healthy: a louder band keeps its word.</summary>
+    [Fact]
+    public void Classify_ANoteDoesNotChangeAFailingOrStaleBand()
+    {
+        var stale = (CollectorHealthClassifier.StaleThresholdHours(5) + CollectorHealthClassifier.FailingThresholdHours(5)) / 2;
+        Assert.Equal(CollectorHealthClassifier.Stale, ClassifyWithNote(null, hoursSinceLastSuccess: stale));
+        Assert.Equal(CollectorHealthClassifier.Stale, ClassifyWithNote(PartialNote(9, 10), hoursSinceLastSuccess: stale));
+
+        Assert.Equal(CollectorHealthClassifier.Failing, ClassifyWithNote(null, hoursSinceLastSuccess: 500));
+        Assert.Equal(CollectorHealthClassifier.Failing, ClassifyWithNote(PartialNote(9, 10), hoursSinceLastSuccess: 500));
+    }
+
+    /// <summary>The reader finds what the writer writes - through the driver's own composer, on its own and
+    /// merged into a longer note - and refuses text that is not the sentence.</summary>
+    [Fact]
+    public void PartialDatabaseFailureNote_TryParse_ReadsWhatTheWriterWrites()
+    {
+        Assert.True(PartialDatabaseFailureNote.TryParse(PartialNote(9, 10), out var failed, out var total));
+        Assert.Equal((9, 10), (failed, total));
+
+        var composed = EnumeratedCollectorDriver.BuildPartialFailureNote(3, 7, new[] { "a", "b", "c" }, "boom");
+        Assert.NotNull(composed);
+        Assert.True(PartialDatabaseFailureNote.TryParse(composed, out failed, out total));
+        Assert.Equal((3, 7), (failed, total));
+
+        var merged = EnumeratedCollectorDriver.MergeNotes("probe failed for 2 database(s)", composed);
+        Assert.True(PartialDatabaseFailureNote.TryParse(merged, out failed, out total));
+        Assert.Equal((3, 7), (failed, total));
+
+        Assert.False(PartialDatabaseFailureNote.TryParse(null, out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse("", out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse($" of 10 {PartialDatabaseFailureNote.Marker}", out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse($"9 of {PartialDatabaseFailureNote.Marker}", out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse(PartialDatabaseFailureNote.Marker, out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse($"9 of 10{PartialDatabaseFailureNote.Marker}", out _, out _));
+        Assert.Equal(EnumeratedCollectorDriver.PartialDatabaseFailureNoteFormat, PartialDatabaseFailureNote.Format);
+    }
+
+    /// <summary>
+    /// Through each banding row, the way the tests above do: the newest run's partial-failure note bands
+    /// Warning, and an older run's note (still shown as the last note) does not once the newest run is clean.
+    /// </summary>
+    [Fact]
+    public void EveryBandingRow_BandsWarning_OnTheNewestRunsNote_AndNotOnAnOlderOne()
+    {
+        var note = PartialNote(9, 10);
+        var recent = DateTime.UtcNow.AddMinutes(-2);
+
+        var viewerLost = new CollectorHealthRow { CollectorName = "wait_stats", TotalRuns = 12, SuccessCount = 12, LastSuccessTime = recent, LastRunTime = recent, LastNote = note, NoteCount = 1, LatestRunNote = note };
+        var viewerClean = new CollectorHealthRow { CollectorName = "wait_stats", TotalRuns = 12, SuccessCount = 12, LastSuccessTime = recent, LastRunTime = recent, LastNote = note, NoteCount = 1, LatestRunNote = null };
+        Assert.Equal("WARNING", viewerLost.HealthStatus);
+        Assert.Equal("HEALTHY", viewerClean.HealthStatus);
+
+        var serviceLost = new CollectorHealth { CollectorName = "wait_stats", TotalRuns = 12, SuccessCount = 12, LastSuccessTime = recent, LastRunTime = recent, LastNote = note, NoteCount = 1, LatestRunNote = note };
+        var serviceClean = new CollectorHealth { CollectorName = "wait_stats", TotalRuns = 12, SuccessCount = 12, LastSuccessTime = recent, LastRunTime = recent, LastNote = note, NoteCount = 1, LatestRunNote = null };
+        Assert.Equal("WARNING", serviceLost.HealthStatus);
+        Assert.Equal("HEALTHY", serviceClean.HealthStatus);
+    }
+
+    /// <summary>Every read that builds a banding row selects the newest run's note, at the ordinal its mapper
+    /// reads; the viewer's fleet read gets it from plain aggregates (no window function), and the sentence its
+    /// LIKE looks for is the one the writer writes.</summary>
+    [Fact]
+    public void EveryDarlingHealthRead_ProjectsTheNewestRunsNote()
+    {
+        Assert.Contains("recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("AS latest_run_note", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("AS recency_rank", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("AS latest_run_note", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER()", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains(CollectionHealthRollupSupport.LatestRunNoteRawSql, ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains($"'%{PartialDatabaseFailureNote.Marker}%'", CollectionHealthRollupSupport.LatestRunNoteRawSql, StringComparison.Ordinal);
+        Assert.Contains(PartialDatabaseFailureNote.Marker, PartialDatabaseFailureNote.Format, StringComparison.Ordinal);
+    }
+
 }

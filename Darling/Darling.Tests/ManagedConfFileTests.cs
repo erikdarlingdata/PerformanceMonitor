@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -368,6 +369,89 @@ public sealed class ManagedConfFileTests
         Assert.Contains("checkpoint_timeout = '15min'", body, StringComparison.Ordinal);
     }
 
+    /// <summary>v17's <c>log_line_prefix</c> is one of the builders <see cref="ManagedConfFile.RenderBody"/>
+    /// calls, so the managed body itself carries it — not just the legacy v1-v17 appenders
+    /// <c>EnsureConfAppended</c> runs against a self-hosted conf.</summary>
+    [Fact]
+    public void RenderBody_ContainsLogLinePrefix()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs());
+
+        Assert.Contains("log_line_prefix = '%m [%p] %a '", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The planner page-cost setting is rendered exactly once, at 1.1, in the managed body and in the
+    /// full file text a start writes.</summary>
+    [Fact]
+    public void RenderBody_ContainsRandomPageCost_ExactlyOnce_At1Point1()
+    {
+        var inputs = SampleInputs();
+        foreach (var text in new[] { ManagedConfFile.RenderBody(inputs), ManagedConfFile.Render(inputs) })
+        {
+            var lines = text.Split('\n').Where(l => l.StartsWith("random_page_cost", StringComparison.Ordinal)).ToList();
+            Assert.Single(lines);
+            Assert.Equal("random_page_cost = '1.1'", lines[0]);
+        }
+    }
+
+    /// <summary>A file the previous version wrote (the same body without the page-cost line, with a header hash
+    /// that matches it) is not a hand edit, and a start replaces it with the new render.</summary>
+    [Fact]
+    public void PreviousVersionRender_IsNotHandEdited_AndIsReplacedWithTheNewLine()
+    {
+        var inputs = SampleInputs();
+        var newBody = ManagedConfFile.RenderBody(inputs);
+        var previousBody = string.Concat(newBody.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => !l.StartsWith("random_page_cost", StringComparison.Ordinal))
+            .Select(l => l + "\n"));
+        Assert.NotEqual(newBody, previousBody);
+        var previousFile = ManagedConfFile.RenderHeader(inputs, ManagedConfFile.ComputeBodyHash(previousBody)) + previousBody;
+        var newFile = ManagedConfFile.Render(inputs);
+
+        Assert.False(ManagedConfFile.IsHandEdited(previousFile));
+        Assert.True(ManagedConfFile.ShouldReplaceManagedConf(previousFile, newFile));
+        var diff = Assert.Single(ManagedConfFile.DiffBodyKeys(
+            ManagedConfFile.ParseExisting(previousFile).Body, ManagedConfFile.ParseExisting(newFile).Body));
+        Assert.Equal("random_page_cost", diff.Key);
+        Assert.Null(diff.FileValue);
+        Assert.Equal("1.1", diff.RenderedValue);
+    }
+
+    /// <summary>A hand-edited previous-version file keeps today's behaviour: it is detected, never replaced, and
+    /// the diff names the page-cost key as the one a fresh render would add.</summary>
+    [Fact]
+    public void HandEditedPreviousVersionRender_IsLeftInForce_AndTheDiffNamesRandomPageCost()
+    {
+        var inputs = SampleInputs();
+        var newFile = ManagedConfFile.Render(inputs);
+        var previousBody = string.Concat(ManagedConfFile.RenderBody(inputs).Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => !l.StartsWith("random_page_cost", StringComparison.Ordinal))
+            .Select(l => l + "\n"));
+        var previousFile = ManagedConfFile.RenderHeader(inputs, ManagedConfFile.ComputeBodyHash(previousBody)) + previousBody;
+        var edited = previousFile.Replace("checkpoint_timeout = '15min'", "checkpoint_timeout = '30min'", StringComparison.Ordinal);
+        Assert.NotEqual(previousFile, edited);
+
+        Assert.True(ManagedConfFile.IsHandEdited(edited));
+        Assert.False(ManagedConfFile.ShouldReplaceManagedConf(edited, newFile));
+        var diffs = ManagedConfFile.DiffBodyKeys(ManagedConfFile.ParseExisting(edited).Body, ManagedConfFile.ParseExisting(newFile).Body);
+        Assert.Contains(diffs, d => d.Key == "random_page_cost" && d.FileValue is null && d.RenderedValue == "1.1");
+        Assert.Contains(diffs, d => d.Key == "checkpoint_timeout");
+    }
+
+    /// <summary>Pin: <see cref="ManagedConfFile.RenderBody"/> always renders <c>listen_addresses</c> as
+    /// exactly loopback (<c>DarlingManagedPostgres.BuildConfAppend</c>'s v1 line) — never the network
+    /// address an exposed store's command line adds. Every verification path that reads this rendered text
+    /// (<see cref="ManagedConfMigrationRunner.VerifyStepB"/>, <see cref="ManagedConfMigrationRunner.FindUnstampedManagedFileErrors"/>)
+    /// depends on that being true — it is the reason the command line always outranks this file for the key,
+    /// on every exposed store, every start.</summary>
+    [Fact]
+    public void RenderBody_ListenAddresses_IsAlwaysLoopbackOnly()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs());
+
+        Assert.Contains("listen_addresses = '127.0.0.1'", body, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// #4246 (claude-desktop's parity pin, 14:47Z): for EVERY marker in
     /// <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/>, every key that marker's OWN legacy builder
@@ -505,6 +589,11 @@ public sealed class ManagedConfFileTests
         if (marker == DarlingManagedPostgres.ConfMarkerV16)
         {
             return DarlingManagedPostgres.BuildCheckpointIntervalConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV17)
+        {
+            return DarlingManagedPostgres.BuildLogLinePrefixConfAppend();
         }
 
         throw new InvalidOperationException(

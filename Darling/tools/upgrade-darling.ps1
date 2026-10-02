@@ -133,6 +133,14 @@ $ErrorActionPreference = 'Stop'
 $serviceName = 'PerformanceMonitor Darling'
 $serviceExeName = 'PerformanceMonitor.Darling.Service.exe'
 $configName = 'darling.json'
+
+# #4466: how long phase two waits for a process that is still exiting after the service reports Stopped,
+# before it refuses. Get-Service reporting Stopped means the SCM's own state machine reached that state,
+# not that every process the service spawned has finished unwinding - a postmaster or a child process can
+# still be a few seconds from actually exiting. A bound this generous is still bounded: it never turns into
+# an indefinite hang, and it is far short of the two minutes already spent waiting for the service itself.
+$script:InstallTreeClearWaitSeconds = 120
+$script:InstallTreeClearPollSeconds = 2
 $manifestName = 'darling-install-manifest.txt'
 
 function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
@@ -757,6 +765,31 @@ function Get-DarlingProcessesUnderPath([string]$root) {
     }
 
     return @($hits)
+}
+
+# #4466: Get-Service reporting Stopped is the SCM's state, not proof that every process the service spawned
+# has actually exited yet - a postmaster (or another child) can still be a moment from unwinding when phase
+# two takes its snapshot, and that moment alone was enough to send an operator into the refusal below with
+# nothing wrong. This polls Get-DarlingProcessesUnderPath until it comes back empty or $waitSeconds runs
+# out, printing what it is waiting on the first time it sees a hit, so phase two only ever has to look once
+# it returns. Factored out so it can be driven with a short bound and a fake process in a test, without
+# waiting on a real two-minute service stop to exercise it.
+function Wait-DarlingInstallTreeClear([string]$root, [int]$waitSeconds, [int]$pollSeconds) {
+    $deadline = (Get-Date).AddSeconds($waitSeconds)
+    $announced = $false
+    $holding = @(Get-DarlingProcessesUnderPath $root)
+
+    while ($holding.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        if (-not $announced) {
+            $names = @($holding | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
+            Note "Still exiting: $($names -join ', '). Waiting up to $waitSeconds seconds for the install tree to clear..."
+            $announced = $true
+        }
+        Start-Sleep -Seconds $pollSeconds
+        $holding = @(Get-DarlingProcessesUnderPath $root)
+    }
+
+    return @($holding)
 }
 
 # True for a process that stopping the service will take with it: the service's own executable, and
@@ -1808,8 +1841,9 @@ $configHashBefore = if (Test-Path -LiteralPath $configPath) { (Get-FileHash -Lit
 # The previous build's manifest, read BEFORE the copy for the same reason the config hash above is taken
 # before it - and it took review to see why that reason applies here too (#2529).
 #
-# A -Source FOLDER is copied wholesale: Copy-Item -Path "$Source\*" -Recurse -Force takes everything in it,
-# unfiltered. A staging directory made from a live install therefore carries THAT install's manifest, and
+# A -Source FOLDER is copied wholesale: Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Recurse
+# -Force takes everything in it, unfiltered. A staging directory made from a live install therefore carries
+# THAT install's manifest, and
 # -Force lays it over this one. Reading afterwards would compute this run's stale-file list against some
 # other box's history - the one scenario the manifest's own write-side filter already names as expected,
 # arriving from the other direction. It self-heals on the next upgrade, because the manifest written at the
@@ -1837,6 +1871,14 @@ Good "Service is stopped."
 # than the normal one - most often a postmaster under pg-runtime that outlived the service stop, which is
 # precisely the process nothing may kill. Phase one cannot see this and phase two cannot see phase one's
 # cases without an outage, which is why there are two.
+#
+# #4466: Get-Service already reported Stopped above, but that is the SCM's state, not proof every process
+# the service spawned has actually finished exiting - so this gives one a bounded window to finish before
+# treating its presence as the interesting case. -SkipStopGuard skips the wait along with the refusal it
+# exists to avoid, same as it always has.
+if (-not $SkipStopGuard) {
+    Wait-DarlingInstallTreeClear $InstallRoot $script:InstallTreeClearWaitSeconds $script:InstallTreeClearPollSeconds | Out-Null
+}
 $stillHolding = Get-DarlingProcessesUnderPath $InstallRoot
 if ($stillHolding.Count -gt 0 -and -not $SkipStopGuard) {
     $names = @($stillHolding | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
@@ -1995,7 +2037,11 @@ foreach ($attempt in 1, 2) {
             Expand-Archive -LiteralPath $Source -DestinationPath $InstallRoot -Force
         }
         else {
-            Copy-Item -Path (Join-Path $Source '*') -Destination $InstallRoot -Recurse -Force
+            # The folder is listed with -LiteralPath and the items are piped in, not copied with -Path and a '*':
+            # PowerShell reads [ and ] in a -Path value as wildcard characters, so a staging folder named build[1]
+            # matched nothing, threw nothing, and the old build stayed in place under a success message (#4745).
+            # -LiteralPath on Copy-Item itself would make the * literal too. Each piped item binds its own literal path.
+            Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Destination $InstallRoot -Recurse -Force
         }
         $copied = $true
         break
@@ -2015,6 +2061,19 @@ foreach ($attempt in 1, 2) {
 }
 
 if (-not $copied) { Fail "The copy did not complete." }
+
+# A copy that reports success has not proved it copied anything. Until #4745 a staging folder whose name held
+# [ or ] laid down nothing and still got the message below. So for a FOLDER -Source, compare the service
+# executable in the source with the one in the install root before saying so. A zip -Source is left out:
+# it is expanded with -LiteralPath, and its $Source is a file, not a folder holding the executable.
+if (-not $sourceIsZip) {
+    $sourceExeHash = (Get-FileHash -LiteralPath (Join-Path $Source $serviceExeName) -Algorithm SHA256).Hash
+    $installedExeHash = (Get-FileHash -LiteralPath (Join-Path $InstallRoot $serviceExeName) -Algorithm SHA256).Hash
+    if ($sourceExeHash -ne $installedExeHash) {
+        Fail "The copy reported success, but the installed $serviceExeName is not the new build's, and the service is still STOPPED - re-run this script with the same arguments."
+    }
+}
+
 Good "New build in place."
 
 if ($configHashBefore) {

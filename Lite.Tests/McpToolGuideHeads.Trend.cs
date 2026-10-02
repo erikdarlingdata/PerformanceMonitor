@@ -82,7 +82,8 @@ public sealed class McpToolGuideHeadsTrendTests
     {
         var served = McpToolGuideTests.Served("get_query_store_duration_trend");
         Assert.StartsWith("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query.", served.Tail!, StringComparison.Ordinal);
-        Assert.Contains("Every point is a rate over the gap since the PREVIOUS point", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Each point is a rate over its own stored interval, its end minus its start.", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("A point with no stored end (a row collected before the end was recorded) falls back to the gap since the PREVIOUS point, so only such a point, when it is the window's first collection", served.Tail!, StringComparison.Ordinal);
         Assert.DoesNotContain("rollup", served.Tail!, StringComparison.Ordinal);
         Assert.EndsWith(BaselineDiscontinuities.DescriptionSentence, served.Tail!, StringComparison.Ordinal);
     }

@@ -137,24 +137,41 @@ public static partial class PgTargetScorer
        — and to the configured ratio only when no concurrency was observed (basis 0). */
     public const double OvercommitRatioLine = 1.0;
 
-    /* unmeasured: chosen, not measured — calibrate against pg_server_config × pg_cpu_utilization before the next
-       release. Twice the box: the band the advice calls out as "more than double", and the third amplifier's line —
-       predicated on the SAME workload co-fire as the others, so the arithmetic alone never lifts the card (D5). The
-       2026-09-19 calibration ran before V136 landed the memory columns and read no ratio. */
+    /* measured: inside the empty interval — the CONFIGURED ratio (every max_connections slot at once) never reached
+       2.0 over 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-29 (pg_server_config ×
+       pg_cpu_utilization, the window's minimum memory_total_bytes as the denominator; #4404, the D2 re-fire): fleet
+       median 0.854, maximum 1.404, 24 of 50 at or past 1.0, none at or past 2.0; 87 % of the worst case is the
+       backend term. The ratio graded since #3691 is the OBSERVED one (peak numbackends, clamped to
+       max_connections), never above the configured ratio over the same denominator, so the empty interval holds
+       for it too. Twice the box: the band the advice calls out as "more than double", and the third amplifier's
+       line — predicated on the SAME workload co-fire as the others, so the arithmetic alone never lifts the card (D5). */
     public const double OvercommitCriticalRatio = 2.0;
 
-    /* unmeasured: chosen, not measured — calibrate against pg_cpu_utilization (memory_free_bytes + memory_cached_bytes
-       over memory_total_bytes) before the next release. 10 % reclaimable is the warning line: below it the OS has
-       little left to give a backend that spills, and the next work_mem allocation is the one that swaps or is refused.
-       The 2026-09-19 calibration read no memory columns (V136 landed after it); the coordinator's next batch does. */
+    /* measured: inside the empty interval — no sample at or below 10 % reclaimable over 7 days × 50 Aurora
+       PostgreSQL clusters of the dogfood fleet, 2026-09-29 (pg_cpu_utilization, (memory_free_bytes +
+       memory_cached_bytes) / memory_total_bytes per one-minute sample; 503,975 samples, every one carrying the V136
+       columns; #4404, the D1 re-fire). Per-server p01 median 0.908, p05 median 0.927, p50 median 0.941; worst
+       cluster p01 0.542, worst single sample 0.195, worst three-sample sustained share 0.203 — twice the line. All
+       50 are Serverless v2, so the total is the CURRENT capacity and the share is read against a moving ceiling.
+       Adding memory_buffers_bytes moves the share by at most 0.005 (p50 0.0009), so free + cached stands. 10 %
+       reclaimable is the warning line: below it the OS has little left to give a backend that spills, and the next
+       work_mem allocation is the one that swaps or is refused. The population never approached the bar, so the
+       read confirms it sits in the measured empty interval (the idle-in-transaction bars' shape,
+       PgTargetScorer.Sessions.cs); it did not place it. */
     public const double HostMemoryReclaimableWarningShare = 0.10;
 
-    /* unmeasured: chosen, not measured — same read as the warning share. 3 % reclaimable is the critical line. */
+    /* measured: inside the same empty interval as the warning share — no sample at or below 3 % reclaimable over
+       7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-29 (#4404, the D1 re-fire); the worst
+       three-sample sustained share was 0.203. 3 % reclaimable is the critical line. */
     public const double HostMemoryReclaimableCriticalShare = 0.03;
 
-    /* unmeasured: chosen, not measured — calibrate against pg_cpu_utilization before the next release. Three consecutive
-       five-minute samples (a quarter of an hour) at or below the line: a single dip while a maintenance job ran is not
-       pressure; a quarter-hour is. The collector reads this constant and computes the sustained minimum with it. */
+    /* measured: inside the empty interval — no run of three consecutive samples at or below 10 % reclaimable, and
+       no single sample, over 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-29 (#4404, the D1
+       re-fire; 10,076–10,083 samples per cluster). pg_cpu_utilization carries ONE sample per minute, so three
+       one-minute samples (three minutes) are the run, not a quarter-hour. The run does filter: on one cluster the worst single sample
+       was 0.210 and the worst sustained share 0.772 — short dips exist and do not count. A single dip while a
+       maintenance job ran is not pressure; three minutes held is. The collector reads this constant and computes
+       the sustained minimum with it. */
     public const int HostMemoryPressureSustainSamples = 3;
 
     /* unmeasured: chosen, not measured — calibrate against pg_cpu_utilization before the next release. The 2× band's
@@ -183,29 +200,28 @@ public static partial class PgTargetScorer
             case PgTargetFactKeys.ConfigMemoryOvercommit:
             {
                 var ratio = fact.Metadata.GetValueOrDefault(MemoryOvercommitRatioKey, fact.Value);
-                /* unmeasured: OvercommitCriticalRatio (see the constant) decides only the band flag; the base below is the
-                   engine's line. The stamp says which decided: 1 while the arithmetic alone did, 0 once the chosen band did. */
+                /* measured (Aurora, 2026-09-29, the empty interval): OvercommitCriticalRatio (see the constant) decides only the band flag; the base below is the engine's line. Both are measured or engine-defined, so every exit stamps 1. */
                 var critical = ratio >= OvercommitCriticalRatio;
                 fact.Metadata[MemoryOvercommitCriticalBandKey] = critical ? 1 : 0;
-                fact.Metadata["threshold_lineage"] = critical ? 0 : 1;
+                fact.Metadata["threshold_lineage"] = 1;
                 /* engine-defined: OvercommitRatioLine (see the constant). */
                 return ratio >= OvercommitRatioLine ? ConfigAdvisoryBase : 0.0;
             }
 
             case PgTargetFactKeys.HostMemoryPressure:
             {
-                fact.Metadata["threshold_lineage"] = 0;
+                fact.Metadata["threshold_lineage"] = 1;
                 if (fact.Metadata.GetValueOrDefault("unavailable") > 0) return 0.0;
                 if (!fact.Metadata.TryGetValue(HostMemorySustainedMinReclaimableShareKey, out var sustained)) return 0.0;
 
-                /* unmeasured: HostMemoryReclaimableWarningShare / HostMemoryReclaimableCriticalShare (see the constants),
+                /* measured (Aurora, 2026-09-29, the empty interval): HostMemoryReclaimableWarningShare / HostMemoryReclaimableCriticalShare (see the constants),
                    graded as SHORTAGE so the shared ascending formula applies; 0 below the warning line — "fired" means
                    "at least at the warning line", the buffer composite's self-gating shape, so a healthy host's 40 %
                    reclaimable never arms the overcommit card. */
                 var shortage = 1.0 - sustained;
                 var concerning = 1.0 - HostMemoryReclaimableWarningShare;
                 var critical = 1.0 - HostMemoryReclaimableCriticalShare;
-                /* unmeasured: the floor is the warning share above, whose lineage is on its constant. */
+                /* measured: the floor is the warning share above, whose lineage is on its constant. */
                 return shortage < concerning ? 0.0 : FactScorer.ApplyThresholdFormula(shortage, concerning, critical);
             }
 

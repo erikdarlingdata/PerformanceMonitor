@@ -106,8 +106,40 @@ internal sealed class DarlingStoreUpgrade
     /// </summary>
     public const string PreUpgradeAutoConfFileName = "postgresql.auto.conf.pre-upgrade";
 
+    /// <summary>
+    /// The pre-upgrade postgresql.conf, kept beside the new data directory before the two conf carries run
+    /// (<see cref="CarryConfAfterSwapAsync"/>). The operator's own lines below the darling-managed.conf include
+    /// exist only in the old data directory's file until <see cref="CarryOperatorConfLinesAsync"/> has carried
+    /// what the new major accepts, and in hard-link mode that directory is removed right after the carries, so
+    /// this copy is the operator's record of what a rejected or uncarried line said. Kept until the NEXT major
+    /// upgrade replaces it, like <see cref="PreUpgradeAutoConfFileName"/>.
+    /// </summary>
+    public const string PreUpgradeConfFileName = "postgresql.conf.pre-upgrade";
+
     /// <summary>Suffix on the runtime root holding the rescued previous runtime (pg_upgrade's --old-bindir).</summary>
     public const string PreviousRuntimeSuffix = "-prev";
+
+    /// <summary>The marker file inside <see cref="PreviousRuntimeSuffix"/>'s folder. The marker exists exactly while
+    /// <c>pg-runtime-prev</c> holds the only runtime known to open this store.</summary>
+    public const string RescueMarkerFileName = "rescue-in-progress";
+
+    /// <summary>The path of <see cref="RescueMarkerFileName"/> for a runtime root.</summary>
+    internal static string RescueMarkerPath(string runtimeRoot)
+    {
+        return Path.Combine(PreviousRuntimeRootFor(runtimeRoot), RescueMarkerFileName);
+    }
+
+    /// <summary>True when the rescue marker's trimmed content and the trimmed main runtime stamp are both non-empty
+    /// and equal. The marker holds the hash of the package whose extract wrote it, and the stamp is written only
+    /// after that extract is good, so equality means the update that wrote the marker finished. An empty, torn or
+    /// unreadable marker or stamp, or any other content, is not a finished update.</summary>
+    private static bool RescueMarkerOutlivedAFinishedUpdate(string runtimeRoot)
+    {
+        var markerContent = ReadTrimmedOrNull(RescueMarkerPath(runtimeRoot));
+        var mainStamp = ReadTrimmedOrNull(Path.Combine(runtimeRoot, RuntimeStampFileName));
+        return !string.IsNullOrEmpty(markerContent) && !string.IsNullOrEmpty(mainStamp) &&
+               string.Equals(markerContent, mainStamp, StringComparison.OrdinalIgnoreCase);
+    }
 
     /* Every directory naming this class can put BESIDE the data directory lives here, because
        ReportUnmanagedStoreCopies decides what is a stranger's by elimination — anything store-shaped that is
@@ -172,6 +204,55 @@ internal sealed class DarlingStoreUpgrade
 
     public DarlingStoreUpgrade(ILogger logger)
         => _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+    /// <summary>The wait between attempts of a runtime-rescue step. Tests replace it so a retry does not sleep.</summary>
+    internal Func<TimeSpan, CancellationToken, Task> RetryDelay { get; set; } = Task.Delay;
+
+    /// <summary>The rename that rescues the live runtime. Tests replace it to stand in for a file lock.</summary>
+    internal Action<string, string> MoveRuntimeDirectory { get; set; } = Directory.Move;
+
+    /// <summary>The step that clears the last update's rescued runtime. Tests replace it to stand in for a file lock.</summary>
+    internal Action<string> ClearPreviousRuntime { get; set; } = EmptyDirectory;
+
+    /// <summary>
+    /// Just after the store stops, an antivirus scan or the exiting server can hold the runtime folder for a
+    /// moment. Runs <paramref name="operation"/> up to <see cref="s_runtimeRescueRetryDelays"/>.Length + 1
+    /// times, waiting between attempts, and retries only <see cref="IOException"/> and
+    /// <see cref="UnauthorizedAccessException"/>. The last failure is rethrown for the caller's existing
+    /// "defer the update" handling; a cancelled wait propagates as the cancellation.
+    /// </summary>
+    private async Task RetryTransientIoAsync(Action operation, string what, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                operation();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                && attempt <= s_runtimeRescueRetryDelays.Length)
+            {
+                var delay = s_runtimeRescueRetryDelays[attempt - 1];
+                _logger.LogInformation(
+                    "Retrying {What} in {DelaySeconds} s after attempt {Attempt} failed ({Message}).",
+                    what, delay.TotalSeconds, attempt, ex.Message);
+                await RetryDelay(delay, cancellationToken);
+            }
+        }
+    }
+
+    private static readonly TimeSpan[] s_runtimeRescueRetryDelays =
+    [
+        TimeSpan.FromSeconds(0.5), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2),
+    ];
+
+    /// <summary>
+    /// The <c>pg_ctl --version</c> probe behind every runtime-major read that decides whether a runtime
+    /// directory is kept, swapped or used for an upgrade. An instance member so a test with no binaries to
+    /// run can answer for a directory; the default is the real probe.
+    /// </summary>
+    internal Func<string, CancellationToken, Task<string?>> ReadRuntimeVersionLine { get; set; } = ReadRuntimeVersionLineAsync;
 
     /* ============================ outcome ============================ */
 
@@ -367,16 +448,27 @@ internal sealed class DarlingStoreUpgrade
     /// catalogs, so link mode is offered — but only when the volume actually supports hard links, and
     /// always as a LOUD downgrade because it trades the rollback away. Neither affordable means abort, which
     /// leaves the store exactly as it was: running, on the old major.
+    ///
+    /// <para><paramref name="dataDirectoryMeasured"/> false means the walk that produced
+    /// <paramref name="dataDirectoryBytes"/> did not finish, so the number is a floor. A floor cannot prove
+    /// the room a copy needs — it used to count as the size, and a copy that fills the disk is recovered
+    /// before the commit point but costs the store the whole attempt — so copy mode is off the table and
+    /// the choice is the one too little room gets: link mode where the volume supports it, otherwise
+    /// abort.</para>
     /// </summary>
-    internal static TransferDecision DecideTransferMode(long dataDirectoryBytes, long freeBytes, bool hardLinksSupported)
+    internal static TransferDecision DecideTransferMode(long dataDirectoryBytes, long freeBytes, bool hardLinksSupported, bool dataDirectoryMeasured)
     {
         var copyNeeds = dataDirectoryBytes + dataDirectoryBytes + CopyHeadroomSlackBytes;
-        if (freeBytes >= copyNeeds)
+        if (dataDirectoryMeasured && freeBytes >= copyNeeds)
         {
             return new TransferDecision(
                 FileTransferMode.Copy,
                 $"{FormatBytes(freeBytes)} free covers the {FormatBytes(copyNeeds)} a copy needs (data {FormatBytes(dataDirectoryBytes)} x2 + 1 GB slack)");
         }
+
+        var shortfall = dataDirectoryMeasured
+            ? $"only {FormatBytes(freeBytes)} free (a copy needs {FormatBytes(copyNeeds)})"
+            : $"the data directory could not be fully measured (at least {FormatBytes(dataDirectoryBytes)}), so the room a copy needs is unknown";
 
         /* Link mode still writes a fresh cluster's catalogs and the copied non-relation files; a tenth of
            the data directory plus the slack is a deliberately conservative floor for that. */
@@ -385,14 +477,14 @@ internal sealed class DarlingStoreUpgrade
         {
             return new TransferDecision(
                 FileTransferMode.Abort,
-                $"only {FormatBytes(freeBytes)} free (a copy needs {FormatBytes(copyNeeds)}) and this volume does not support hard links, so link mode is unavailable");
+                $"{shortfall} and this volume does not support hard links, so link mode is unavailable");
         }
 
         if (freeBytes >= linkNeeds)
         {
             return new TransferDecision(
                 FileTransferMode.Link,
-                $"only {FormatBytes(freeBytes)} free (a copy needs {FormatBytes(copyNeeds)}) — falling back to hard-link mode, which does NOT leave a rollback copy");
+                $"{shortfall} — falling back to hard-link mode, which does NOT leave a rollback copy");
         }
 
         return new TransferDecision(
@@ -710,6 +802,175 @@ internal sealed class DarlingStoreUpgrade
         }
     }
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetDiskFreeSpaceExW(
+        string lpDirectoryName, out ulong lpFreeBytesAvailableToCaller, out ulong lpTotalNumberOfBytes, out ulong lpTotalNumberOfFreeBytes);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetVolumePathNameW(
+        string lpszFileName, [Out] char[] lpszVolumePathName, uint cchBufferLength);
+
+    /// <summary>MAX_PATH: the least room <see cref="ResolveVolumeMountPoint"/> gives <c>GetVolumePathNameW</c> for its answer.</summary>
+    private const int VolumePathBufferFloor = 260;
+
+    /// <summary>ERROR_ACCESS_DENIED: what <c>GetDiskFreeSpaceExW</c> answers for a folder the caller holds no right on.</summary>
+    private const int ErrorAccessDenied = 5;
+
+    /// <summary>
+    /// The bytes this process may still write on the volume that holds <paramref name="directory"/>, asked
+    /// for the directory's own volume. <see cref="DriveInfo"/> answers for a drive letter, and a data
+    /// directory on a volume mounted at a folder (a second disk mounted under the install directory, say) is
+    /// not on its drive letter's volume: the upgrade's headroom check used to read the letter's free space
+    /// and could choose copy mode on a volume with no room for the copy. Available-to-caller, like
+    /// <c>DriveInfo.AvailableFreeSpace</c>, so a quota on the service account counts. Throws when the volume
+    /// cannot be read (a directory that is not there, a volume that is not ready), rather than answering for
+    /// the drive letter: a headroom read from another volume is the wrong answer this exists to end, and the
+    /// upgrade's pre-commit handler turns the throw into a Failed outcome with the store still running on its
+    /// old major.
+    /// </summary>
+    internal static long ReadAvailableFreeBytes(string directory)
+        => ReadVolumeSpace(directory).AvailableFreeBytes;
+
+    /// <summary>
+    /// The free and total bytes of the volume that holds <paramref name="directory"/>, both from the one
+    /// <c>GetDiskFreeSpaceExW</c> call. A report that shows a volume's size beside its free space reads both
+    /// here so the two describe ONE volume, and a directory on a volume mounted at a folder gets that
+    /// volume's figures rather than the ones behind its drive letter. Both are the caller's view, like
+    /// <c>DriveInfo.AvailableFreeSpace</c> and <c>DriveInfo.TotalSize</c>, so a quota on the service account
+    /// counts.
+    ///
+    /// <para>The directory is asked first: <c>GetDiskFreeSpaceExW</c> opens whatever it is given, so a data
+    /// directory reached through a directory junction or a symbolic link is read on the volume the link
+    /// points at, where a lookup from the path alone names the volume that holds the link. Only when the
+    /// caller is turned away from the directory with "access denied" (a command prompt that is not elevated,
+    /// the viewer's own profile, asking about a data directory only the service account can open) is the
+    /// space asked of the volume's mount point (<see cref="ResolveVolumeMountPoint"/>) instead: the size and
+    /// free space of a volume do not depend on the caller's access to one folder on it. Any other failure
+    /// throws <see cref="IOException"/> (a directory that is not there, a volume that is not ready), and the
+    /// read never answers for the drive letter. A Windows call: a caller that also runs elsewhere keeps its
+    /// own read for the other platforms.</para>
+    /// </summary>
+    internal static (long AvailableFreeBytes, long TotalBytes) ReadVolumeSpace(string directory)
+        => ReadVolumeSpaceVia(directory, ReadDirectorySpace, ResolveVolumeMountPoint, ReadMountPointSpace);
+
+    /// <summary>
+    /// <see cref="ReadVolumeSpace"/> with its three steps replaceable, so a test can say what the directory
+    /// read answers, which mount point holds a directory and what that mount point's volume holds. The order
+    /// is the contract: the directory is asked first, and the numbers it gives are the answer, with no mount
+    /// point looked up. Only a directory read that answers <c>null</c> (the caller is turned away from the
+    /// directory) goes on to the mount point the second step finds, and any other failure of the first step
+    /// reaches the caller as it is. The space is never asked of the drive letter.
+    /// </summary>
+    internal static (long AvailableFreeBytes, long TotalBytes) ReadVolumeSpaceVia(
+        string directory,
+        Func<string, (long AvailableFreeBytes, long TotalBytes)?> readDirectorySpace,
+        Func<string, string> resolveMountPoint,
+        Func<string, (long AvailableFreeBytes, long TotalBytes)> readMountPointSpace)
+        => readDirectorySpace(directory) ?? readMountPointSpace(resolveMountPoint(directory));
+
+    /// <summary>
+    /// The root of the volume that holds <paramref name="directory"/>: <c>C:\</c> for a folder on a drive
+    /// letter, the mount point's own folder (with its trailing separator) for a volume mounted at a folder,
+    /// the share root for a UNC path. Found by <c>GetVolumePathNameW</c>, which works it out from the path
+    /// without opening the directory, so it answers for a directory the caller has no access to: the read
+    /// <see cref="ReadVolumeSpace"/> falls back to when the directory itself turns the caller away.
+    ///
+    /// <para>A directory that is not there is refused. <c>GetVolumePathNameW</c> answers for it anyway, with
+    /// the volume of the nearest folder that does exist, and that is the wrong-volume answer this read exists
+    /// to end: a volume mounted at a folder that is offline leaves an ordinary empty folder in its place, and
+    /// a data directory below it would be judged by the drive letter's free space. Only "not there" is
+    /// refused. A directory the caller cannot open is still on a volume.</para>
+    /// </summary>
+    internal static string ResolveVolumeMountPoint(string directory)
+    {
+        var path = Path.GetFullPath(directory);
+
+        try
+        {
+            _ = File.GetAttributes(path);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            throw new IOException(
+                $"Could not read the free space of the volume that holds {path}: the directory is not there.", ex);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            /* Closed to this caller, but it is there, and which volume it is on does not depend on the caller's access. */
+        }
+
+        var buffer = new char[Math.Max(path.Length, VolumePathBufferFloor) + 1];
+        if (!GetVolumePathNameW(path, buffer, (uint)buffer.Length))
+        {
+            throw new IOException(
+                $"Could not find the volume that holds {path} (Win32 error {Marshal.GetLastPInvokeError()}).");
+        }
+
+        var length = Array.IndexOf(buffer, '\0');
+        return length < 0 ? new string(buffer) : new string(buffer, 0, length);
+    }
+
+    /// <summary>
+    /// The space of the volume behind <paramref name="directory"/>, asked of the directory itself, or
+    /// <c>null</c> when the caller is turned away from it with "access denied": that is the one answer
+    /// <see cref="ReadVolumeSpaceVia"/> goes on from, to the volume's mount point. Any other failure throws
+    /// <see cref="IOException"/>, so a directory that is not there is not answered with the volume above it.
+    /// </summary>
+    private static (long AvailableFreeBytes, long TotalBytes)? ReadDirectorySpace(string directory)
+    {
+        var path = WithTrailingSeparator(Path.GetFullPath(directory));
+
+        if (TryQueryVolumeSpace(path, out var space, out var win32Error))
+        {
+            return space;
+        }
+
+        if (win32Error == ErrorAccessDenied)
+        {
+            return null;
+        }
+
+        throw new IOException(
+            $"Could not read the free space of the volume that holds {path} (Win32 error {win32Error}).");
+    }
+
+    private static (long AvailableFreeBytes, long TotalBytes) ReadMountPointSpace(string mountPoint)
+    {
+        var path = WithTrailingSeparator(mountPoint);
+
+        if (!TryQueryVolumeSpace(path, out var space, out var win32Error))
+        {
+            throw new IOException(
+                $"Could not read the free space of the volume mounted at {path} (Win32 error {win32Error}).");
+        }
+
+        return space;
+    }
+
+    /// <summary>A trailing separator is what the Win32 call wants for a UNC path and harmless for a local one.</summary>
+    private static string WithTrailingSeparator(string path)
+        => Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar;
+
+    /// <summary>The one <c>GetDiskFreeSpaceExW</c> call, with the Win32 error read straight after it.</summary>
+    private static bool TryQueryVolumeSpace(
+        string path, out (long AvailableFreeBytes, long TotalBytes) space, out int win32Error)
+    {
+        if (GetDiskFreeSpaceExW(path, out var availableToCaller, out var totalBytes, out _))
+        {
+            space = (ClampToLong(availableToCaller), ClampToLong(totalBytes));
+            win32Error = 0;
+            return true;
+        }
+
+        space = default;
+        win32Error = Marshal.GetLastPInvokeError();
+        return false;
+    }
+
+    private static long ClampToLong(ulong value) => value > long.MaxValue ? long.MaxValue : (long)value;
+
     /// <summary>
     /// Total bytes of every file under <paramref name="directory"/>; unreadable entries are skipped.
     ///
@@ -725,8 +986,9 @@ internal sealed class DarlingStoreUpgrade
 
     /// <summary>
     /// <see cref="MeasureDirectoryBytes(string)"/> with a wall-clock ceiling. Returns what it managed to add
-    /// up and sets <paramref name="complete"/> false when <paramref name="deadline"/> cut the walk short, so
-    /// a caller can say "at least" instead of stating a number it did not finish computing.
+    /// up and sets <paramref name="complete"/> false when <paramref name="deadline"/> cut the walk short, or
+    /// when an error ended it (an unreadable subdirectory stops the enumeration), so a caller can say "at
+    /// least" instead of stating a number it did not finish computing.
     ///
     /// <para>The report path needs this because it measures foreign data directories on EVERY service start,
     /// before the store is up, on exactly the low-headroom hosts the feature exists for. A budget is the
@@ -763,7 +1025,11 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            /* Partial measurement still beats no measurement; the caller's slack absorbs it. */
+            /* An error ends the enumeration, so what was added up is a floor, not the size: reported as
+               incomplete, the same as a walk the deadline cut short. A caller that wants an order of
+               magnitude can still use the total; the upgrade's headroom check must not, because a floor
+               that passes its slack is how a copy fills the disk. */
+            complete = false;
         }
 
         return total;
@@ -792,6 +1058,261 @@ internal sealed class DarlingStoreUpgrade
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// The bin directory of the rescued runtime under <see cref="PreviousRuntimeRootFor"/> when it runs and
+    /// reports the PostgreSQL major the store's data directory is on; null when there is no rescued runtime,
+    /// it does not run, its major is another one, or there is no cluster to compare it with.
+    ///
+    /// <para>A runtime update rescues the current runtime there BEFORE the in-place upgrade runs, and the
+    /// stamp is written at the same time. When the process dies between the two, or the upgrade fails and
+    /// its revert is refused, the next start reads a stamp that matches the package and reports no previous
+    /// runtime, although the store's own binaries are sitting in the rescued copy. Every consumer that needs
+    /// the store's runtime asks here before it declares those binaries gone, and a runtime an operator
+    /// restores by hand at that path is found the same way.</para>
+    /// </summary>
+    internal async Task<string?> FindRescuedRuntimeBinAsync(string runtimeRoot, string dataDirectory, CancellationToken cancellationToken)
+    {
+        return (await FindRescuedRuntimeAsync(runtimeRoot, dataDirectory, cancellationToken)).Bin;
+    }
+
+    /// <summary>
+    /// <see cref="FindRescuedRuntimeBinAsync"/> with the majors it compared. <c>StoreMajor</c> is null when the
+    /// store's <c>PG_VERSION</c> is absent or unreadable; <c>PreviousMajor</c> is null when the rescued runtime has
+    /// no <c>pg_ctl.exe</c> or its version probe gave no answer. <c>Bin</c> is set only when both were read and
+    /// they are equal.
+    /// </summary>
+    internal async Task<(string? Bin, int? PreviousMajor, int? StoreMajor)> FindRescuedRuntimeAsync(
+        string runtimeRoot, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var storeMajor = TryReadDataDirectoryMajor(dataDirectory);
+        if (storeMajor is null)
+        {
+            return (null, null, null);
+        }
+
+        var previousBin = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql", "bin");
+        if (!File.Exists(Path.Combine(previousBin, "pg_ctl.exe")))
+        {
+            return (null, null, storeMajor);
+        }
+
+        var previousMajor = ParsePostgresMajor(await ReadRuntimeVersionLine(previousBin, cancellationToken));
+        return (previousMajor == storeMajor ? previousBin : null, previousMajor, storeMajor);
+    }
+
+    /// <summary>
+    /// True when the runtime at <paramref name="previousPgsql"/> carries the libraries of every TimescaleDB version
+    /// the store can be at. A store with no record is taken to be on 2.28.1 outside the rescue marker; under the
+    /// marker it abstains, because the marker proves the rescued runtime was this store's live runtime just
+    /// before the rescue.
+    /// </summary>
+    internal static bool RescuedRuntimeCarriesStoreTimescale(string dataDirectory, string previousPgsql, bool underMarker)
+    {
+        var storeVersions = ReadTimescaleRecord(dataDirectory)?.StoreVersions ?? (underMarker ? [] : ["2.28.1"]);
+        return !storeVersions.Except(TryReadTimescaleLibraryVersions(previousPgsql), StringComparer.Ordinal).Any();
+    }
+
+    /// <summary>
+    /// Puts the store's own rescued runtime back at <c>pgsql</c> when an INTERRUPTED runtime update left no
+    /// <c>bin\pg_ctl.exe</c> there and the rescued copy under <see cref="PreviousRuntimeRootFor"/> is the one
+    /// that last opened the store. Returns true when it moved the runtime back; false, having changed
+    /// nothing, in every other case: a live runtime is there (unless the rescue marker says an update was
+    /// interrupted), there is no store or no rescued copy of the
+    /// store's major (which <see cref="FindRescuedRuntimeBinAsync"/> already refuses), no stamp exists, a
+    /// server is running on the data directory, the shipped package is missing, the stamp already names the
+    /// shipped package, the rescued runtime lacks the TimescaleDB versions the store is on, or a restore move still fails after its retries (logged; the first-run branch then
+    /// runs as it did before this restore existed).
+    ///
+    /// <para>The shape: a runtime update moved the live runtime aside and its extract never finished (the
+    /// process died, or an antivirus scan held the folder), leaving an empty or partial <c>pgsql</c> with the
+    /// good runtime in <c>pg-runtime-prev</c>. Without this, the next start saw no <c>pg_ctl.exe</c>, took the
+    /// first-run branch and extracted the package as if there were no store.</para>
+    ///
+    /// <para>The stamp is what separates an interrupted update from a finished one. The advance writes the
+    /// stamp only after a good extract, so an interrupted update leaves the OLD stamp, which differs from the
+    /// shipped package. <c>pg-runtime-prev</c> is never emptied after a successful update, so a finished host
+    /// that later loses <c>pgsql</c> still has an older same-major runtime there; putting that back would
+    /// leave it in front of the store with a stamp that never triggers a retry. That host re-extracts the
+    /// shipped package instead. A host with no stamp at all cannot be proven interrupted, so it takes the
+    /// same path. A finished host that later receives a newer package can also pass the stamp test, so the
+    /// store's recorded TimescaleDB versions (2.28.1 when there is no record) must all be carried by the
+    /// rescued runtime: a rescued runtime that could not open the store stays where it is.</para>
+    ///
+    /// <para>The rescue marker (<see cref="RescueMarkerFileName"/>) in <c>pg-runtime-prev</c> proves the update
+    /// was interrupted. Under it the restore also fires when <c>pgsql</c> holds a <c>pg_ctl.exe</c> (a re-extract
+    /// that died part way), and when no stamp file exists at all; the same-major, live-postmaster,
+    /// TimescaleDB, package and stamp-equals-package gates still apply. The marker is deleted in six places:
+    /// here once the runtime is back; after a good swap writes its stamp, when the live runtime opens the
+    /// store; when a major swap commits; when a failed extract's revert puts the runtime back; when a reverted
+    /// major swap puts it back; and at the stamp-equals-package early return, when the live runtime opens the
+    /// store. The swap's own guard also deletes a marker whose folder no longer holds a runtime that opens the
+    /// store.</para>
+    ///
+    /// <para>The checks run cheapest first. The same-major test runs the rescued binary's version probe,
+    /// which can take up to the tool timeout (about five minutes) on a hung binary. Under the marker that
+    /// probe runs on every start, even when <c>pgsql</c> holds a <c>pg_ctl.exe</c>, and the swap that follows
+    /// probes again, so a start can spend up to two such probes. The package is hashed last, only when
+    /// everything else says the restore is due.</para>
+    /// </summary>
+    internal async Task<bool> TryRestoreRescuedRuntimeAsync(
+        string runtimeRoot, string runtimeZipPath, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var pgsqlDirectory = Path.Combine(runtimeRoot, "pgsql");
+
+        /* Under the rescue marker the runtime in pg-runtime-prev is the only one known to open the store, so a
+           pgsql that already holds pg_ctl.exe is no proof of a finished update: a re-extract that died part
+           way can leave one. Without the marker a live pg_ctl.exe ends the restore. */
+        /* A marker whose content equals the main stamp outlived a FINISHED update: it protects nothing, so the
+           restore treats it as no marker (a live pg_ctl.exe refuses, the 2.28.1 default applies) and the swap's
+           own guard removes it. */
+        var underMarker = File.Exists(RescueMarkerPath(runtimeRoot)) && !RescueMarkerOutlivedAFinishedUpdate(runtimeRoot);
+        if (!underMarker && File.Exists(Path.Combine(pgsqlDirectory, "bin", "pg_ctl.exe")))
+        {
+            return false;
+        }
+
+        if (await FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, cancellationToken) is null)
+        {
+            return false;
+        }
+
+        /* Only a MISSING main stamp falls back to the legacy one. A main stamp file that exists but cannot be
+           read is no proof of an interrupted update, so nothing is restored. */
+        var mainStampPath = Path.Combine(runtimeRoot, RuntimeStampFileName);
+        var legacyStampPath = Path.Combine(runtimeRoot, LegacyRuntimeStampFileName);
+        var stamp = ReadTrimmedOrNull(mainStampPath);
+        if (stamp is null && !File.Exists(mainStampPath))
+        {
+            stamp = ReadTrimmedOrNull(legacyStampPath);
+        }
+
+        /* Under the marker the interrupted update is already proven, so a store with no stamp file at all still
+           restores, and so does one whose stamp reads empty: a stamp write that was cut short leaves a
+           zero-length file, and the swap's own guard defers on it for ever, because that stamp never equals the
+           package and the rescued runtime still opens the store. A restore there costs at most one extract:
+           before the swap commits, the same-major test passes only while the data is still on the rescued
+           runtime's major, and the advance then swaps again in the same start; after the commit that test
+           refuses. A stamp that exists but cannot be read still refuses, because a read fault that persists
+           would only turn the old failure into a swap that repeats on every start, and one that is transient
+           clears by itself. Without the marker an existing-but-empty stamp refuses too, and once the main
+           stamp file exists the legacy stamp is not consulted. */
+        var noStampAtAll = underMarker
+            && (stamp == string.Empty || (!File.Exists(mainStampPath) && !File.Exists(legacyStampPath)));
+        if (string.IsNullOrEmpty(stamp) && !noStampAtAll)
+        {
+            return false;
+        }
+
+        /* Windows lets a folder be moved while an exe inside it runs, so a server started by hand from the
+           rescued runtime would lose its binaries. The same guard RevertRuntime uses. */
+        var livePostmaster = FindLivePostmaster(dataDirectory);
+        if (livePostmaster is not null)
+        {
+            _logger.LogWarning(
+                "The Postgres runtime at {Runtime} had no pg_ctl.exe, but a PostgreSQL server (PID {Pid}) is running on {DataDirectory}, so the rescued runtime was not moved.",
+                pgsqlDirectory, livePostmaster, dataDirectory);
+            return false;
+        }
+
+        /* In an interrupted update the store is still on the rescued runtime's extension, because the extension
+           moves only after a good swap, so the rescued runtime carries every version the store records. A
+           finished host that later receives a newer package also passes the stamp test below; its rescued
+           runtime predates the store's extension, and putting it back would leave a runtime that cannot load
+           TimescaleDB in front of the store. A store with no record is taken to be on TimescaleDB 2.28.1:
+           every 3.2-3.8 release shipped 2.28.1, the only extension a store with no record (a 3.x store) can
+           be on. Under the marker a store with no record abstains instead: the marker proves the rescued
+           runtime was this store's live runtime just before the rescue, so it carries the store's extension
+           whatever that is. */
+        var previousPgsql = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+        if (!RescuedRuntimeCarriesStoreTimescale(dataDirectory, previousPgsql, underMarker))
+        {
+            return false;
+        }
+
+        if (!File.Exists(runtimeZipPath))
+        {
+            return false;
+        }
+
+        string zipHash;
+        try
+        {
+            zipHash = await Task.Run(() => ComputeFileHash(runtimeZipPath), cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        /* A major swap that is waiting for its data upgrade has a stamp that names the package and must resume,
+           not restore; only a store with no stamp at all has nothing to compare. */
+        if (stamp is not null && string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        /* A partial pgsql goes aside before the restore, exactly as the extract-failure revert does it: a
+           move is one operation, a recursive delete is not, and a half-deleted folder is no runtime. */
+        var failedExtract = pgsqlDirectory + ".failed";
+        var movedAside = false;
+        var pgsqlHeldPgCtl = File.Exists(Path.Combine(pgsqlDirectory, "bin", "pg_ctl.exe"));
+        try
+        {
+            TryDeleteDirectory(failedExtract);
+            if (Directory.Exists(pgsqlDirectory))
+            {
+                movedAside = true;
+                await RetryTransientIoAsync(
+                    () => MoveRuntimeDirectory(pgsqlDirectory, failedExtract),
+                    $"the move aside of the incomplete runtime at {pgsqlDirectory}",
+                    cancellationToken);
+            }
+
+            await RetryTransientIoAsync(
+                () => MoveRuntimeDirectory(previousPgsql, pgsqlDirectory),
+                $"the restore of the rescued runtime to {pgsqlDirectory}",
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "The rescued Postgres runtime at {Previous} could not be put back at {Runtime}: {Reason}. The runtime is extracted from the package instead.",
+                previousPgsql, pgsqlDirectory, ex.Message);
+            return false;
+        }
+
+        TryDeleteDirectory(failedExtract);
+
+        /* The rescued runtime, which last opened the store, is back at pgsql, so the marker's invariant no
+           longer holds; the swap is retried below and writes the marker again if it moves the runtime aside. */
+        TryDeleteFile(RescueMarkerPath(runtimeRoot));
+
+        /* The stamp still names the runtime that was live before the interrupted update: the advance writes it
+           only after a good extract (File.WriteAllText(stampPath, zipHash) in TryAdvanceRuntimeAsync). So the
+           normal path that follows compares the package against that stamp, sees the difference, and retries
+           the update. */
+        if (movedAside && underMarker && pgsqlHeldPgCtl)
+        {
+            _logger.LogWarning(
+                "An earlier Postgres runtime update did not finish: the runtime at {Runtime} was incomplete although it held pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The incomplete runtime was moved aside and deleted, the rescued runtime was put back, and the runtime update is retried on this start.",
+                pgsqlDirectory, dataDirectory, previousPgsql);
+        }
+        else if (movedAside)
+        {
+            _logger.LogWarning(
+                "The Postgres runtime at {Runtime} had no pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The incomplete runtime was moved aside and deleted, the rescued runtime was put back, and the runtime update is retried on this start.",
+                pgsqlDirectory, dataDirectory, previousPgsql);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "The Postgres runtime at {Runtime} had no pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The rescued runtime was put back, and the runtime update is retried on this start.",
+                pgsqlDirectory, dataDirectory, previousPgsql);
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -905,6 +1426,18 @@ internal sealed class DarlingStoreUpgrade
 
         if (string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
         {
+            /* A start that died between the stamp write and the same-major marker delete leaves the marker
+               behind. When the live runtime has the store's major, pgsql opens the store and the marker is
+               stale; a differing major is a major swap still waiting for its in-place upgrade, which keeps it. */
+            if (File.Exists(RescueMarkerPath(runtimeRoot)) &&
+                await LiveRuntimeOpensStoreAsync(binDirectory, dataDirectory, cancellationToken))
+            {
+                TryDeleteFile(RescueMarkerPath(runtimeRoot));
+                _logger.LogInformation(
+                    "Removed the stale rescue marker at {Marker}: the runtime at {Current} opens the store.",
+                    RescueMarkerPath(runtimeRoot), pgsqlDirectory);
+            }
+
             return new RuntimeAdvance(false, null, zipHash);
         }
 
@@ -917,7 +1450,7 @@ internal sealed class DarlingStoreUpgrade
                Compare the actual PostgreSQL majors instead, and ADOPT a runtime that already matches by
                recording the stamp without touching anything. Costs one small extract, once per host,
                because from then on the stamp answers. */
-            var installedVersionLine = await ReadRuntimeVersionLineAsync(binDirectory, cancellationToken);
+            var installedVersionLine = await ReadRuntimeVersionLine(binDirectory, cancellationToken);
             var installedMajor = ParsePostgresMajor(installedVersionLine);
             var zipMajor = TryReadZipPostgresMajor(runtimeZipPath);
 
@@ -1008,13 +1541,107 @@ internal sealed class DarlingStoreUpgrade
         var previousRoot = PreviousRuntimeRootFor(runtimeRoot);
         var previousPgsql = Path.Combine(previousRoot, "pgsql");
 
+        /* The rescued runtime is the ONLY copy of the store's own major once a runtime update has swapped
+           and its in-place upgrade has not finished: the process died between the stamp and the upgrade's
+           commit, or the upgrade failed and its revert was refused. Clearing it here to make room for the
+           next rescue would delete the one runtime that can open the store, on the very start an operator
+           forced by deleting the stamp to get the upgrade retried. So while the store is still on the
+           rescued runtime's major and the live runtime is not, nothing is emptied or extracted: the
+           rescued runtime is reported as the previous one, and the upgrade resumes from it. */
+        var (rescuedBin, rescuedMajor, rescuedStoreMajor) = await FindRescuedRuntimeAsync(runtimeRoot, dataDirectory, cancellationToken);
+        if (rescuedBin is not null)
+        {
+            var liveMajor = ParsePostgresMajor(await ReadRuntimeVersionLine(binDirectory, cancellationToken));
+            var storeMajor = TryReadDataDirectoryMajor(dataDirectory);
+            if (liveMajor != storeMajor)
+            {
+                _logger.LogWarning(
+                    "Keeping the rescued Postgres runtime at {Previous}: it is PostgreSQL {StoreMajor}, which the store at {DataDirectory} is still on, while the live runtime at {Current} is PostgreSQL {LiveMajor}, so an earlier runtime update did not finish its in-place upgrade. The shipped package is not extracted on this start; the upgrade resumes from the rescued runtime, and the package is compared again on the start after it.",
+                    previousPgsql, storeMajor, dataDirectory, pgsqlDirectory,
+                    liveMajor?.ToString(CultureInfo.InvariantCulture) ?? "unreadable");
+                return new RuntimeAdvance(false, rescuedBin, zipHash);
+            }
+        }
+
+        /* While the marker exists, pg-runtime-prev holds the only runtime known to open this store: an earlier
+           update rescued it and neither finished nor reverted. The marker is stale only when that runtime
+           provably cannot open the store, or the update provably finished:
+             1. the rescued runtime has no pg_ctl.exe;
+             2. the store has no PG_VERSION at all (absent, which is not the same as unreadable);
+             3. the rescued runtime answered with a PostgreSQL major, the store's major was read, and they differ;
+             4. the rescued runtime lacks libraries for a TimescaleDB version the store can be at;
+             5. the marker holds the hash the main runtime stamp holds: the stamp is written only after the
+                extract that wrote the marker is good, so that update finished (the probe that removes the
+                marker after the stamp was unreadable).
+           Anything else defers, a probe that timed out or gave no answer included: a good rescued runtime
+           behind a failed probe must survive, so clearing it is an operator's decision. */
+        var markerPath = RescueMarkerPath(runtimeRoot);
+        if (File.Exists(markerPath))
+        {
+            string? staleReason = null;
+            var markerFinished = RescueMarkerOutlivedAFinishedUpdate(runtimeRoot);
+            if (markerFinished)
+            {
+                staleReason = "the update that wrote it finished (the runtime stamp names its package)";
+            }
+            else if (!File.Exists(Path.Combine(previousPgsql, "bin", "pg_ctl.exe")))
+            {
+                staleReason = $"the folder no longer holds a runtime that opens the store at {dataDirectory}";
+            }
+            else if (!File.Exists(Path.Combine(dataDirectory, "PG_VERSION")))
+            {
+                staleReason = $"there is no store at {dataDirectory}";
+            }
+            else if (rescuedMajor is not null && rescuedStoreMajor is not null && rescuedMajor != rescuedStoreMajor)
+            {
+                staleReason = $"the runtime in that folder is PostgreSQL {rescuedMajor} and the store at {dataDirectory} is on PostgreSQL {rescuedStoreMajor}";
+            }
+            else if (!RescuedRuntimeCarriesStoreTimescale(dataDirectory, previousPgsql, underMarker: true))
+            {
+                staleReason = $"the runtime in that folder has no libraries for the TimescaleDB version the store at {dataDirectory} is on";
+            }
+
+            if (staleReason is null)
+            {
+                /* A deferral that leaves the live runtime unable to start the store is an outage until an operator
+                   acts, so it is an error; a live runtime that opens the store only waits. */
+                var liveOpensStore = rescuedBin is not null ||
+                    (File.Exists(Path.Combine(binDirectory, "pg_ctl.exe")) &&
+                     await LiveRuntimeOpensStoreAsync(binDirectory, dataDirectory, cancellationToken));
+                if (liveOpensStore)
+                {
+                    _logger.LogWarning(
+                        "An earlier runtime update did not finish; the runtime that opens the store is at {Previous}. Nothing is cleared, and the update is deferred. If that runtime can no longer run, delete {Marker} to let the next start clear it.",
+                        previousPgsql, markerPath);
+                }
+                else
+                {
+                    _logger.LogError(
+                        "An earlier runtime update did not finish; the runtime that opens the store is at {Previous}, and the runtime at {Current} cannot start it. Nothing is cleared, and the update is deferred. If that runtime can no longer run, delete {Marker} to let the next start clear the previous runtime and re-extract.",
+                        previousPgsql, pgsqlDirectory, markerPath);
+                }
+
+                return new RuntimeAdvance(false, null, zipHash);
+            }
+
+            TryDeleteFile(markerPath);
+            _logger.LogWarning(
+                markerFinished ? "Removed the stale rescue marker at {Marker}: {Reason}." : "Removed the rescue marker at {Marker}: {Reason}.",
+                markerPath, staleReason);
+        }
+
         _logger.LogWarning(
             "The package ships a different Postgres runtime than the one extracted on this host — rescuing the current runtime to {Previous} and extracting the new one. This is the store runtime update (#1706); if the PostgreSQL major changed, an in-place pg_upgrade follows.",
             previousPgsql);
 
         try
         {
-            EmptyDirectory(previousRoot);
+            /* EmptyDirectory only runs here once the rescued-runtime guard above has decided the folder may be
+               cleared, and clearing is idempotent, so running it again after a partial pass is safe. */
+            await RetryTransientIoAsync(
+                () => ClearPreviousRuntime(previousRoot),
+                $"the clear of the previous runtime at {previousRoot}",
+                cancellationToken);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1031,9 +1658,33 @@ internal sealed class DarlingStoreUpgrade
             return new RuntimeAdvance(false, null, zipHash);
         }
 
+        /* From here until pgsql is known to open the store again, the rescued copy is the only runtime that
+           does. The marker is written BEFORE the rescue move, so no start can find the rescued copy without
+           it, and every later start clears nothing under it while that copy still opens the store. Its content
+           is diagnostic; its presence is the signal, so a torn write still counts. A failed write moves
+           nothing: the update is retried on the next start. A rescue move that fails empties the folder with
+           the marker in it, and a crash between the write and the move leaves a marker over a folder with no
+           runtime, which the next start removes. */
         try
         {
-            Directory.Move(pgsqlDirectory, previousPgsql);
+            File.WriteAllText(markerPath, zipHash);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not write the rescue marker at {Marker} ({Message}). The current runtime has not been touched and the update is retried on the next start.",
+                markerPath, ex.Message);
+            return new RuntimeAdvance(false, null, zipHash);
+        }
+
+        try
+        {
+            /* A failed Directory.Move leaves the source intact (a same-volume rename is one operation), so
+               trying it again after a lock clears is safe. */
+            await RetryTransientIoAsync(
+                () => MoveRuntimeDirectory(pgsqlDirectory, previousPgsql),
+                $"the rescue of the current runtime to {previousPgsql}",
+                cancellationToken);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1061,28 +1712,71 @@ internal sealed class DarlingStoreUpgrade
                     $"Extracted {runtimeZipPath} but {binDirectory}\\pg_ctl.exe is missing — the archive does not contain pgsql\\bin.");
             }
         }
-        catch (Exception)
+        catch (Exception extractFailure)
         {
             /* The new runtime is not usable; put the old one back so the store still boots, and let the
                caller's existing error path report. Nothing has touched the data directory yet. Move-aside
                rather than delete-first, for the reason spelled out in RevertRuntime: a partial delete
-               would leave an unbootable runtime behind. */
+               would leave an unbootable runtime behind. The cause is logged first: a revert move that
+               still fails after its retries throws in its place, and would hide why the extract failed. */
+            _logger.LogWarning(
+                "The new Postgres runtime from {Package} could not be extracted to {Runtime}: {Reason}. The previous runtime is being put back.",
+                runtimeZipPath, pgsqlDirectory, extractFailure.Message);
             var failedExtract = pgsqlDirectory + ".failed";
             TryDeleteDirectory(failedExtract);
+
+            /* Both moves retry a briefly locked folder like the rescue does: a same-volume rename is atomic,
+               so trying again is safe, and a lock here would otherwise leave no runtime at pgsql. The waits
+               use CancellationToken.None: if the extract failed because the update was cancelled, the revert
+               still has to finish to leave a bootable runtime, and a cancelled wait would throw a new
+               OperationCanceledException in place of the original failure. */
             if (Directory.Exists(pgsqlDirectory))
             {
-                Directory.Move(pgsqlDirectory, failedExtract);
+                await RetryTransientIoAsync(
+                    () => MoveRuntimeDirectory(pgsqlDirectory, failedExtract),
+                    $"the move aside of the failed extract at {pgsqlDirectory}",
+                    CancellationToken.None);
             }
 
-            Directory.Move(previousPgsql, pgsqlDirectory);
+            await RetryTransientIoAsync(
+                () => MoveRuntimeDirectory(previousPgsql, pgsqlDirectory),
+                $"the restore of the previous runtime to {pgsqlDirectory}",
+                CancellationToken.None);
             TryDeleteDirectory(failedExtract);
+            /* The previous runtime is back at pgsql and opens the store. A restore move that threw never gets
+               here, which leaves the marker in place. */
+            TryDeleteFile(markerPath);
             TryEmptyDirectory(previousRoot);
             throw;
         }
 
         File.WriteAllText(stampPath, zipHash);
         PinLegacyRuntimeStamp(runtimeRoot, _logger);
+
+        /* The new runtime has the store's major (or there is no store), so no in-place upgrade follows and
+           pgsql opens the store. A different or unreadable major keeps the marker: the in-place upgrade still
+           has to run, and until it commits the rescued copy is the runtime that opens the store. */
+        if (await LiveRuntimeOpensStoreAsync(binDirectory, dataDirectory, cancellationToken))
+        {
+            TryDeleteFile(markerPath);
+        }
+
         return new RuntimeAdvance(true, Path.Combine(previousPgsql, "bin"), zipHash);
+    }
+
+    /// <summary>True when there is no store to open, or the runtime at <paramref name="binDirectory"/> answers with
+    /// the store's PostgreSQL major. An unreadable runtime answers false.</summary>
+    private async Task<bool> LiveRuntimeOpensStoreAsync(
+        string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var storeMajor = TryReadDataDirectoryMajor(dataDirectory);
+        if (storeMajor is null)
+        {
+            return true;
+        }
+
+        var liveMajor = ParsePostgresMajor(await ReadRuntimeVersionLine(binDirectory, cancellationToken));
+        return liveMajor == storeMajor;
     }
 
     /// <summary>
@@ -1200,6 +1894,9 @@ internal sealed class DarlingStoreUpgrade
         }
 
         TryDeleteDirectory(failedRuntime);
+
+        /* The rescued runtime is back at pgsql and opens the store. */
+        TryDeleteFile(RescueMarkerPath(runtimeRoot));
         TryEmptyDirectory(previousRoot);
 
         /* Record the failing package so the next start does not run the same doomed upgrade again, and
@@ -1509,7 +2206,9 @@ internal sealed class DarlingStoreUpgrade
             SearchPath = null,
         }.ConnectionString;
 
-        var sourceBuilder = new NpgsqlDataSourceBuilder(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
+        var sourceBuilder = new NpgsqlDataSourceBuilder(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.UpgradeApplicationName)));
         sourceBuilder.ConfigureTypeLoading(typeLoading => typeLoading.EnableTypeLoading(false));
         await using var source = sourceBuilder.Build();
         await using var connection = await WithTransportRetryAsync(
@@ -1790,7 +2489,8 @@ internal sealed class DarlingStoreUpgrade
                 $"the update could not prepare its private start ({ex.Message})");
         }
 
-        var owner = DarlingManagedPostgres.BuildConnectionString(port, password);
+        var owner = DarlingStoreConnection.WithApplicationName(
+            DarlingManagedPostgres.BuildConnectionString(port, password), DarlingManagedPostgres.UpgradeApplicationName);
 
         string? before = null;
         try
@@ -2375,6 +3075,11 @@ internal sealed class DarlingStoreUpgrade
     /// every other copy as well, and kept abandoning it for as long as the condition lasted. Their counters
     /// stopped advancing too, so nothing aged out and multi-GB directories accumulated on exactly the hosts
     /// that can least afford them. A failure now costs that one directory its turn and nothing else.</para>
+    ///
+    /// <para><b>Nothing ages while no cluster is at the data directory.</b> A retained copy beside an empty
+    /// data path is not a rollback copy that outlived its use: it is the store itself, moved aside by an
+    /// upgrade's directory swap that could not move it back. Counting starts against it would delete the
+    /// only copy of the store. The counters wait until a cluster is back at the configured path.</para>
     /// </summary>
     internal void SweepRetainedDataDirectories(string dataDirectory)
     {
@@ -2403,30 +3108,116 @@ internal sealed class DarlingStoreUpgrade
             return;
         }
 
-        foreach (var copy in retained)
+        if (retained.Length > 0 && !File.Exists(Path.Combine(liveDataDirectory, "PG_VERSION")))
         {
-            /* A wildcard is not what a delete should be trusting. Directory.GetDirectories' pattern also
-               matches a directory's Windows 8.3 SHORT name, so the real name is re-checked against the
-               prefix before this touches anything: the only directories this deletes are the ones
-               RetainedDataDirectoryFor names. */
-            if (!Path.GetFileName(copy).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            _logger.LogWarning(
+                "Not aging out the {Count} retained pre-upgrade store data directory(ies) beside {DataDirectory}: no cluster is at the data directory, so a retained copy may be the store itself, moved aside by an upgrade that could not move it back. Their counters do not advance and none is deleted until a cluster is back at the data directory.",
+                retained.Length, liveDataDirectory);
+        }
+        else
+        {
+            foreach (var copy in retained)
             {
-                continue;
-            }
+                /* A wildcard is not what a delete should be trusting. Directory.GetDirectories' pattern also
+                   matches a directory's Windows 8.3 SHORT name, so the real name is re-checked against the
+                   prefix before this touches anything: the only directories this deletes are the ones
+                   RetainedDataDirectoryFor names. */
+                if (!Path.GetFileName(copy).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
-            try
-            {
-                AgeOutRetainedDataDirectory(copy);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    "Could not age out the retained pre-upgrade store data directory {Path} ({Message}). The other retained copies were still swept, and this one is retried on the next service start — it is safe to delete by hand.",
-                    copy, ex.Message);
+                try
+                {
+                    AgeOutRetainedDataDirectory(copy);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        "Could not age out the retained pre-upgrade store data directory {Path} ({Message}). The other retained copies were still swept, and this one is retried on the next service start — it is safe to delete by hand.",
+                        copy, ex.Message);
+                }
             }
         }
 
         ReportUnmanagedStoreCopies(parent, liveDataDirectory, retained);
+    }
+
+    /// <summary>
+    /// The sibling directories of <paramref name="dataDirectory"/> that hold a cluster under a name this
+    /// service's upgrade gives a moved-aside store: the retained pre-upgrade copies
+    /// (<see cref="RetainedDataDirectorySuffix"/>) first, then the half-built new clusters
+    /// (<see cref="UpgradeStagingDirectorySuffix"/>). Read before the first-run initdb: when nothing is at the
+    /// data directory and one of these is a cluster, the store was moved aside and not put back, and a
+    /// start must refuse rather than initialize an empty store in its place. A credential file with no
+    /// data directory is deliberately NOT evidence: the credential is written before initdb, so it is what
+    /// a retry after a failed first initdb, and a deliberate re-initialize, both look like.
+    /// </summary>
+    internal static IReadOnlyList<string> FindDisplacedStoreCopies(string dataDirectory)
+    {
+        var found = new List<string>();
+        try
+        {
+            var liveDataDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+            var parent = Path.GetDirectoryName(liveDataDirectory);
+            if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
+            {
+                return found;
+            }
+
+            var name = Path.GetFileName(liveDataDirectory);
+            foreach (var suffix in new[] { RetainedDataDirectorySuffix, UpgradeStagingDirectorySuffix })
+            {
+                var prefix = name + suffix;
+                foreach (var candidate in Directory.GetDirectories(parent, prefix + "*"))
+                {
+                    /* The same 8.3 short-name caveat as the sweep: the real name decides. */
+                    if (Path.GetFileName(candidate).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                        && File.Exists(Path.Combine(candidate, "PG_VERSION")))
+                    {
+                        found.Add(candidate);
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* A parent that will not list is the next step's problem; what was found still counts. */
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// The refusal for a start that finds no cluster at the data directory and a cluster under one of the
+    /// names <see cref="FindDisplacedStoreCopies"/> looks for. Names every copy, the one to put back (the
+    /// pre-upgrade copy when there is one, since it is the store as it was, otherwise the upgraded cluster),
+    /// the rename that does it, and the way to start over on purpose.
+    /// </summary>
+    internal static string DescribeDisplacedStore(string dataDirectory, IReadOnlyList<string> copies)
+    {
+        var liveDataDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+        var name = Path.GetFileName(liveDataDirectory);
+        var parent = Path.GetDirectoryName(liveDataDirectory) ?? string.Empty;
+
+        /* The newest pre-upgrade copy is the store as it was before the upgrade that moved it aside. */
+        var putBack = copies
+            .Where(copy => Path.GetFileName(copy).StartsWith(name + RetainedDataDirectorySuffix, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(copy => TryReadDataDirectoryMajor(copy) ?? 0)
+            .FirstOrDefault() ?? copies[0];
+
+        var linkedControlFile = File.Exists(Path.Combine(putBack, "global", "pg_control.old"))
+            && !File.Exists(Path.Combine(putBack, "global", "pg_control"));
+
+        return $"No PostgreSQL cluster is at the store's data directory {liveDataDirectory}, but one is at {string.Join(" and ", copies)}: " +
+               "an in-place upgrade moved the store aside and did not put it back. The service is stopping here instead of initializing an empty store at the data directory, " +
+               "which would replace the store's superuser credential and later delete the real store as an expired rollback copy. " +
+               $"With the service stopped, rename {putBack} to {liveDataDirectory}" +
+               (linkedControlFile
+                   ? ", then rename global\\pg_control.old inside it back to global\\pg_control (pg_upgrade renamed it when hard-link mode began linking)"
+                   : string.Empty) +
+               ", then start the service: the store starts on its own PostgreSQL major, and the upgrade runs again if the package is newer. " +
+               $"To start over with an empty store instead, first move every directory under {parent} whose name starts with {name}{RetainedDataDirectorySuffix} or {name}{UpgradeStagingDirectorySuffix} somewhere else.";
     }
 
     /// <summary>
@@ -3308,9 +4099,10 @@ internal sealed class DarlingStoreUpgrade
         string oldDataDirectory,
         string newDataDirectory,
         string newBinDirectory,
+        string? originalConfPath,
         CancellationToken cancellationToken)
         => CarryOperatorConfLinesAsync(
-            oldDataDirectory, newDataDirectory, newBinDirectory,
+            oldDataDirectory, newDataDirectory, newBinDirectory, originalConfPath,
             (exePath, arguments, timeout, token) => DarlingManagedPostgres.RunToolAsync(exePath, arguments, timeout, token),
             cancellationToken);
 
@@ -3331,13 +4123,19 @@ internal sealed class DarlingStoreUpgrade
     /// not need to distinguish a same-major move from a cross-major carry). Never throws: same
     /// "must never brick a completed upgrade" posture the auto.conf carry follows for a probe failure — an
     /// unexpected exception here resets the new cluster's <c>postgresql.conf</c> back to its pre-carry
-    /// (legacy-appended) baseline and logs a warning naming the retained old data directory as the manual
-    /// fallback, rather than propagate.
+    /// (legacy-appended) baseline and logs a warning naming where the original lines are kept as the manual
+    /// fallback, rather than propagate. That place is <paramref name="originalConfPath"/>, the file
+    /// <see cref="CarryConfAfterSwapAsync"/>'s save step reported as holding the old lines (the copy it saves
+    /// as <see cref="PreUpgradeConfFileName"/>, or the old data directory's own file when that copy could not
+    /// be made), never a guess from which files happen to exist: an earlier major upgrade's copy can still be
+    /// sitting there. It is null when the save step found no postgresql.conf to save, and the old data
+    /// directory's own file is named then.
     /// </summary>
     internal async Task<OperatorConfLineCarryResult> CarryOperatorConfLinesAsync(
         string oldDataDirectory,
         string newDataDirectory,
         string newBinDirectory,
+        string? originalConfPath,
         Func<string, string, TimeSpan, CancellationToken, Task<(int ExitCode, string Output)>> probe,
         CancellationToken cancellationToken)
     {
@@ -3367,6 +4165,7 @@ internal sealed class DarlingStoreUpgrade
             baseline += "\n";
         }
 
+        var originalConf = originalConfPath ?? sourcePath;
         var postgresExe = Path.Combine(newBinDirectory, "postgres.exe");
         var goodLines = new List<string>();
         var carried = 0;
@@ -3377,10 +4176,8 @@ internal sealed class DarlingStoreUpgrade
             foreach (var rawLine in candidateLines)
             {
                 var (_, name, _) = DarlingManagedPostgres.ParseConfText(rawLine).FirstOrDefault();
-                var isProbeableSetting = name is not null &&
-                    !s_confIncludeDirectiveNames.Contains(name, StringComparer.OrdinalIgnoreCase);
 
-                if (!isProbeableSetting)
+                if (name is null || s_confIncludeDirectiveNames.Contains(name, StringComparer.OrdinalIgnoreCase))
                 {
                     /* A comment, blank line, or an operator include directive — never probed, always carried
                        (see s_confIncludeDirectiveNames and the method summary above). */
@@ -3417,15 +4214,15 @@ internal sealed class DarlingStoreUpgrade
                         _logger.LogWarning(
                             "NOT carried: {Name} — the new PostgreSQL binaries reject it (reason withheld: the " +
                             "name suggests it may hold a credential, or names an extension setting whose reason " +
-                            "could). The original line is kept in the retained pre-upgrade data directory.",
-                            name);
+                            "could). The original line is kept in {OriginalConf}.",
+                            name, originalConf);
                     }
                     else
                     {
                         _logger.LogWarning(
                             "NOT carried: {Name} — the new PostgreSQL binaries reject it: {Reason}. The original " +
-                            "line is kept in the retained pre-upgrade data directory.",
-                            name, output);
+                            "line is kept in {OriginalConf}.",
+                            name, output, originalConf);
                     }
                 }
             }
@@ -3453,16 +4250,15 @@ internal sealed class DarlingStoreUpgrade
                 _logger.LogWarning(
                     "Carrying operator postgresql.conf lines below the include did not finish ({Reason}), and " +
                     "resetting postgresql.conf to its pre-carry content also failed ({ResetReason}) — check " +
-                    "{Path} by hand against the retained pre-upgrade data directory.",
-                    ex.Message, resetEx.Message, newConfPath);
+                    "{Path} by hand against the original in {OriginalConf}.",
+                    ex.Message, resetEx.Message, newConfPath, originalConf);
                 return none;
             }
 
             _logger.LogWarning(
                 "Carrying operator postgresql.conf lines below the include did not finish ({Reason}) — " +
-                "postgresql.conf was reset to its pre-carry content. The originals are kept in the retained " +
-                "pre-upgrade data directory.",
-                ex.Message);
+                "postgresql.conf was reset to its pre-carry content. The originals are kept in {OriginalConf}.",
+                ex.Message, originalConf);
             return none;
         }
 
@@ -3513,9 +4309,14 @@ internal sealed class DarlingStoreUpgrade
         {
             /* ---- 1. space + hard-link capability, measured before anything is touched ---- */
             step = "disk-headroom";
-            var dataBytes = MeasureDirectoryBytes(context.DataDirectory);
-            var free = new DriveInfo(Path.GetPathRoot(parent)!).AvailableFreeSpace;
-            var decision = DecideTransferMode(dataBytes, free, SupportsHardLinks(parent));
+            /* The size walk says whether it finished: a walk an error cut short is a floor, and the decision
+               treats a floor as unknown rather than as the size. The free space is read for the parent
+               directory itself, not its drive letter: a data directory on a volume mounted at a folder is on
+               a different volume from its drive root, whose free space says nothing about the room the copy
+               will take. */
+            var dataBytes = MeasureDirectoryBytes(context.DataDirectory, deadline: null, out var dataMeasured);
+            var free = ReadAvailableFreeBytes(parent);
+            var decision = DecideTransferMode(dataBytes, free, SupportsHardLinks(parent), dataMeasured);
             mode = decision.Mode;
 
             if (mode == FileTransferMode.Abort)
@@ -3545,7 +4346,8 @@ internal sealed class DarlingStoreUpgrade
             oldStarted = true;
 
             step = "read-cluster-identity";
-            var ownerConnection = DarlingManagedPostgres.BuildConnectionString(context.Port, context.Password);
+            var ownerConnection = DarlingStoreConnection.WithApplicationName(
+                DarlingManagedPostgres.BuildConnectionString(context.Port, context.Password), DarlingManagedPostgres.UpgradeApplicationName);
             var identity = await ReadClusterIdentityAsync(ownerConnection, cancellationToken);
             _logger.LogInformation(
                 "Old cluster identity: encoding {Encoding}, collate {Collate}, ctype {Ctype}, locale provider {Provider}, data checksums {Checksums} — the new cluster is initialized to match.",
@@ -3675,35 +4477,33 @@ internal sealed class DarlingStoreUpgrade
                a completed upgrade. */
             swapped = true;
 
-            /* ---- 8. carry the pre-upgrade postgresql.auto.conf (#4253) — BEFORE anything gives the new
-                    cluster its first real start, the quiesced TimescaleDB update just below included. Read
-                    from `retained`: the old data directory's content now lives there, since the swap above
-                    already moved it. Any failure here is caught by the post-commit handler below, which
-                    keeps the store running on the new major regardless — never a reason to brick it. */
-            step = "carry-auto-conf";
-            await CarryAutoConfAsync(
-                retained, context.DataDirectory, context.NewBinDirectory, cancellationToken, context.SslServerOptions);
+            /* The configured path now holds the new major's cluster, which the rescued runtime cannot open;
+               the new runtime at pgsql is the one that does. */
+            TryDeleteFile(RescueMarkerPath(context.RuntimeRoot));
 
-            /* #4358: alongside the auto.conf carry, same post-swap timing — one pattern. Reads the OLD
-               cluster's postgresql.conf from `retained` (its content now lives there, since the swap above
-               already moved it), extracts any operator lines below the darling-managed.conf include, and
-               appends them to the NEW cluster's postgresql.conf AFTER the legacy blocks
-               context.AppendManagedConf already wrote there (step "conf-new-cluster", above) — so an
-               operator's override still wins over the legacy block's own copy of the same key. Any failure
-               here is caught by the post-commit handler below, which keeps the store running on the new
-               major regardless — never a reason to brick it. */
-            step = "carry-operator-conf-lines";
-            await CarryOperatorConfLinesAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken);
+            /* ---- 8. carry the pre-upgrade postgresql.auto.conf (#4253) and, alongside it with the same
+                    post-swap timing (#4358), the operator lines below the darling-managed.conf include in
+                    the OLD cluster's postgresql.conf — BEFORE anything gives the new cluster its first real
+                    start, the quiesced TimescaleDB update just below included. Both read from `retained`:
+                    the old data directory's content now lives there, since the swap above already moved it.
+                    The operator lines are appended to the NEW cluster's postgresql.conf AFTER the legacy
+                    blocks context.AppendManagedConf already wrote there (step "conf-new-cluster", above), so
+                    an operator's override still wins over the legacy block's own copy of the same key. Any
+                    failure here is caught by the post-commit handler below, which keeps the store running on
+                    the new major regardless — never a reason to brick it. The old postgresql.conf is saved
+                    beside the new data directory first, and in hard-link mode `retained` goes the moment the
+                    carries are done with it, whether they returned or threw, once that copy exists
+                    (CarryConfAfterSwapAsync says why). ---- */
+            await CarryConfAfterSwapAsync(
+                mode,
+                retained,
+                context.DataDirectory,
+                name => step = name,
+                () => CarryAutoConfAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken, context.SslServerOptions),
+                linesPath => CarryOperatorConfLinesAsync(retained, context.DataDirectory, context.NewBinDirectory, linesPath, cancellationToken),
+                _logger);
 
-            if (mode == FileTransferMode.Link)
-            {
-                /* Hard-link mode leaves an old directory that SHARES its files with the new cluster — it is
-                   not a rollback copy and keeping it invites someone to try. Delete it now, loudly. */
-                TryDeleteDirectory(retained);
-                _logger.LogWarning(
-                    "Removed the pre-upgrade data directory immediately: hard-link mode shares its files with the upgraded cluster, so it was never a usable rollback copy.");
-            }
-            else
+            if (mode != FileTransferMode.Link)
             {
                 /* Non-fatal on purpose, and belt-and-braces with the post-commit catch below. The upgrade is
                    already COMMITTED by the time this runs, so a marker file that will not write must not
@@ -3807,6 +4607,149 @@ internal sealed class DarlingStoreUpgrade
         }
     }
 
+    /// <summary>
+    /// The two post-swap conf carries, with hard-link mode's removal of the retained pre-upgrade directory
+    /// bound to them in a <c>finally</c>. In hard-link mode that directory SHARES its files with the upgraded
+    /// cluster, so it is not a rollback copy and keeping it invites someone to try one; it used to be
+    /// deleted only after both carries returned, so a carry that threw left it beside the new cluster for
+    /// the two starts the retention sweep gives a real copy. The carries are its last readers, so it goes
+    /// the moment they are done with it, whether they returned or threw. Only these two steps are wrapped,
+    /// never the upgrade's outer try: before the swap commits, the same directory can be the only copy of
+    /// the store. <paramref name="setStep"/> names the step in flight for the post-commit handler's
+    /// message. Its own method so a test can run the carries against a directory, without a cluster.
+    ///
+    /// <para>The old directory's postgresql.conf is the only place the operator's lines below the
+    /// darling-managed.conf include still exist, and the auto.conf carry can throw (a probe timeout, a
+    /// cancellation at service stop, a failed reset) before the operator-lines carry has read it. So before
+    /// either carry, in every mode, it is copied beside <paramref name="newDataDirectory"/> as
+    /// <see cref="PreUpgradeConfFileName"/> and hardened like <see cref="PreUpgradeAutoConfFileName"/>. In
+    /// hard-link mode the retained directory is removed only once that copy exists (or there was no
+    /// postgresql.conf to copy). When the copy could not be made it is kept, with a warning, and the retention
+    /// sweep ages it out after <see cref="RollbackRetentionStarts"/> starts as it did before this copy existed.</para>
+    ///
+    /// <para><paramref name="carryOperatorConfLines"/> is handed the path the save step reports as holding the
+    /// old lines, so its warnings name that file and not a guess from which files exist beside the new data
+    /// directory: the saved copy, or the retained directory's own postgresql.conf when the copy could not be
+    /// made (a copy left by an earlier major upgrade may still be sitting at the saved path then, holding
+    /// that upgrade's lines), or null when there was no postgresql.conf to save.</para>
+    /// </summary>
+    internal static async Task CarryConfAfterSwapAsync(
+        FileTransferMode mode,
+        string retained,
+        string newDataDirectory,
+        Action<string> setStep,
+        Func<Task> carryAutoConf,
+        Func<string?, Task> carryOperatorConfLines,
+        ILogger logger)
+    {
+        /* False until the save step has answered, so anything unexpected before that leaves the retained
+           directory in place. */
+        var saveAnswered = false;
+        string? oldConfPath = null;
+        try
+        {
+            oldConfPath = TrySavePreUpgradeConf(retained, newDataDirectory, logger);
+            saveAnswered = true;
+
+            setStep("carry-auto-conf");
+            await carryAutoConf();
+
+            setStep("carry-operator-conf-lines");
+            await carryOperatorConfLines(oldConfPath);
+        }
+        finally
+        {
+            if (mode == FileTransferMode.Link)
+            {
+                /* The retained directory goes once it no longer holds the only copy of the file: the save step
+                   reported the saved copy (the file named PreUpgradeConfFileName), or there was none to save
+                   (null). Its other answer, the retained directory's own postgresql.conf, keeps it. Read off
+                   the file name so the finally has nothing left to compute that could throw. */
+                if (saveAnswered
+                    && (oldConfPath is null
+                        || string.Equals(Path.GetFileName(oldConfPath), PreUpgradeConfFileName, StringComparison.Ordinal)))
+                {
+                    TryDeleteDirectory(retained);
+                    logger.LogWarning(
+                        "Removed the pre-upgrade data directory immediately: hard-link mode shares its files with the upgraded cluster, so it was never a usable rollback copy.");
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "Kept the pre-upgrade data directory at {Path} because the pre-upgrade postgresql.conf could not be " +
+                        "saved beside the new data directory, so its operator lines exist only there. Hard-link mode shares " +
+                        "its files with the upgraded cluster, so it is not a usable rollback copy: it is kept only for those " +
+                        "lines, and the retention sweep removes it after {Starts} service starts.",
+                        retained, RollbackRetentionStarts);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Where <see cref="PreUpgradeConfFileName"/> lives: beside the new data directory, in its parent, where
+    /// <see cref="CarryAutoConfAsync"/> keeps <see cref="PreUpgradeAutoConfFileName"/> and this class keeps the
+    /// pg-upgrade password file and the retained pre-upgrade data directory.
+    /// </summary>
+    private static string SavedConfPath(string newDataDirectory)
+        => Path.Combine(
+            Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(newDataDirectory)))!,
+            PreUpgradeConfFileName);
+
+    /// <summary>
+    /// Copies the old data directory's postgresql.conf to <see cref="SavedConfPath"/> and hardens the copy the
+    /// way <see cref="CarryAutoConfAsync"/> hardens its auto.conf original (best effort: a failed harden is a
+    /// warning, and the copy still counts). Returns the path that holds the old lines: the saved copy when it
+    /// was saved, the retained directory's own postgresql.conf, after a warning, when the copy could not be
+    /// made (a copy left by an earlier major upgrade may still sit at the saved path then, and it holds that
+    /// upgrade's lines, so it is never the answer), or null when there was no postgresql.conf to save. Never
+    /// throws: a copy that cannot be made must not stop the carries or the upgrade.
+    /// </summary>
+    private static string? TrySavePreUpgradeConf(string retained, string newDataDirectory, ILogger logger)
+    {
+        string preUpgradeCopy;
+        try
+        {
+            var sourcePath = Path.Combine(retained, "postgresql.conf");
+            if (!File.Exists(sourcePath))
+            {
+                return null;
+            }
+
+            preUpgradeCopy = SavedConfPath(newDataDirectory);
+            File.Copy(sourcePath, preUpgradeCopy, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            var retainedConf = Path.Combine(retained, "postgresql.conf");
+            logger.LogWarning(
+                "Could not save the pre-upgrade postgresql.conf beside the new data directory ({Message}). Its " +
+                "operator lines below the darling-managed.conf include still exist in {Path}.",
+                ex.Message, retainedConf);
+            return retainedConf;
+        }
+
+        try
+        {
+            DarlingFileSecurity.HardenFile(preUpgradeCopy, allowInteractiveRead: false);
+        }
+        catch (Exception ex)
+        {
+            /* Best-effort, like the auto.conf original this mirrors — a failure here must not cost the copy
+               itself, only get logged so it can be fixed by hand. */
+            logger.LogWarning(
+                "Could not restrict {Path} to the store's own ACL ({Message}) — it may be readable more " +
+                "broadly than the data directory it was copied from.",
+                preUpgradeCopy, ex.Message);
+        }
+
+        logger.LogInformation(
+            "Pre-upgrade postgresql.conf saved to {Path} — kept until the NEXT major upgrade replaces it, not " +
+            "deleted with the rest of the pre-upgrade data directory.",
+            preUpgradeCopy);
+        return preUpgradeCopy;
+    }
+
     private async Task TryStopAsync(UpgradeContext context, bool oldStarted)
     {
         if (!oldStarted)
@@ -3893,14 +4836,63 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
+    /// Why a start must stop after a failed upgrade, or null when the failure was put back cleanly and the
+    /// store can start on its previous major. Two shapes of a Failed outcome leave no startable store, and
+    /// each used to let the start go on: a data directory that could not be put back dies later, at the
+    /// first-run initdb, and a runtime that could not be reverted starts the new major's binaries on the
+    /// old major's cluster. The text names the hand step; the caller raises it as a failure the worker does
+    /// not retry, because a retry in the same process would reach exactly those two places.
+    /// </summary>
+    internal static string? DescribeUnrecoveredUpgrade(StoreUpgradeOutcome outcome, string dataDirectory, string runtimeRoot)
+    {
+        if (outcome.Status != StoreUpgradeStatus.Failed)
+        {
+            return null;
+        }
+
+        var retained = RetainedDataDirectoryFor(dataDirectory, outcome.FromMajor);
+        var pgsqlDirectory = Path.Combine(runtimeRoot, "pgsql");
+        var previousPgsql = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+        var failed = $"The in-place upgrade of the store at {dataDirectory} from PostgreSQL {outcome.FromMajor} to {outcome.ToMajor} failed at step '{outcome.FailedStep}' ({outcome.Message}), and ";
+
+        if (outcome.PreUpgradeData == PreUpgradeDataDirectory.NotRestored)
+        {
+            var linkedControlFile = File.Exists(Path.Combine(retained, "global", "pg_control.old"))
+                && !File.Exists(Path.Combine(retained, "global", "pg_control"));
+            return failed +
+                   $"the pre-upgrade data directory could not be put back: the store's data is at {retained} and nothing is at {dataDirectory}. " +
+                   "The service is stopping here so that no start initializes an empty store at the data directory. " +
+                   $"With the service stopped, rename {retained} to {dataDirectory}" +
+                   (linkedControlFile
+                       ? ", then rename global\\pg_control.old inside it back to global\\pg_control (pg_upgrade renamed it when hard-link mode began linking)"
+                       : string.Empty) +
+                   (outcome.RuntimeReverted
+                       ? string.Empty
+                       : $", and put the PostgreSQL {outcome.FromMajor} runtime back (move {pgsqlDirectory} aside and move {previousPgsql} into its place)") +
+                   ", then start the service.";
+        }
+
+        if (!outcome.RuntimeReverted)
+        {
+            return failed +
+                   $"the runtime could not be reverted: the PostgreSQL {outcome.ToMajor} binaries at {pgsqlDirectory} are in front of the PostgreSQL {outcome.FromMajor} store, which they cannot open. " +
+                   "The service is stopping here rather than starting the store on them. The log lines before this one say why the revert was refused and what to do by hand. " +
+                   $"Once no server is running on the data directory and the PostgreSQL {outcome.FromMajor} runtime is at {previousPgsql}, starting the service resumes the upgrade from that runtime.";
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Puts the pre-upgrade data directory back where, and as, the old runtime needs it (#3927). Two things
     /// can stand in the way, and each is undone only when the evidence says this upgrade did it:
     /// <list type="bullet">
     /// <item>The directory swap moves it aside to its retained name, and moves it back when the second move
     /// fails; that move back can fail too. Nothing at the configured path and a cluster under the retained
-    /// name is exactly that, and left alone it is the worst outcome available here: the next start finds no
-    /// cluster, initializes an EMPTY store in its place, and the retention sweep deletes the real one two
-    /// starts later. Moving it back is the swap's own undo, tried once more.</item>
+    /// name is exactly that. Moving it back is the swap's own undo, tried once more; when that fails too,
+    /// the start stops (<see cref="DescribeUnrecoveredUpgrade"/>), and until someone moves it back every
+    /// later start refuses the first-run initdb (<see cref="FindDisplacedStoreCopies"/>) and the retention
+    /// sweep leaves the copy's counter alone.</item>
     /// <item>In hard-link mode pg_upgrade renames <c>global\pg_control</c> once linking starts; see
     /// <see cref="RestoreLinkedControlFile"/>. Only in hard-link mode: copy mode never renames it, and a
     /// renamed control file this upgrade did not produce is not this service's to rename back.</item>
@@ -3924,7 +4916,7 @@ internal sealed class DarlingStoreUpgrade
                 var linkedControlFile = File.Exists(Path.Combine(retained, "global", "pg_control.old"))
                     && !File.Exists(Path.Combine(retained, "global", "pg_control"));
                 _logger.LogCritical(
-                    "The store's data is at {Retained} and nothing is at {DataDirectory}: the directory swap moved it aside, and neither the swap nor this recovery could move it back ({Message}). Move it back by hand BEFORE restarting the service{ControlFileStep}. Do not restart first: a start that finds no cluster at the configured path initializes an EMPTY store there, and the real one is then deleted as an expired rollback copy two starts later.",
+                    "The store's data is at {Retained} and nothing is at {DataDirectory}: the directory swap moved it aside, and neither the swap nor this recovery could move it back ({Message}). Move it back by hand{ControlFileStep}, then restart the service. Until then every start refuses to initialize an empty store at the configured path, and the retention sweep does not count starts against the moved-aside copy.",
                     retained, context.DataDirectory, ex.Message,
                     linkedControlFile
                         ? ", then rename global\\pg_control.old inside it back to global\\pg_control (pg_upgrade renamed it when hard-link mode began linking)"
@@ -4196,7 +5188,8 @@ internal sealed class DarlingStoreUpgrade
         string? oldRuntimeDefaultVersion,
         CancellationToken cancellationToken)
     {
-        var ownerConnection = DarlingManagedPostgres.BuildConnectionString(port, password);
+        var ownerConnection = DarlingStoreConnection.WithApplicationName(
+            DarlingManagedPostgres.BuildConnectionString(port, password), DarlingManagedPostgres.UpgradeApplicationName);
         var databases = new List<string>();
 
         var listBuilder = new NpgsqlConnectionStringBuilder(ownerConnection) { Database = "postgres", Pooling = false };

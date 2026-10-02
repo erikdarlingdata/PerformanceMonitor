@@ -135,22 +135,46 @@ public sealed partial class ViewerDataService
            unique_queries means between two rows of the same read. */
         var routedSql = DailySummaryRangeSqlFor(tier, coverage, fromDate);
 
-        async Task<List<RawDailySummaryDay>> RunRangeAsync(DateTime start, DateTime end, CancellationToken ct)
+        async Task<List<RawDailySummaryDay>> RunRangeAsync(
+            string sql, IReadOnlyList<string>? scope, DateTime start, DateTime end, CancellationToken ct)
         {
             var raws = new List<RawDailySummaryDay>();
-            await using var command = _dataSource.CreateCommand(routedSql);
+            await using var command = _dataSource.CreateCommand(sql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(start.Date, DateTimeKind.Unspecified) });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(end.Date, DateTimeKind.Unspecified) });
-
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
+            /* $4: the floor the event-time deadlock / blocked-report CTEs carry beside their window. */
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(start.Date) });
+            if (scope is not null)
             {
-                raws.Add(ReadRawDailySummaryDay(reader));
+                /* $5: the separately monitored databases, bound on the scoped statement only (#4925). */
+                command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = scope.ToArray() });
             }
 
-            return raws;
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    raws.Add(ReadRawDailySummaryDay(reader));
+                }
+            }
+
+            if (scope is null)
+            {
+                return raws;
+            }
+
+            /* #4925: the deadlocks the every-process rule keeps from the rows the scoped statement leaves to the
+               graph check, added to each day's count. The band is judged from these merged rows below. */
+            var graphByDay = await DailySummaryAzureMasterScope.GraphDeadlocksByDayAsync(
+                _dataSource, serverId, start.Date, end.Date, scope,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, ct);
+            return graphByDay.Count == 0
+                ? raws
+                : raws.Select(raw => graphByDay.TryGetValue(raw.Day.Date, out var add)
+                    ? raw with { DeadlockCount = raw.DeadlockCount + add }
+                    : raw).ToList();
         }
 
         /* #4232: the closed-day cache. The viewer's calendar reads are always live ("as of now"), so every
@@ -158,16 +182,40 @@ public sealed partial class ViewerDataService
            fresh, every call — never from whatever a cached block happened to compute them as up to an hour ago
            (ruling item 7: no column the statement itself returns spans more than one day, but this post-read
            judgment does move between refreshes). */
-        var rawResults = await _dailySummaryRangeCache.GetRangeAsync(
+        Task<List<RawDailySummaryDay>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => _dailySummaryRangeCache.GetRangeAsync(
             storeKey: string.Empty,
             serverId: serverId,
             fromDate: fromDate,
             toDate: toDate,
-            routedSql: routedSql,
+            routedSql: sql,
             asOfNow: true,
             day: raw => raw.Day,
-            runRange: RunRangeAsync,
+            runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
+            scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
             cancellationToken: cancellationToken);
+
+        /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
+           deadlocks, as get_daily_health does. An empty list (every other target) is today's read, unchanged. A
+           scoping fault is logged and the days are read unscoped, so the calendar never loses a day to it. */
+        var separatelyMonitored = await GetSeparatelyMonitoredAsync(serverId, cancellationToken);
+        List<RawDailySummaryDay> rawResults;
+        if (separatelyMonitored.Count > 0)
+        {
+            try
+            {
+                await ScopeReadStageAsync("dailysummary");
+                rawResults = await ReadRawAsync(DailySummaryAzureMasterScope.Scope(routedSql), separatelyMonitored);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                ViewerLogger.Warn("ViewerDataService", $"Daily summary for server {serverId} could not be scoped to the master's own events; reading it unscoped: {ex.Message}");
+                rawResults = await ReadRawAsync(routedSql, null);
+            }
+        }
+        else
+        {
+            rawResults = await ReadRawAsync(routedSql, null);
+        }
 
         var results = rawResults.Select(raw => ToDailySummaryRow(raw, banding, horizon)).ToList();
 

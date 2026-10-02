@@ -155,12 +155,21 @@ SELECT
     c.max_cpu_pct,
     c.p95_cpu_pct,
     COALESCE(m.max_workers_count, 0),
-    COALESCE(m.current_workers_count, 0),
+    m.current_workers_count,
     COALESCE(g.max_grant_waiters, 0),
     COALESCE(g.grant_timeouts, 0),
     COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0)
+    COALESCE(g.grant_utilization_pct, 0),
+    props.engine_edition,
+    props.edition
 FROM servers s
+LEFT JOIN LATERAL (
+    SELECT engine_edition, edition
+    FROM server_properties
+    WHERE server_id = s.server_id
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS props ON true
 LEFT JOIN cpu_24h c ON c.server_id = s.server_id
 LEFT JOIN mem_latest m ON m.server_id = s.server_id
 LEFT JOIN storage_totals st ON st.server_id = s.server_id
@@ -283,16 +292,7 @@ WHERE s.server_id <> 0";
             /* The verdict is computed HERE rather than as a SQL CASE, so this grid and the drill-down
                cannot disagree — they now call the same predicate. The old inline CASE was copies 5 and 6
                of the ratio bug, on the screen the field report was actually looking at (#2246). */
-            var status = ProvisioningVerdict.Evaluate(
-                avgCpuPercent: reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
-                maxCpuPercent: reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                p95CpuPercent: reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
-                maxGrantWaiters: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
-                grantTimeouts: reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
-                forcedGrants: reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
-                grantUtilizationPercent: reader.IsDBNull(11) ? 0m : Convert.ToDecimal(reader.GetValue(11)),
-                maxWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
-                currentWorkers: reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)));
+            var status = FleetProvisioningStatusFor(reader);
 
             results[reader.GetInt32(0)] = new ServerMetricsRow(
                 reader.IsDBNull(1) ? null : Convert.ToDecimal(reader.GetValue(1)),
@@ -302,6 +302,35 @@ WHERE s.server_id <> 0";
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// The provisioning verdict for one fleet-read row, or null when the server has no CPU sample in the
+    /// 24-hour window (its average CPU is NULL).
+    ///
+    /// <para>Null, not a verdict from zeros: with nothing to average, <c>Evaluate</c> reads 0% CPU and calls
+    /// the server OVER_PROVISIONED — a server that has sent no CPU sample is told to shrink. The Server
+    /// Inventory grid already shows a null status as blank. A server WITH CPU samples gets the same verdict as
+    /// before, except that a logical server's master gets the N/A verdict. Ordinals match the fleet SELECT: 1 avg CPU,
+    /// 4 max CPU, 5 p95 CPU, 6 max workers, 7 current workers, 8 grant waiters, 9 grant timeouts, 10 forced grants,
+    /// 11 grant utilization, 12 engine edition, 13 edition.</para>
+    /// </summary>
+    internal static string? FleetProvisioningStatusFor(System.Data.Common.DbDataReader reader)
+    {
+        if (reader.IsDBNull(1)) return null;
+
+        return ProvisioningVerdict.Evaluate(
+            avgCpuPercent: Convert.ToDecimal(reader.GetValue(1)),
+            maxCpuPercent: reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+            p95CpuPercent: reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
+            maxGrantWaiters: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
+            grantTimeouts: reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
+            forcedGrants: reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
+            grantUtilizationPercent: reader.IsDBNull(11) ? 0m : Convert.ToDecimal(reader.GetValue(11)),
+            maxWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
+            currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)),
+            engineEdition: reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+            edition: reader.IsDBNull(13) ? null : reader.GetString(13));
     }
 
     /// <summary>
@@ -363,6 +392,12 @@ ORDER BY s.is_enabled DESC, server_name";
 
     public async Task<List<ServerPropertyRow>> GetServerInventoryAsync(CancellationToken cancellationToken = default)
     {
+        /* #4766: Server Inventory is one row per server, so each row reads its times on ITS server's clock (the
+           collected one, else the viewer machine's offset, the rule every list row uses) and not on the active server
+           tab's. The fleet's clocks are read once per load. */
+        var clocks = await GetServerClocksAsync(null, cancellationToken);
+        var nowUtc = DateTime.UtcNow;
+
         await using var command = _dataSource.CreateCommand(ServerInventorySql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
 
@@ -377,9 +412,13 @@ ORDER BY s.is_enabled DESC, server_name";
                 ? $"{version} - {updateLevel}"
                 : $"{version} - {level}";
 
+            var serverId = reader.GetInt32(0);
+            var clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, serverId, TimeZoneInfo.Local, nowUtc);
+
             items.Add(new ServerPropertyRow
             {
-                ServerId = reader.GetInt32(0),
+                ServerId = serverId,
+                Clock = clock,
                 ServerName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 Edition = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 ProductVersion = versionDisplay,
@@ -393,7 +432,10 @@ ORDER BY s.is_enabled DESC, server_name";
                 IsClustered = reader.IsDBNull(12) ? null : reader.GetBoolean(12),
                 /* #2359: this is the CONFIG SNAPSHOT time, not a freshness heartbeat. Named for what it
                    is so nobody reads a days-old value as a stale metric again. */
-                InventoryAsOf = reader.IsDBNull(13) ? null : ViewerTimeHelper.ForDisplay(reader.GetDateTime(13)),
+                InventoryAsOf = reader.IsDBNull(13) ? null : ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(13), ViewerTimeHelper.CurrentDisplayMode, clock),
+                /* #4766: the UTC instants too (this one and LastCollected below), so the columns' text can name the
+                   offset in the repeated autumn hour. */
+                InventoryAsOfUtc = reader.IsDBNull(13) ? null : reader.GetDateTime(13),
                 /* sqlserver_start_time is the server's LOCAL clock — read verbatim, shown as-is like Lite
                    (UptimeDisplay = Now - start). host OS + AG role are the collected guarded values. */
                 SqlServerStartTime = reader.IsDBNull(14) ? null : reader.GetDateTime(14),
@@ -404,7 +446,8 @@ ORDER BY s.is_enabled DESC, server_name";
                    as a stale metric rather than as the date monitoring stopped. */
                 IsEnabled = reader.IsDBNull(17) || reader.GetBoolean(17),
                 MonthlyCost = reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18)),
-                LastCollected = reader.IsDBNull(19) ? null : ViewerTimeHelper.ForDisplay(reader.GetDateTime(19))
+                LastCollected = reader.IsDBNull(19) ? null : ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(19), ViewerTimeHelper.CurrentDisplayMode, clock),
+                LastCollectedUtc = reader.IsDBNull(19) ? null : reader.GetDateTime(19)
             });
         }
         return items;

@@ -824,9 +824,36 @@ public class ServerWatermarkReadFloorTests
     }
 
     /// <summary>
+    /// #4749: the Query Store cache's seed read returns the value and its witness in one statement. The witness
+    /// is the newest <c>collection_time</c> among the rows AT the maximum value, so the outer query is limited
+    /// to those rows by an inner <c>MAX</c> over the same bounded predicates, and the unaliased
+    /// <c>MAX(last_execution_time)</c> stays in the text for the tests that count watermark reads by it.
+    /// </summary>
+    [Fact]
+    public void TheWatermarkWithWitnessForDatabaseSql_TakesTheNewestStampAmongTheRowsAtTheMaximumValue()
+    {
+        var sql = DarlingCollectorRunner.BuildServerWatermarkWithWitnessForDatabaseSql("query_store_stats", "last_execution_time", "database_name");
+        const string Predicates = "WHERE server_id = $1 AND database_name = $2 AND collection_time > $3";
+
+        Assert.StartsWith("SELECT MAX(last_execution_time), MAX(collection_time) FROM query_store_stats ", sql, StringComparison.Ordinal);
+        Assert.Equal(2, sql.Split(Predicates).Length - 1);
+        Assert.EndsWith(
+            "AND last_execution_time = (SELECT MAX(last_execution_time) FROM query_store_stats " + Predicates + ")",
+            sql,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #4197: job_history's numeric (instance_id) watermark read carried NO bound at all before this
     /// issue — this pins that it now has the same collection_time bound as its timestamp siblings, on the
     /// PARTITIONING column rather than on instance_id itself (which does not partition the table).
+    ///
+    /// <para>#4487: BOTH forms are now scoped to the server's NEWEST collected batch (an inner
+    /// <c>MAX(collection_time)</c> subquery), not an all-time max — an all-time max survives an identity
+    /// reseed at the OLD epoch's higher number forever, which is the field bug. So the UNBOUNDED form now
+    /// legitimately mentions <c>collection_time</c> too (in its own inner subquery, with no <c>&gt;</c>
+    /// lower bound), and this pin asserts the bounded/unbounded distinction by the presence of the $2
+    /// parameter rather than by "unbounded never says collection_time".</para>
     /// </summary>
     [Fact]
     public void TheBoundedServerWatermarkInstanceIdSql_PredicatesOnThePartitioningColumn()
@@ -835,9 +862,12 @@ public class ServerWatermarkReadFloorTests
         var unbounded = DarlingCollectorRunner.BuildServerWatermarkInstanceIdSql("job_history", "instance_id", bounded: false);
 
         Assert.Contains("collection_time > $2", bounded, StringComparison.Ordinal);
-        Assert.DoesNotContain("collection_time", unbounded, StringComparison.Ordinal);
+        Assert.DoesNotContain("$2", unbounded, StringComparison.Ordinal);
         Assert.Contains("MAX(instance_id)", bounded, StringComparison.Ordinal);
         Assert.Contains("MAX(instance_id)", unbounded, StringComparison.Ordinal);
+        /* #4487: both forms now scope to the newest collected batch via an inner MAX(collection_time). */
+        Assert.Contains("collection_time = (SELECT MAX(collection_time)", bounded, StringComparison.Ordinal);
+        Assert.Contains("collection_time = (SELECT MAX(collection_time)", unbounded, StringComparison.Ordinal);
     }
 
     /// <summary>

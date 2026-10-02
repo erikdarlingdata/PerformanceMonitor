@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
@@ -246,9 +247,11 @@ public sealed class AgTopologyCardsTests
     public void Summary_DistinguishesDistinctGroupsFromViews()
     {
         /* A reader seeing the same AG name on two cards needs the difference stated, not inferred. */
+        /* the primary's view lists every replica; a secondary's lists only itself (#4475) */
         var replicas = new[]
         {
             Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY"),
             Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
         };
 
@@ -261,5 +264,305 @@ public sealed class AgTopologyCardsTests
     public void Summary_EmptyFleetSaysSo()
     {
         Assert.Equal("none observed", AvailabilityGroupsTab.BuildSummary(Array.Empty<AgTopologyCard>()));
+    }
+
+    /* ─────────────────────────── #4475: group identity is name + replica set ─────────────────────────── */
+
+    [Fact]
+    public void Counts_FortyTwoSameNamedAgsWithDistinctReplicaSets_AreFortyTwoGroups()
+    {
+        /* The exact field shape: every Amazon RDS for SQL Server Multi-AZ instance's internal AG is named
+           RDSAG0, but each instance's replica set (itself + its own standby) is distinct. Counting by name
+           alone reads this as "1 group"; the fix must read it as 42. */
+        var replicas = new System.Collections.Generic.List<AgTopologyReplicaRow>();
+        for (var i = 1; i <= 42; i++)
+        {
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}A", "PRIMARY"));
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}B", "SECONDARY"));
+        }
+
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
+        var (groups, servers, views) = AgTopology.Counts(cards);
+
+        Assert.Equal(42, groups);
+        Assert.Equal(42, servers);
+        Assert.Equal(42, views);
+    }
+
+    [Fact]
+    public void Counts_TwoReplicasOfTheSameAg_AreOneGroupWithTwoViews()
+    {
+        /* Two monitored replicas of the SAME real AG report the SAME replica set, so identity (name + replica
+           set) still collapses them to one group — the case Views exists to distinguish from Groups. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY"),
+            Replica(2, "NODE2", "AG1", "NODE1", "PRIMARY", operational: null),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
+        var (groups, servers, views) = AgTopology.Counts(cards);
+
+        Assert.Equal(1, groups);
+        Assert.Equal(2, servers);
+        Assert.Equal(2, views);
+    }
+
+    /* ────────── #4475 follow-up: identity is overlap (connected components), not exact-set equality ────────── */
+
+    [Fact]
+    public void Counts_SameAgSeenFromItsPrimaryAndItsSecondary_IsOneGroup()
+    {
+        /* The blocking case: sys.dm_hadr_availability_replica_states returns LOCAL information only on a
+           server hosting a SECONDARY (Microsoft Learn). The primary's card carries {P,S}; the secondary's
+           card carries only {S}. Exact-set identity (the previous commit, still on this branch's head before
+           this fix) counts that as 2 — this pin is RED against 5f0e119a9 and must go GREEN here. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY"),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
+        var (groups, _, views) = AgTopology.Counts(cards);
+
+        Assert.Equal(1, groups);
+        Assert.Equal(2, views);
+    }
+
+    [Fact]
+    public void Counts_ThreeOverlappingPerspectivesOfOneAg_IsOneGroupByTransitivity()
+    {
+        /* {P,S1,S2} + {S1} + {S2}: no two sets are equal, but each overlaps the full-set card, so all three
+           union into one group through it. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY"),
+            Replica(1, "NODE1", "AG1", "NODE3", "SECONDARY"),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+            Replica(3, "NODE3", "AG1", "NODE3", "SECONDARY"),
+        };
+
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
+        var (groups, _, views) = AgTopology.Counts(cards);
+
+        Assert.Equal(1, groups);
+        Assert.Equal(3, views);
+    }
+
+    [Fact]
+    public void Counts_TwoMonitoredSecondariesWithNoPrimaryMonitored_AreTwoGroups_TheDocumentedLimit()
+    {
+        /* {S1} + {S2}, same AG name, neither reporting the other: nothing in the collected rows links them
+           without the AG's group_id, which a non-primary reporter's replica-states view does not expose. This
+           is the known limit stated in the doc comment, not a bug. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "SECONDARY"),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
+        var (groups, _, views) = AgTopology.Counts(cards);
+
+        Assert.Equal(2, groups);
+        Assert.Equal(2, views);
+    }
+
+    [Fact]
+    public void Counts_SameReplicaNamesButDifferentAgNames_AreTwoGroups()
+    {
+        /* Overlap alone is never enough — the name must match too, or two entirely different AGs that happen
+           to share a replica's server name would wrongly merge. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(2, "NODE1", "AG2", "NODE1", "PRIMARY"),
+        };
+
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
+        var (groups, _, views) = AgTopology.Counts(cards);
+
+        Assert.Equal(2, groups);
+        Assert.Equal(2, views);
+    }
+
+    [Fact]
+    public void Counts_TwoSameNameCardsWithEmptyReplicaSets_AreOneGroup()
+    {
+        /* An empty replica set can never overlap anything, so it falls back to name-only matching among
+           itself rather than becoming a permanent singleton. Reachable when a card's replica rows are absent
+           but its AG name is known some other way; exercised here directly against the counting helper since
+           BuildCards' REPLICA grain cannot itself produce a card with zero replicas. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>)[]
+        {
+            ("AG1", Array.Empty<string?>()),
+            ("AG1", Array.Empty<string?>()),
+        });
+
+        Assert.Equal(1, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_EmptyReplicaSetCardAmongDisjointSameNameCards_DoesNotBridgeThem()
+    {
+        /* #4475/#4478 regression: one card whose replica names are all null (an empty set) must never union
+           with a same-named card that DOES have replicas -- that bridges components with nothing in common.
+           Two disjoint {P1,S1}/{P2,S2} cards plus one empty RDSAG0 card must stay 3 groups, not collapse to 1
+           (which is what happens against 0a3738bae, the pre-fix head). */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>)[]
+        {
+            ("RDSAG0", new string?[] { "P1", "S1" }),
+            ("RDSAG0", new string?[] { "P2", "S2" }),
+            ("RDSAG0", Array.Empty<string?>()),
+        });
+
+        Assert.Equal(3, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_TwoEmptyReplicaSetCards_StillMatchEachOtherByNameOnly()
+    {
+        /* Two empty-set same-named cards still union by name alone -- nothing else distinguishes them, so this
+           keeps the pre-existing #4475 empty-set pin's behavior for the all-empty case. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>)[]
+        {
+            ("RDSAG0", Array.Empty<string?>()),
+            ("RDSAG0", Array.Empty<string?>()),
+        });
+
+        Assert.Equal(1, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_OneReplicaOverlapsSharedNodePlusOneEmptyCard_AreTwoGroups()
+    {
+        /* {P,S} and {S} overlap on S and union into one group; the empty card unions with neither (it shares no
+           replica with either, and it is not itself empty-paired with a same-named empty card), so the total
+           is 2, not 1. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>)[]
+        {
+            ("RDSAG0", new string?[] { "P", "S" }),
+            ("RDSAG0", new string?[] { "S" }),
+            ("RDSAG0", Array.Empty<string?>()),
+        });
+
+        Assert.Equal(2, groups);
+    }
+
+    [Fact]
+    public void Counts_FortyTwoDistinctRdsAg0Instances_AreFortyTwoGroups()
+    {
+        /* Re-proves the pre-existing #4475 case still holds under overlap identity: 42 disjoint replica sets
+           sharing the RDSAG0 name never overlap each other, so they stay 42 groups, not 1. */
+        var replicas = new List<AgTopologyReplicaRow>();
+        for (var i = 1; i <= 42; i++)
+        {
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}A", "PRIMARY"));
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}B", "SECONDARY"));
+        }
+
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
+        var (groups, servers, views) = AgTopology.Counts(cards);
+
+        Assert.Equal(42, groups);
+        Assert.Equal(42, servers);
+        Assert.Equal(42, views);
+    }
+
+    /* ────────────────── V151/#4475: the group_id overload's count rule ────────────────── */
+
+    [Fact]
+    public void CountDistinctGroups_TwoSecondariesOfOneAgSameGroupId_DisjointReplicaSets_IsOne()
+    {
+        /* The exact case a group_id closes: two monitored SECONDARIES of one real AG, its primary unmonitored.
+           Each reports only itself (sys.dm_hadr_availability_replica_states' local-only rule), so their replica
+           sets are DISJOINT and the name+overlap rule alone would count 2. Carrying the same group_id on both
+           unions them into 1. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>, string?)[]
+        {
+            ("RDSAG0", new string?[] { "S1" }, "GROUP-GUID-1"),
+            ("RDSAG0", new string?[] { "S2" }, "GROUP-GUID-1"),
+        });
+
+        Assert.Equal(1, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_FortyTwoDistinctGroupIds_AreFortyTwoGroups()
+    {
+        /* 42 members, same AG name (RDSAG0), each carrying its OWN distinct group_id -- id-based union never
+           collapses them, same as the pre-existing disjoint-replica-set case, now proven on the id path too. */
+        var members = new List<(string?, IEnumerable<string?>, string?)>();
+        for (var i = 1; i <= 42; i++)
+        {
+            members.Add(("RDSAG0", new string?[] { $"NODE{i}A", $"NODE{i}B" }, $"GROUP-GUID-{i}"));
+        }
+
+        var groups = AgTopology.CountDistinctGroups(members);
+
+        Assert.Equal(42, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_ExistingIdLessPins_AreUnchanged()
+    {
+        /* (c): the pre-existing id-less 2-tuple overload still behaves exactly as before -- calling it directly
+           (as every pre-V151 caller does) with no group_id anywhere reproduces the pre-existing #4475 41/42
+           result unchanged. */
+        var members = new List<(string?, IEnumerable<string?>)>();
+        for (var i = 1; i <= 42; i++)
+        {
+            members.Add(("RDSAG0", new string?[] { $"NODE{i}A", $"NODE{i}B" }));
+        }
+
+        Assert.Equal(42, AgTopology.CountDistinctGroups(members));
+    }
+
+    [Fact]
+    public void CountDistinctGroups_MixedWithIdAndIdLess_SameNameOverlappingReplicas_IsOne()
+    {
+        /* (d): a with-id member and an id-less member of the SAME name whose replicas overlap still union -- the
+           same AG, seen once before the V151 upgrade landed on that reporter (no group_id yet) and once after
+           (group_id now populated). */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>, string?)[]
+        {
+            ("RDSAG0", new string?[] { "P", "S1" }, "GROUP-GUID-1"),
+            ("RDSAG0", new string?[] { "S1" }, null),
+        });
+
+        Assert.Equal(1, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_TwoWithIdDifferentIds_SameNameOverlappingReplicas_IsTwo()
+    {
+        /* (e): two with-id members, DIFFERENT ids, same name, OVERLAPPING replicas -- a group_id is definitive,
+           so the name+overlap match that would otherwise union them is overridden. Never 1. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>, string?)[]
+        {
+            ("RDSAG0", new string?[] { "P", "S1" }, "GROUP-GUID-1"),
+            ("RDSAG0", new string?[] { "S1" }, "GROUP-GUID-2"),
+        });
+
+        Assert.Equal(2, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_WithIdAndIdLess_SameNameDisjointReplicas_IsTwo()
+    {
+        /* (f): a with-id member and an id-less member share a name but their replicas are DISJOINT -- with no id
+           on one side to union on, and no replica overlap either, they stay 2 separate groups. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>, string?)[]
+        {
+            ("RDSAG0", new string?[] { "P", "S1" }, "GROUP-GUID-1"),
+            ("RDSAG0", new string?[] { "S2" }, null),
+        });
+
+        Assert.Equal(2, groups);
     }
 }

@@ -72,7 +72,8 @@ public sealed class AgReplicaStatesCollector : CollectorDefinitionBase<AgReplica
         string? AvailabilityModeDesc,
         string? FailoverModeDesc,
         string? EndpointUrl,
-        bool? IsLocal);
+        bool? IsLocal,
+        string? GroupId);
 
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -88,7 +89,8 @@ SELECT
     availability_mode_desc = ar.availability_mode_desc,
     failover_mode_desc = ar.failover_mode_desc,
     endpoint_url = ar.endpoint_url,
-    is_local = ars.is_local
+    is_local = ars.is_local,
+    group_id = CONVERT(nvarchar(36), ag.group_id)
 FROM sys.availability_replicas AS ar
 JOIN sys.availability_groups AS ag
   ON ar.group_id = ag.group_id
@@ -131,6 +133,12 @@ OPTION(RECOMPILE);";
         new CollectorColumn("failover_mode_desc", CollectorColumnType.Varchar),
         new CollectorColumn("endpoint_url", CollectorColumnType.Varchar),
         new CollectorColumn("is_local", CollectorColumnType.Boolean),
+        /* Appended LAST (#4475's group-count fallback rung): sys.availability_groups.group_id, the SAME
+           GUID on every replica of one AG, stored as text (36 chars) rather than a uniqueidentifier — the
+           collector vocabulary has no uuid/GUID type, and every consumer treats it as an opaque identity
+           string rather than doing arithmetic on it, same reasoning as last_hardened_lsn/last_commit_lsn on
+           the sibling collector. */
+        new CollectorColumn("group_id", CollectorColumnType.Varchar),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -150,7 +158,8 @@ OPTION(RECOMPILE);";
                 AvailabilityModeDesc: reader.IsDBNull(7) ? null : reader.GetString(7),
                 FailoverModeDesc: reader.IsDBNull(8) ? null : reader.GetString(8),
                 EndpointUrl: reader.IsDBNull(9) ? null : reader.GetString(9),
-                IsLocal: reader.IsDBNull(10) ? null : reader.GetBoolean(10)));
+                IsLocal: reader.IsDBNull(10) ? null : reader.GetBoolean(10),
+                GroupId: reader.IsDBNull(11) ? null : reader.GetString(11)));
         }
 
         return rows;
@@ -169,6 +178,7 @@ OPTION(RECOMPILE);";
             .Value(row.AvailabilityModeDesc)       /* availability_mode_desc VARCHAR */
             .Value(row.FailoverModeDesc)           /* failover_mode_desc VARCHAR */
             .Value(row.EndpointUrl)                /* endpoint_url VARCHAR */
-            .Value(row.IsLocal);                   /* is_local BOOLEAN */
+            .Value(row.IsLocal)                    /* is_local BOOLEAN */
+            .Value(row.GroupId);                   /* group_id VARCHAR (uuid text, #4475) */
     }
 }

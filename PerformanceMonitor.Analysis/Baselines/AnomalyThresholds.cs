@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Collections.Immutable;
+using System.Linq;
 
 namespace PerformanceMonitor.Analysis.Baselines;
 
@@ -128,6 +131,36 @@ public static class AnomalyThresholds
     // input) — a sensible starting point, still uncalibrated: see DefaultRatioThreshold for what the
     // 2026-09 fleet pass measured instead and which read would calibrate these.
     public const double WaitProfileFallbackMsPerSec = 250.0;  // untrustworthy-baseline absolute bar
+    /// <summary>
+    /// Wait types the young-baseline absolute bar leaves out on an Azure SQL Database (engine edition 5).
+    /// REMOTE_BLOCK_IO is a steady platform timer on Hyperscale (about 1,000 ms/s on an idle database) that
+    /// alone would clear <see cref="WaitProfileFallbackMsPerSec"/> on every analysis window for the ~3 days
+    /// the baseline is untrusted. It stays collected, charted and counted everywhere else, including the
+    /// trusted arms and the reported rate.
+    /// </summary>
+    public static readonly ImmutableArray<string> YoungBaselineBarExcludedWaitsAzureSqlDatabase = ImmutableArray.Create("REMOTE_BLOCK_IO");
+
+    /// <summary>
+    /// Metadata key prefix a wait-profile fact carries (value 1) for each contributor the firing young-baseline bar left out,
+    /// e.g. <c>bar_excluded_REMOTE_BLOCK_IO</c>. Absent whenever a trusted arm fired or the target is not an Azure SQL Database.
+    /// </summary>
+    public const string BarExcludedMetadataPrefix = "bar_excluded_";
+
+    /// <summary>
+    /// True only when the fact's metadata carries <c>bar_excluded_&lt;waitType&gt;</c> with the value 1; a missing key or
+    /// any other value (such as 0) means the wait counted toward the bar.
+    /// </summary>
+    public static bool IsBarExcluded(IReadOnlyDictionary<string, double>? metadata, string waitType)
+    {
+        return metadata is not null
+            && metadata.TryGetValue(BarExcludedMetadataPrefix + waitType, out var mark)
+            && mark == 1;
+    }
+
+    /// <summary>The excluded set as a quoted SQL list body, e.g. <c>'REMOTE_BLOCK_IO'</c>, for a <c>NOT IN (...)</c>.</summary>
+    public static readonly string YoungBaselineBarExcludedWaitsSqlList =
+        string.Join(", ", YoungBaselineBarExcludedWaitsAzureSqlDatabase.Select(w => "'" + w.Replace("'", "''") + "'"));
+
     public const double NoBaselineRatio = 100.0;             // scoring sentinel for a first-occurrence (is_new)
 
     // Day-over-day object/index detection (delta-based, not stddev-baseline) since the

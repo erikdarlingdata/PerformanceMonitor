@@ -9,6 +9,7 @@
 using System;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -106,10 +107,10 @@ public sealed class PgPlanCaptureCsvLiveTests
                 PgLogUsesCsvlog = true,
                 PgReadBinaryFileGranted = binaryRoute,
             };
-            var sql = PgPlanCaptureCollector.Instance.BuildQuery(context).Text;
+            var query = PgPlanCaptureCollector.Instance.BuildQuery(context);
 
             System.Collections.Generic.List<PgPlanCaptureCollector.Row> rows;
-            await using (var read = new NpgsqlCommand(sql, connection))
+            await using (var read = PostgresTargetProvider.Instance.CreateCommand(query, connection, 30))
             await using (var readReader = await read.ExecuteReaderAsync(ct))
             {
                 rows = await PgPlanCaptureCollector.Instance.ReadAsync(readReader, context, ct);

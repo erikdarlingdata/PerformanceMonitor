@@ -8,6 +8,7 @@
 
 using System;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -245,6 +246,104 @@ public sealed class McpToolGuideHeadsPgPlanTests
 
         var sessions = McpToolGuideTests.Served("get_pg_session_states");
         Assert.Contains("read truncated to know whether the window held more sessions than were returned", sessions.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary><b>Two</b> readiness facets reach past plan capture, and the reading guide says so (#4735).
+    /// <c>message_locale</c> is about every target-side log read; <c>log_line_prefix_readable</c> is about the
+    /// stderr deadlock and log-event reads, which parse the prefix with no auto_explain in the picture. A tail that
+    /// named only the locale facet would leave a quiet <c>get_pg_deadlocks</c> looking healthy while an unreadable
+    /// prefix hides every report from it, so the sentence names both and says an unmet facet of either kind is the
+    /// difference between a quiet server and a read that cannot see anything.</summary>
+    [Fact]
+    public void ReadinessTail_NamesBothFacetsThatReachPastPlanCapture()
+    {
+        var tail = McpToolGuideTests.Served("get_pg_plan_capture_readiness").Tail!;
+
+        Assert.Contains("Two facets reach beyond plan capture", tail, StringComparison.Ordinal);
+        Assert.Contains("message_locale reports whether the target writes its log messages in English", tail, StringComparison.Ordinal);
+        Assert.Contains("log_line_prefix_readable reports whether the log line prefix can be parsed", tail, StringComparison.Ordinal);
+        Assert.Contains("which the stderr deadlock and log-event reads need", tail, StringComparison.Ordinal);
+        Assert.Contains("an unmet facet of either kind is the difference between a quiet server and a read that cannot see anything", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("One facet reaches beyond plan capture", tail, StringComparison.Ordinal);
+    }
+
+    /// <summary>The <c>get_pg_deadlocks</c> reading guide keeps step with those two facets and with the saved RDS
+    /// position (#4735). Its list of reasons for an empty answer grows a fourth entry, the log line prefix that
+    /// <c>log_line_prefix_readable</c> judges, and says the readiness tool reports both facets. Its sentence on how
+    /// <c>times_seen</c> can exceed 1 on RDS and Aurora no longer claims the resume position lives in memory (#4708
+    /// saves it): a restart resumes where the last read stopped, except while a deadlock report is split across
+    /// two reads, when the saved position waits and that part is read again.</summary>
+    [Fact]
+    public void DeadlockTail_NamesThePrefixFacet_AndSaysTheReadPositionSurvivesARestart()
+    {
+        var tail = McpToolGuideTests.Served("get_pg_deadlocks").Tail!;
+
+        Assert.Contains("There is a fourth precondition", tail, StringComparison.Ordinal);
+        Assert.Contains("The log_line_prefix_readable facet judges it", tail, StringComparison.Ordinal);
+        Assert.Contains("get_pg_plan_capture_readiness reports both facets", tail, StringComparison.Ordinal);
+
+        Assert.Contains("the collector saves its resume position, so a restart resumes where the last read stopped", tail, StringComparison.Ordinal);
+        Assert.Contains("a deadlock report split across two reads, where the saved position waits and a restart reads that part again", tail, StringComparison.Ordinal);
+        Assert.Contains("a window whose write did not land is offered again", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("resume position in memory", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("re-reads a bounded tail", tail, StringComparison.Ordinal);
+    }
+
+    /// <summary>The <c>note</c> the <c>get_pg_deadlocks</c> RESPONSE carries says the RDS read position is saved,
+    /// in the reading guide's own words (#4735). The guide and the note are two texts about one fact, and the guide
+    /// was corrected first: the note went on saying the resume position "lives in the collector process, so a
+    /// restart re-reads a bounded tail", which stopped being true when #4708 saved it. A caller that never opened
+    /// the guide would still have been told to expect a re-read after every restart. Pinned on
+    /// <see cref="DarlingMcpPgDeadlockTools.DeadlocksNote"/> and, because a pin on a constant proves nothing if the
+    /// response stops using it, on the source line that puts it in the response.</summary>
+    [Fact]
+    public void DeadlocksResponseNote_SaysTheReadPositionIsSaved_InTheGuidesWords()
+    {
+        var note = DarlingMcpPgDeadlockTools.DeadlocksNote;
+
+        Assert.Contains("the collector saves its resume position, so a restart resumes where the last read stopped", note, StringComparison.Ordinal);
+        Assert.Contains("a deadlock report split across two reads, where the saved position waits and a restart reads that part again", note, StringComparison.Ordinal);
+        Assert.Contains("a window whose write did not land is offered again", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("lives in the collector process", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("re-reads a bounded tail", note, StringComparison.Ordinal);
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgDeadlockTools.cs");
+        Assert.Contains("note = DeadlocksNote,", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>An empty <c>get_pg_deadlocks</c> answer names the log line prefix beside the locale (#4735). The
+    /// status text listed what makes an empty window mean something other than a quiet server and named the
+    /// <c>message_locale</c> facet; an unreadable <c>log_line_prefix</c> on a stderr log target produces exactly
+    /// the same empty answer (every line written under it is dropped), and the text sent the caller to the
+    /// readiness read without saying that one of its facets is about the prefix.</summary>
+    [Fact]
+    public void NoDeadlocksText_NamesThePrefixFacet_BesideTheLocaleFacet()
+    {
+        var text = DarlingMcpPgDeadlockTools.NoDeadlocksText("target-a", 24);
+
+        Assert.StartsWith("No deadlock was reported on target-a in the last 24 hour(s).", text, StringComparison.Ordinal);
+        Assert.Contains("message_locale facet", text, StringComparison.Ordinal);
+        Assert.Contains("log_line_prefix_readable facet", text, StringComparison.Ordinal);
+        Assert.Contains("FOUR different things", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("THREE different things", text, StringComparison.Ordinal);
+        Assert.Contains("get_pg_plan_capture_readiness", text, StringComparison.Ordinal);
+        Assert.Contains("get_pg_database_stats", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The same for <c>get_pg_deadlock_detail</c>'s empty answer when no hash is given (#4735): it named the
+    /// locale mismatch as the only way a read that runs can come back empty, so it now names the log line prefix
+    /// too, and still points at the cumulative counter as the test that tells the healthy case from the others.</summary>
+    [Fact]
+    public void NoDeadlockGraphText_NamesThePrefixFacet_BesideTheLocaleMismatch()
+    {
+        var text = DarlingMcpPgDeadlockTools.NoDeadlockGraphText("target-a");
+
+        Assert.StartsWith("No deadlock graph is stored for target-a.", text, StringComparison.Ordinal);
+        Assert.Contains("non-English lc_messages", text, StringComparison.Ordinal);
+        Assert.Contains("log_line_prefix_readable", text, StringComparison.Ordinal);
+        Assert.Contains("get_pg_database_stats", text, StringComparison.Ordinal);
+        Assert.Contains("which tells the healthy case from the others", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("from the other two", text, StringComparison.Ordinal);
     }
 
     /// <summary>D8: no renames, no consolidation — all three still resolve as the same tool names with the same

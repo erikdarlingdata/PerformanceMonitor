@@ -13,8 +13,10 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 using static PerformanceMonitor.Common.DeadlockGraphProcessParser;
 
 namespace PerformanceMonitorLite.Services;
@@ -88,12 +90,12 @@ GROUP BY collection_time";
     /// filtering for XML in C# after a capped fetch was the shape of the defect, where a run of graph-less rows
     /// at the newest end read as "no XML in the window" while older graphs sat behind the cap.</para>
     /// </summary>
-    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, int limit = DeadlockGridCap, bool graphOnly = false)
+    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, int limit = DeadlockGridCap, bool graphOnly = false, bool windowOnCollectionTime = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var graphClause = graphOnly
             ? @"
@@ -101,17 +103,23 @@ AND   deadlock_graph_xml IS NOT NULL
 AND   deadlock_graph_xml <> ''"
             : string.Empty;
 
+        /* The grid answers "what deadlocked in this window", so it windows on deadlock_time. The alert engine
+           passes windowOnCollectionTime: its read is a delivery cursor, and on the event time a deadlock collected
+           late (seconds, or hours after an outage) would fall out of the window before it ever alerted. */
+        var windowCol = windowOnCollectionTime ? "collection_time" : "deadlock_time";
         command.CommandText = @"
 SELECT
     collection_time,
     deadlock_time,
     victim_process_id,
     victim_sql_text,
-    deadlock_graph_xml
-FROM v_deadlocks
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3" + graphClause + @"
+    deadlock_graph_xml,
+    database_name
+FROM " + StoredEventCopies.Deadlocks(
+            windowOnCollectionTime
+                ? "server_id = $1 AND collection_time <= $3" + graphClause
+                : "server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3" + graphClause,
+            windowOnCollectionTime ? "$2" : null) + @" AS dl
 ORDER BY deadlock_time DESC
 LIMIT $4";
 
@@ -130,7 +138,8 @@ LIMIT $4";
                 DeadlockTime = reader.IsDBNull(1) ? null : reader.GetDateTime(1),
                 VictimProcessId = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 VictimSqlText = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                DeadlockGraphXml = reader.IsDBNull(4) ? "" : reader.GetString(4)
+                DeadlockGraphXml = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                DatabaseName = reader.IsDBNull(5) ? null : reader.GetString(5)
             });
         }
 
@@ -147,7 +156,7 @@ LIMIT $4";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -201,7 +210,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -315,7 +324,7 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
     /// <para>The codebase's usual tie-break idiom for "no PK, need one deterministic row"
     /// (<c>QueryStoreSliceRepairService</c>'s <c>ORDER BY ... , rowid DESC</c>) does not reach here:
     /// <c>v_query_snapshots</c> is a UNION ALL of a live table and <c>read_parquet()</c> (query_snapshots
-    /// carries no entry in <c>ArchiveViewDedupKeys</c>, so there is no QUALIFY dedup either), and DuckDB does
+    /// has no dedup key in <c>ArchiveViewDedupKeys</c>, so it is a plain union with no QUALIFY, as <c>v_deadlocks</c> is too; a deadlock's copies are dropped per read, not in the view), and DuckDB does
     /// not propagate the <c>rowid</c> pseudocolumn through a UNION or a <c>SELECT *</c> view. Unlike
     /// <c>config_alert_log</c>, this view carries no 'live'/'archive' <c>source</c> literal to break a tie on
     /// either — there is nothing left to order by beyond the WHERE match itself.</para>
@@ -410,7 +419,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var dbClause = BuildDbInClause(
             string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues);
         var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
@@ -562,45 +571,37 @@ LIMIT $4";
     /// Gets lightweight blocking + deadlock counts and latest event time for alert badge updates.
     /// Much cheaper than fetching full rows with XML — just COUNT(*) and MAX(time).
     /// </summary>
-    /// <param name="utcOffsetMinutes">
-    /// The UTC offset of <paramref name="serverId"/> itself, not of whichever server tab the desktop has
-    /// selected. This read is the one on the badge path, which runs on every tab's own timer whether or
-    /// not that tab is visible, so the server it names and the server the desktop is showing are
-    /// routinely different ones.
-    ///
-    /// <para>Required, and required to be the SAME offset the caller used to convert
-    /// <paramref name="fromDate"/>/<paramref name="toDate"/> out of the display mode. Those two
-    /// conversions cancel in <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> and only the one here
-    /// applies in <c>ServerTime</c>; sourcing them from different servers leaves a residue in every
-    /// mode. <c>ServerTab.RefreshAlertCountsAsync</c> derives both from the tab's own
-    /// <c>UtcOffsetMinutes</c>.</para>
-    /// </param>
-    public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, int utcOffsetMinutes)
+    /// <remarks>
+    /// <paramref name="fromDate"/>/<paramref name="toDate"/> are the tab's custom range as naive-UTC instants
+    /// (#4766), so this read needs no clock. It is the one on the badge path, which runs on every tab's own timer
+    /// whether or not that tab is visible, so the server it names and the server the desktop is showing are
+    /// routinely different ones; it once had to be handed the clock of the right one, and a clock from the wrong
+    /// one left the window an offset off in every display mode.
+    /// <para>A DISPLAY read (the server tab's badge), not an alert-engine read: it windows on the event time, as
+    /// the grids do, and the alert engine never calls it.</para>
+    /// </remarks>
+    public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, utcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         /* blocking_count prefers the blocked-process-report; falls back to the always-on DMV snapshot when
            BPR captured nothing (AWS RDS). latest_event_time includes DMV blocking recency too. */
         command.CommandText = @"
 SELECT
-    COALESCE(NULLIF((SELECT COUNT(*) FROM v_blocked_process_reports
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3), 0),
+    COALESCE(NULLIF((SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev), 0),
      (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS blocking_count,
-    (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS deadlock_count,
+    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3) AS deadlock_count,
     (SELECT MAX(t) FROM (
-        SELECT MAX(event_time) AS t FROM v_blocked_process_reports
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        SELECT MAX(event_time) AS t FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev
         UNION ALL
         SELECT MAX(event_time) AS t FROM v_dmv_blocking_snapshots
         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
         UNION ALL
-        SELECT MAX(deadlock_time) AS t FROM v_deadlocks
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        SELECT MAX(deadlock_time) AS t FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
     )) AS latest_event_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -635,20 +636,26 @@ SELECT
     /// DMV arm entirely (a DMV snapshot never has one) — the population <c>get_blocked_process_xml</c> pages
     /// over, so its <c>limit</c> counts reports rather than rows it would have to discard.</para>
     /// </summary>
-    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportMerge.DefaultCap, bool xmlOnly = false)
+    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportMerge.DefaultCap, bool xmlOnly = false, bool windowOnCollectionTime = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         /* $4 is the row cap, so the optional database list starts at $5. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
-
         var xmlClause = xmlOnly
             ? @"
 AND   blocked_process_report_xml IS NOT NULL
 AND   blocked_process_report_xml <> ''"
             : string.Empty;
+
+        /* The XE arm windows on event_time; the DMV arm stays on collection_time because
+           dmv_blocking_snapshots.event_time IS its collection time. The alert engine opts out (see GetRecentDeadlocksAsync),
+           and only that collection_time window needs the look-back collectedFrom adds. */
+        var xeRows = windowOnCollectionTime
+            ? StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3" + xmlClause + dbClause, collectedFrom: "$2")
+            : StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + xmlClause + dbClause);
 
         command.CommandText = @"
 SELECT
@@ -689,10 +696,7 @@ SELECT
     blocking_priority,
     contentious_object,
     monitor_loop
-FROM v_blocked_process_reports
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3" + xmlClause + dbClause + @"
+FROM " + xeRows + @" AS ev
 ORDER BY event_time DESC
 LIMIT $4";
 
@@ -855,9 +859,7 @@ SELECT
     {PerformanceMonitorLite.Analysis.BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {PerformanceMonitorLite.Analysis.BlockingPairRowQuery.TrailingIdentityColumns}
-FROM v_blocked_process_reports
-WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
-{PerformanceMonitorLite.Analysis.BlockingPairRowQuery.SpidFilter}
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + PerformanceMonitorLite.Analysis.BlockingPairRowQuery.SpidFilter)} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -891,7 +893,7 @@ LIMIT 5000";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* BPR buckets, falling back to the always-on DMV snapshot only when BPR has no buckets in the
@@ -899,15 +901,14 @@ LIMIT 5000";
         command.CommandText = @"
 WITH bpr AS (
     SELECT
-        date_trunc('hour', collection_time) AS bucket,
+        date_trunc('hour', event_time) AS bucket,
         COUNT(*) AS event_count,
         COALESCE(SUM(wait_time_ms), 0) / 1000.0 AS total_wait_sec,
         COUNT(DISTINCT blocking_spid) AS distinct_blockers,
         COUNT(DISTINCT blocked_spid) AS distinct_blocked,
         COUNT(DISTINCT database_name) AS distinct_databases
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"
-    GROUP BY date_trunc('hour', collection_time)
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
+    GROUP BY date_trunc('hour', event_time)
 ),
 dmv AS (
     SELECT
@@ -961,17 +962,15 @@ ORDER BY bucket";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
-    COUNT(*) AS deadlock_count
-FROM v_deadlocks
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-GROUP BY date_trunc('hour', collection_time)
+    date_trunc('hour', deadlock_time) AS bucket,
+    " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+FROM v_deadlocks AS dl
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+GROUP BY date_trunc('hour', deadlock_time)
 ORDER BY bucket";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -1004,7 +1003,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* Use blocked_process_reports from XE session - more reliable than point-in-time snapshots
@@ -1014,8 +1013,7 @@ ORDER BY bucket";
         command.CommandText = @"
 WITH bpr AS (
     SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (
@@ -1056,7 +1054,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -1065,11 +1063,9 @@ SELECT
 FROM (
     SELECT
         DATE_TRUNC('minute', deadlock_time) AS bucket,
-        COUNT(*) AS deadlock_count
-    FROM v_deadlocks
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
+        " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+    FROM v_deadlocks AS dl
+    WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
     GROUP BY DATE_TRUNC('minute', deadlock_time)
 ) sub
 ORDER BY bucket";
@@ -1157,7 +1153,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -1259,9 +1255,9 @@ ORDER BY wait_type, 2";
     ///
     /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
     /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
-    /// are SERVER-LOCAL and converted back to UTC inside GetTimeRange — handing them an instant already in
-    /// UTC would shift the window by the monitored server's offset. collection_time is stored in UTC, so
-    /// this read windows on the UTC bounds.</para>
+    /// are a custom range's UTC bounds (#4766) and the caller here has one instant, the end of an hours-back
+    /// window: the anchor states that end once and the window's length comes from hoursBack. collection_time
+    /// is stored in UTC, so this read windows on the UTC bounds.</para>
     /// <para>#4349: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (wait type), matching
     /// #4234/#4340's shape — <c>seriesCount</c> is always 1 into <see cref="TrendBuckets.AutoMinutes"/>. When
     /// every bucket the call returns holds exactly one physical collection, every point is stamped at its own
@@ -1272,7 +1268,7 @@ ORDER BY wait_type, 2";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
@@ -1346,6 +1342,10 @@ public class DeadlockRow : DeadlockAlertRow
 {
     public DateTime CollectionTime { get; set; }
     public DateTime? DeadlockTime { get; set; }
+
+    /// <summary>The database the deadlock was captured for. On an Azure SQL Database <c>master</c> target
+    /// this is the user database whose deadlock it is.</summary>
+    public string? DatabaseName { get; set; }
 }
 
 /// <summary>

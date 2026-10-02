@@ -104,10 +104,12 @@ public sealed class SwallowedItemFailureTests
         /* Cleared when a later reconcile succeeds, on both arms. */
         Assert.Equal(2, CountOccurrences(source, "_longQueryTraceFault.TryRemove(server.Id, out _);"));
 
-        /* Rethrown in the collector's run BEFORE the definition read, with its original stack. */
+        /* Rethrown in the collector's run BEFORE the definition read, with its original stack. The read is the
+           definition call inside the shared ReadXeSessionAsync since #4731 (XeSessionHealthTests pins that
+           wrapper), so this looks for the call and not for the old bare `return await`. */
         var collect = source.IndexOf("private async Task<int> CollectLongQueryCompletionsAsync(", StringComparison.Ordinal);
         var rethrow = source.IndexOf("System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ensureFailure).Throw();", StringComparison.Ordinal);
-        var read = source.IndexOf("return await RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, server, cancellationToken);", StringComparison.Ordinal);
+        var read = source.IndexOf("RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, server, cancellationToken)", StringComparison.Ordinal);
         Assert.True(collect > 0 && rethrow > collect && read > rethrow,
             "the recorded ensure failure is rethrown inside CollectLongQueryCompletionsAsync, ahead of the read");
     }
@@ -338,6 +340,35 @@ public sealed class SwallowedItemFailureTests
         Assert.False(CollectorHealthClassifier.IsEventCollector("database_scoped_config"));
         Assert.False(CollectorHealthClassifier.IsEventCollector("wait_stats"));
         Assert.False(CollectorHealthClassifier.IsEventCollector("database_size_stats"));
+    }
+
+    /// <summary>
+    /// #4620: the activity-sourced set, against the catalog, from this SKU's suite too. Every name must be a
+    /// real collector, or a rename silently puts that collector back on the three-run rule. None may be an
+    /// event, on-load or interval-sourced collector, because the predicate checks those arms first and an
+    /// overlapping name would never reach the 72-hour bar. And the two dense collectors the issue grouped
+    /// with them stay out, because their sources have rows on every cycle.
+    /// </summary>
+    [Fact]
+    public void TheActivitySourcedSet_IsReal_AndDisjointFromTheArmsCheckedBeforeIt()
+    {
+        var catalog = new HashSet<string>(CollectorCatalog.All.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+
+        Assert.NotEmpty(CollectorHealthClassifier.ActivitySourcedCollectorNamesForPinning);
+        foreach (var name in CollectorHealthClassifier.ActivitySourcedCollectorNamesForPinning)
+        {
+            Assert.Contains(name, catalog);
+            Assert.True(CollectorHealthClassifier.IsActivitySourcedCollector(name), name);
+            Assert.False(CollectorHealthClassifier.IsEventCollector(name), name);
+            Assert.False(CollectorHealthClassifier.IsOnLoadCollector(name), name);
+            Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector(name), name);
+        }
+
+        foreach (var dense in new[] { "memory_grant_stats", "query_stats" })
+        {
+            Assert.Contains(dense, catalog);
+            Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector(dense), dense);
+        }
     }
 
     /* ── the read and the tool carry the new count, on both SKUs ── */

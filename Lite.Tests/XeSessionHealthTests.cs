@@ -6,7 +6,11 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -112,5 +116,146 @@ public class XeSessionHealthTests
 
         Assert.Single(service.GetHealthSummary(ServerId).XeSessionFailures);
         Assert.Empty(service.GetHealthSummary(ServerId + 1).XeSessionFailures);
+    }
+
+    /* ── #4731: the blocked process, deadlock and long-query ring-buffer READS classify like the ensure does ── */
+
+    /// <summary>
+    /// A read the server refuses (297, 15151) or that names the XE session used to be caught, logged at Info and
+    /// returned as zero rows, so the run recorded SUCCESS for a source it could not read. It now raises the
+    /// exception the ensure raises, which <c>RunCollectorAsync</c> classifies on its inner error (PERMISSIONS or
+    /// ERROR, with the XE session flagged unavailable). The message says the READ failed, not the ensure.
+    /// </summary>
+    [Theory]
+    [InlineData("blocked process", 15151, "Cannot find the object 'sys.dm_xe_session_targets', because it does not exist or you do not have permission.")]
+    [InlineData("deadlock", 297, "The user does not have permission to perform this action.")]
+    [InlineData("deadlock", 50000, "The XE session is not running.")]
+    [InlineData("long query completions", 15151, "Cannot find the object 'sys.dm_xe_database_session_targets', because it does not exist or you do not have permission.")]
+    [InlineData("long query completions", 297, "The user does not have permission to perform this action.")]
+    public async Task ARefusedRingBufferRead_RaisesTheEnsureException_InsteadOfReturningZeroRows(string kind, int number, string message)
+    {
+        var refusal = SqlExceptionFactory.Create(number, message: message);
+
+        var raised = await Assert.ThrowsAsync<XeSessionEnsureException>(
+            () => RemoteCollectorService.ReadXeSessionAsync(kind, () => Task.FromException<int>(refusal)));
+
+        Assert.Same(refusal, raised.InnerException);
+        Assert.Equal(kind, raised.SessionKind);
+        Assert.Equal($"Failed to read {kind} XE session: {refusal.Message}", raised.Message);
+    }
+
+    [Fact]
+    public async Task AnUnrelatedSqlErrorOnTheRead_IsNotTurnedIntoAnXeSessionFailure()
+    {
+        var unrelated = SqlExceptionFactory.Create(1205, message: "Transaction was deadlocked and chosen as the victim.");
+
+        var raised = await Assert.ThrowsAsync<SqlException>(
+            () => RemoteCollectorService.ReadXeSessionAsync("deadlock", () => Task.FromException<int>(unrelated)));
+
+        Assert.Same(unrelated, raised);
+    }
+
+    [Fact]
+    public async Task ASuccessfulRead_ReturnsItsRows()
+    {
+        Assert.Equal(7, await RemoteCollectorService.ReadXeSessionAsync("deadlock", () => Task.FromResult(7)));
+    }
+
+    /// <summary>
+    /// The three read arms go through the shared read and keep no catch of their own, so none can go back to
+    /// swallowing a refusal as zero rows. This pins the source, not a run: <c>RunCollectorAsync</c> needs a live
+    /// connection, so what a test here cannot catch is the run's own PERMISSIONS / ERROR classification of the
+    /// exception (its arm is the #1086 one, unchanged). The long-query arm also keeps its reconcile-fault guard
+    /// ahead of the read (#3754); that guard rethrows the ensure's own exception and is not a catch either.
+    /// </summary>
+    [Theory]
+    [InlineData("RemoteCollectorService.BlockedProcessReport.cs", "CollectBlockedProcessReportsAsync", "\"blocked process\"", "BlockedProcessReportCollector.Instance")]
+    [InlineData("RemoteCollectorService.Deadlocks.cs", "CollectDeadlocksAsync", "\"deadlock\"", "DeadlocksCollector.Instance")]
+    [InlineData("RemoteCollectorService.LongQueryCompletions.cs", "CollectLongQueryCompletionsAsync", "\"long query completions\"", "LongQueryCompletionsCollector.Instance")]
+    public void TheReadArms_GoThroughTheSharedRead_AndNeverReturnZeroRows(string file, string method, string kind, string definition)
+    {
+        var source = ReadLf(Path.Combine("Lite", "Services", file));
+
+        var start = source.IndexOf($"Task<int> {method}(", StringComparison.Ordinal);
+        Assert.True(start > 0, $"{file} lost {method}");
+        var arm = source[start..];
+        var end = arm.IndexOf("\n    /// <summary>", StringComparison.Ordinal);
+        if (end > 0)
+        {
+            arm = arm[..end];
+        }
+
+        Assert.Contains($"ReadXeSessionAsync(\n            {kind},", arm, StringComparison.Ordinal);
+        Assert.Contains($"RunCollectorDefinitionAsync({definition}, server, cancellationToken)", arm, StringComparison.Ordinal);
+        Assert.DoesNotContain("catch", arm, StringComparison.Ordinal);
+        Assert.DoesNotContain("return 0", arm, StringComparison.Ordinal);
+
+        /* And the shared read has exactly one exit that is not the read's own result: the raise. */
+        var read = ReadLf(Path.Combine("Lite", "Services", "RemoteCollectorService.BlockedProcessReport.cs"));
+        var sharedRead = read[read.IndexOf("internal static async Task<int> ReadXeSessionAsync(", StringComparison.Ordinal)..];
+        Assert.Contains("throw XeSessionEnsureException.ForFailedRead(sessionKind, ex);", sharedRead, StringComparison.Ordinal);
+        Assert.DoesNotContain("return 0", sharedRead, StringComparison.Ordinal);
+    }
+
+    /* ── #4731: the Capture Not Running notice names each capture by its collector ── */
+
+    /// <summary>
+    /// The notice named every collector that was not <c>blocked_process_report</c> a "deadlock" capture, so a
+    /// long-query capture whose XE session could not be created (the Azure SQL Database ensure refuses it per
+    /// database) was announced as a deadlock capture that cannot start. Each capture is now named by its own
+    /// collector, and a collector this map has not learned about by its collector name.
+    /// </summary>
+    [Theory]
+    [InlineData("blocked_process_report", "blocking")]
+    [InlineData("deadlocks", "deadlock")]
+    [InlineData("long_query_completions", "long-query")]
+    [InlineData("wait_stats", "wait_stats")]
+    public void TheCaptureNotRunningNotice_NamesEachCaptureByItsCollector(string collector, string named)
+    {
+        Assert.Equal(named, MainWindow.NameXeCaptures(new[] { collector }));
+    }
+
+    [Fact]
+    public void TheCaptureNotRunningNotice_JoinsTwoDownCapturesWithAnd()
+    {
+        Assert.Equal(
+            "blocking and long-query",
+            MainWindow.NameXeCaptures(new[] { "blocked_process_report", "long_query_completions" }));
+    }
+
+    /// <summary>
+    /// The balloon names its captures through the map above and keeps no inline copy of the old
+    /// blocking-or-deadlock choice, so a capture added later cannot fall back into "deadlock" by way of a second
+    /// copy. Pins the source: the tray notice needs a running window, so a test here cannot fire it.
+    /// </summary>
+    [Fact]
+    public void TheCaptureNotRunningBalloon_NamesItsCapturesThroughTheMap()
+    {
+        var window = ReadLf(Path.Combine("Lite", "MainWindow.xaml.cs"));
+
+        /* The notification's title argument (with its comma), not the quoted name in the map's own doc comment. */
+        var balloon = window.IndexOf("\"Capture Not Running\",", StringComparison.Ordinal);
+        Assert.True(balloon > 0, "MainWindow lost the Capture Not Running balloon");
+        var block = window[Math.Max(0, balloon - 1500)..balloon];
+
+        Assert.Contains("NameXeCaptures(healthSummary!.XeSessionFailures.Select(f => f.CollectorName))", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("? \"blocking\" : \"deadlock\"", window, StringComparison.Ordinal);
+    }
+
+    private static string ReadLf(string relativePath)
+    {
+        var dir = AppContext.BaseDirectory;
+        for (var i = 0; i < 8 && dir is not null; i++)
+        {
+            var candidate = Path.Combine(dir, relativePath);
+            if (File.Exists(candidate))
+            {
+                return File.ReadAllText(candidate).Replace("\r\n", "\n", StringComparison.Ordinal);
+            }
+
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        throw new FileNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
     }
 }

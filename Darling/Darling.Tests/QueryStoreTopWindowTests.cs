@@ -93,6 +93,12 @@ public class QueryStoreTopWindowTests
         */
         Assert.Contains("GetQueryStoreWindowFloorAsync", method, StringComparison.Ordinal);
         Assert.Contains("effective_start", method, StringComparison.Ordinal);
+
+        /* The raw floor probe runs only on the raw route: when the interval table served, its own plan says how
+           far back the answer reaches. */
+        var probeAt = method.IndexOf("GetQueryStoreWindowFloorAsync", StringComparison.Ordinal);
+        var tableAt = method.IndexOf("tablePlan is { } plan", StringComparison.Ordinal);
+        Assert.True(tableAt >= 0 && tableAt < probeAt, "the raw floor probe must come after the interval-table branch");
         Assert.DoesNotContain("oldest_returned_collection_time", method, StringComparison.Ordinal);
     }
 

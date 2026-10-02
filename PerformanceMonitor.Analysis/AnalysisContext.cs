@@ -17,6 +17,14 @@ namespace PerformanceMonitor.Analysis;
 public class AnalysisContext
 {
     public int ServerId { get; set; }
+
+    /// <summary>
+    /// The databases monitored as their own targets on this target's server. Set only for an Azure SQL
+    /// Database <c>master</c> target (the same list <c>AzureMasterScope</c> gives the alert sweep). The
+    /// blocking and deadlock facts and the anomaly counts skip those databases' events, because those
+    /// findings come from the databases' own targets. Null or empty changes nothing.
+    /// </summary>
+    public IReadOnlyList<string>? SeparatelyMonitoredDatabases { get; set; }
     public string ServerName { get; set; } = string.Empty;
     public DateTime TimeRangeStart { get; set; }
     public DateTime TimeRangeEnd { get; set; }
@@ -53,7 +61,8 @@ public class AnalysisContext
     /// server's LOCAL clock so every windowed read matches the collectors (which stamp rows
     /// with SYSDATETIME, server-local); this offset converts that window back to UTC for
     /// persistence/display. <see cref="TimeSpan.Zero"/> when the clock probe was unavailable
-    /// (the window is then host-UTC — the prior behavior).
+    /// (the window is then host-UTC — the prior behavior). Lite and Darling never set it, so it is zero
+    /// in both; only the retired Dashboard, which shares this assembly, still fills it in.
     /// </summary>
     public TimeSpan ServerUtcOffset { get; set; }
 

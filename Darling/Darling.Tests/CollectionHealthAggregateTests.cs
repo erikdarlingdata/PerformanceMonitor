@@ -451,10 +451,69 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         await plant.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>One statement's result, keyed (server, collector), every one of the thirteen ordinals rendered
+    /// <summary>The two collectors the parity proof plants a partial-failure note on (#4812), both on server 1. The
+    /// NEWEST run of the first is a partial-failure cycle; the second had a partial-failure cycle and then a clean
+    /// run.</summary>
+    private const string NoteNewestCollector = "collector_note_newest";
+
+    private const string NoteClearedCollector = "collector_note_cleared";
+
+    /// <summary>The note the product's own writer records for a per-database cycle that lost
+    /// <paramref name="failed"/> of <paramref name="attempted"/> databases and still finished SUCCESS, which is the
+    /// only record of the loss.</summary>
+    private static string PartialNote(int failed, int attempted) =>
+        EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, new[] { "a", "b", "c" }.Take(failed).ToArray(), "boom")
+        ?? throw new InvalidOperationException($"the writer recorded no note for {failed} of {attempted} databases");
+
+    /// <summary>
+    /// Plants the two histories that put a real note in the parity proof's <c>latest_run_note</c> column (#4812).
+    /// Every other seed leaves it NULL on both sides, and a parity over NULLs compares nothing. Planted BEFORE the
+    /// policy's run, so the notes sit in materialized hour buckets and the composed read really re-aggregates them
+    /// rather than taking them from the real-time tail. Every run is SUCCESS with rows: a cycle that lost some of its
+    /// databases still records SUCCESS, and its note is the only record. Each run is placed by hours back from the
+    /// current hour and minute within that hour, so its bucket is fixed whatever the clock reads.
+    ///
+    /// <para><c>collector_note_newest</c> (a clean run 6 hours back at :10, a 3-of-4 note 4 hours back at :40, and its
+    /// newest run 3 hours back at :40 carrying a 1-of-4 note): both sides must return the NEWEST run's note. The
+    /// older note's text sorts after the newest one's, so a read that kept the greatest note text instead of the
+    /// newest run's note would return the wrong one.</para>
+    ///
+    /// <para><c>collector_note_cleared</c> (a 2-of-4 note 5 hours back at :40, then a 2-of-4 note and a clean run 3
+    /// hours back at :10 and :40): both sides must return NULL. The newest run is clean, so the newest bucket keeps no
+    /// note (its last run is the clean one), and the older bucket's note must not survive the re-aggregate.</para>
+    /// </summary>
+    private static async Task PlantPartialFailureRunsAsync(NpgsqlConnection connection, long idBase, CancellationToken ct)
+    {
+        await using var plant = new NpgsqlCommand($@"
+WITH n AS (SELECT date_trunc('hour', now() AT TIME ZONE 'UTC') AS h),
+runs (collector_name, hours_back, minute_of_hour, error_message) AS
+(
+    VALUES ('{NoteNewestCollector}', 6, 10, CAST(NULL AS text)),
+           ('{NoteNewestCollector}', 4, 40, CAST(@older AS text)),
+           ('{NoteNewestCollector}', 3, 40, CAST(@newest AS text)),
+           ('{NoteClearedCollector}', 5, 40, CAST(@cleared AS text)),
+           ('{NoteClearedCollector}', 3, 10, CAST(@cleared AS text)),
+           ('{NoteClearedCollector}', 3, 40, CAST(NULL AS text))
+)
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+SELECT {idBase} + row_number() OVER (), 1, 'srv-1', r.collector_name,
+       n.h - r.hours_back * INTERVAL '1 hour' + r.minute_of_hour * INTERVAL '1 minute', 1, 'SUCCESS', 5, r.error_message
+FROM n
+CROSS JOIN runs r", connection);
+        plant.Parameters.AddWithValue("older", PartialNote(3, 4));
+        plant.Parameters.AddWithValue("newest", PartialNote(1, 4));
+        plant.Parameters.AddWithValue("cleared", PartialNote(2, 4));
+        await plant.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One statement's result, keyed (server, collector), every one of the fourteen ordinals rendered
     /// invariantly (timestamps to the tick, so a MAX that loses a microsecond cannot compare equal).</summary>
+    private static Task<SortedDictionary<string, string>> ReadRowsAsync(
+        NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, CancellationToken ct) =>
+        ReadRowsAsync(postgres, sql, windowStart, headEnd, null, ct);
+
     private static async Task<SortedDictionary<string, string>> ReadRowsAsync(
-        NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, CancellationToken ct)
+        NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, IReadOnlyList<DateTime>? holeHours, CancellationToken ct)
     {
         await using var command = postgres.CreateCommand(sql);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
@@ -462,12 +521,16 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         {
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = h });
         }
+        if (holeHours is { Count: > 0 } holes)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = holes.ToArray() });
+        }
         var rows = new SortedDictionary<string, string>(StringComparer.Ordinal);
         await using var reader = await command.ExecuteReaderAsync(ct);
-        Assert.Equal(13, reader.FieldCount);
+        Assert.Equal(14, reader.FieldCount); // #4812 appended latest_run_note
         while (await reader.ReadAsync(ct))
         {
-            var fields = Enumerable.Range(0, 13).Select(i => reader.GetName(i) + "=" + (reader.IsDBNull(i)
+            var fields = Enumerable.Range(0, 14).Select(i => reader.GetName(i) + "=" + (reader.IsDBNull(i)
                 ? "NULL"
                 : reader.GetValue(i) switch
                 {
@@ -497,6 +560,47 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         Assert.True(diff.Count == 0, $"composed read differs from the raw scan in {diff.Count} row(s):\n" + string.Join("\n", diff));
     }
 
+    /// <summary>The note a rendered row carries: everything after <c>latest_run_note=</c>, which is the row's last
+    /// field, or null for the <c>NULL</c> that <c>ReadRowsAsync</c> renders.</summary>
+    private static string? NoteOf(string row)
+    {
+        const string field = " latest_run_note=";
+        var at = row.IndexOf(field, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"the rendered row has no latest_run_note field: {row}");
+        var note = row[(at + field.Length)..];
+        return note == "NULL" ? null : note;
+    }
+
+    /// <summary>
+    /// The note column, compared with a value in it (#4812). <see cref="AssertSameRows"/> already compares every
+    /// rendered field, but until <see cref="PlantPartialFailureRunsAsync"/> planted two histories the note was NULL
+    /// on both sides, so that comparison covered nothing. Some row must carry a note on each side (so the proof
+    /// cannot go vacuous again if the seed changes); both sides must agree on the note of each planted collector;
+    /// the one whose newest run is a partial-failure cycle must return exactly that run's note; the one whose
+    /// partial-failure cycle was followed by a clean run must return NULL.
+    /// </summary>
+    private static void AssertPartialFailureNotesAgree(SortedDictionary<string, string> raw, SortedDictionary<string, string> composed)
+    {
+        Assert.True(raw.Values.Any(v => NoteOf(v) is not null), "no row of the raw scan carries a note, so the parity proof compares no note");
+        Assert.True(composed.Values.Any(v => NoteOf(v) is not null), "no row of the composed read carries a note, so the parity proof compares no note");
+
+        string? Note(SortedDictionary<string, string> rows, string side, string collector)
+        {
+            Assert.True(rows.TryGetValue("1|" + collector, out var row), $"the {side} read has no row for server 1, {collector}");
+            return NoteOf(row!);
+        }
+
+        foreach (var collector in new[] { NoteNewestCollector, NoteClearedCollector })
+        {
+            Assert.Equal(Note(raw, "raw", collector), Note(composed, "composed", collector));
+        }
+
+        Assert.Equal(PartialNote(1, 4), Note(raw, "raw", NoteNewestCollector));
+        Assert.Equal(PartialNote(1, 4), Note(composed, "composed", NoteNewestCollector));
+        Assert.Null(Note(raw, "raw", NoteClearedCollector));
+        Assert.Null(Note(composed, "composed", NoteClearedCollector));
+    }
+
     private static DateTime NaiveUtcNow() => DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
     private static async Task DropAggregateAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -508,9 +612,12 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
     /// <summary>
     /// THE PARITY PROOF. Eight days of every CASE arm, materialized by the PRODUCT's first policy run (no hand
     /// backfill), then rows landing above the watermark: the composed read (whole buckets + raw head slice)
-    /// EQUALS the raw scan per (server, collector) across all thirteen ordinals, the guard says composed, and
+    /// EQUALS the raw scan per (server, collector) across all fourteen ordinals, the guard says composed, and
     /// the banded fleet payload the product computes through the composed path is identical to the one it
-    /// computes through the raw path (the aggregate dropped, so the chooser falls back).
+    /// computes through the raw path (the aggregate dropped, so the chooser falls back). The last ordinal, the
+    /// newest run's partial-failure note (#4812), is compared with a value in it: one collector's newest run is a
+    /// partial-failure cycle (both sides return its note) and another's was followed by a clean run (both return
+    /// NULL), see <see cref="PlantPartialFailureRunsAsync"/>.
     /// </summary>
     [Fact]
     public async Task ComposedRead_EqualsRawScan_AcrossEveryCaseArm_AgainstDevPostgres()
@@ -524,6 +631,7 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         await PlantEveryArmAsync(connection, 10_000_000, ct);
+        await PlantPartialFailureRunsAsync(connection, 12_000_000, ct);
         await RunPolicyAsync(connection, jobId, ct);
         await PlantAboveWatermarkAsync(connection, 19_000_000, ct);
 
@@ -541,8 +649,9 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
 
         var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
         var composed = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthComposedSql, windowStart, headEnd, ct);
-        Assert.Equal(2 * 5 + 1, raw.Count); // 2 servers × (3 rotating + streak + skipflip) + collector_late; sentinel excluded
+        Assert.Equal(2 * 5 + 1 + 2, raw.Count); // 2 servers × (3 rotating + streak + skipflip) + collector_late + the two note collectors; sentinel excluded
         AssertSameRows(raw, composed);
+        AssertPartialFailureNotesAgree(raw, composed);
 
         /* Every arm is actually exercised (a parity over zeros proves nothing). */
         var all = string.Join(" ", raw.Values);
@@ -600,13 +709,22 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         var headEnd = DarlingFleetReader.CeilingHour(windowStart);
         var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
         var forced = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthComposedSql, windowStart, headEnd, ct);
-        Assert.NotEqual(raw, forced); // the hole is real: served from buckets, the read is short
+        Assert.NotEqual(raw, forced); // the naive union (no hole hours) is short: the hole is real
 
-        Assert.False(await DarlingFleetReader.CollectionHealthRollupUsableAsync(postgres, headEnd, ct));
-        var banded = await ReadBandedAsync(postgres, now, ct);
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, ct);
+        Assert.True(plan.Usable); // #4477: a single repairable hole no longer sends the whole window to raw
+        Assert.Single(plan.HoleHours);
+
+        var repairedSql = CollectionHealthRollupSupport.ComposeFleetSql(DarlingFleetReader.FleetCollectionHealthSql, plan.HoleHours);
+        var repaired = await ReadRowsAsync(postgres, repairedSql, windowStart, headEnd, plan.HoleHours, ct);
+        AssertSameRows(raw, repaired);
+
+        /* The product's own call path (ReadFailingCollectorCountsAsync, reached through ReadBandedAsync) picks
+           the SAME repaired plan and must band identically to the pure raw scan. */
+        var bandedRepaired = await ReadBandedAsync(postgres, now, ct);
         await DropAggregateAsync(connection, ct);
         var bandedRaw = await ReadBandedAsync(postgres, now, ct);
-        Assert.Equal(bandedRaw.OrderBy(kv => kv.Key), banded.OrderBy(kv => kv.Key));
+        Assert.Equal(bandedRaw.OrderBy(kv => kv.Key), bandedRepaired.OrderBy(kv => kv.Key));
     }
 
     /// <summary>THE ABSENT GUARD. No aggregate (plain PostgreSQL, or not yet created): the probe says so, the
@@ -685,4 +803,263 @@ VALUES (49000000, 1, 'srv-1', 'collector_2', (now() AT TIME ZONE 'UTC') - INTERV
 
     private static long TotalRuns(string row) =>
         long.Parse(row.Split(' ').Single(f => f.StartsWith("total_runs=", StringComparison.Ordinal))["total_runs=".Length..], CultureInfo.InvariantCulture);
+
+    /// <summary>Every chunk relation <c>collect.collection_log</c> now has, with its range in UTC — the same
+    /// shape <see cref="DarlingWatermarkFloorScanBoundLiveTests"/> reads, but against the scratch store's own
+    /// hypertable rather than the shared live one.</summary>
+    private static async Task<List<(string Schema, string Name, DateTime RangeStart, DateTime RangeEnd)>> ListChunkRelationsAsync(
+        NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+SELECT chunk_schema, chunk_name, range_start AT TIME ZONE 'UTC', range_end AT TIME ZONE 'UTC'
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'collect' AND hypertable_name = 'collection_log'
+ORDER BY range_start", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var result = new List<(string, string, DateTime, DateTime)>();
+        while (await reader.ReadAsync(ct))
+        {
+            result.Add((reader.GetString(0), reader.GetString(1),
+                DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc),
+                DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)));
+        }
+        return result;
+    }
+
+    /// <summary>seq_scan + idx_scan for one chunk relation.</summary>
+    private static async Task<(long Seq, long Idx)> ScanCountersAsync(NpgsqlConnection connection, string schema, string name, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT COALESCE(seq_scan, 0), COALESCE(idx_scan, 0) FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2", connection);
+        command.Parameters.AddWithValue(schema);
+        command.Parameters.AddWithValue(name);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+        {
+            return (0, 0);
+        }
+        return (reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    private static async Task ForceStatsFlushAsync(NpgsqlDataSource postgres, NpgsqlConnection ownConnection, CancellationToken ct)
+    {
+        await using (var ownFlush = new NpgsqlCommand("SELECT pg_stat_force_next_flush()", ownConnection))
+        {
+            await ownFlush.ExecuteScalarAsync(ct);
+        }
+        await using var pooled = await postgres.OpenConnectionAsync(ct);
+        await using var pooledFlush = new NpgsqlCommand("SELECT pg_stat_force_next_flush()", pooled);
+        await pooledFlush.ExecuteScalarAsync(ct);
+    }
+
+    /// <summary>Deletes the aggregate's materialized bucket for exactly one whole hour, engineering a
+    /// continuity hole below the watermark the same way <c>ContinuityGuard_HourMissingBelowWatermark…</c>
+    /// does.</summary>
+    private static async Task<DateTime> DeleteOneBucketAsync(NpgsqlConnection connection, DateTime hour, CancellationToken ct)
+    {
+        string materialization;
+        await using (var find = new NpgsqlCommand(
+            "SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) " +
+            "FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '" +
+            TimescaleSupport.CollectionHealthHourlyView + "'", connection))
+        {
+            materialization = (string)(await find.ExecuteScalarAsync(ct))!;
+        }
+        await using var deleteBucket = new NpgsqlCommand($"DELETE FROM {materialization} WHERE bucket = $1", connection);
+        deleteBucket.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(hour, DateTimeKind.Unspecified) });
+        Assert.True(await deleteBucket.ExecuteNonQueryAsync(ct) > 0);
+        return hour;
+    }
+
+    /// <summary>
+    /// THE SCAN-BOUND PROOF (#4477, pin b). One hole hour, three days back, below the watermark. Every chunk
+    /// entirely before the 7-day window is untouched on dev too (dev's raw arm is itself bounded to that
+    /// window, so that half of the claim is vacuous — it does not discriminate this fix from dev at all). What
+    /// this fix actually changes is INSIDE the window: a covered chunk — one entirely below the watermark and
+    /// not the hole hour's own chunk — is read ONLY from the rollup once this fix's per-hole raw slice replaces
+    /// dev's whole-window fallback. The PRODUCT's own call path (<see cref="ReadBandedAsync"/>, reaching
+    /// <c>DarlingFleetReader.ReadFailingCollectorCountsAsync</c>) must touch no such covered chunk. Scans stay
+    /// legitimate only on the head chunk(s) [window start, head end), the hole hour's own chunk, and anything
+    /// at or after the watermark (the real-time tail, since <c>materialized_only = false</c>).
+    ///
+    /// <para><b>RED on dev, at RUNTIME</b> (recorded against a build of dev's tip with only this test file
+    /// swapped in, since dev already has <c>RollupUsableAsync</c>/<c>ContinuitySql</c> under the names this
+    /// test reads — no compile failure this time). Dev has no hole-hours concept: <c>ContinuitySql</c> counts
+    /// distinct buckets in [head end, watermark) and any gap short of the count fails the whole guard, so ONE
+    /// missing hour anywhere in an eight-day plant makes <c>RollupUsableAsync</c> return <c>false</c> and the
+    /// caller falls back to <see cref="DarlingFleetReader.FleetCollectionHealthSql"/> raw for the WHOLE
+    /// window — every covered chunk this test asserts untouched gets seq_scan'd instead. Read through plain
+    /// SQL (<see cref="DarlingFleetReader.CollectionHealthWatermarkSql"/>), not <c>RollupPlanAsync</c>, so this
+    /// file compiles unmodified against dev.</para>
+    /// </summary>
+    [Fact]
+    public async Task ProductPath_OneHoleHour_NeverScansACoveredChunkInsideTheWindow_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live scan-bound test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* Same de-flake as #4469's DarlingWatermarkFloorScanBoundLiveTests: no autovacuum/autoanalyze on this
+           hypertable can independently scan an old chunk between the two snapshots and be mistaken for the
+           read under test. OpenStoreAsync already stopped this scratch database's background workers. */
+        await using (var noAutovacuum = new NpgsqlCommand("ALTER TABLE collect.collection_log SET (autovacuum_enabled = false)", connection))
+        {
+            await noAutovacuum.ExecuteNonQueryAsync(ct);
+        }
+
+        await PlantEveryArmAsync(connection, 50_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        var now = NaiveUtcNow();
+        var windowStart = now.AddDays(-7);
+        var headEnd = DarlingFleetReader.CeilingHour(windowStart);
+        var holeHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddDays(-3);
+        await DeleteOneBucketAsync(connection, holeHour, ct);
+
+        /* Read through PLAIN SQL, the members dev already has under these names, so this file needs no
+           #4477-only member to build on dev's tip — only the ASSERTED BEHAVIOR differs. */
+        DateTime? watermark;
+        await using (var readWatermark = new NpgsqlCommand(DarlingFleetReader.CollectionHealthWatermarkSql, connection))
+        {
+            watermark = await readWatermark.ExecuteScalarAsync(ct) is DateTime w ? DateTime.SpecifyKind(w, DateTimeKind.Unspecified) : null;
+        }
+        Assert.True(watermark is { } mark && mark > headEnd, "expected a materialized watermark past the head end for a covered chunk to exist below it");
+        var watermarkUtc = DateTime.SpecifyKind(watermark!.Value, DateTimeKind.Utc);
+
+        var chunks = await ListChunkRelationsAsync(connection, ct);
+        Assert.True(chunks.Count >= 3, $"expected several daily chunks from eight days of history; got {chunks.Count}");
+
+        /* A COVERED chunk: entirely below the watermark (so the aggregate, not raw, is authoritative for it),
+           at or after the 7-day window start (inside the consumer window this fix's slice logic actually
+           governs — the vacuous "before the window" half of the old pin proved nothing, since dev's own raw
+           arm never touches those chunks either), and NOT the hole hour's own chunk (that chunk is legitimately
+           read raw by both dev and this fix, so it proves nothing about the fix). */
+        var windowStartUtc = DateTime.SpecifyKind(windowStart, DateTimeKind.Utc);
+        var holeHourUtc = DateTime.SpecifyKind(holeHour, DateTimeKind.Utc);
+        var coveredChunks = chunks
+            .Where(c => c.RangeEnd <= watermarkUtc && c.RangeStart >= windowStartUtc)
+            .Where(c => !(holeHourUtc >= c.RangeStart && holeHourUtc < c.RangeEnd))
+            .ToList();
+        Assert.True(coveredChunks.Count >= 1,
+            "expected at least one whole chunk below the watermark, inside the window, and outside the hole's own chunk");
+
+        await ForceStatsFlushAsync(postgres, connection, ct);
+        var before = new Dictionary<(string, string), (long Seq, long Idx)>();
+        foreach (var chunk in coveredChunks)
+        {
+            before[(chunk.Schema, chunk.Name)] = await ScanCountersAsync(connection, chunk.Schema, chunk.Name, ct);
+        }
+
+        /* THE PRODUCT'S OWN CALL PATH. */
+        _ = await ReadBandedAsync(postgres, now, ct);
+
+        await ForceStatsFlushAsync(postgres, connection, ct);
+        foreach (var chunk in coveredChunks)
+        {
+            var after = await ScanCountersAsync(connection, chunk.Schema, chunk.Name, ct);
+            var beforeCounters = before[(chunk.Schema, chunk.Name)];
+            Assert.Equal(beforeCounters, after);
+        }
+    }
+
+    /// <summary>
+    /// THE NO-RAW-ROWS HOLE (#4477, pin c). The missing hour is a real collection outage: no
+    /// <c>collection_log</c> rows exist for it at all, materialized or not. The composed-with-holes read must
+    /// equal the raw arm exactly (the hole contributes nothing, exactly what the raw scan would also return
+    /// for an hour with nothing in it), and the only raw chunks touched are the head, the tail and the hole's
+    /// own chunk.
+    /// </summary>
+    [Fact]
+    public async Task HoleHourWithNoRawRows_EqualsRawScan_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live no-raw-rows hole test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 60_000_000, ct);
+
+        var now = NaiveUtcNow();
+        var holeHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddDays(-4);
+        await using (var wipe = new NpgsqlCommand(
+            "DELETE FROM collect.collection_log WHERE collection_time >= $1 AND collection_time < $2", connection))
+        {
+            wipe.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = holeHour });
+            wipe.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = holeHour.AddHours(1) });
+            await wipe.ExecuteNonQueryAsync(ct);
+        }
+
+        await RunPolicyAsync(connection, jobId, ct);
+        /* The materialized run's own bucket for that hour never had rows to aggregate either — a real outage
+           already leaves no bucket AND no raw rows, so no extra deletion is needed here. */
+
+        var windowStart = now.AddDays(-7);
+        var headEnd = DarlingFleetReader.CeilingHour(windowStart);
+        var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
+
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, ct);
+        Assert.True(plan.Usable);
+        Assert.Single(plan.HoleHours);
+
+        var repairedSql = CollectionHealthRollupSupport.ComposeFleetSql(DarlingFleetReader.FleetCollectionHealthSql, plan.HoleHours);
+        var repaired = await ReadRowsAsync(postgres, repairedSql, windowStart, headEnd, plan.HoleHours, ct);
+        AssertSameRows(raw, repaired);
+    }
+
+    /// <summary>
+    /// THE TOO-MANY-HOLES FALLBACK (#4477, pin d). More than
+    /// <see cref="CollectionHealthRollupSupport.MaxRepairableHoleHours"/> whole hours missing below the
+    /// watermark → unusable, unchanged from before #4477: patching that many holes individually is no longer
+    /// cheaper than the plain raw scan.
+    /// </summary>
+    [Fact]
+    public async Task MoreHolesThanTheRepairCap_IsUnusable_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live too-many-holes test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 70_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        string materialization;
+        await using (var find = new NpgsqlCommand(
+            "SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) " +
+            "FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '" +
+            TimescaleSupport.CollectionHealthHourlyView + "'", connection))
+        {
+            materialization = (string)(await find.ExecuteScalarAsync(ct))!;
+        }
+        var now = NaiveUtcNow();
+        var deleteFrom = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddDays(-6);
+        await using (var wipeMany = new NpgsqlCommand(
+            $"DELETE FROM {materialization} WHERE bucket >= $1 AND bucket < $1 + INTERVAL '{CollectionHealthRollupSupport.MaxRepairableHoleHours + 1} hours'", connection))
+        {
+            wipeMany.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = deleteFrom });
+            Assert.True(await wipeMany.ExecuteNonQueryAsync(ct) > CollectionHealthRollupSupport.MaxRepairableHoleHours);
+        }
+
+        var windowStart = now.AddDays(-7);
+        var headEnd = DarlingFleetReader.CeilingHour(windowStart);
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, ct);
+        Assert.False(plan.Usable);
+        Assert.Empty(plan.HoleHours);
+
+        /* The product's own call path falls all the way back to the exact raw scan for the whole window. */
+        var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
+        var bandedRaw = await ReadBandedAsync(postgres, now, ct);
+        Assert.NotEmpty(raw);
+        Assert.NotEmpty(bandedRaw);
+    }
 }

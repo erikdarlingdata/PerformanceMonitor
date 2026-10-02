@@ -68,7 +68,9 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Runs AT MOST one backfill slice per enabled server: the first database found with a pending
     /// hole or an undrained first-contact tail gets one byte-budgeted slice; everything else waits
-    /// for a later tick. Per-server failures log and skip, and per-server WEDGES are abandoned and
+    /// for a later tick. A database that has failed
+    /// <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/> slices in a row is skipped
+    /// while any other database has work, then retried on a tick where none does. Per-server failures log and skip, and per-server WEDGES are abandoned and
     /// quarantined (#2148) — one stuck server never stalls the sweep in either failure mode. Called
     /// from CollectionBackgroundService on its own due-cadence.
     /// </summary>
@@ -77,6 +79,12 @@ public partial class RemoteCollectorService
         foreach (var server in _serverManager.GetEnabledServers())
         {
             if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            /* Checked per server, not once per tick: a fatal error can land while an earlier server's slice runs. */
+            if (LocalDatabaseIsDown())
             {
                 return;
             }
@@ -164,9 +172,32 @@ public partial class RemoteCollectorService
     private void OnQueryStoreItemSucceeded(int serverId, string database)
         => _consecutiveQueryStoreItemFailures.TryRemove((serverId, database), out _);
 
-    /// <summary>Consecutive failed backfill slices per server — the shrink signal's backfill half;
-    /// any completed slice resets it.</summary>
-    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+    /// <summary>The backfill slice window per server — the shrink signal's backfill half. #4771: a completed
+    /// slice keeps the span that fit, and a run of them widens it one step
+    /// (<see cref="QueryStoreBackfillSliceSpans"/>).</summary>
+    private readonly QueryStoreBackfillSliceSpans _sliceSpans = new();
+
+    /// <summary>
+    /// Consecutive failed backfill slices per (server, database), the twin of Darling's, used ONLY to decide
+    /// which database to skip: one that fails <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/>
+    /// slices in a row is served after the databases behind it instead of ahead of them, so it can no longer
+    /// stall them; that database's completed slice resets it. It does not size the slice window: that stays the
+    /// per-server count above, because a command timeout usually means the whole server is loaded, and
+    /// narrowing per database would add timed-out queries per database against a server that is already
+    /// struggling.
+    /// </summary>
+    private readonly QueryStoreBackfillFailureLedger _sliceFailures = new();
+
+    /// <summary>Which of the candidate and stored-floor reads are in a run of failures (#4772): each read turns an
+    /// error into "no work", so the first failure of a run is logged at Warning and the repeats at Debug, and a
+    /// read that completes ends the run. The twin of Darling's field. In memory on purpose, like the ledger
+    /// above.</summary>
+    private readonly QueryStoreBackfillReadFailureRuns _readFailures = new();
+
+    /// <summary>Test-only seam: when set, replaces the slice body (called with the database and the window
+    /// span the slice would have used). A throw counts as a failed slice and a normal return as a completed
+    /// one, through the same accounting. Null in production, where it changes nothing.</summary>
+    internal Func<string, TimeSpan, Task>? SliceOverrideForTests { get; set; }
 
     /// <summary>Runs one slice with the failure accounting wrapped around it — the caller's outer
     /// catch still logs the throw exactly as before.</summary>
@@ -177,11 +208,23 @@ public partial class RemoteCollectorService
         try
         {
             await RunBackfillSliceAsync(server, serverId, target, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
-            _consecutiveSliceFailures.TryRemove(serverId, out _);
+            _sliceSpans.RecordCompletion(serverId);
+            _sliceFailures.RecordCompletion(serverId, databaseName);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _consecutiveSliceFailures.AddOrUpdate(serverId, 1, static (_, current) => current + 1);
+            _sliceSpans.RecordFailure(serverId);
+            var failures = _sliceFailures.RecordFailure(serverId, databaseName);
+
+            /* Logged at the failure that crosses the threshold, so it is once per stretch of failures and
+               needs no extra state: the count only grows until a completed slice clears it. */
+            if (failures == QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures)
+            {
+                _logger?.LogWarning(
+                    "query_store backfill on '{Server}' [{Database}]: {Failures} consecutive slice failures; serving the other databases first and retrying this one only when none has work.",
+                    server.DisplayName, databaseName, failures);
+            }
+
             throw;
         }
     }
@@ -228,7 +271,11 @@ public partial class RemoteCollectorService
         /* #4197: the same rule as Darling's twin — floorLimit is computed before the candidate read so
            it can bind the read's own lower bound, then the store's list is unioned with every database
            a hole key already names (state is loaded above, for free). */
-        var databases = await GetBackfillCandidateDatabasesAsync(serverId, floorLimit, state, cancellationToken);
+        var databases = await GetBackfillCandidateDatabasesAsync(serverId, floorLimit, state, cancellationToken, server.DisplayName);
+
+        /* Databases whose slices keep failing: their slice is held back while any other database has work
+           (see QueryStoreBackfillFailureLedger), then one of them is retried after the walk. */
+        List<(string Database, DateTime Floor, DateTime Ceiling, bool IsHole)>? skipped = null;
 
         foreach (var databaseName in databases)
         {
@@ -245,6 +292,12 @@ public partial class RemoteCollectorService
                 }
 
                 var holeFloor = holeFrom > floorLimit ? holeFrom : floorLimit;
+                if (_sliceFailures.IsSkipped(serverId, databaseName))
+                {
+                    (skipped ??= []).Add((databaseName, holeFloor, holeTo, true));
+                    continue;
+                }
+
                 await RunCountedBackfillSliceAsync(server, serverId, target, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
                 return true;
             }
@@ -257,7 +310,7 @@ public partial class RemoteCollectorService
             /* The derived ceiling: everything at or above the stored MIN shipped complete. Null
                means the live path has not made first contact for this database yet. */
             var storedFloor = await GetMinCollectedTimeForDatabaseAsync(
-                serverId, QueryStoreCollector.Instance.TargetTable, "last_execution_time", "database_name", databaseName, floorLimit, cancellationToken);
+                serverId, QueryStoreCollector.Instance.TargetTable, "last_execution_time", "database_name", databaseName, floorLimit, cancellationToken, server.DisplayName);
             if (storedFloor is null)
             {
                 continue;
@@ -273,7 +326,32 @@ public partial class RemoteCollectorService
                 continue;
             }
 
+            if (_sliceFailures.IsSkipped(serverId, databaseName))
+            {
+                (skipped ??= []).Add((databaseName, floorLimit, storedFloor.Value, false));
+                continue;
+            }
+
             await RunCountedBackfillSliceAsync(server, serverId, target, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
+            return true;
+        }
+
+        /* No other database had work, so retry a skipped one: the one whose last failure is the oldest, so
+           several skipped databases take turns instead of the first in the list starving the rest. This costs
+           at most one failed slice per tick on an otherwise idle server, exactly what the stall cost before. */
+        if (skipped is { Count: > 0 })
+        {
+            var retry = skipped[0];
+            for (var i = 1; i < skipped.Count; i++)
+            {
+                if (_sliceFailures.LastFailureTicket(serverId, skipped[i].Database)
+                    < _sliceFailures.LastFailureTicket(serverId, retry.Database))
+                {
+                    retry = skipped[i];
+                }
+            }
+
+            await RunCountedBackfillSliceAsync(server, serverId, target, retry.Database, retry.Floor, retry.Ceiling, retry.IsHole, cancellationToken);
             return true;
         }
 
@@ -298,12 +376,17 @@ public partial class RemoteCollectorService
            budget bounds what SHIPS, not what the query aggregates and sorts — an unchunked wide
            window on a big database times out at the command timeout every tick and the range never
            drains, the same row-cap-is-not-a-cost-cap flaw that wedged the live path. */
-        /* #2111 adaptive shrink: after consecutive failed slices this server digs in narrower
-           chunks until one fits its command timeout; a completed slice resets to full width. */
-        var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
-            QueryStoreBackfillState.MaxSliceSpan,
-            _consecutiveSliceFailures.TryGetValue(serverId, out var recentFailures) ? recentFailures : 0);
+        /* #2111 adaptive shrink: after failed slices this server digs in narrower chunks until one fits
+           its command timeout. #4771: a completed slice keeps the span that fit instead of swinging back to
+           the width that just timed out; a run of them widens it one step. */
+        var sliceSpan = _sliceSpans.Current(serverId);
         var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
+
+        if (SliceOverrideForTests is { } sliceOverride)
+        {
+            await sliceOverride(databaseName, sliceSpan);
+            return;
+        }
 
         var definition = QueryStoreCollector.Instance;
         var context = new CollectorContext
@@ -414,6 +497,10 @@ public partial class RemoteCollectorService
         /* Backdated to the slice ceiling — rows land beside their own activity, and retention/
            archival age them on the same clock as live rows. One batch, the shared appender path. */
         int written;
+
+        /* The read lock, unlike a collector's write: the backfill runs outside the collection gate, so this lock is
+           what a reopen after a fatal error waits for, and what keeps this write out of the open's index rebuild. */
+        using (_duckDb.AcquireReadLock(cancellationToken))
         using (var duckConnection = _duckDb.CreateConnection())
         {
             await duckConnection.OpenAsync(cancellationToken);
@@ -479,13 +566,17 @@ public partial class RemoteCollectorService
     /// <paramref name="floorLimit"/> the loop uses to decide whether a database still needs digging,
     /// then merged with <see cref="QueryStoreBackfillState.MergeHoleDatabases"/> so a database that
     /// has gone fully quiet does not lose a recorded hole. DuckDB has no chunks to decompress, so the
-    /// bound buys Lite nothing but the shared rule; see the PR body's measured table.</summary>
+    /// bound buys Lite nothing but the shared rule; see the PR body's measured table. #4772: a failed read
+    /// logs one Warning for each run of failures (<see cref="QueryStoreBackfillReadFailureRuns"/>);
+    /// <paramref name="serverLabel"/> names the server in it and falls back to the id.</summary>
     internal async Task<List<string>> GetBackfillCandidateDatabasesAsync(
-        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
+        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken, string? serverLabel = null)
     {
         var databases = new List<string>();
         try
         {
+            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write). */
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -500,10 +591,24 @@ public partial class RemoteCollectorService
                     databases.Add(reader.GetString(0));
                 }
             }
+
+            _readFailures.RecordSuccess(serverId);
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "query_store backfill candidate read failed; skipping this tick");
+            /* #4772, the twin of Darling's catch: one Warning at the first failure of a run, the repeats at Debug.
+               A cancelled read is a shutdown, not a failure: it neither warns nor starts a run. */
+            if (ex is not OperationCanceledException && _readFailures.RecordFailure(serverId))
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "query_store backfill on '{Server}': reading the databases to backfill failed, so no hole or tail on this server is filled until a read succeeds. Further failures are logged at debug level until then.",
+                    serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                _logger?.LogDebug(ex, "query_store backfill candidate read failed; skipping this tick");
+            }
         }
 
         return QueryStoreBackfillState.MergeHoleDatabases(databases, state);
@@ -513,44 +618,79 @@ public partial class RemoteCollectorService
     /// <see cref="GetLastCollectedTimeForDatabaseAsync"/>. Null skips this tick; failure never invents
     /// a boundary. #4197: the twin of Darling's exact bounded form — see
     /// <c>QueryStoreBackfill.GetStoredFloorAsync</c> for why the EXISTS-then-bounded-MIN pair returns
-    /// the same value an unbounded MIN would.</summary>
+    /// the same value an unbounded MIN would. #4772: a failed read logs one Warning for each run of failures
+    /// for that database (<see cref="QueryStoreBackfillReadFailureRuns"/>); <paramref name="serverLabel"/>
+    /// names the server in it and falls back to the id.</summary>
     internal async Task<DateTime?> GetMinCollectedTimeForDatabaseAsync(
-        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, DateTime floorLimit, CancellationToken cancellationToken)
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, DateTime floorLimit, CancellationToken cancellationToken, string? serverLabel = null)
     {
         try
         {
+            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write). */
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
 
+            bool liveHit;
             using (var exists = conn.CreateCommand())
             {
                 exists.CommandText = $"SELECT 1 FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time <= $3 LIMIT 1";
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
-                var hit = await exists.ExecuteScalarAsync(cancellationToken);
-                if (hit is not null)
-                {
-                    return floorLimit;
-                }
+                liveHit = await exists.ExecuteScalarAsync(cancellationToken) is not null;
             }
 
+            /* The archive side, cached per archive generation under a key with no limit in it: the oldest
+               collection_time and the oldest value over the whole archived history for this database. A row
+               at or before the limit exists exactly when that oldest collection_time is <= the limit; and when
+               none does, every archived row is newer than the limit, so the unbounded oldest value IS the
+               bounded one. Live and archive combine as the lesser value / the OR of the two probes. */
+            var archivedRow = await ReadArchiveViewAsync(conn,
+                $"floor|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
+                $"SELECT MIN(collection_time), MIN({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
+                [serverId, databaseName], cancellationToken,
+                readRow: reader => (reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0),
+                                    reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1)));
+            var (archivedOldestCollection, archivedMin) =
+                archivedRow is ValueTuple<DateTime?, DateTime?> archivedPair ? archivedPair : (null, null);
+
+            if (liveHit || archivedOldestCollection <= floorLimit)
+            {
+                _readFailures.RecordSuccess(serverId, databaseName);
+                return floorLimit;
+            }
+
+            DateTime? liveMin = null;
             using (var min = conn.CreateCommand())
             {
                 min.CommandText = $"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
-                var result = await min.ExecuteScalarAsync(cancellationToken);
-                if (result is DateTime dt)
-                {
-                    return dt;
-                }
+                if (await min.ExecuteScalarAsync(cancellationToken) is DateTime dt)
+                    liveMin = dt;
             }
+
+            _readFailures.RecordSuccess(serverId, databaseName);
+            if (liveMin is DateTime l && archivedMin is DateTime a2)
+                return l <= a2 ? l : a2;
+            return liveMin ?? archivedMin;
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "query_store backfill floor read failed for [{Database}]; skipping this tick", databaseName);
+            /* #4772, the twin of Darling's catch: one Warning at the first failure of a run for this database. */
+            if (ex is not OperationCanceledException && _readFailures.RecordFailure(serverId, databaseName))
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "query_store backfill on '{Server}' [{Database}]: reading the stored floor failed, so this database is not backfilled until a read succeeds. Further failures are logged at debug level until then.",
+                    serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture), databaseName);
+            }
+            else
+            {
+                _logger?.LogDebug(ex, "query_store backfill floor read failed for [{Database}]; skipping this tick", databaseName);
+            }
         }
 
         return null;
@@ -564,6 +704,9 @@ public partial class RemoteCollectorService
     {
         try
         {
+            /* The write lock, as SaveCollectorStateAsync takes for the same table (#4343). The backfill runs outside
+               the collection gate, so this lock is also what a reopen after a fatal error waits for. */
+            using var writeLock = _duckDb.AcquireWriteLock();
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -649,7 +792,7 @@ RETURNING state_key";
     /// query_store cycle for one server — the same trigger and the same placement as Darling's, so the two
     /// cannot drift on WHEN they prune either.
     /// </summary>
-    protected async Task PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
+    protected async Task<bool> PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
     {
         try
         {
@@ -685,10 +828,32 @@ RETURNING state_key";
                     "[server_id {ServerId}] pruned {Count} query_store state row(s) for database(s) no longer on the server: {Keys}",
                     serverId, pruned.Count, string.Join(", ", pruned));
             }
+
+            return true;
         }
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
+            return false;
+        }
+    }
+
+    /// <summary>#4660: when the orphaned per-database state prune last succeeded, per server.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> _lastOrphanStatePruneUtc = new();
+
+    /// <summary>#4660: the per-cycle entry: runs the prune when <see cref="OrphanStatePrune.IsDue"/> says so, and records
+    /// only a success, so a failure is retried on the next cycle.</summary>
+    protected async Task PruneOrphanedQueryStoreDatabaseStateIfDueAsync(int serverId, CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        if (!OrphanStatePrune.IsDue(_lastOrphanStatePruneUtc.TryGetValue(serverId, out var last) ? last : null, now))
+        {
+            return;
+        }
+
+        if (await PruneOrphanedQueryStoreDatabaseStateAsync(serverId, cancellationToken))
+        {
+            _lastOrphanStatePruneUtc[serverId] = now;
         }
     }
 

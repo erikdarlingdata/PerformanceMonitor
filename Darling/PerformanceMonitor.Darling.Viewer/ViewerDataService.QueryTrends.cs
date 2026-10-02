@@ -20,8 +20,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (LocalDataService.QueryStats.cs). <see cref="Value"/> is the per-second rate the chart plots
 /// (elapsed ms/sec for the duration trends, executions/sec for the execution-count trend);
 /// <see cref="ExecutionCount"/> carries the executions/sec rate the duration trends also compute
-/// (unused by the execution-count trend). CollectionTime is naive UTC — the chart converts it
-/// through <see cref="ViewerTimeHelper.ForDisplay"/>.
+/// (unused by the execution-count trend). CollectionTime is naive UTC — the chart plots it as X
+/// unconverted and draws it in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (#4766).
 /// </summary>
 public sealed class QueryTrendPoint
 {
@@ -198,9 +198,17 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreDurationTrendRollupSql"/> and this shape runs only where it is affordable
     /// (no rollup: plain PostgreSQL, or nothing materialized yet). Its ±slab stays untouched on purpose —
     /// see <see cref="QueryStoreTrendRouting"/>.</para>
-    /// <para>The first placed interval in the window carries NULL rates, not 0 (#3653; #3642 on the MCP copy):
-    /// its LAG has nothing to difference against, so its rate is unknowable and the reader skips it. The
-    /// rollup route's builder has applied the same rule to its first bucket since #3642.</para>
+    /// <para><b>The rate is over the interval's own length (#4765).</b> An interval that stored its end
+    /// (<c>interval_end_time_utc</c>) is rated over end minus start. It used to be the seconds since the
+    /// previous STORED interval, and Query Store stores no row for an interval with no executions, so an
+    /// interval that followed a quiet one divided by the gap plus its own length and read too low. Only a row
+    /// that stored no end (collected before the column) keeps that gap, the way <c>sample_interval_seconds</c>
+    /// falls back to the gap for a pre-V128 collection (#3540). The three other copies of this expression
+    /// (the table twin, the MCP reader, the rollup route's raw class) are pinned identical to this one.</para>
+    /// <para>The first placed interval in the window carries NULL rates, not 0 (#3653; #3642 on the MCP copy),
+    /// unless it stored its end: a gap has nothing to difference against for the first point, so the rate of a
+    /// row with no end is unknowable and the reader skips it. The rollup route's builder has applied the same
+    /// rule to its first raw bucket since #3642.</para>
     /// </summary>
     public const string QueryStoreDurationTrendSql = """
         WITH placed AS
@@ -211,12 +219,14 @@ public sealed partial class ViewerDataService
                collapses this series and placement alone leaves it inflated. */
             SELECT
                 interval_start_time_utc AS point_time,
+                interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM
             (
                 SELECT
                     interval_start_time_utc,
+                    interval_end_time_utc,
                     execution_count,
                     avg_duration_us,
                     ROW_NUMBER() OVER
@@ -246,9 +256,12 @@ public sealed partial class ViewerDataService
             /* Arm 2 — rows collected before tier 2. No interval start exists and none can be
                reconstructed, so these keep the pre-tier-2 treatment byte for byte: un-deduped, placed at
                collection_time, still overstating. The split is on IS NULL / IS NOT NULL, so the two arms
-               partition the rows exactly — nothing counted twice, nothing dropped. */
+               partition the rows exactly — nothing counted twice, nothing dropped. The end is stated NULL:
+               a row placed at its collection time is not measured from an interval start, so it keeps
+               the gap to the previous point below (#4765). */
             SELECT
                 collection_time AS point_time,
+                CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM query_store_stats
@@ -264,7 +277,14 @@ public sealed partial class ViewerDataService
                 point_time,
                 SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
                 SUM(execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+                /* #4765: the interval's OWN length, its stored end less its start. Query Store stores no row
+                   for an interval with no executions, so the gap to the previous stored point is the
+                   interval's length PLUS every quiet interval before it. Only a point whose rows stored no
+                   end (collected before the column) keeps that gap, as sample_interval_seconds does (#3540). */
+                COALESCE(
+                    extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
+                    extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
+                ) AS interval_seconds
             FROM placed
             GROUP BY point_time
         )
@@ -310,12 +330,25 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 the gate's own clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>), $3/$4 window
     /// end (naive UTC; $3 binds arm 1's placement filter, $4 binds arm 2's collection-time filter — both are
     /// the caller's unclamped <c>endUtc</c>), $5 database filter.
+    /// <para><b>The <c>first_execution_time</c> floor (#4605), on both arms.</b> Neither the unique key (it leads
+    /// with <c>server_id</c>) nor <c>idx_query_store_interval_wide_first_exec</c> serves <c>collection_time</c> or
+    /// <c>interval_start_time_utc</c>, so both arms walked all of the server's rows. <c>first_execution_time</c>
+    /// is a key column of that unique key, so <c>first_execution_time &gt;= $2 - </c>
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> filters its entries before the heap, and it drops no
+    /// row: every stored row has
+    /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). Arm 1's rows start no earlier than $2
+    /// and hold a <c>first_execution_time</c> inside the interval, so the same margin is looser there than it needs
+    /// to be, which is harmless. A static readonly rather than a const because the interval literal is derived from
+    /// that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
     /// </summary>
-    public const string QueryStoreDurationTrendTableSql = """
+    public static readonly string QueryStoreDurationTrendTableSql = $$"""
         WITH placed AS
         (
             SELECT
                 interval_start_time_utc AS point_time,
+                interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM query_store_interval_wide
@@ -323,6 +356,7 @@ public sealed partial class ViewerDataService
             AND   interval_start_time_utc >= $2
             AND   interval_start_time_utc <= $3
             AND   interval_start_time_utc IS NOT NULL
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
 
             UNION ALL
@@ -334,6 +368,7 @@ public sealed partial class ViewerDataService
                QueryStoreDurationTrendSql's own arm 2 apart from the source table. */
             SELECT
                 collection_time AS point_time,
+                CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM query_store_interval_wide
@@ -341,6 +376,7 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   collection_time <= $4
             AND   interval_start_time_utc IS NULL
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
         raw AS
@@ -349,7 +385,14 @@ public sealed partial class ViewerDataService
                 point_time,
                 SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
                 SUM(execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+                /* #4765: the interval's OWN length, its stored end less its start. Query Store stores no row
+                   for an interval with no executions, so the gap to the previous stored point is the
+                   interval's length PLUS every quiet interval before it. Only a point whose rows stored no
+                   end (collected before the column) keeps that gap, as sample_interval_seconds does (#3540). */
+                COALESCE(
+                    extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
+                    extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
+                ) AS interval_seconds
             FROM placed
             GROUP BY point_time
         )
@@ -526,7 +569,8 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
         DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
     {
-        var route = await QueryStoreTrendRouting.ResolveAsync(_dataSource, cancellationToken);
+        var (_, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var route = await QueryStoreTrendRouting.ResolveAsync(coverage, _dataSource, cancellationToken);
         List<QueryTrendPoint> points;
         if (route.UseRollup)
         {
@@ -575,6 +619,10 @@ public sealed partial class ViewerDataService
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            /* Stays on the clamp (ReadsTableAsync, not ResolveReadAsync): _wide can hold legacy NULL
+               interval_start_time_utc rows (QueryStoreCollector.cs:805), which make the table differ from raw
+               for this read, and below raw's floor they can't be checked without a probe that walks every
+               server's rows. */
             var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
                 connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreDurationTrendMinWindow,
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);

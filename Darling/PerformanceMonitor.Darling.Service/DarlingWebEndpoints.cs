@@ -16,6 +16,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -26,6 +27,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -67,24 +69,24 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public static class DarlingWebEndpoints
 {
-    /// <summary>#4442 scope 2: the process-lifetime read-latency accumulator, set once from <see cref="MapAll"/>'s
-    /// DI singleton. Static because <see cref="RunComposedPanelAsync"/> is shared, unchanged, with the MCP
-    /// run_custom_view_panel tool -- a static field is the seam that lets this recording land without adding a
-    /// parameter to that shared, static method's signature (and touching its MCP call site, which is a later,
-    /// separate change). Null in any context that never calls <see cref="MapAll"/> (a unit test exercising
-    /// RunComposedPanelAsync directly), so recording is always optional, never required.</summary>
-    private static ReadLatencyAccumulator? s_readLatency;
-
-    /// <summary>The logger recording failures are reported through, at Debug -- never at a level an operator
-    /// would see, since a recording failure is never a request failure.</summary>
-    private static ILogger? s_readLatencyLogger;
-
     /// <summary>#4442, test-only: one extra <c>/api/read/*</c> dispatch entry a test can register so a
     /// real <see cref="PostgresException"/> with SqlState 57014 travels through the SAME dispatch loop
     /// every other route uses, rather than a hand-called <c>Record</c> standing in for the wiring. <c>internal</c>
     /// and set ONLY from <c>Darling.Tests</c> (grep proves no production caller ever assigns it); null in every
-    /// production run, so <see cref="BuildReadDispatch"/> adds nothing extra unless a test opted in.</summary>
-    internal static (string Name, ReadToolHandler Handler)? s_testOnlyExtraDispatchEntry;
+    /// production run, so <see cref="BuildReadDispatch"/> adds nothing extra unless a test opted in.
+    /// #4782: held per async flow, not process-wide. Only the async flow that set the entry (and what that flow
+    /// starts or awaits) sees it, so a test class running at the same time in another flow builds its own
+    /// dispatch without the extra route. A plain static was seen by all of them, and a test that compares the
+    /// dispatch keys with the Custom Views catalog failed on the route it did not expect.</summary>
+    private static readonly AsyncLocal<(string Name, ReadToolHandler Handler)?> s_testOnlyExtraDispatchEntry = new();
+
+    /// <summary>The test-only extra dispatch entry (#4442, #4782). Reads and writes the current async flow's
+    /// value only; see the note on the backing field.</summary>
+    internal static (string Name, ReadToolHandler Handler)? TestOnlyExtraDispatchEntry
+    {
+        get => s_testOnlyExtraDispatchEntry.Value;
+        set => s_testOnlyExtraDispatchEntry.Value = value;
+    }
 
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
     /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
@@ -167,9 +169,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <param name="Collecting">The same answer as one bit, for a check that wants no string comparison at all.</param>
     /// <param name="Step">Which startup step failed (<c>configuration</c>, <c>managed_store</c>, <c>store</c>); omitted otherwise.</param>
     /// <param name="Attempt">The retry in flight and the cap it counts against; both omitted outside <c>degraded</c>.</param>
-    /// <param name="Attempts">The attempt cap the retry budget allows.</param>
+    /// <param name="Attempts">The attempt cap the retry budget allows; omitted once the fast budget is spent
+    /// and the service is retrying every 60 seconds with no cap (#4508), rather than showing a spent cap as if
+    /// it still bounded anything.</param>
     /// <param name="Detail">The failure message, as the service's own log line reports it; omitted when there is none.</param>
     /// <param name="SinceUtc">When this state began — collection start, or when the failure was last observed.</param>
+    /// <param name="Sustained">True once the step has spent its 120 s fast budget and retries with no cap (#4508); omitted otherwise.</param>
+    /// <param name="RetryEverySeconds">The sustained retry interval, <c>StartupFailureTriage.SustainedRetryDelay</c>; omitted outside that state.</param>
     internal sealed record PingReport(
         [property: JsonIgnore] int HttpStatus,
         [property: JsonPropertyName("status")] string Status,
@@ -178,7 +184,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         [property: JsonPropertyName("attempt")] int? Attempt,
         [property: JsonPropertyName("attempts")] int? Attempts,
         [property: JsonPropertyName("detail")] string? Detail,
-        [property: JsonPropertyName("since")] DateTime? SinceUtc);
+        [property: JsonPropertyName("since")] DateTime? SinceUtc,
+        [property: JsonPropertyName("sustained")] bool? Sustained,
+        [property: JsonPropertyName("retryEverySeconds")] int? RetryEverySeconds);
 
     /// <summary>Omits the null members so each ping state carries only the fields that mean something in it —
     /// a <c>degraded</c> body has an attempt count and an <c>ok</c> body does not, rather than every body
@@ -228,30 +236,32 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         if (snapshot is null)
         {
-            return new PingReport(StatusCodes.Status200OK, "starting", false, null, null, null, null, null);
+            return new PingReport(StatusCodes.Status200OK, "starting", false, null, null, null, null, null, null, null);
         }
 
         return snapshot.Phase switch
         {
             CollectorRuntimeState.CollectorPhase.Collecting =>
-                new PingReport(StatusCodes.Status200OK, "ok", true, null, null, null, null, snapshot.AsOfUtc),
+                new PingReport(StatusCodes.Status200OK, "ok", true, null, null, null, null, snapshot.AsOfUtc, null, null),
 
             CollectorRuntimeState.CollectorPhase.Retrying =>
                 new PingReport(
                     StatusCodes.Status503ServiceUnavailable, "degraded", false, DescribeStartupStep(snapshot.Step),
-                    snapshot.Attempt, snapshot.Attempts, snapshot.Detail, snapshot.AsOfUtc),
+                    snapshot.Attempt, snapshot.Sustained ? null : snapshot.Attempts, snapshot.Detail, snapshot.AsOfUtc,
+                    snapshot.Sustained ? true : null,
+                    snapshot.Sustained ? (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds : null),
 
             CollectorRuntimeState.CollectorPhase.Stopped =>
                 new PingReport(
                     StatusCodes.Status503ServiceUnavailable, "stopped", false, DescribeStartupStep(snapshot.Step),
-                    null, null, snapshot.Detail, snapshot.AsOfUtc),
+                    null, null, snapshot.Detail, snapshot.AsOfUtc, null, null),
 
             /* Default-deny to the loudest answer: a phase this method does not know about is a phase whose
                health it cannot vouch for, and the whole point of the route is that it does not report healthy
                on a state it has not reasoned about. */
             _ => new PingReport(
                 StatusCodes.Status503ServiceUnavailable, "stopped", false, DescribeStartupStep(snapshot.Step),
-                null, null, snapshot.Detail, snapshot.AsOfUtc),
+                null, null, snapshot.Detail, snapshot.AsOfUtc, null, null),
         };
     }
 
@@ -280,17 +290,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null)
     {
-        /* #4442 scope 2: RunComposedPanelAsync is a static method shared with the MCP run_custom_view_panel
-           tool (Mcp/DarlingMcpCustomViewTools.cs) and carries no instance state, so it cannot take the
-           accumulator as an ordinary parameter without touching that MCP call site too -- out of scope for
-           this change (MCP recording is a later step). A process-lifetime static set once here, from the
-           one DI singleton, is the seam: every MapAll call (there is exactly one, at host startup) sets it
-           before any route can be hit. Null-safe throughout, so a caller that never sets it up (a test that
-           builds MapAll's routes directly) simply records nothing. */
-        s_readLatency = readLatency;
-        s_readLatencyLogger = logger;
+        /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
+           logger this call was given, held in a per-call object that the two record sites close over: the
+           /api/read/* loop below, and the /api/compose/run route, which hands it to the shared
+           RunComposedPanelAsync (the MCP run_custom_view_panel tool hands that runner its own host's seat).
+           They used to be process-wide statics that every MapAll call overwrote, so a second server set up in
+           the same process (six test classes call MapAll, and xUnit runs classes in parallel) took the samples
+           of a server built before it. Production calls MapAll once, so nothing changes there. A caller with
+           no accumulator (a test that maps the routes directly) records nothing. */
+        var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger);
 
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -307,7 +317,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            persisted-finding read — need only the store; the optional plan fetcher is for the excluded
            analyze/drill path, but the logger is also the analysis service's own logger (#4316)). Shared across
            requests, like the MCP host's singleton. */
-        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache);
+        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache, analyzerConfig: analyzerConfig)
+        {
+            SeparatelyMonitoredResolver = registryState is null
+                ? null
+                : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct)
+        };
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
@@ -316,7 +331,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var worstCount = Math.Max(0, QueryInt(context, "worst_count", null, DarlingFleetReader.DefaultWorstCount));
             var now = DateTime.UtcNow;
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
-                postgres, now.AddHours(-hours), now, now, worstCount, context.RequestAborted);
+                postgres, now.AddHours(-hours), now, now, worstCount,
+                separatelyMonitored: registryState is null
+                    ? null
+                    : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
+                logger: logger,
+                cancellationToken: context.RequestAborted);
             return Results.Json(result, DarlingFleetReader.JsonOptions);
         });
 
@@ -328,7 +348,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         app.MapGet("/api/ag", async (HttpContext context) =>
         {
             var result = await DarlingAgReader.GetAgHealthAsync(
-                postgres, null, DateTime.UtcNow, context.RequestAborted);
+                postgres, null, DateTime.UtcNow, cancellationToken: context.RequestAborted);
             return Results.Json(result, DarlingAgReader.JsonOptions);
         });
 
@@ -343,7 +363,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
-        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig))
+        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig, registryState))
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
@@ -371,7 +391,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        routing this through FormatError first would make ToHttpResult's classifier re-derive
                        from text what this catch already knows structurally, and log it a second time. */
                     DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
-                    RecordWebReadLatency(name, ReadOutcomeClassifier.Classify(ex, context.RequestAborted), stopwatch.ElapsedMilliseconds);
+                    RecordWebReadLatency(readLatencyRecorder, name, ReadOutcomeClassifier.Classify(ex, context.RequestAborted), stopwatch.ElapsedMilliseconds);
                     return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
 
@@ -383,13 +403,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
                     ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
                     : ReadOutcome.Ok;
-                RecordWebReadLatency(name, webOutcome, stopwatch.ElapsedMilliseconds);
+                RecordWebReadLatency(readLatencyRecorder, name, webOutcome, stopwatch.ElapsedMilliseconds);
 
                 return ToHttpResult(result, "/api/read/" + name, logger, stopwatch.ElapsedMilliseconds);
             });
         }
 
-        MapCustomViews(app, postgres, logger);
+        MapCustomViews(app, postgres, logger, readLatencyRecorder);
         MapCustomAlerts(app, postgres, logger);
         MapMuteRules(app, postgres, logger);
 
@@ -422,7 +442,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="ValidateDefinition"/> (the authority) before any write; the store adds optimistic concurrency +
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
-    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder)
     {
         var store = new CustomViewStore(postgres);
 
@@ -581,7 +601,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
                the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
-            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted);
+            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder);
             if (outcome.Payload is not null)
             {
                 return JsonNodeResult(outcome.Payload);
@@ -840,7 +860,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         var store = new PgMuteRuleStore(postgres);
 
-        /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry. The
+        /* A server_id in a create or update body must name a registered server, the same check the MCP tools
+           make, so the web cannot write a rule keyed on an id that mutes nothing. */
+        Func<int, Task<string?>> serverNameLookup = id => Mcp.DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id);
+
+        /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry; 409 with
+           status already_exists (and the existing rule's id) when an enabled, unexpired rule already has the same
+           scope, patterns and expiry, so a client retry leaves one rule (#4734). The
            body is one JSON object of the get_mute_rules field shape; {} is legal and creates a rule that mutes
            EVERY alert (the same whole-fleet silence an argument-less create_mute_rule builds — scope fields
            narrow, they are not required). application/json required. */
@@ -852,7 +878,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context));
+            var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context), serverNameLookup);
             return MuteRuleToolResult(result, "/api/mute-rules", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
         });
 
@@ -869,7 +895,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context));
+            var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context), serverNameLookup);
             return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
 
@@ -935,8 +961,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>
     /// Maps a mute-rule verb's returned string onto the HTTP status the web surface answers with, leaving the
-    /// body untouched: <c>invalid</c> → 400, <c>not_found</c> → 404, any other envelope (created / updated /
-    /// unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception envelope
+    /// body untouched: <c>invalid</c> → 400, <c>not_found</c> → 404, <c>already_exists</c> → 409 (#4734: a create
+    /// that repeats a rule already in force is a conflict, the status the views and custom-rule routes give theirs;
+    /// the body is still the verb's envelope, carrying the existing rule's id), any other envelope (created /
+    /// updated / unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception envelope
     /// (<c>McpHelpers.FormatError</c>, <c>{"status":"error", ...}</c>) → 500 (classified by
     /// <see cref="ClassifyToolResponse"/>, like the read surface, and BEFORE the status switch below so the
     /// failure word is never read as a verb outcome); any other bare string is a shape the cores do not produce and maps to the client-correctable
@@ -967,6 +995,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 "invalid" => StatusCodes.Status400BadRequest,
                 "not_found" => StatusCodes.Status404NotFound,
+                "already_exists" => StatusCodes.Status409Conflict,
                 _ => successStatus,
             };
         }
@@ -1027,22 +1056,35 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>#4283 review round 1 (M1): the PostgresException SQLSTATEs a Custom Views panel author can act
     /// on by editing their own panel — a statement_timeout cancel, or a class-22/class-42 error other than
-    /// 42501 (insufficient_privilege, which names a STORE role problem, not the panel). Everything else (28P01
-    /// auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000 unknown database, ...) is a STORE
-    /// fault the author cannot fix.</summary>
+    /// 42501 (insufficient_privilege, which names a STORE role problem, not the panel), or (#4605) a 53400
+    /// <c>configuration_limit_exceeded</c> — the viewer/mcp role's <c>temp_file_limit</c> refusing the panel's
+    /// own on-disk spill, which the author fixes the same way they fix a statement_timeout cancel: narrow the
+    /// panel. Everything else (28P01 auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000
+    /// unknown database, ...) is a STORE fault the author cannot fix.</summary>
     internal static bool IsComposeRunAuthorActionable(string? sqlState) =>
         sqlState == "57014"
+        || sqlState == ReadOutcomeClassifier.ConfigurationLimitExceeded
         || (sqlState is { Length: 5 } && sqlState.StartsWith("22", StringComparison.Ordinal))
         || (sqlState is { Length: 5 } && sqlState.StartsWith("42", StringComparison.Ordinal) && sqlState != "42501");
+
+    /// <summary>#4605: the caller-facing text for a composed read the viewer/mcp role's <c>temp_file_limit</c>
+    /// refused (SQLSTATE 53400) — named separately from the generic "Query failed: {MessageText}" text
+    /// (#4283) because the store's own wording ("temporary file size exceeds temp_file_limit") names an
+    /// internal setting the panel author has no way to change; this names the ACTIONS they can take
+    /// instead.</summary>
+    internal const string TempFileLimitExceededMessage =
+        "This panel needed more temporary disk space than a dashboard read may use. Narrow the time window, choose an hourly or daily grain, or add a filter.";
 
     /// <summary>#4293 round 2 (R2-L1, R2-L2): the compose runner's PostgresException decision, pulled out of the
     /// catch so a test runs it. <see cref="IsComposeRunAuthorActionable"/>'s SQLSTATEs count only at ERROR
     /// severity: a FATAL or PANIC is a connection-level store fault whatever its class (a startup parameter the
     /// server rejects answers FATAL 22023 or 42704, which names the configured setting and its value).</summary>
     internal static ComposeRunOutcome FromPostgresException(PostgresException ex) =>
-        IsComposeRunAuthorActionable(ex.SqlState) && ex.InvariantSeverity is not ("FATAL" or "PANIC")
-            ? ComposeRunOutcome.AuthorQueryError($"Query failed: {ex.MessageText}", ex.SqlState)
-            : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+        ex.SqlState == ReadOutcomeClassifier.ConfigurationLimitExceeded && ex.InvariantSeverity is not ("FATAL" or "PANIC")
+            ? ComposeRunOutcome.AuthorQueryError(TempFileLimitExceededMessage, ex.SqlState)
+            : IsComposeRunAuthorActionable(ex.SqlState) && ex.InvariantSeverity is not ("FATAL" or "PANIC")
+                ? ComposeRunOutcome.AuthorQueryError($"Query failed: {ex.MessageText}", ex.SqlState)
+                : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
     /// <summary>
     /// Compile-and-run a single composed panel spec (Custom Views v2, #1563) against <paramref name="postgres"/>
@@ -1055,9 +1097,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// value bound — and the query runs under the pool's role <c>statement_timeout</c> backstop. A cancellation
     /// (<see cref="OperationCanceledException"/>) is deliberately NOT caught: it propagates to the caller as a
     /// client-abort, exactly as the endpoint has always done.
+    ///
+    /// <para><paramref name="readLatency"/> (#4782) is the read-latency seat this run is recorded into: the web
+    /// route passes the one its own <see cref="MapAll"/> call built, the MCP tool the one its host registered.
+    /// Null records nothing (a test calling the runner directly).</para>
     /// </summary>
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
-        NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
+        ReadLatencyRecorder? readLatency = null)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -1068,7 +1115,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
         var outcome = await RunComposedPanelCoreAsync(postgres, body, cancellationToken);
-        RecordComposeLatency(body, outcome, cancellationToken, stopwatch.ElapsedMilliseconds);
+        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
         return outcome;
     }
 
@@ -1081,19 +1128,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// name="name"/> is already a bounded-cardinality route label (the dispatch table's own tool name, never
     /// caller-supplied text). Never throws into the request: swallowed and logged at Debug, exactly like the
     /// compose path's own recording.</summary>
-    private static void RecordWebReadLatency(string name, ReadOutcome outcome, long elapsedMs)
+    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs)
     {
         try
         {
-            s_readLatency?.Record(ReadSurface.Web, name, outcome, elapsedMs);
+            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs);
         }
         catch (Exception ex)
         {
-            s_readLatencyLogger?.LogDebug(ex, "Read-latency recording failed for /api/read/{Route}.", name);
+            recorder.Logger?.LogDebug(ex, "Read-latency recording failed for /api/read/{Route}.", name);
         }
     }
 
-    private static void RecordComposeLatency(JsonObject body, ComposeRunOutcome outcome, System.Threading.CancellationToken cancellationToken, long elapsedMs)
+    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken)
     {
         try
         {
@@ -1106,25 +1153,28 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                author could not have caused -- classified the same way the web loop classifies any exception.
                outcome.AuthorSqlState is set only for an author-actionable PostgresException (#4283 M1/#4293
                R2), and that allow-list includes 57014 -- a panel query hitting the store's own
-               statement_timeout is a Timeout sample even though it answers the caller at 400, not 500.
-               Anything else that did not produce a payload (a validation BadRequest with no exception at
-               all, or the generic-Exception ServerError arm) is Error, unless the caller's own token already
-               explains it. */
+               statement_timeout is a Timeout sample even though it answers the caller at 400, not 500 -- and
+               (#4605) 53400, the viewer/mcp role's temp_file_limit refusing the panel's own spill, which is a
+               Limit sample for the same reason. Anything else that did not produce a payload (a validation
+               BadRequest with no exception at all, or the generic-Exception ServerError arm) is Error, unless
+               the caller's own token already explains it. */
             var readOutcome = outcome.Payload is not null
                 ? ReadOutcome.Ok
                 : outcome.AuthorSqlState == CollectorFaultCancelOrigin.QueryCanceled
                     ? ReadOutcome.Timeout
-                    : outcome.Fault is not null
-                        ? ReadOutcomeClassifier.Classify(outcome.Fault, cancellationToken)
-                        : cancellationToken.IsCancellationRequested
-                            ? ReadOutcome.Cancelled
-                            : ReadOutcome.Error;
+                    : outcome.AuthorSqlState == ReadOutcomeClassifier.ConfigurationLimitExceeded
+                        ? ReadOutcome.Limit
+                        : outcome.Fault is not null
+                            ? ReadOutcomeClassifier.Classify(outcome.Fault, cancellationToken)
+                            : cancellationToken.IsCancellationRequested
+                                ? ReadOutcome.Cancelled
+                                : ReadOutcome.Error;
 
-            s_readLatency?.Record(ReadSurface.Compose, measureKey, readOutcome, elapsedMs);
+            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, readOutcome, elapsedMs);
         }
         catch (Exception ex)
         {
-            s_readLatencyLogger?.LogDebug(ex, "Read-latency recording failed for a composed-panel run.");
+            recorder?.Logger?.LogDebug(ex, "Read-latency recording failed for a composed-panel run.");
         }
     }
 
@@ -1223,7 +1273,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            relation. Probed lazily, cached per data source. */
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage);
+        /* #4605: Query Store never takes the recent-window rollup route (it can't be exact,
+           even on the corrected hourly), so its own bounded fast path is the wide table (V145) — decided
+           HERE, in the runner, before compiling, because ComposeCompiler.Compile stays pure and never opens
+           a connection. Only checked for a panel that actually reads query_store_stats; every other panel
+           pays nothing extra. */
+        var wideResolution = plan!.Measure.SourceTable == "query_store_stats"
+            ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken)
+            : default;
+        var queryStoreWideEligible = wideResolution.Eligible;
+
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -1260,6 +1320,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 payload["notice"] = notice;
             }
 
+            /* #4689: the interval table served this panel from a start later than the window's, so say where it
+               starts and why. Absent when the table did not serve or nothing was cut. */
+            if (queryStoreWideEligible && wideResolution.WideStart is DateTime historyStart && historyStart > start)
+            {
+                payload["query_store_history_starts"] = historyStart.ToString("o");
+                payload["query_store_history_note"] = QueryStoreHistoryNote(historyStart, wideResolution.Bound, wideResolution.SettingServer);
+                if (wideResolution.SettingServer is not null)
+                {
+                    payload["query_store_history_set_by"] = wideResolution.SettingServer;
+                }
+            }
+
             return ComposeRunOutcome.Ok(payload);
         }
         catch (PostgresException ex)
@@ -1280,6 +1352,120 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return ComposeRunOutcome.ServerError($"Error running query: {ex.Message}");
         }
     }
+
+    /// <summary>The #4605 minimum window: below this, the wide table's own gate round trips
+    /// (one per server, each a fixed handful of small reads) cost more than the read they would save, so a
+    /// composed Query Store panel stays raw regardless of coverage — the same pattern
+    /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> already applies to the grid. A composed panel
+    /// may span the WHOLE FLEET rather than one server, so this site keeps its own constant rather than
+    /// sharing the grid's; it starts at the grid's own measured 12h pending a composer-specific measurement.</summary>
+    internal static readonly TimeSpan ComposeQueryStoreWideMinWindow = QueryStoreIntervalWide.GridWideMinWindow;
+
+    /// <summary>#4617: named so the MCP read census (<see cref="Darling.Tests.McpReadCommandTimeoutTests"/>)
+    /// recognises the <c>NpgsqlCommand(string, connection)</c> construction below as a store read rather
+    /// than an unrecognised receiver.</summary>
+    private const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
+
+    /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
+    private const string QueryStoreWideServerIdsSql =
+        "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))";
+
+    /// <summary>
+    /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
+    /// may read <c>collect.query_store_interval_wide</c> (V145) instead of deduping raw — decided here, in the
+    /// runner, BEFORE <see cref="ComposeCompiler.Compile"/> runs, because the compiler stays pure and never
+    /// opens a connection. Reuses the pure <see cref="QueryStoreIntervalWide.UseTable"/> decision (through
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>, which also runs clause 6 — no legacy row in the
+    /// window — and the literal-end-before-applied_through refusal) for EVERY server in scope: a fleet panel
+    /// (null/empty <paramref name="serverScope"/>) must pass for every server the store has rows for, or the
+    /// hybrid would silently under-read a server whose table coverage lags. Any fault, a schema below V145, or
+    /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
+    /// the same rule #3953 already applies to the single-server reads.
+    /// </summary>
+    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer)> ResolveQueryStoreWideEligibleAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
+        DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken)
+    {
+        if (end - start < ComposeQueryStoreWideMinWindow)
+        {
+            return default;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+
+            int schemaVersion;
+            await using (var probe = new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                schemaVersion = (int)(await probe.ExecuteScalarAsync(cancellationToken))!;
+            }
+
+            if (schemaVersion < 145)
+            {
+                return default;
+            }
+
+            var wideServers = new List<(int Id, string Name)>();
+            await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                servers.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
+                    Value = serverScope is { Count: > 0 } ? (object)serverScope.ToArray() : DBNull.Value,
+                });
+                await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
+                }
+            }
+
+            if (wideServers.Count == 0)
+            {
+                return default;
+            }
+
+            /* #4689: every server in scope reads from ONE common start, the latest of the per-server read
+               starts, so each is exact from there; Bound and SettingServer are the bound and the server_name (the spelling
+               the panel's rows carry) of the server that set it. */
+            var wideStart = start;
+            var bound = QueryStoreIntervalWide.WideStartBound.Window;
+            string? settingServer = null;
+            foreach (var (serverId, serverName) in wideServers)
+            {
+                var plan = await QueryStoreIntervalWide.ResolveReadAsync(
+                    connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
+                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
+                if (!plan.UseTable)
+                {
+                    return default;
+                }
+
+                if (plan.ReadStart > wideStart)
+                {
+                    wideStart = plan.ReadStart;
+                    bound = plan.StartBound;
+                    settingServer = serverName;
+                }
+            }
+
+            return (true, wideStart, bound, settingServer);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* #4508/#4283 census: never carry ex.Message into a web-surface trace; the exception's type name
+               alone is enough to distinguish a fault here (this check never answers an HTTP response either
+               way, but the census sweeps every ex.Message in this file regardless of destination). */
+            System.Diagnostics.Trace.TraceWarning($"#4605 compose Query Store wide-table eligibility check failed; reading raw: {ex.GetType().Name}");
+            return default;
+        }
+    }
+
+    /// <summary>#4689: the note a Compose Query Store panel carries when the interval table served it from a
+    /// start later than the window's. Same wording as the MCP top-queries table route.</summary>
+    internal static string QueryStoreHistoryNote(DateTime historyStart, QueryStoreIntervalWide.WideStartBound bound, string? settingServer = null) =>
+        QueryStoreIntervalWide.HistoryNote(historyStart, bound, manyServers: true, settingServer);
 
     /// <summary>Maps a failed (non-<see cref="ComposeRunOutcome.Payload"/>) <see cref="ComposeRunOutcome"/> onto
     /// its HTTP answer — factored out of the <c>/api/compose/run</c> route (the <see cref="ToHttpResult"/> /
@@ -1426,13 +1612,34 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         NpgsqlDataSource postgres, PanelPlan plan, ComposeRunContext runContext, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
     {
         var annotations = new JsonArray();
-        foreach (var (source, compiled) in ComposeCompiler.CompileAnnotations(plan, runContext))
+        var serverClocks = plan.Annotations.Any(a => a.Frame == AnnotationClockFrame.ServerLocal)
+            ? await ReadServerClocksAsync(postgres, runContext, composedQuerySeconds, cancellationToken)
+            : ComposeCompiler.NoServerClocks;
+        foreach (var (source, compiled) in ComposeCompiler.CompileAnnotations(plan, runContext, serverClocks))
         {
             var events = await RunComposedQueryAsync(postgres, compiled, composedQuerySeconds, cancellationToken);
             annotations.Add(new JsonObject { ["source"] = source, ["events"] = events });
         }
 
         return annotations;
+    }
+
+    /// <summary>Each panel server's clock, read before a server-local annotation query so that query can place
+    /// every marker by the offset in force on its own date (#4821). Same pool and same timeout as the
+    /// annotation queries; a failure surfaces through the caller's try/catch the same way.</summary>
+    private static async Task<IReadOnlyDictionary<string, PerformanceMonitor.Analysis.Baselines.ServerClock>> ReadServerClocksAsync(
+        NpgsqlDataSource postgres, ComposeRunContext runContext, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
+    {
+        var compiled = ComposeCompiler.CompileServerClockRead(runContext);
+        await using var command = postgres.CreateCommand(compiled.Sql);
+        command.CommandTimeout = composedQuerySeconds;
+        foreach (var parameter in compiled.Parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await ComposeCompiler.ReadServerClocksAsync(reader, cancellationToken);
     }
 
     private static JsonValue? DbValueToJson(object value) => value switch
@@ -1555,14 +1762,35 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>What a stored DASHBOARD definition's root may carry.</summary>
     private static readonly IReadOnlySet<string> s_dashboardRootKeys = new HashSet<string>(StringComparer.Ordinal)
     {
-        "kind", "panels", "variables", "range",
+        "kind", "panels", "variables", "range", "refresh",
     };
 
     /// <summary>What a stored NOTEBOOK definition's root may carry (design D7).</summary>
     private static readonly IReadOnlySet<string> s_notebookRootKeys = new HashSet<string>(StringComparer.Ordinal)
     {
-        "kind", "cells", "variables", "range",
+        "kind", "cells", "variables", "range", "refresh",
     };
+
+    /// <summary>The page auto-refresh choices a stored definition's optional root <c>refresh</c> may carry (#4666).</summary>
+    internal static readonly string[] RefreshChoices = { "off", "1m", "5m", "15m" };
+
+    /// <summary>Validates the optional root <c>refresh</c> key: absent is fine (the page type's default applies),
+    /// anything else must be one of <see cref="RefreshChoices"/>.</summary>
+    private static string? RefreshError(JsonObject rootObject, string prefix)
+    {
+        if (!rootObject.ContainsKey("refresh"))
+        {
+            return null;
+        }
+
+        var node = rootObject["refresh"];
+        if (node is JsonValue value && value.TryGetValue<string>(out var text) && Array.IndexOf(RefreshChoices, text) >= 0)
+        {
+            return null;
+        }
+
+        return $"{prefix}.refresh must be one of \"off\", \"1m\", \"5m\", \"15m\".";
+    }
 
     /// <summary>What a markdown cell may carry: its discriminator and its prose.</summary>
     private static readonly IReadOnlySet<string> s_markdownCellKeys = new HashSet<string>(StringComparer.Ordinal)
@@ -1740,6 +1968,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         if (rangeError is not null)
         {
             return DefinitionValidation.Fail(rangeError);
+        }
+
+        if (RefreshError(rootObject, "definition") is string refreshError)
+        {
+            return DefinitionValidation.Fail(refreshError);
         }
 
         /* Strict keys inside the shared root objects (#2733) — after the parsers, so a structural error
@@ -2004,6 +2237,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         if (rangeError is not null)
         {
             return DefinitionValidation.Fail(rangeError);
+        }
+
+        if (RefreshError(rootObject, "notebook") is string refreshError)
+        {
+            return DefinitionValidation.Fail(refreshError);
         }
 
         /* Strict keys inside the shared root objects (#2733) — same placement rationale as the dashboard arm. */
@@ -2373,7 +2611,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_daily_summary_range"] = R(CatOverview, "One daily health summary per collected day over a span of days - the Performance Calendar's month grid.", PServer(), PInt("days_back", 30), PAsOf()),
             ["get_fleet_overview"] = R(CatOverview, "The banded cross-server fleet roll-up.", PHours(DefaultFleetHours), PTextDefault("detail", "summary"), PBool("worst_only", false), PText("band")),
             ["get_sweep_reports"] = R(CatOverview, "The scheduled Fleet Sweep Reports: the sweep timeline for the window, the newest sweep in full, and the watch-item worklist - or one sweep by sweep_id (a string; the ids do not survive a JSON number round trip).", PHours(1), PAsOf(), PText("sweep_id"), PText("watch_state")),
-            ["get_ag_health"] = R(CatOverview, "Availability Group topology: replicas and per-database secondary state.", PServer()),
+            ["get_ag_health"] = R(CatOverview, "Availability Group topology: replicas and per-database secondary state.", PServer(), PLimit(DarlingMcpAgTools.DefaultGroupLimit)),
             ["get_store_metrics"] = R(CatOverview, "The monitoring store's own size/compression/growth (self-metrics): a summary by default, object_kind to list one kind, an exact object_name for one object's daily series.", PInt("days_back", 30), PText("object_kind"), PText("object_name"), PLimit(DarlingMcpStoreMetricsTools.DefaultLimit)),
             ["get_store_log"] = R(CatOverview, "What the monitoring store's OWN PostgreSQL server log recorded - a per-class census with the capture denominator beside it, not the lines. Deliberately unbanded.", PHours(24), PLimit(DarlingMcpStoreLogTools.DefaultRetainedLimit), PAsOf()),
             ["get_store_query_stats"] = R(CatOverview, "The monitoring store's OWN SQL statements ranked by server-side cost (pg_stat_statements), split by the role that ran them (on a managed store: the web viewer, MCP tools, the Darling Viewer, or the service itself).", PText("role"), PText("order_by"), PTop(DarlingMcpStoreQueryStatsTools.DefaultTop), PBool("full_text", false)),
@@ -2489,7 +2727,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             string? defaultAggregate = m.Kind == MeasureKind.Ratio ? null : MeasureCatalog.WireName(m.DefaultTimeAgg);
 
-            measures.Add(new JsonObject
+            var node = new JsonObject
             {
                 ["key"] = m.Key,
                 ["displayName"] = m.DisplayName,
@@ -2506,7 +2744,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 /* Per-server-type availability (design D4), off the owning collector's AppliesTo gate — so the
                    composer can grey a measure a given target can't collect (e.g. Agent measures need msdb). */
                 ["appliesTo"] = BuildAppliesToNode(m.SourceTable),
-            });
+            };
+
+            /* #4653: only a measure that really divides carries a suffix; omitted otherwise, so the payload grows
+               by the ratio measures alone (editor.js reads `labelSuffix || ""`, so an absent field renders the same). */
+            var labelSuffix = MeasureCatalog.LabelSuffix(m);
+            if (labelSuffix.Length > 0)
+            {
+                node["labelSuffix"] = labelSuffix;
+            }
+
+            measures.Add(node);
         }
 
         var dimensions = new JsonArray();
@@ -3072,7 +3320,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// gets the tool's own "unavailable" envelope rather than a null-reference throw if that one entry is ever
     /// invoked without it.</para>
     /// </summary>
-    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null)
+    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null, MonitoredServerRegistryState? registryState = null)
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
@@ -3117,7 +3365,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
                though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
                tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
-            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, c.RequestAborted),
+            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, c.RequestAborted),
             ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
                store's tools/list-driven call under the shared response budget), but the web viewer has
@@ -3125,7 +3373,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                budget cut does not silently shrink what the viewer renders. */
             ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, cancellationToken: c.RequestAborted),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
@@ -3275,11 +3523,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : MissingParam("query_hash"),
 
             /* ── health / overview ── */
-            ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), c.RequestAborted),
-            ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), c.RequestAborted),
-            ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), c.RequestAborted),
-            ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), c.RequestAborted),
-            ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c), c.RequestAborted),
+            ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), registryState, logger, c.RequestAborted),
+            ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), registryState, logger, c.RequestAborted),
+            ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), registryState, logger, c.RequestAborted),
+            ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
+            ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c), Rows(c, "limit", DarlingMcpAgTools.DefaultGroupLimit), c.RequestAborted),
             ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), c.RequestAborted),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
@@ -3314,7 +3562,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                for the identical reason - rather than silently dropping to the new MCP default. 200 is well
                under both McpHelpers.MaxTop and MaxRowLimit (1000 each), so the value is never refused or
                reclamped by either validation layer. */
-            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200), cancellationToken: c.RequestAborted),
+            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200), registryState, c.RequestAborted),
             ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), cancellationToken: c.RequestAborted),
 
             /* ── plan cache / scheduler ── */
@@ -3345,8 +3593,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         };
 
         /* #4442: the test-only extra entry, added ONLY when a test set it -- never in a production
-           run, since s_testOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. */
-        if (s_testOnlyExtraDispatchEntry is { } extra)
+           run, since TestOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. #4782: it is
+           per async flow, so only the flow that set it gets the extra key; a test running at the same time
+           in another flow builds its dispatch without it. */
+        if (TestOnlyExtraDispatchEntry is { } extra)
         {
             dispatch[extra.Name] = extra.Handler;
         }

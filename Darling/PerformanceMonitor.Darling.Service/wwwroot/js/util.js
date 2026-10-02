@@ -144,15 +144,60 @@ export function noticeStrip(message) {
  * a tab cannot show a friendly notice on one panel and the raw string on its neighbour.
  */
 export function readErrorStrip(message) {
-  const m = /exceeds maximum of (\d+) hours/.exec(message || "");
-  if (m) {
-    const hours = Number(m[1]);
-    const days = Math.round(hours / 24);
-    return noticeStrip(
-      "This view keeps up to " + hours + " hours (" + days + " day" + (days === 1 ? "" : "s") +
-      ") of history — pick a shorter range.");
+  const hours = keptHoursOf(message);
+  if (hours != null) {
+    return noticeStrip(keptHistoryText(hours) + " — pick a shorter range.");
   }
   return errorStrip(message);
+}
+
+/* The M of a "window too wide" refusal (`... exceeds maximum of M hours ...`), or null for any other message.
+   A `top` refusal (`exceeds maximum of 1000.`) carries no " hours" and so is never one. */
+function keptHoursOf(message) {
+  const m = /exceeds maximum of (\d+) hours/.exec(message || "");
+  return m ? Number(m[1]) : null;
+}
+
+function daysText(hours) {
+  const days = Math.round(hours / 24);
+  return days + " day" + (days === 1 ? "" : "s");
+}
+
+function keptHistoryText(hours) {
+  return "This view keeps up to " + hours + " hours (" + daysText(hours) + ") of history";
+}
+
+/**
+ * Run a read, and when it refuses the page's window because it keeps less history than that, ask it again ONCE
+ * for the history it does keep. The Range select offers 30 days, and most reads keep 7: before this, each of
+ * those panels showed only readErrorStrip's "pick a shorter range" notice and no data, beside panels whose reads
+ * accept 30 days. Now the panel shows the last M hours with keptWindowStrip's notice saying so.
+ *
+ * `fetchWith(params)` is the read itself (readTool, or apiGet over a raw path), so the descriptor loader and the
+ * hand-built server-tab composites share this one rule. The retry happens only for the window refusal and only
+ * when `params.hours` asked for more than M, so a read that accepts the window makes one call, a second refusal
+ * is never retried again, and every other error comes back unchanged. A successful retry carries
+ * `keptHours: M`: the caller shows the notice and draws its chart axis over M hours, not the asked window.
+ */
+export async function readWithinKeptHistory(fetchWith, params) {
+  const res = await fetchWith(params);
+  if (res.kind !== "error") return res;
+  const kept = keptHoursOf(res.message);
+  const asked = Number(params && params.hours);
+  if (kept == null || !(kept >= 1 && asked > kept)) return res;
+  const retry = await fetchWith({ ...params, hours: kept });
+  return retry.kind === "data" || retry.kind === "empty" ? { ...retry, keptHours: kept } : retry;
+}
+
+/** readWithinKeptHistory over a read-only tool by its MCP name. `signal`: see apiGet (#4191). */
+export function readToolWithinKeptHistory(tool, params, signal) {
+  return readWithinKeptHistory((p) => readTool(tool, p, signal), params);
+}
+
+/** The notice for a read readWithinKeptHistory narrowed to the history it keeps, or null for any other result. */
+export function keptWindowStrip(res) {
+  if (!res || !res.keptHours) return null;
+  return noticeStrip(keptHistoryText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
 }
 export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
@@ -238,6 +283,17 @@ export function fmtNum(v, d = 1) {
   const n = Number(v);
   return isFinite(n) ? n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
 }
+/* A per-second rate. From 1 up it reads as fmtNum does without padding (66, 1,234.57). Below 1 it keeps two
+   significant digits (0.22, 0.0033, 0.000012), so a real rate never reads as 0: one deadlock in a 300 s collection
+   is 0.0033 a second, and one count over a day-wide bucket is 0.000012. Only a true 0 reads 0. */
+export function fmtRate(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  return Math.abs(n) >= 1 || n === 0
+    ? n.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    : n.toLocaleString(undefined, { maximumSignificantDigits: 2 });
+}
 export function fmtPct(v) {
   if (v == null) return "—";
   const n = Number(v);
@@ -271,6 +327,7 @@ export const FORMATTERS = {
   int: fmtInt,
   num1: (v) => fmtNum(v, 1),
   num2: (v) => fmtNum(v, 2),
+  rate: fmtRate,
   pct: fmtPct,
   ms: fmtMs,
   mb: fmtMb,
@@ -332,9 +389,10 @@ export function buildQuery(params) {
 
 /* In-flight read counter (#4191): every apiGet/readTool call counts itself while its fetch is outstanding, so
    the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
-   before firing a whole new set of the same reads on top of it. apiGetFleet and apiSend are deliberately NOT
-   counted here — the fleet read is the one request every caller already shares regardless of render (#3895),
-   and a mutation is not a "page read" a poll tick should wait out. */
+   before firing a whole new set of the same reads on top of it. apiSendRead (a read that must travel as a POST,
+   the composed-panel run) IS counted, so a slow panel holds the poll off and the refresh back-off measures it.
+   apiGetFleet and apiSend are deliberately NOT counted here — the fleet read is the one request every caller
+   already shares regardless of render (#3895), and a mutation is not a "page read" a poll tick should wait out. */
 let inFlightReads = 0;
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
@@ -428,6 +486,18 @@ export async function apiSend(method, path, body) {
     return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
   }
   return classifyResponse(resp);
+}
+
+/** #4666: a READ that has to travel as a POST (the composed-panel run, /api/compose/run). Counted in inFlightReads
+    exactly like apiGet, so the poll's overlap guard (#4191) waits it out and the refresh back-off measures the render
+    that contains it. Mutations (saves, deletes, alert validate/test) keep using apiSend, uncounted. */
+export async function apiSendRead(method, path, body) {
+  inFlightReads++;
+  try {
+    return await apiSend(method, path, body);
+  } finally {
+    inFlightReads--;
+  }
 }
 
 /* Session-expired takeover (#4187). A module-level one-shot latch: the FIRST read that reports the session is

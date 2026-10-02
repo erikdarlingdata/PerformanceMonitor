@@ -240,7 +240,12 @@ public static class DuckDbSchemaGenerator
                constraint on existing databases. */
             ["database_size_stats.file_type_desc"] = "NOT NULL",
             ["database_size_stats.file_name"] = "NOT NULL",
-            ["database_size_stats.total_size_mb"] = "NOT NULL",
+            /* total_size_mb is deliberately NULLABLE: the LOG file of an Azure SQL Database Hyperscale
+               database lives in the log service, so the collector stores NULL for its size rather than
+               the ~1 TB sys.database_files reports, and every reader shows it as n/a and keeps it out
+               of the allocated totals. NOT NULL here would fail the appender on that row and lose the
+               whole batch -- the same shape as the sibling-row columns above. Schema v67 drops the
+               constraint on existing databases. */
             ["index_object_stats.database_name"] = "NOT NULL",
             ["index_object_stats.database_id"] = "NOT NULL",
             ["index_object_stats.schema_name"] = "NOT NULL",

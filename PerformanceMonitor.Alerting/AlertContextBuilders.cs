@@ -439,8 +439,8 @@ public static class AlertContextBuilders
                    threshold, so the two numbers read as comparable (#3539 A8c). */
                 ("Growth", $"{f.GrowthGb:F1} GB in {f.GrowthWindowMinutes:F0} min ({f.GrowthMbPerHour:F0} {FileGrowthRiseUnit})"),
                 ("Volume", string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint),
-                ("Volume Free", $"{f.VolumeFreeMb / 1024.0:F1} GB"),
-                ("File % of Volume", $"{f.VolumePercent:F0}%"),
+                ("Volume Free", f.VolumeFreeMb is double freeMb ? $"{freeMb / 1024.0:F1} GB" : "n/a"),
+                ("File % of Volume", f.VolumeTotalMb is double volTotal && volTotal > 0 ? $"{f.VolumePercent:F0}%" : "n/a"),
                 /* A percent autogrowth on a large file is its own finding: each growth is bigger than the last,
                    which is exactly how a file gets away from someone. WS3 knows about the pattern and does not
                    alert on it. */
@@ -456,7 +456,7 @@ public static class AlertContextBuilders
 
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"{f.DatabaseName}.{f.FileName} — {f.TotalSizeGb:F1} GB ({f.VolumePercent:F0}% of {f.VolumeMountPoint})",
+                Heading = $"{f.DatabaseName}.{f.FileName} — {f.TotalSizeGb:F1} GB ({(f.VolumeTotalMb is double headTotal && headTotal > 0 ? $"{f.VolumePercent:F0}% of {(string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint)}" : "volume unknown")})",
                 Fields = fields
             });
         }
@@ -594,20 +594,7 @@ public static class AlertContextBuilders
     /// </summary>
     public static bool IsDeadlockExcluded(DeadlockAlertRow row, IReadOnlyList<string> excludedDatabases)
     {
-        if (string.IsNullOrEmpty(row.DeadlockGraphXml)) return false;
-        try
-        {
-            var doc = System.Xml.Linq.XElement.Parse(row.DeadlockGraphXml);
-            var dbNames = doc.Descendants("process")
-                .Select(p => p.Attribute("currentdbname")?.Value)
-                .Where(n => !string.IsNullOrEmpty(n))
-                .Cast<string>()
-                .ToList();
-            if (dbNames.Count == 0) return false;
-            return dbNames.All(db => excludedDatabases.Any(e =>
-                string.Equals(e, db, StringComparison.OrdinalIgnoreCase)));
-        }
-        catch { return false; }
+        return PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(row.DeadlockGraphXml, excludedDatabases);
     }
     public static AlertContext? BuildPoisonWaitContext(List<PoisonWaitDelta> triggeredWaits)
     {

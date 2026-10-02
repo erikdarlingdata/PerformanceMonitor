@@ -51,8 +51,14 @@ public sealed class McpQueryTools
                 ? $"lifetime max_dop >= {minMaxDop} (applied in SQL before the top-{top} ranking; the page is the top-{top} of the parallel population)"
                 : null;
 
+            /* #4793: the ranking read floors last_execution_time, a stamp on THIS server's wall clock, at the
+               window's start, so the floor needs THIS server's clock. It used to get none and floored at the
+               UTC number: west of UTC a query last run early in the window was dropped, east of UTC one from
+               before the window was kept. See McpServerLocalWindow. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
+
             var requestedStart = nowUtc.AddHours(-hours_back);
-            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop);
+            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop);
             if (rows.Count == 0)
             {
                 /* A filtered miss is not a collection miss — same words as Darling's twin. */
@@ -86,11 +92,14 @@ public sealed class McpQueryTools
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
+            /* The core count is what the server is given: on an Azure SQL Database the stored cpu_count is the schedulers it can see,
+               which can be more than its vCores, so this divides by its vcore_count, or omits the ratio for a DTU-model objective or
+               an elastic pool (see CpuAttribution). */
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuMs) / 1000.0,
                 requestedStart, nowUtc,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
-                properties?.CpuCount ?? 0);
+                properties?.EngineEdition, properties?.CpuCount ?? 0, properties?.VcoreCount);
 
             var result = rows.Select(r => new
             {
@@ -187,8 +196,11 @@ public sealed class McpQueryTools
 
             /* Same pre-read capture as the queries tool — the skew shrinks to call-entry overhead. */
             var nowUtc = windowEnd;
+            /* #4793: the same last_execution_time floor as get_top_queries_by_cpu, on this server's clock. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
+
             var requestedStart = nowUtc.AddHours(-hours_back);
-            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
+            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
@@ -210,11 +222,14 @@ public sealed class McpQueryTools
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
+            /* The core count is what the server is given: on an Azure SQL Database the stored cpu_count is the schedulers it can see,
+               which can be more than its vCores, so this divides by its vcore_count, or omits the ratio for a DTU-model objective or
+               an elastic pool (see CpuAttribution). */
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuMs) / 1000.0,
                 requestedStart, nowUtc,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
-                properties?.CpuCount ?? 0);
+                properties?.EngineEdition, properties?.CpuCount ?? 0, properties?.VcoreCount);
 
             var result = rows.Select(r => new
             {
@@ -875,7 +890,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). A point with no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut; effective_start says where the answer begins. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Every point is a rate over the gap since the PREVIOUS point, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Each point is a rate over its own stored interval, its end minus its start. A point with no stored end (a row collected before the end was recorded) falls back to the gap since the PREVIOUS point, so only such a point, when it is the window's first collection and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryStoreDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -1017,8 +1032,8 @@ public sealed class McpQueryTools
         WriteDisclosure(envelope, points.Count > 0 ? points[0].FirstCollectionTime ?? points[0].CollectionTime : null, startUtc, windowEndUtc, grain);
         /* #3541 A12: a point with no rate is published as null, never as 0, and the envelope says how many
            and why. Two whys since #3695 / v61 (#3653 A11): the plan-cache trends read the STORED interval,
-           so a restart collection (stored 0) is unrated beside the first-in-window LAG case; the Query Store
-           trend stores no interval and only hits the second arm, and the sentence stays true there. Same keys
+           so a restart collection (stored 0) is unrated beside the first-in-window LAG case; the Query Store trend stores no sample interval and only hits the second arm, and only for a point that
+           stored no end (#4765, a rate over its own stored interval otherwise); the sentence stays true there. Same keys
            and the same sentence as Darling's twin, byte-identical — pinned by McpMissMessageParityPinTests. */
         var unrated = points.Count(p => !p.HasRate);
         var unratedCollections = points.Sum(p => p.UnratedInBucket ?? (p.HasRate ? 0 : 1));

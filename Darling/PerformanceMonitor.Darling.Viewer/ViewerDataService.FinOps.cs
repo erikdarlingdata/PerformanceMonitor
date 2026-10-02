@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -35,7 +37,7 @@ public sealed class ProvisioningTrendRow
     public decimal MemoryRatio { get; set; }
     public string Status { get; set; } = "";
     public string DayDisplay => Day.ToString("ddd MM/dd");
-    public string StatusDisplay => Status.Replace("_", " ");
+    public string StatusDisplay => Status == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : Status.Replace("_", " ");
 }
 
 /// <summary>Pool-level memory-grant vs used efficiency per day (Optimization sub-tab).</summary>
@@ -92,6 +94,11 @@ public sealed class UtilizationEfficiencyRow
     public long CpuSamples { get; set; }
     public int TotalMemoryMb { get; set; }
     public int TargetMemoryMb { get; set; }
+
+    /// <summary>From <c>memory_stats.total_physical_memory_mb</c>. On SQL Server and Managed Instance that is the machine's physical
+    /// memory. On an Azure SQL Database (<see cref="EngineEdition"/> 5) the collector fills it from <c>committed_target_kb</c>,
+    /// which is the database's own memory limit, not the host's RAM: the host's is <c>server_properties.physical_memory_mb</c>,
+    /// which this row never reads. So the card shows it, and the health score and the verdict use it, on every edition.</summary>
     public int PhysicalMemoryMb { get; set; }
     public int BufferPoolMb { get; set; }
     public decimal MemoryRatio { get; set; }
@@ -111,9 +118,30 @@ public sealed class UtilizationEfficiencyRow
     public decimal GrantUtilizationPct { get; set; }
 
     public int MaxWorkersCount { get; set; }
-    public int CurrentWorkersCount { get; set; }
+
+    /// <summary>Workers in use at the latest sample. <c>null</c> where the collector cannot read it (an Azure SQL Database stores
+    /// NULL), which the card shows as n/a: it is never 0, and the verdict treats it as unknown.</summary>
+    public int? CurrentWorkersCount { get; set; }
+
+    /// <summary>The CPU count CPU percent is measured against, 0 when there is none. On an Azure SQL Database
+    /// (<see cref="EngineEdition"/> 5) that is the <c>vcore_count</c> parsed from the service objective, not the stored
+    /// <c>cpu_count</c> (the schedulers the database can see, which can be higher than its vCores), and it is 0 for an objective
+    /// that names none (a DTU-model objective or an elastic pool), which the card shows as n/a.</summary>
     public int CpuCount { get; set; }
+
+    /// <summary>The engine edition of the server these figures describe (<c>SERVERPROPERTY('EngineEdition')</c>, 0 when unread).
+    /// The card uses it to name the memory figure (Physical, or Memory limit on an Azure SQL Database) and to show a CPU count
+    /// that is not applicable as n/a.</summary>
+    public int EngineEdition { get; set; }
     public string ProvisioningStatus { get; set; } = "";
+
+    /// <summary>
+    /// False when the 24-hour window held no CPU sample at all. The row's <see cref="ProvisioningStatus"/> is then
+    /// the empty no-verdict value, and <see cref="P95CpuPct"/> is a 0 that came from nothing rather than from a
+    /// measured idle server. The right-sizing rules read this so a server that sent no CPU sample is not told to
+    /// shrink.
+    /// </summary>
+    public bool HasCpuSample => ProvisioningStatus.Length > 0;
 
     // FinOps cost — proportional to the server's monthly budget (0 = hidden)
     public decimal MonthlyCost { get; set; }
@@ -123,6 +151,21 @@ public sealed class UtilizationEfficiencyRow
     public decimal FreeSpacePct { get; set; }
     public int HealthScore { get; set; }
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+
+    /// <summary>
+    /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
+    /// term reads <see cref="PhysicalMemoryMb"/> and <see cref="BufferPoolMb"/>, which come from <c>memory_stats</c>. On an Azure
+    /// SQL Database those are the database's own (its memory limit, not the host's RAM), so the memory term is worked the same way
+    /// on every edition. A window with no CPU sample (<see cref="HasCpuSample"/> false) leaves the CPU term out: its p95 is a 0
+    /// that came from nothing, and scoring that 0 would hand the server a full 100.
+    /// </summary>
+    public int ComputeHealthScore()
+    {
+        var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
+        int? cpuScore = HasCpuSample ? FinOpsHealthCalculator.CpuScore(P95CpuPct) : null;
+        return FinOpsHealthCalculator.Overall(
+            cpuScore, FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(FreeSpacePct));
+    }
 }
 
 /// <summary>Per-database resource usage (Database Resources sub-tab).</summary>
@@ -164,6 +207,34 @@ public sealed class ApplicationConnectionRow
     public long SampleCount { get; set; }
     public DateTime FirstSeenLocal { get; set; }
     public DateTime LastSeenLocal { get; set; }
+
+    /// <summary>
+    /// The UTC instants behind <see cref="FirstSeenLocal"/> and <see cref="LastSeenLocal"/> (#4766). A converted wall
+    /// clock cannot say which of the two 01:30s of the repeated autumn hour it was, so the column text is worded from these.
+    /// </summary>
+    public DateTime FirstSeenUtc { get; set; }
+    public DateTime LastSeenUtc { get; set; }
+
+    /// <summary>
+    /// The clock of the server these rows are for, stamped by the loader (#4766): its collected clock, else the viewer
+    /// machine's offset (<see cref="ViewerTimeHelper.ClockForServerOrMachine"/>), the rule every list row uses. The
+    /// FinOps tab loads the server it is opened for, which need not be the server tab that is active, so the times read
+    /// that server's wall time in Server mode. Null (a row built without one) falls back to the active server's.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// What the First Seen and Last Seen columns show (#4766): the instant in the display mode on the row's server's clock,
+    /// with its UTC offset added in the repeated autumn hour
+    /// (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, TimeZoneInfo, string)"/>). The columns bind these
+    /// and sort by <see cref="FirstSeenLocal"/> and <see cref="LastSeenLocal"/>, so the order stays chronological.
+    /// </summary>
+    public string FirstSeenText => ViewerTimeHelper.FormatForDisplay(FirstSeenUtc, DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm");
+    public string LastSeenText => ViewerTimeHelper.FormatForDisplay(LastSeenUtc, DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm");
+
+    /// <summary>The zone the current display mode names for <paramref name="rowClock"/>'s server, else the active server's.</summary>
+    internal static TimeZoneInfo DisplayZoneNow(ServerClock? rowClock) =>
+        ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, rowClock ?? ViewerTimeHelper.ActiveServerClock);
 }
 
 /// <summary>Per-file database size + growth config (Database Sizes sub-tab).</summary>
@@ -172,10 +243,25 @@ public sealed class DatabaseSizeRow
     public string DatabaseName { get; set; } = "";
     public string FileTypeDesc { get; set; } = "";
     public string FileName { get; set; } = "";
-    public decimal TotalSizeMb { get; set; }
+
+    /// <summary>
+    /// The file's allocated size. Null for the LOG file of an Azure SQL Database Hyperscale database: that log
+    /// lives in the log service, so the size <c>sys.database_files</c> reports is not storage the database holds
+    /// or pays for. The grid shows <see cref="HyperscaleLogSize.Display"/> for it, and <see cref="AllocatedTotalMb"/>
+    /// leaves it out of every allocated total. Lite's <c>DatabaseSizeRow</c> is the twin of this.
+    /// </summary>
+    public decimal? TotalSizeMb { get; set; }
     public decimal? UsedSizeMb { get; set; }
-    public decimal? FreeSpaceMb => UsedSizeMb.HasValue ? TotalSizeMb - UsedSizeMb.Value : null;
-    public decimal? UsedPct => UsedSizeMb.HasValue && TotalSizeMb > 0 ? Math.Round(UsedSizeMb.Value * 100m / TotalSizeMb, 1) : null;
+    public decimal? FreeSpaceMb => UsedSizeMb.HasValue && TotalSizeMb.HasValue ? TotalSizeMb.Value - UsedSizeMb.Value : null;
+    public decimal? UsedPct => UsedSizeMb.HasValue && TotalSizeMb > 0 ? Math.Round(UsedSizeMb.Value * 100m / TotalSizeMb.Value, 1) : null;
+
+    /// <summary>The allocated total over <paramref name="rows"/>: a row with no allocated size (the Hyperscale log
+    /// file) adds nothing, so the data file alone is what a Hyperscale database holds.</summary>
+    public static decimal AllocatedTotalMb(IEnumerable<DatabaseSizeRow> rows) => rows.Sum(r => r.TotalSizeMb ?? 0m);
+
+    /// <summary>The free space over <paramref name="rows"/>, on the same footing as <see cref="AllocatedTotalMb"/>:
+    /// only a row that has an allocation has free space in it.</summary>
+    public static decimal FreeTotalMb(IEnumerable<DatabaseSizeRow> rows) => rows.Sum(r => r.FreeSpaceMb ?? 0m);
     public string? VolumeMountPoint { get; set; }
     public decimal? VolumeTotalMb { get; set; }
     public decimal? VolumeFreeMb { get; set; }
@@ -184,6 +270,48 @@ public sealed class DatabaseSizeRow
     public bool? IsPercentGrowth { get; set; }
     public int? GrowthPct { get; set; }
     public int? VlfCount { get; set; }
+
+    /// <summary>The file id; null for the one row another database on an Azure SQL Database server gets.</summary>
+    public int? FileId { get; set; }
+
+    /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the database's
+    /// data size, and its log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>. Lite's
+    /// <c>DatabaseSizeRow</c> is the twin of this.</summary>
+    public bool IsAzureSiblingRow => AzureSiblingDatabaseSize.IsSiblingRow(FileId, FileName);
+
+    /// <summary>What the grid's Note column says: <see cref="AzureSiblingDatabaseSize.LogNote"/> on such a row, so
+    /// its size is not read as including a log it does not report; null on every other row.</summary>
+    public string? Note => IsAzureSiblingRow ? AzureSiblingDatabaseSize.LogNote : null;
+
+    /// <summary>The caption over the grid: the row count, and when the grid holds such a row, the sentence that
+    /// those rows are data space only and their log size is not reported
+    /// (<see cref="AzureSiblingDatabaseSize.GridCaption"/>).</summary>
+    public static string Caption(IReadOnlyCollection<DatabaseSizeRow> rows)
+    {
+        if (rows.Count == 0) return "";
+        return rows.Any(r => r.IsAzureSiblingRow)
+            ? $"{rows.Count} file(s). {AzureSiblingDatabaseSize.GridCaption}"
+            : $"{rows.Count} file(s)";
+    }
+
+    /// <summary>The caption under the Allocated vs Used chart, or null when none of its bars needs one. The chart
+    /// draws only <paramref name="barDatabases"/> (the top few by size), so only a database with a bar is named: one
+    /// that has the row for another database on an Azure SQL Database server, or one whose log file has no size (the
+    /// Hyperscale log service). The names keep the order of the bars, and the words are
+    /// <see cref="AzureSiblingDatabaseSize.ChartCaption"/>'s, shared with Darling.</summary>
+    public static string? ChartCaption(IEnumerable<DatabaseSizeRow> rows, IEnumerable<string> barDatabases)
+    {
+        var siblings = new HashSet<string>(StringComparer.Ordinal);
+        var logService = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            if (row.IsAzureSiblingRow) siblings.Add(row.DatabaseName);
+            else if (row.TotalSizeMb is null) logService.Add(row.DatabaseName);
+        }
+
+        var bars = barDatabases.ToList();
+        return AzureSiblingDatabaseSize.ChartCaption(bars.Where(siblings.Contains), bars.Where(logService.Contains));
+    }
 
     /// <summary>FinOps cost — proportional share of the server monthly budget by size (set by the loader).</summary>
     public decimal MonthlyCostShare { get; set; }
@@ -223,10 +351,24 @@ public sealed class ServerPropertyRow
     public string ProductVersion { get; set; } = "";
     public string HostOsVersion { get; set; } = "";
     public int EngineEdition { get; set; }
-    public int CpuCount { get; set; }
-    public long PhysicalMemoryMb { get; set; }
-    public int? SocketCount { get; set; }
-    public int? CoresPerSocket { get; set; }
+
+    /* Three of the four hardware cells below read as ABSENT for an Azure SQL Database (engine edition 5): its collected
+       sys.dm_os_sys_info memory, socket count and cores per socket are the HOST's, not the database's allocation (a 1-vCore
+       database read 0 sockets, 32 cores per socket and about 912 GB), and the grid draws an absent value as a blank cell. The
+       CPU count is the database's own scheduler count (a 1-vCore database reads 2), so it is shown as stored. The stored values
+       are kept behind the properties, so the order the loader assigns them in does not matter and no calculation loses
+       its input. */
+    private int _cpuCount;
+    private long _physicalMemoryMb;
+    private int? _socketCount;
+    private int? _coresPerSocket;
+    private string? _hardwareUnavailableReason;
+    private bool HostHardware => ServerHardwareScope.HardwareIsTheHosts(EngineEdition);
+
+    public int? CpuCount { get => _cpuCount; set => _cpuCount = value ?? 0; }
+    public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
+    public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
+    public int? CoresPerSocket { get => HostHardware ? null : _coresPerSocket; set => _coresPerSocket = value; }
     /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info) — stored verbatim, shown as-is like Lite.</summary>
     public DateTime? SqlServerStartTime { get; set; }
     /// <summary>
@@ -243,11 +385,42 @@ public sealed class ServerPropertyRow
     public DateTime? InventoryAsOf { get; set; }
 
     /// <summary>
+    /// The UTC instants behind <see cref="InventoryAsOf"/> and <see cref="LastCollected"/> (#4766). A converted wall clock
+    /// cannot say which of the two 01:30s of the repeated autumn hour it was, so the column text is worded from these.
+    /// </summary>
+    public DateTime? InventoryAsOfUtc { get; set; }
+
+    /// <summary>
+    /// What the Inventory As Of column shows (#4766): the instant in the display mode, with its UTC offset added in the
+    /// repeated autumn hour, and nothing for a server with no snapshot. The column binds this and sorts by
+    /// <see cref="InventoryAsOf"/>.
+    /// </summary>
+    public string InventoryAsOfText => InventoryAsOfUtc.HasValue
+        ? ViewerTimeHelper.FormatForDisplay(InventoryAsOfUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm")
+        : "";
+
+    /// <summary>
+    /// The clock of THIS row's server, stamped by the loader (#4766): its collected clock, else the viewer machine's
+    /// offset (<see cref="ViewerTimeHelper.ClockForServerOrMachine"/>). Server Inventory is one row per server, so each
+    /// row's times read its own server's wall time in Server mode and not the active server tab's. Null (a row built
+    /// without one) falls back to the active server's.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
     /// The newest collection of ANY kind for this server — <c>MAX(collection_time)</c> across
     /// <c>v_collection_log</c>, the same signal <c>list_servers</c> and the Overview cards use (#2359). This is
     /// the real freshness heartbeat, and it moves every sweep.
     /// </summary>
     public DateTime? LastCollected { get; set; }
+
+    /// <summary>The UTC instant behind <see cref="LastCollected"/>; see <see cref="InventoryAsOfUtc"/>.</summary>
+    public DateTime? LastCollectedUtc { get; set; }
+
+    /// <summary>What the Last Collected column shows (#4766); see <see cref="InventoryAsOfText"/>. The column sorts by <see cref="LastCollected"/>.</summary>
+    public string LastCollectedText => LastCollectedUtc.HasValue
+        ? ViewerTimeHelper.FormatForDisplay(LastCollectedUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm")
+        : "";
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";
@@ -284,7 +457,12 @@ public sealed class ServerPropertyRow
     /// what #1663 made possible — before it, a login without VIEW SERVER STATE lost the ENTIRE server_properties
     /// row, so there was nothing to annotate.</para>
     /// </summary>
-    public string? HardwareUnavailableReason { get; set; }
+    public string? HardwareUnavailableReason
+    {
+        /* An Azure SQL Database's blank hardware cells say why, in the column that already carries a read's own reason. */
+        get => _hardwareUnavailableReason ?? (HostHardware ? ServerHardwareScope.InventoryHardwareNote : null);
+        set => _hardwareUnavailableReason = value;
+    }
 
     /// <summary>Per-server FinOps budget (servers.monthly_cost_usd from darling.json); 0 hides the cost columns.</summary>
     public decimal MonthlyCost { get; set; }
@@ -302,7 +480,7 @@ public sealed class ServerPropertyRow
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
     public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "—" : AgReplicaRole;
-    public string ProvisioningDisplay => ProvisioningStatus?.Replace("_", " ") ?? "";
+    public string ProvisioningDisplay => ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : ProvisioningStatus?.Replace("_", " ") ?? "";
 
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
     public string? LicenseWarning
@@ -328,10 +506,22 @@ public sealed class StorageGrowthRow
     public decimal CurrentSizeMb { get; set; }
     public decimal? Size7dAgoMb { get; set; }
     public decimal? Size30dAgoMb { get; set; }
-    public decimal Growth7dMb { get; set; }
-    public decimal Growth30dMb { get; set; }
-    public decimal DailyGrowthRateMb { get; set; }
-    public decimal GrowthPct30d { get; set; }
+    /// <summary>Growth, daily rate and percent are null when the database has no past row to compare with (shown as n/a), never 0.</summary>
+    public decimal? Growth7dMb { get; set; }
+    public decimal? Growth30dMb { get; set; }
+    public decimal? DailyGrowthRateMb { get; set; }
+    public decimal? GrowthPct30d { get; set; }
+
+    /// <summary>True when the database has the one row another database on an Azure SQL Database server gets: its
+    /// size is data space only, and the log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>
+    public bool HasSiblingRow { get; set; }
+
+    /// <summary>True when the database has a log file with no size (the Hyperscale log service): the sums skip it, so
+    /// the size is data space only. See <see cref="HyperscaleLogSize"/>.</summary>
+    public bool HasLogServiceFile { get; set; }
+
+    /// <summary>What the grid's Note column says: the log is not in this size, and why. Null when it is.</summary>
+    public string? Note => AzureSiblingDatabaseSize.StorageGrowthNote(HasLogServiceFile, HasSiblingRow);
 }
 
 /// <summary>Database with zero query executions over the window (Optimization sub-tab).
@@ -414,8 +604,20 @@ public static class FinOpsHealthCalculator
         return (int)(freeSpacePct * 5);
     }
 
-    public static int Overall(int cpu, int memory, int storage) =>
-        (int)(cpu * 0.40 + memory * 0.30 + storage * 0.30);
+    /// <summary>
+    /// The overall score: CPU 40%, memory 30%, storage 30%. A null <paramref name="cpu"/> means the window held no CPU
+    /// sample: there is nothing to score, and scoring the 0 it reads as would be a full 100 made from nothing. The term is
+    /// then left out, not scored as zero and not scored as a default, and memory and storage keep their weights over their
+    /// own total (30:30 over 60).
+    /// </summary>
+    public static int Overall(int? cpu, int memory, int storage)
+    {
+        if (cpu is int cpuScore)
+            return (int)(cpuScore * 0.40 + memory * 0.30 + storage * 0.30);
+
+        /* integer weights, so no floating-point error can truncate 100 to 99 */
+        return (memory * 30 + storage * 30) / 60;
+    }
 
     public static string ScoreColor(int score) => score switch
     {
@@ -541,9 +743,9 @@ public sealed class ObjectSizeGrowthRow
     public long TotalRows { get; set; }
     public int IndexCount { get; set; }
     public decimal Growth7dMb { get; set; }
-    public decimal Growth30dMb { get; set; }
-    public decimal DailyGrowthRateMb { get; set; }
-    public decimal GrowthPct30d { get; set; }
+    public decimal? Growth30dMb { get; set; }
+    public decimal? DailyGrowthRateMb { get; set; }
+    public decimal? GrowthPct30d { get; set; }
 }
 
 /// <summary>Per-index usage with unused/write-only classification (Storage Growth index drill).

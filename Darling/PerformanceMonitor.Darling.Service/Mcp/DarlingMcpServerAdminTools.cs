@@ -46,7 +46,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// serial to avoid a probe storm): for each server it validates the fields, skips an exact/case-variant DUPLICATE
 /// of an existing or earlier-in-batch server (<c>status:"duplicate"</c>), probes the connection (a failure is
 /// <c>status:"connection_failed"</c> and does NOT abort the batch), DPAPI-encrypts the SQL password or the service-
-/// principal client secret, and INSERTs the row (<c>status:"added"</c>). Windows/integrated and managed-identity
+/// principal client secret, and INSERTs the row (<c>status:"added"</c>). A save that throws is caught PER ENTRY: that
+/// entry and every one after it are <c>status:"not_saved"</c> (the rest are not probed), and the entries before it
+/// stay <c>added</c> in the results (#4734). An INSERT that changes no rows (its <c>server_id</c> is taken) is
+/// answered from the row that holds the id — <c>collides</c> for a different identity, <c>duplicate</c> for the same
+/// one — and never as <c>added</c>. A LITERAL password or client secret is <c>invalid</c> off Windows, where DPAPI is
+/// not available (#4734). Windows/integrated and managed-identity
 /// auth store no secret; a service principal stores its client secret exactly like a SQL password; the INTERACTIVE
 /// Entra modes (MFA / device-code / default-credential) are rejected (<c>status:"invalid"</c>) — they need a broker
 /// or a signed-in user and cannot run headless, whereas ServicePrincipal and ManagedIdentity are non-interactive
@@ -59,10 +64,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// the name against the <c>config.config_monitored_servers</c> DEFINITIONS — the rows it deletes from, projected
 /// onto the read tools' (id, storage name, display name) identity — rather than the <c>servers</c> registry the
 /// read tools resolve against (#3653 A15/A16: that registry is written on FIRST successful connect, so a server
-/// added with a bad password or an unreachable host could not be removed by the tool that added it), with a
-/// stricter rule than theirs: an exact match, or a partial match ONLY when it is unique — an ambiguous partial is
-/// refused with the candidates named, because a first-wins partial on a DELETE removes whichever sibling sorts
-/// first. It then DELETEs the definition row and says whether a registry row (history) exists beside it.</para>
+/// added with a bad password or an unreachable host could not be removed by the tool that added it), by the
+/// matching rule the read tools use: an exact match, or a partial match ONLY when it is unique — a name several
+/// servers answer to is refused with the candidates named, because a DELETE must never remove whichever sibling
+/// sorts first. It then DELETEs the definition row and says whether a registry row (history) exists beside it.</para>
 ///
 /// <para><b>Security.</b> These tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role, granted
 /// (see <see cref="DarlingManagedRoles"/>) INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> — a single
@@ -110,18 +115,23 @@ public sealed class DarlingMcpServerAdminTools
         "read_only_intent (bool, default false); multi_subnet_failover (bool, default false). Servers are processed " +
         "IN ORDER, one at a time. A case-variant or exact duplicate of an already-monitored server (or an earlier " +
         "entry in the same array) is skipped as status \"duplicate\". A server that fails to connect is recorded as " +
-        "status \"connection_failed\" and does NOT stop the rest of the batch. The INTERACTIVE Microsoft Entra modes " +
+        "status \"connection_failed\" and does NOT stop the rest of the batch. If saving an entry fails, that entry " +
+        "and every entry after it are reported as \"not_saved\" without being tested, and the entries before it stay " +
+        "added. The INTERACTIVE Microsoft Entra modes " +
         "(MFA / device-code / default-credential) are rejected (status \"invalid\") — they need a broker or a " +
         "signed-in user and cannot run headless; ServicePrincipal and ManagedIdentity are non-interactive and are " +
         "supported. A server whose probed connection lands in a database that ANOTHER monitored server already " +
         "covers (it names one database but connects to a different one, e.g. a wrong Initial Catalog) is refused as " +
         "status \"collides\" — adding it would store one database's history under two identities and alert twice. " +
+        "So is a server whose id is already held by a different server (two identities that hash to one id). " +
         "A SQL password or service-principal client secret is encrypted at rest (DPAPI, the service identity) and " +
-        "is never returned. Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
-        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"invalid\", detail}]}. requested is " +
+        "is never returned. Where DPAPI is not available (Linux) a literal password or client secret is rejected as " +
+        "\"invalid\": give an env:NAME or file:/run/secrets/<name> reference instead. " +
+        "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
+        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail}]}. requested is " +
         "the number of entries you sent and the four counters SUM to it — every entry lands in exactly one: " +
-        "\"added\" → added, \"duplicate\" → skipped, \"collides\" → collided, \"connection_failed\" and " +
-        "\"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
+        "\"added\" → added, \"duplicate\" → skipped, \"collides\" → collided, \"connection_failed\", " +
+        "\"not_saved\" and \"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
         "the batch as done. An added server's detail reports what the probe found — for a PostgreSQL target that " +
         "includes writer-vs-reader, Aurora-vs-not, and how many of the PostgreSQL collectors apply to it. NOTE: the " +
         "password travels to this endpoint in the request; on a LAN use the documented TLS reverse proxy. " +
@@ -138,8 +148,14 @@ public sealed class DarlingMcpServerAdminTools
     /// <paramref name="probe"/> seam) + encrypts + INSERTs, aggregating a per-server result. Structural validation
     /// runs BEFORE any store access, and when NO structurally-valid candidate remains the store is never opened —
     /// so a call whose entries are all invalid (bad field, MFA auth) returns without a connection or a probe.</summary>
+    internal static Task<string> AddServersAsync(
+        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken);
+
+    /// <summary>The same flow over an injected <see cref="IServerDefinitions"/>, so a test can stand in a
+    /// definitions table that faults on a chosen write or swallows one without a live database.</summary>
     internal static async Task<string> AddServersAsync(
-        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken)
+        IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken)
     {
         try
         {
@@ -161,7 +177,7 @@ public sealed class DarlingMcpServerAdminTools
             /* Seed the case-folded dedupe gate from the authoritative store rows FIRST, then partition the batch —
                a duplicate (of an existing server OR an earlier entry in this batch, first occurrence wins) is
                skipped WITHOUT a probe, exactly as the bulk dialog (#1549) does. */
-            var existingKeys = await LoadExistingStorageKeysAsync(postgres, cancellationToken);
+            var existingKeys = await definitions.LoadStorageKeysAsync(cancellationToken);
             var (ready, duplicates) = PartitionDuplicates(entries, existingKeys);
             results.AddRange(duplicates);
 
@@ -175,8 +191,21 @@ public sealed class DarlingMcpServerAdminTools
                 claimed.Add(entry.StorageKey);
             }
 
+            /* #4734: set when a save throws. Every entry after that is answered WITHOUT a probe: the table is not
+               taking writes, and a probe waits out a connect timeout for a server that could not be saved anyway.
+               The entries already saved stay in the results as added — they are in the table and being collected. */
+            var saveFailed = false;
+
             foreach (var entry in ready)
             {
+                if (saveFailed)
+                {
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.NotSaved,
+                        "Not saved and not tested: an earlier entry in this batch could not be saved, so the rest of " +
+                        "the batch was not attempted. Send this entry again."));
+                    continue;
+                }
+
                 /* Validate the connection IN-PROCESS (the service holds the network path + credentials). A failure
                    is recorded and the batch CONTINUES — one unreachable server never aborts the rest. */
                 var probeResult = await probe(entry.ProbeConfig, cancellationToken);
@@ -208,9 +237,30 @@ public sealed class DarlingMcpServerAdminTools
                 /* DPAPI-encrypt the SQL password for storage (the service identity encrypts here and decrypts it
                    during collection, so it round-trips); Windows-auth servers store no secret. The plaintext never
                    leaves this method — it is not logged, not echoed in a result. */
-                var encryptedPassword = ProtectPasswordForStorage(entry.PlaintextPassword);
-                await InsertServerAsync(postgres, entry, encryptedPassword, cancellationToken);
-                results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added, DescribeProbe(probeResult)));
+                try
+                {
+                    var encryptedPassword = ProtectPasswordForStorage(entry.PlaintextPassword);
+                    var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, cancellationToken);
+                    if (rowsWritten > 0)
+                    {
+                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added, DescribeProbe(probeResult)));
+                    }
+                    else
+                    {
+                        /* #4734: ON CONFLICT (server_id) DO NOTHING wrote nothing, so this entry is NOT in the table.
+                           Ask who holds its id rather than report "added" for a server nothing will collect. */
+                        var holder = await definitions.ReadStorageKeyAsync(ServerIdOf(entry), cancellationToken);
+                        results.Add(ClassifyUnwrittenInsert(entry, holder));
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    /* #4734: catch PER ENTRY. The outer catch below used to be the only one, so a fault on entry N
+                       dropped the list that recorded entries 1 to N-1 as added and answered one error for a call
+                       that had saved them — and the retry then reported them as duplicates. */
+                    saveFailed = true;
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.NotSaved, $"Not saved: {ex.Message}"));
+                }
             }
 
             return Aggregate(results);
@@ -272,11 +322,10 @@ public sealed class DarlingMcpServerAdminTools
                the darling.json-defined server — a registry row with no store definition — an answer that names
                the real reason nothing was deleted.
 
-               NOT the read resolver's rule, then or now. Its first-wins partial match is the right convenience
-               for a read — an agent that lands on the wrong sibling sees its name in the payload and re-asks. On a
-               DELETE the payload IS the damage: "-01" against "-01"/"-02" removed whichever sorted first, and
-               said so only after the fact (#3541 A14). So the partial match survives, as documented, but only when
-               it is UNIQUE; anything else is refused with the candidates named. */
+               The read resolver (DarlingServerResolver) matches with this same rule. It was first-wins on a
+               partial match once, and on a DELETE the payload IS the damage: "-01" against "-01"/"-02" removed
+               whichever sorted first, and said so only after the fact (#3541 A14). So the partial match survives,
+               as documented, but only when it is UNIQUE; anything else is refused with the candidates named. */
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
             var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name);
             var everConnected = definitions.ToDictionary(d => d.Server.ServerId, d => d.EverConnected);
@@ -335,7 +384,7 @@ public sealed class DarlingMcpServerAdminTools
             }
 
             var resolved = target.Candidates[0];
-            var connected = everConnected[resolved.ServerId];
+            var resolvedDefinition = definitions.First(d => d.Server.ServerId == resolved.ServerId);
 
             await using var command = postgres.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = $1");
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -343,18 +392,7 @@ public sealed class DarlingMcpServerAdminTools
             var affected = await command.ExecuteNonQueryAsync();
 
             return affected > 0
-                ? JsonSerializer.Serialize(new
-                {
-                    status = "removed",
-                    server = resolved.ServerName,
-                    display_name = resolved.DisplayName,
-                    matched_by = target.MatchedBy,
-                    matched_in = "config_monitored_servers",
-                    ever_connected = connected,
-                    note = connected
-                        ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept."
-                        : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
-                }, McpHelpers.JsonOptions)
+                ? RemovedAnswer(resolvedDefinition, target.MatchedBy)
                 : Outcome("not_found",
                     $"'{resolved.ServerName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
         }
@@ -393,9 +431,13 @@ public sealed class DarlingMcpServerAdminTools
         /// without a probe (#1549).</summary>
         public const string Duplicate = "duplicate";
 
-        /// <summary>Probed, but its connection reached a database another registration already covers (#2280); NOT
-        /// added.</summary>
+        /// <summary>Probed, but its connection reached a database another registration already covers (#2280), or its
+        /// <c>server_id</c> is already held by a different registration (#4734); NOT added.</summary>
         public const string Collides = "collides";
+
+        /// <summary>The save did not happen (#4734): the write threw, wrote nothing with no row to explain it, or an
+        /// earlier entry's save threw and this one was never attempted. NOT added.</summary>
+        public const string NotSaved = "not_saved";
 
         /// <summary>The in-process probe could not connect; NOT added, the batch continued.</summary>
         public const string ConnectionFailed = "connection_failed";
@@ -427,6 +469,7 @@ public sealed class DarlingMcpServerAdminTools
         [AddStatus.Duplicate] = "skipped",
         [AddStatus.Collides] = "collided",
         [AddStatus.ConnectionFailed] = "failed",
+        [AddStatus.NotSaved] = "failed",
         [AddStatus.Invalid] = "failed",
     };
 
@@ -443,7 +486,46 @@ public sealed class DarlingMcpServerAdminTools
     /// worker uses when it registers the server on first connect, so a definition and its registry row carry one
     /// name and one id — plus whether that registry row exists at all.
     /// </summary>
-    internal sealed record ServerDefinition(DarlingServerResolver.RegisteredServer Server, bool EverConnected);
+    internal sealed record ServerDefinition(DarlingServerResolver.RegisteredServer Server, bool EverConnected, string Kind);
+
+    /// <summary>
+    /// One definition row projected onto <see cref="ServerDefinition"/> (#4734): the storage name is rebuilt from the
+    /// identity columns, and <c>Kind</c> (<see cref="ServerIdHelper.DescribeKind"/>) is read from the database name and
+    /// read-only intent those same columns hold, never parsed back out of the storage name. Pure, so the projection
+    /// unit-tests without a store.
+    /// </summary>
+    internal static ServerDefinition ToDefinition(
+        int serverId, string? displayName, string host, string? database, bool readOnlyIntent, string? engine, int port, bool everConnected)
+    {
+        var storageName = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
+        return new ServerDefinition(
+            new DarlingServerResolver.RegisteredServer(serverId, storageName, displayName),
+            everConnected,
+            ServerIdHelper.DescribeKind(database, readOnlyIntent));
+    }
+
+    /// <summary>
+    /// The answer of a <c>remove_server</c> that deleted its definition. <c>server</c> is the resolved registration's
+    /// storage name and <c>kind</c> says which of a machine's registrations it was (plain, read-only, per-database), so
+    /// a wrong pick shows at once (#4734). Pure, so the shape unit-tests without a store.
+    /// </summary>
+    internal static string RemovedAnswer(ServerDefinition resolved, string matchedBy) =>
+        JsonSerializer.Serialize(new
+        {
+            status = "removed",
+            server = resolved.Server.ServerName,
+            display_name = resolved.Server.DisplayName,
+            kind = resolved.Kind,
+            matched_by = matchedBy,
+            matched_in = "config_monitored_servers",
+            ever_connected = resolved.EverConnected,
+            note = resolved.EverConnected
+                ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept. "
+                    + "Its Extended Events sessions (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist) are not dropped and stay on the server. "
+                    + "For a server nothing else monitors, an operator runs PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql, which prints the DROP statements, and runs them on that server. "
+                    + "The named form (--drop-xe-sessions <server>) works only for a server this service still monitors, so it had to run before this removal."
+                : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
+        }, McpHelpers.JsonOptions);
 
     /// <summary>
     /// The definitions read behind <c>remove_server</c>: every row of the table the DELETE targets, with its
@@ -474,27 +556,27 @@ ORDER BY d.host, d.database";
             var readOnlyIntent = !reader.IsDBNull(4) && reader.GetBoolean(4);
             var engine = reader.IsDBNull(5) ? null : reader.GetString(5);
             var port = reader.IsDBNull(6) ? 0 : reader.GetInt32(6);
-            var storageName = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
-            definitions.Add(new ServerDefinition(
-                new DarlingServerResolver.RegisteredServer(serverId, storageName, displayName),
-                reader.GetBoolean(7)));
+            definitions.Add(ToDefinition(serverId, displayName, host, database, readOnlyIntent, engine, port, reader.GetBoolean(7)));
         }
 
         return definitions;
     }
 
     /// <summary>
-    /// The matching rule for a DELETE, over the same registry rows the read resolver uses: every exact match
-    /// (storage name OR display name, case-insensitive, trimmed) if there are any; otherwise every partial
+    /// The matching rule for a name over the registry rows: the one registration whose
+    /// storage name equals the name exactly (case-sensitive, trimmed), if there is one (#4734); otherwise every exact
+    /// match on the storage name OR display name (case-insensitive), if there are any; otherwise every partial
     /// (<c>Contains</c>) match. The CALLER decides what a count other than one means — this only refuses to
-    /// choose among equals.
+    /// choose among equals. Every read tool (through <see cref="DarlingServerResolver"/>), <c>remove_server</c>
+    /// and <c>mute_analysis_finding</c> match with it, and each refuses a count other than one. Only the read tools
+    /// pass <paramref name="storageNameIgnoresCase"/>: they also take the storage name in another letter case.
     ///
-    /// <para><b>Why not the read resolver's rule.</b> <see cref="DarlingServerResolver"/> is first-wins on a partial
-    /// match, ordered by storage name. For a read that is a convenience: the answer names the server it resolved
-    /// to, and a caller who meant the other one re-asks having lost nothing. For a delete the same rule removed
-    /// <c>-01</c> when the caller typed <c>-01</c> meaning <c>-01</c>, and removed it just the same when the caller
-    /// typed a fragment that <c>-01</c> and <c>-02</c> both contain — a coin the caller did not know was being
-    /// flipped. The read tools keep their rule; this write does not borrow it.</para>
+    /// <para><b>Why one rule for reads and writes.</b> The read resolver used to take the FIRST partial match,
+    /// ordered by storage name. Several databases on one Azure SQL Database server are separate servers whose
+    /// storage names (<c>host:database</c>) all contain the host name, so the bare host name answered for whichever
+    /// database sorted first, and a delete removed <c>-01</c> when the caller typed a fragment that <c>-01</c> and
+    /// <c>-02</c> both contain — a coin the caller did not know was being flipped. A read that picks the wrong
+    /// sibling is only a wrong answer, but it is still a wrong answer the caller may not notice.</para>
     ///
     /// <para><b>Why partial matching survives at all.</b> The description has promised it since the tool shipped
     /// ("resolved the same way the read tools resolve server_name"), display names are what an operator knows a
@@ -506,13 +588,43 @@ ORDER BY d.host, d.database";
     /// so two registrations can share one display name exactly; picking the first would be the same coin under a
     /// better-looking name. Two rows matching exactly is reported as ambiguous with <c>matched_by: "exact"</c>, and
     /// the caller disambiguates on the storage name, which IS unique.</para>
+    ///
+    /// <para><b>An exact storage name breaks the tie, and only that (#4734).</b> The plain registration's storage
+    /// name is the machine name, and the display name defaults to the machine name, so its read-only and per-database
+    /// siblings show that same text as THEIR display name. Without a tier for the storage name, the plain
+    /// registration's own <c>server</c> value — the one an <c>ambiguous</c> answer lists for it, and tells the caller
+    /// to pass back — tied with its siblings, so no name could pick it. A storage name is unique (it is what
+    /// <c>server_id</c> is derived from), so an exact match on it names one registration by construction. The tier is
+    /// deliberately narrow, because this rule also chooses what a delete removes: the match is case-SENSITIVE, so the
+    /// same name in another case, a display-name match and a partial all keep the old behavior and still answer
+    /// ambiguous when they name several registrations. And a tier that finds anything other than exactly one
+    /// registration falls through to the matching above unchanged.</para>
     /// </summary>
-    internal static RemovalTarget ResolveForRemoval(IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName)
+    internal static RemovalTarget ResolveForRemoval(
+        IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName, bool storageNameIgnoresCase = false)
     {
         var name = (serverName ?? string.Empty).Trim();
         if (name.Length == 0)
         {
             return new RemovalTarget(Array.Empty<DarlingServerResolver.RegisteredServer>(), "none");
+        }
+
+        /* The storage name is the one key that is unique, so a single match on it picks that registration: exact case
+           first (a candidate's own `server` value picks it even beside a registration whose name differs only in
+           case), then, for a read only, ignoring case. Anything other than one match falls through to the tiers
+           below. */
+        var comparisons = storageNameIgnoresCase
+            ? new[] { StringComparison.Ordinal, StringComparison.OrdinalIgnoreCase }
+            : new[] { StringComparison.Ordinal };
+        foreach (var comparison in comparisons)
+        {
+            var byStorageName = servers
+                .Where(s => string.Equals(s.ServerName, name, comparison))
+                .ToList();
+            if (byStorageName.Count == 1)
+            {
+                return new RemovalTarget(byStorageName, "exact");
+            }
         }
 
         var exact = servers
@@ -540,7 +652,13 @@ ORDER BY d.host, d.database";
     /// <c>WholeError</c> when the whole payload is unusable (not JSON, not an array, or empty), for which the caller
     /// returns a single <c>{status:"invalid"}</c> without opening the store.
     /// </summary>
-    internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(string servers_json)
+    internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(string servers_json) =>
+        ParseRequest(servers_json, OperatingSystem.IsWindows());
+
+    /// <summary><see cref="ParseRequest(string)"/> with the platform named, so a test can ask what either platform
+    /// answers for a literal password without running on it.</summary>
+    internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(
+        string servers_json, bool isWindows)
     {
         var entries = new List<ParsedServerEntry>();
         var invalid = new List<ServerResult>();
@@ -567,7 +685,7 @@ ORDER BY d.host, d.database";
 
         for (var i = 0; i < array.Count; i++)
         {
-            var (entry, result) = ParseEntry(i, array[i]);
+            var (entry, result) = ParseEntry(i, array[i], isWindows);
             if (entry != null)
             {
                 entries.Add(entry);
@@ -585,7 +703,7 @@ ORDER BY d.host, d.database";
     /// problem. The service honors Windows, SQL, and the two non-interactive Entra modes (ServicePrincipal,
     /// ManagedIdentity); the interactive Entra modes (MFA/device-code/default-credential) are rejected — they
     /// cannot run headless (#3484).</summary>
-    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node)
+    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, bool isWindows)
     {
         if (node is not JsonObject obj)
         {
@@ -662,6 +780,14 @@ ORDER BY d.host, d.database";
                 return (null, Invalid(isSp
                     ? "password is required for ServicePrincipal authentication (the client secret)."
                     : "password is required for SQL authentication."));
+            }
+
+            /* #4734: refuse a literal where it cannot be encrypted, HERE, before the probe and the write. Left to
+               ProtectPasswordForStorage it threw after the probe, in the middle of the batch. */
+            var refusal = LiteralSecretRefusal(plaintextPassword, isWindows, isSp);
+            if (refusal != null)
+            {
+                return (null, Invalid(refusal));
             }
         }
         else if (storeAuth == ServerStoreAuth.ManagedIdentity)
@@ -799,6 +925,44 @@ ORDER BY d.host, d.database";
     }
 
     /// <summary>
+    /// PURE answer for a write that changed no rows (#4734). <c>server_id</c> is a 32-bit hash of the storage key and
+    /// the insert is <c>ON CONFLICT (server_id) DO NOTHING</c>, so a write can save nothing without throwing: two
+    /// different keys can hash to one id, and a concurrent add of the same server can land between the duplicate
+    /// gate's read and this write. <paramref name="holderStorageKey"/> is the storage key of the row that holds the id
+    /// now, or null when none does.
+    ///
+    /// <list type="bullet">
+    /// <item>A DIFFERENT key holds the id: <c>collides</c>. The entry is not a duplicate — its identity is not
+    /// registered — but it cannot be saved under this identity.</item>
+    /// <item>The SAME key holds it (compared case-folded, as the duplicate gate is): <c>duplicate</c>, the server is
+    /// registered, by a concurrent add.</item>
+    /// <item>No row holds it (removed between the write and the read): <c>not_saved</c>, because the write saved
+    /// nothing and nothing explains why. Never "added".</item>
+    /// </list>
+    /// </summary>
+    internal static ServerResult ClassifyUnwrittenInsert(ParsedServerEntry entry, string? holderStorageKey)
+    {
+        if (holderStorageKey is null)
+        {
+            return new ServerResult(entry.Order, entry.DisplayName, AddStatus.NotSaved,
+                "Not saved: the write changed no rows, and no server holds this entry's id now (it was removed in " +
+                "between). Send this entry again.");
+        }
+
+        if (string.Equals(holderStorageKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return new ServerResult(entry.Order, entry.DisplayName, AddStatus.Duplicate,
+                "Already monitored: another add of this server saved it while this call ran; skipped.");
+        }
+
+        return new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides,
+            $"Not added: this server's id (a 32-bit hash of its identity) is already held by a different monitored " +
+            $"server, '{holderStorageKey}'. The two identities differ but hash to the same id, so both cannot be " +
+            "saved. Register this one under a differently spelled address (for example its fully qualified name) so " +
+            "its identity, and its id, differ.");
+    }
+
+    /// <summary>
     /// PURE dedupe partition — the case-folded <see cref="ServerIdHelper.BuildStorageName"/> gate seeded with the
     /// existing store keys, first-occurrence-wins within the batch (the #1549 idiom). Returns the <c>Ready</c>
     /// entries to probe + insert and the <c>Duplicates</c> as ready-to-report results. Unit-testable without a
@@ -844,7 +1008,7 @@ ORDER BY d.host, d.database";
     /// <c>alert_delivery_mode_override</c> default to NULL (inherit the globals), <c>monthly_cost_usd</c>/
     /// <c>excluded_databases</c> are the neutral defaults, and <c>is_enabled</c> is TRUE (collection starts at
     /// once). ON CONFLICT DO NOTHING guards a race with a concurrent writer — the dedupe gate is the primary
-    /// guard.</summary>
+    /// guard. DO NOTHING is silent, so the caller checks the rows changed (#4734): 0 means nothing was saved.</summary>
     public const string InsertServerSql = @"
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
@@ -861,18 +1025,41 @@ ON CONFLICT (server_id) DO NOTHING";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var host = reader.GetString(0);
-            var database = reader.IsDBNull(1) ? null : reader.GetString(1);
-            var readOnlyIntent = !reader.IsDBNull(2) && reader.GetBoolean(2);
-            var engine = reader.IsDBNull(3) ? null : reader.GetString(3);
-            var port = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
-            keys.Add(ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port));
+            keys.Add(StorageKeyOf(reader));
         }
 
         return keys;
     }
 
-    private static async Task InsertServerAsync(
+    /// <summary>The storage key of the row a reader is positioned on, from the five identity columns
+    /// <see cref="ExistingServersSql"/> and <see cref="ServerByIdSql"/> both read, in that order — one mapping for
+    /// both so the dedupe gate and the lookup by id cannot disagree about what a row's identity is.</summary>
+    private static string StorageKeyOf(NpgsqlDataReader reader)
+    {
+        var host = reader.GetString(0);
+        var database = reader.IsDBNull(1) ? null : reader.GetString(1);
+        var readOnlyIntent = !reader.IsDBNull(2) && reader.GetBoolean(2);
+        var engine = reader.IsDBNull(3) ? null : reader.GetString(3);
+        var port = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
+        return ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
+    }
+
+    /// <summary>The identity columns of the one row holding a given <c>server_id</c>.</summary>
+    internal const string ServerByIdSql =
+        "SELECT host, database, read_only_intent, engine, port FROM config_monitored_servers WHERE server_id = $1";
+
+    /// <summary>The storage key of the row that holds <paramref name="serverId"/>, or null when no row does.</summary>
+    private static async Task<string?> ReadStorageKeyByIdAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(ServerByIdSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId }); // $1
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? StorageKeyOf(reader) : null;
+    }
+
+    private static async Task<int> InsertServerAsync(
         NpgsqlDataSource postgres, ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken)
     {
         var config = entry.ProbeConfig;
@@ -880,7 +1067,7 @@ ON CONFLICT (server_id) DO NOTHING";
 
         await using var command = postgres.CreateCommand(InsertServerSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerIdHelper.GetDeterministicHashCode(entry.StorageKey) }); // $1
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerIdOf(entry) });                                   // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Name });                                            // $2
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Host });                                            // $3
         AddNullableText(command, config.Database);                                                                                    // $4
@@ -896,10 +1083,70 @@ ON CONFLICT (server_id) DO NOTHING";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });                           // $14
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Engine });                                           // $15
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = config.Port });                                                // $16
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>The <c>server_id</c> an entry is stored under: the deterministic hash of its storage key, the same
+    /// id the collectors derive, so a tool-added row joins the collected data.</summary>
+    private static int ServerIdOf(ParsedServerEntry entry) => ServerIdHelper.GetDeterministicHashCode(entry.StorageKey);
+
+    /// <summary>
+    /// The storage operations <c>add_servers</c> performs, as a seam: the real one is
+    /// <see cref="PostgresServerDefinitions"/>, and a test stands in one that faults on a chosen write or swallows a
+    /// write, neither of which can be produced on demand against a live database.
+    /// </summary>
+    internal interface IServerDefinitions
+    {
+        /// <summary>The storage key of every existing server, to seed the dedupe gate.</summary>
+        Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken);
+
+        /// <summary>Writes one entry and returns how many rows the write changed: 1 when it was saved, 0 when
+        /// <c>ON CONFLICT (server_id) DO NOTHING</c> found the id already taken and wrote nothing.</summary>
+        Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken);
+
+        /// <summary>The storage key of the row that holds <paramref name="serverId"/>, or null when none does.</summary>
+        Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken);
+    }
+
+    /// <summary>The definitions table itself: <c>config_monitored_servers</c>.</summary>
+    private sealed class PostgresServerDefinitions : IServerDefinitions
+    {
+        private readonly NpgsqlDataSource _postgres;
+
+        public PostgresServerDefinitions(NpgsqlDataSource postgres) => _postgres = postgres;
+
+        public Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken) =>
+            LoadExistingStorageKeysAsync(_postgres, cancellationToken);
+
+        public Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken) =>
+            InsertServerAsync(_postgres, entry, encryptedPassword, cancellationToken);
+
+        public Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken) =>
+            ReadStorageKeyByIdAsync(_postgres, serverId, cancellationToken);
     }
 
     /* ─────────────────────────────── helpers ─────────────────────────────── */
+
+    /// <summary>
+    /// PURE platform check for a SQL password or service-principal client secret (#4734): null when the value can be
+    /// stored on this platform, otherwise the refusal sentence. A LITERAL is encrypted with DPAPI, which is Windows-
+    /// only, so off Windows it cannot be saved; an <c>env:</c>/<c>file:</c> reference (#1804) is stored as given and
+    /// needs no encryption, so it is accepted everywhere. <see cref="ParseEntry"/> asks this before any probe or
+    /// write, which makes the entry <c>invalid</c> up front instead of throwing from
+    /// <see cref="ProtectPasswordForStorage"/> after the probe, in the middle of a batch.
+    /// </summary>
+    internal static string? LiteralSecretRefusal(string? secret, bool isWindows, bool isServicePrincipal)
+    {
+        if (isWindows || string.IsNullOrEmpty(secret) || DarlingSecretSource.IsReference(secret))
+        {
+            return null;
+        }
+
+        var noun = isServicePrincipal ? "client secret" : "password";
+        return $"A literal {noun} cannot be saved on this platform: encrypting it needs Windows DPAPI. Give the " +
+               $"{noun} as an env:NAME or file:/run/secrets/<name> reference instead (for example " +
+               "file:/run/secrets/sql_password).";
+    }
 
     /// <summary>Prepares a SQL password for storage: an <c>env:</c>/<c>file:</c> secret REFERENCE (#1804) is
     /// stored VERBATIM — a reference is a pointer, not a secret; the secret stays in the mounted file or
@@ -907,7 +1154,9 @@ ON CONFLICT (server_id) DO NOTHING";
     /// <c>add_servers</c> refused ALL SQL-auth passwords off-Windows, dead-ending the designed onboarding path
     /// for compose deployments — the store-authoritative control plane means darling.json edits do not add
     /// servers after first seed). A LITERAL password is DPAPI-encrypted and therefore Windows-only, with the
-    /// refusal now pointing at references as the cross-platform alternative. Null for Windows auth (no secret).
+    /// refusal now pointing at references as the cross-platform alternative. <see cref="ParseEntry"/> refuses a literal
+    /// off Windows first (<see cref="LiteralSecretRefusal"/>, #4734), so a request never reaches this throw; it stays as
+    /// the backstop for any other caller. Null for Windows auth (no secret).
     /// The plaintext is not logged and never leaves this method.</summary>
     internal static string? ProtectPasswordForStorage(string? plaintextPassword)
     {

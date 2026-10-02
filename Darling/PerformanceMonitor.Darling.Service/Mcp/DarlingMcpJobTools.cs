@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -59,16 +60,12 @@ public sealed class DarlingMcpJobTools
                        remove, surviving in the one case that records nothing to read.
 
                        The gate is !IsAzureSqlDb && !IsAwsRds. The engine half is already answered above,
-                       so AWS RDS is the only remaining candidate and the message can name it outright rather
-                       than hedging — #2559 removed HasMsdbAccess from this gate, which is what turned two
-                       unpersisted candidates into one. */
+                       so AWS RDS is the only remaining candidate (#2559 removed HasMsdbAccess from this gate).
+                       The message still names it as a possible cause: a run that is merely late looks the same
+                       from here. The text is shared with Lite, so the two tools cannot drift. */
                     ?? await DarlingRuntimePrecondition.GatedOffStatusAsync(
                         postgres, resolved.ServerId, resolved.ServerName, "running_jobs",
-                        "For this collector the gate is: this is an AWS RDS instance, where the Agent job "
-                        + "tables are not reachable to a monitoring login at all and no grant changes that. "
-                        + "Since #2559 msdb access is NOT a gate — a login without it now attempts and is "
-                        + "reported as a permission denial, so the grant takes effect on the next cycle "
-                        + "rather than the next reconnect.",
+                        CollectorRuntimePrecondition.RunningJobsPossibleCauses,
                         cancellationToken)
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or the running_jobs collector has not run yet).");
 

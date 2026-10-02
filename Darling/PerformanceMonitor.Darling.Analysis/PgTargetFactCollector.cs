@@ -157,6 +157,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         await CollectObservedCoverageAsync(context, facts);
         await CollectServerMetadataFactsAsync(context, facts);
         await CollectConfigFactsAsync(context, facts);
+        await ReadStatementsEvictionFactAsync(context, facts);
         await CollectPostureFactsAsync(context, facts);
         await CollectDatabaseFactsAsync(context, facts);
         await CollectWriteFactsAsync(context, facts);

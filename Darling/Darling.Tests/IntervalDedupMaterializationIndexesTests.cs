@@ -63,14 +63,29 @@ public sealed class IntervalDedupMaterializationIndexesTests
     /// <summary>
     /// The scope pin: every OTHER registered aggregate keeps TimescaleDB's default. Enumerated from the three
     /// registries the ensure sweep builds from, so a new aggregate is covered the day it is registered.
+    ///
+    /// <para>Widened by #4503: a production catalog read found the same measured, zero-<c>idx_scan</c> shape on
+    /// six more rollups, so they earned the same option L1 has. An aggregate not on that measured list still
+    /// keeps TimescaleDB's default until it is measured too.</para>
     /// </summary>
     [Fact]
     public void EveryOtherAggregate_KeepsTheDefaultGroupIndexes_UntilMeasured()
     {
+        var measured = new[]
+        {
+            TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+            TimescaleSupport.QueryStoreStatsHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+            TimescaleSupport.QueryStoreStatsDailyView,
+            TimescaleSupport.QueryStoreStatsCorrectedDailyView,
+            TimescaleSupport.QueryStoreStatsIntervalDailyView,
+            TimescaleSupport.QueryStoreStatsDayGrainDailyView,
+        };
+
         var others = TimescaleSupport.HourlyAggregates
             .Concat(TimescaleSupport.DailyAggregates)
             .Concat(TimescaleSupport.BaselineAggregates)
-            .Where(a => !string.Equals(a.View, TimescaleSupport.QueryStoreStatsIntervalHourlyView, StringComparison.Ordinal))
+            .Where(a => !measured.Contains(a.View, StringComparer.Ordinal))
             .ToList();
 
         Assert.NotEmpty(others);
@@ -82,6 +97,20 @@ public sealed class IntervalDedupMaterializationIndexesTests
 
         /* And L1 is in the hourly registry, so the converge below finds a materialization to act on. */
         Assert.Contains(TimescaleSupport.HourlyAggregates, a => string.Equals(a.View, TimescaleSupport.QueryStoreStatsIntervalHourlyView, StringComparison.Ordinal));
+
+        /* The six measured rollups DO carry the option (#4503) — not silently exempted from this pin, asserted
+           the other way. */
+        var measuredAggregates = TimescaleSupport.HourlyAggregates
+            .Concat(TimescaleSupport.DailyAggregates)
+            .Concat(TimescaleSupport.BaselineAggregates)
+            .Where(a => measured.Contains(a.View, StringComparer.Ordinal) && !string.Equals(a.View, TimescaleSupport.QueryStoreStatsIntervalHourlyView, StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(6, measuredAggregates.Count);
+        foreach (var (createSql, _) in measuredAggregates)
+        {
+            Assert.Contains("timescaledb.create_group_indexes = false", createSql, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>

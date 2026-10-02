@@ -154,12 +154,13 @@ public sealed class McpObjectStatsTools
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
             var rows = await dataService.GetIndexUsageAsync(resolved.ServerId, limit, database);
             if (rows.Count == 0)
@@ -207,7 +208,7 @@ public sealed class McpObjectStatsTools
                 user_lookups = r.UserLookups,
                 total_reads = r.TotalReads,
                 user_updates = r.UserUpdates,
-                last_user_access = r.LastUserAccess?.AddMinutes(-utcOffsetMinutes).ToString("o")
+                last_user_access = r.LastUserAccess is { } lastAccess ? serverClock.ToUtc(lastAccess).ToString("o") : null
             });
 
             return JsonSerializer.Serialize(new
@@ -254,10 +255,15 @@ public sealed class McpObjectStatsTools
             var fetched = await dataService.GetIndexLockingAsync(resolved.ServerId, limit + 1);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
+            var optimizedLockingNote = await dataService.GetOptimizedLockingNoteAsync(resolved.ServerId);
+
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
-                    ?? McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
+                    ?? McpHelpers.Status("unavailable",
+                        "No locking/contention data recorded. Index/object stats are collected daily."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
             }
 
             var result = rows.Select(r => new
@@ -298,6 +304,8 @@ public sealed class McpObjectStatsTools
                       + "page I/O latch) descending, so the highest-contention indexes are returned first; "
                       + "raise limit to see more."
                     : "Complete: every index with lock/latch contention at the latest snapshot is included.",
+                optimized_locking_note = optimizedLockingNote,
+                separately_monitored_note = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 objects = result
             }, McpHelpers.JsonOptions);
         }

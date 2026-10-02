@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -246,5 +247,79 @@ public static class DarlingPgStatementReader
         }
 
         return new PgTopQueriesPage(rows, windowTotalExecTimeMs);
+    }
+
+    /// <summary>
+    /// #4677: the eviction passes the window recorded. The collector renders <c>statements_dealloc=N</c> onto the
+    /// <c>collection_log.error_message</c> of each run that knew the counter (0 means known, none), after the host
+    /// note and a space or semicolon, so the pattern anchors on the start or one of those two characters. The
+    /// label comes from <see cref="ServerEpoch.StatementsDeallocMeasurement"/> by concatenation. <c>known</c> is
+    /// whether any run in the window carried the label; the sum is NULL when none did. $1 server_id, $2/$3 window
+    /// (naive UTC).
+    /// </summary>
+    public const string EvictionPassesSql =
+        "SELECT count(m.n) > 0, sum(m.n)\n"
+        + "FROM (SELECT substring(error_message FROM '(?:^|[ ;])" + ServerEpoch.StatementsDeallocMeasurement + "=([0-9]+)')::bigint AS n\n"
+        + "      FROM collection_log\n"
+        + "      WHERE server_id = $1\n"
+        + "      AND   collector_name = 'pg_statement_stats'\n"
+        + "      AND   collection_time >= $2\n"
+        + "      AND   collection_time <= $3\n"
+        + "      AND   error_message LIKE '%" + ServerEpoch.StatementsDeallocMeasurement + "=%') AS m";
+
+    /// <summary>
+    /// #4677: the server's latest recorded <c>pg_stat_statements.max</c> (server-wide row). $1 server_id.
+    /// </summary>
+    public const string StatementsMaxSql = """
+        SELECT setting
+        FROM pg_server_config
+        WHERE server_id = $1
+        AND   name = 'pg_stat_statements.max'
+        AND   database_name IS NULL
+        AND   role_name IS NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
+
+    /// <summary>What the window's collection runs recorded about pg_stat_statements evictions.</summary>
+    /// <param name="Known">True when at least one run in the window observed the counter. False means unknown, never zero.</param>
+    /// <param name="EvictionPasses">Eviction passes in the window; null when <paramref name="Known"/> is false.</param>
+    /// <param name="MaxEntries">The latest recorded pg_stat_statements.max, or null when not recorded.</param>
+    public sealed record PgEvictionInfo(bool Known, long? EvictionPasses, long? MaxEntries);
+
+    /// <summary>#4677: the eviction disclosure inputs for one server and window.</summary>
+    public static async Task<PgEvictionInfo> GetEvictionInfoAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        bool known = false;
+        long? passes = null;
+        await using (var command = postgres.CreateCommand(EvictionPassesSql))
+        {
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                known = !reader.IsDBNull(0) && reader.GetBoolean(0);
+                passes = known && !reader.IsDBNull(1) ? Convert.ToInt64(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture) : null;
+            }
+        }
+
+        long? max = null;
+        await using (var command = postgres.CreateCommand(StatementsMaxSql))
+        {
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            if (value is string text && long.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+            {
+                max = parsed;
+            }
+        }
+
+        return new PgEvictionInfo(known, passes, max);
     }
 }

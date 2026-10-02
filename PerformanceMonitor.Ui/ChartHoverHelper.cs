@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Windows;
@@ -58,11 +59,37 @@ internal sealed class ChartHoverHelper
     /// disappear when the chart is collected.</summary>
     private static readonly ConditionalWeakTable<ScottPlot.WPF.WpfPlot, ChartHoverHelper> _registry = new();
 
-    public ChartHoverHelper(ScottPlot.WPF.WpfPlot chart, string unit, bool enableClickIsolate = true)
+    /// <summary>
+    /// The display zone when the chart's X is the UTC instant (#4766), else <c>null</c>: X is then the server-time
+    /// value the app plotted and the text goes through <see cref="UiTimeContext.ConvertForDisplay"/> as before.
+    /// </summary>
+    private readonly Func<TimeZoneInfo>? _displayZone;
+
+    /// <summary>
+    /// Says whether a plotted X is one whose stored wall time names two instants (#4766): the server's repeated
+    /// hour, where the instant the X sits at is only the first of the two and cannot say which pass the data was.
+    /// For such an X the hover words the time without the repeated-hour UTC offset, which would name a pass the data
+    /// never recorded. An X whose stored wall time happens once is an exact instant and keeps its offset. The
+    /// argument is the plotted X as <see cref="DateTime.FromOADate"/> reads it. Only used with a display zone;
+    /// <see cref="Clear"/> sets it back to <c>null</c>, so a predicate never outlives the data it was built for.
+    /// </summary>
+    public Func<DateTime, bool>? PlainTimeAt { get; set; }
+
+    /// <param name="chart">The chart to attach to.</param>
+    /// <param name="unit">The unit printed after a value.</param>
+    /// <param name="enableClickIsolate">Whether a click isolates the series under the cursor.</param>
+    /// <param name="displayZone">
+    /// Set when the chart plots the UTC instant as X: the hover time is then that instant in the zone, with the
+    /// UTC offset added when the wall time is ambiguous (<see cref="DisplayZone.Format"/>). Read on every hover,
+    /// so a display-mode switch shows on the next move. Leave it out and the hover behaves exactly as it always has.
+    /// </param>
+    public ChartHoverHelper(ScottPlot.WPF.WpfPlot chart, string unit, bool enableClickIsolate = true,
+        Func<TimeZoneInfo>? displayZone = null)
     {
         _chart = chart;
         _unit = unit;
         _enableClickIsolate = enableClickIsolate;
+        _displayZone = displayZone;
 
         _text = new TextBlock
         {
@@ -150,6 +177,7 @@ internal sealed class ChartHoverHelper
         _isolatedLabel = null;
         _series.Clear();
         _barPlots.Clear();
+        PlainTimeAt = null;
     }
 
     public void Add(ScottPlot.Plottables.Scatter scatter, string label) =>
@@ -291,11 +319,12 @@ internal sealed class ChartHoverHelper
 
             if (found)
             {
-                var time = UiTimeContext.ConvertForDisplay(DateTime.FromOADate(bestPoint.X));
+                var plottedX = DateTime.FromOADate(bestPoint.X);
+                var time = FormatHoverTime(plottedX, _displayZone, PlainTimeAt?.Invoke(plottedX) == true);
                 string valueFormatted = (bestPoint.Y == Math.Floor(bestPoint.Y))
                     ? bestPoint.Y.ToString("N0")
                     : bestPoint.Y.ToString("N1");
-                _text.Text = $"{bestLabel}\n{valueFormatted} {_unit}\n{time:HH:mm:ss}";
+                _text.Text = $"{bestLabel}\n{valueFormatted} {_unit}\n{time}";
                 _popup.HorizontalOffset = pos.X + 15;
                 _popup.VerticalOffset = pos.Y + 15;
                 /* Updating the offsets above moves an already-open popup, so only toggle IsOpen
@@ -327,6 +356,21 @@ internal sealed class ChartHoverHelper
     {
         _popup.IsOpen = false;
     }
+
+    /// <summary>
+    /// The time line of a hover for the plotted X <paramref name="plottedX"/>. With no zone, X is the app's
+    /// server-time value and the line is the display-mode conversion of it, as it has always been. With a zone, X
+    /// is the UTC instant: the line is that instant in the zone, and the zone's offset follows it when the wall
+    /// time happens twice. With a zone and <paramref name="plain"/> (the X's stored wall time names two instants,
+    /// <see cref="PlainTimeAt"/>) the line is the same wall time without that offset; without a zone
+    /// <paramref name="plain"/> changes nothing.
+    /// </summary>
+    internal static string FormatHoverTime(DateTime plottedX, Func<TimeZoneInfo>? displayZone, bool plain = false)
+        => displayZone is null
+            ? UiTimeContext.ConvertForDisplay(plottedX).ToString("HH:mm:ss")
+            : plain
+                ? DisplayZone.ToDisplay(plottedX, displayZone()).ToString("HH:mm:ss", CultureInfo.InvariantCulture)
+                : DisplayZone.Format(plottedX, displayZone(), "HH:mm:ss");
 
     // ── Click-to-isolate ───────────────────────────────────────────────────────────────────────
 

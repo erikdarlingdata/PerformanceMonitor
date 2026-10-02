@@ -51,12 +51,14 @@ public partial class ViewerServerTab
     // Returns a Task (not async void) for signature parity with Lite's OpenPlanTab (#2870): the Ctrl+V paste
     // guard there awaits the load so it spans the off-thread parse, and this twin stays identical. This viewer
     // tab has no paste caller today; every "View Plan" caller here discards the Task (CS4014 is an error).
-    private async Task OpenPlanTab(string planXml, string label, string? queryText = null)
+    private async Task OpenPlanTab(string planXml, string label, string? queryText = null, string? databaseName = null)
     {
         HidePlanLoading();
-        var viewer = new PlanViewerControl();
+        var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = ViewerExportSettings.AccuracyRatioDivergenceLimit };
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_server.ServerId, databaseName);
             await viewer.LoadPlan(planXml, label, queryText);
         }
         catch (System.Xml.XmlException ex)
@@ -81,6 +83,8 @@ public partial class ViewerServerTab
         }
 
         var header = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+        /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only, so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
+        header.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
         header.Children.Add(new TextBlock
         {
             Text = label.Length > 30 ? label[..30] + "…" : label,
@@ -200,7 +204,14 @@ public partial class ViewerServerTab
                 return;
             }
 
-            _ = OpenPlanTab(planXml, label, queryText);
+            var databaseName = grid.CurrentItem switch
+            {
+                ViewerQueryStatsRow s => s.DatabaseName,
+                ViewerQueryStoreRow q => q.DatabaseName,
+                ViewerProcedureStatsRow p => p.DatabaseName,
+                _ => null
+            };
+            _ = OpenPlanTab(planXml, label, queryText, databaseName);
         }
         catch (OperationCanceledException)
         {
@@ -279,7 +290,7 @@ public partial class ViewerServerTab
                 return;
             }
 
-            _ = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+            _ = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText, row.DatabaseName);
         }
         catch (Exception ex)
         {

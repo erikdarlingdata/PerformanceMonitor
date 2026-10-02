@@ -81,8 +81,8 @@ public sealed class DarlingCommandExecutorTests
         {
             WasCalled = true;
             ReceivedCustomRetentionDays = customRetentionDays;
-            return Task.FromResult(new CommandOutcome(true, "purge complete",
-                "{\"success\":true,\"tablesPurged\":3,\"rowsPurged\":42}"));
+            return Task.FromResult(new CommandOutcome(true, "purge started",
+                "{\"success\":true,\"started\":true,\"customRetentionDays\":null}"));
         }
 
         public Task<CommandOutcome> FetchPlanAsync(int serverId, PlanFetchRequest request, CancellationToken cancellationToken)
@@ -546,6 +546,27 @@ public sealed class DarlingCommandExecutorTests
         Assert.Equal("SQL Server 2022", ProbeVersionLabelOf(sqlServer));
         Assert.Equal("PostgreSQL 18", ProbeVersionLabelOf(postgres));
         Assert.Equal("Aurora PostgreSQL 16", ProbeVersionLabelOf(aurora));
+    }
+
+    /// <summary>
+    /// The same seam for the two Azure platforms: an Azure SQL Database reports major 12 (SQL Server 2014's
+    /// number) and edition 5, and the reply the executor really serializes carries <c>engineEdition</c>, which
+    /// the shared reader turns into the platform's name instead of a SQL Server year. As above, the reader's
+    /// own tests parse hand-written JSON, so this is the place the writer's key and the reader's key must agree.
+    /// </summary>
+    [Fact]
+    public void MapProbeResult_FeedsTheSharedProbeVersionLabelReader_AnAzureEditionReadsAsThePlatform()
+    {
+        var azureSqlDatabase = new ConnectionProbeResult(
+            Success: true, MajorVersion: 12, EngineEdition: 5, EngineEditionDescription: "Azure SQL Database",
+            IsAzureSqlDb: true, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: false, Error: null);
+
+        var managedInstance = new ConnectionProbeResult(
+            Success: true, MajorVersion: 16, EngineEdition: 8, EngineEditionDescription: "Azure SQL Managed Instance",
+            IsAzureSqlDb: false, IsAzureManagedInstance: true, IsAwsRds: false, HasMsdbAccess: true, Error: null);
+
+        Assert.Equal("Azure SQL Database", ProbeVersionLabelOf(azureSqlDatabase));
+        Assert.Equal("Azure SQL Managed Instance", ProbeVersionLabelOf(managedInstance));
     }
 
     /// <summary>Runs a probe result through the executor's reply serializer and the viewer's shared reader —

@@ -14,6 +14,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -136,9 +137,13 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// and a PostgreSQL target — whose <c>sql_major_version</c> is <c>0</c> — rendered "SQL Server v0" in the
     /// fleet sidebar while this very object's <see cref="IsPostgres"/> and <see cref="EngineDescription"/>
     /// already knew better.</para>
+    ///
+    /// <para>It also asks <see cref="EngineEdition"/>: an Azure SQL Database reports major <c>12</c>, which the
+    /// year table would label "SQL Server 2014", so the two Azure editions (5 and 8) read as "Azure SQL
+    /// Database" and "Azure SQL Managed Instance" instead. Every other edition keeps the year.</para>
     /// </summary>
     public string VersionLabel =>
-        MonitoredEngineVersion.DescribeEngineVersion(EngineKind, SqlMajorVersion, PostgresMajorVersion);
+        MonitoredEngineVersion.DescribeEngineVersion(EngineKind, SqlMajorVersion, PostgresMajorVersion, EngineEdition);
 
     /// <summary>
     /// <c>servers.created_date</c>: the service's first successful connect to this server, or null when it has
@@ -153,7 +158,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
 
     private bool _isFavorite;
 
-    /// <summary>Whether the user pinned this server (from the viewer's registry, matched by name). Drives the star.</summary>
+    /// <summary>Whether the user pinned this server (from the viewer's registry, matched by server id). Drives the star.</summary>
     public bool IsFavorite
     {
         get => _isFavorite;
@@ -444,6 +449,10 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// toward a stale "table" claim, same as every other input to this gate.</summary>
     private int? _cachedStoreSchemaVersion;
 
+    /// <summary>The fleet's server clocks for the alert-history reads (#4766), held between polls: see
+    /// <see cref="ServerClockCache"/>. Per instance, like the store connection it reads.</summary>
+    private readonly ServerClockCache _alertClocks;
+
     /// <param name="connectionString">The Postgres connection string (managed-derived or BYO from darling.json).</param>
     /// <param name="connectionTimeoutSeconds">
     /// The viewer's "Connection timeout" preference (<see cref="ViewerAppSettings.ConnectionTimeoutSeconds"/>,
@@ -466,8 +475,14 @@ public sealed partial class ViewerDataService : IAsyncDisposable
            from disagreeing. */
         ViewerStorePool.Publish(effectiveConnectionString);
 
-        _dataSource = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(effectiveConnectionString));
+        /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.ApplicationName,
+           set on the builder there); this is the BYO connection string's turn — set-if-absent, so an
+           operator's own ApplicationName on a bring-your-own store wins. */
+        _dataSource = NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
+        _alertClocks = new ServerClockCache(ct => GetServerClocksAsync(serverId: null, ct), AlertClockLifetime);
     }
 
     /// <summary>
@@ -971,7 +986,77 @@ SELECT
     /* V148 (#4442 scope 2) probes the new read-latency histogram table. It is not yet read by any viewer
        surface, so this gate rests on the standing invariant alone. Named only in this probe line, never in
        prose, per the V71 finding. */
-    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'read_latency')";
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'read_latency'),
+    /* V149 (#4250) drops query_store_plan_map's last_seen btree index and sets fillfactor 90 on it, so the
+       liveness touch's UPDATE can go HOT. This probes NEGATIVELY — the index's ABSENCE plus the fillfactor
+       reloption — unlike every other sentinel in this list, which probes an object's presence. It is not
+       yet read by any viewer surface, so this gate rests on the standing invariant alone. Named only in
+       this probe line, never in prose, per the V71 finding. */
+    ((SELECT c.reloptions FROM pg_class c WHERE c.oid = 'collect.query_store_plan_map'::regclass) @> ARRAY['fillfactor=90']
+        AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'collect' AND indexname = 'idx_query_store_plan_map_last_seen')),
+    /* V150 (#4469, #4477) adds two supporting indexes: idx_collection_log_watermark (the per-collector
+       watermark lookup) and idx_job_history_server_run (the Viewer's Job History tab read). It is not yet
+       read by any viewer surface, so this gate rests on the standing invariant alone. Named only in this
+       probe line, never in prose, per the V71 finding. */
+    (EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'collect' AND indexname = 'idx_collection_log_watermark')
+        AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'collect' AND indexname = 'idx_job_history_server_run')),
+    /* V151 (#4475) probes a COLUMN for the V36/V37 reason: ag_replica_states has existed since V34, so
+       table existence cannot separate the rungs. It is not yet read by any viewer surface, so this gate
+       rests on the standing invariant alone. Named only in this probe line, never in prose, per the V71
+       finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ag_replica_states' AND column_name = 'group_id'),
+    /* V152 (#4503) probes NEGATIVELY, the V149 shape: the six Query Store rollups' auto-created two-key
+       group index (first key one of the rung's drop-list columns, second key bucket) is ABSENT. This walks
+       query_store_stats_hourly's own pg_rewrite/pg_depend dependency to its materialization hypertable
+       rather than the TimescaleDB information views, so it needs no pg_extension guard. ANDed with V151's
+       own sentinel, copied verbatim, rather than a to_regclass(...) IS NOT NULL existence check on the
+       view: a plain-PostgreSQL store has no rollup at all, so to_regclass(...) is NULL there at every
+       version, the dependency walk finds no rows, and the bare NOT EXISTS reads that absence as ""index
+       dropped"" — misreporting a plain-PostgreSQL store at V151 as V152. That store is harmless to leave
+       unresolved here: V152 is a no-op without TimescaleDB, so a plain-PostgreSQL store's schema at V151
+       and V152 is identical, and ANDing with V151's own sentinel makes this arm require V151 first, so a
+       store below V151 fails that sentinel and falls through to the next arm instead. It is not yet read
+       by any viewer surface, so this gate rests on the standing invariant alone. Named only in this probe
+       line, never in prose, per the V71 finding. */
+    (NOT EXISTS (
+        SELECT 1
+        FROM pg_rewrite r
+        JOIN pg_depend d ON d.objid = r.oid
+        JOIN pg_class matc ON matc.oid = d.refobjid AND matc.oid <> r.ev_class
+        JOIN pg_index i ON i.indrelid = matc.oid AND i.indnkeyatts = 2
+        JOIN pg_attribute a1 ON a1.attrelid = matc.oid AND a1.attnum = i.indkey[0] AND a1.attname = 'query_hash'
+        JOIN pg_attribute a2 ON a2.attrelid = matc.oid AND a2.attnum = i.indkey[1] AND a2.attname = 'bucket'
+        WHERE r.ev_class = to_regclass('collect.query_store_stats_hourly')
+    )
+     AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ag_replica_states' AND column_name = 'group_id')),
+    /* V153 (#4608) probes an INDEX the same way V22/V142 do: idx_query_store_interval_latest_first_exec is
+       additive (indexes are not listed in information_schema, so this reads the world-readable pg_indexes
+       catalog like those arms do). It is not yet read by any viewer surface, so this gate rests on the
+       standing invariant alone. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_query_store_interval_latest_first_exec'),
+    /* V154 (#4608, split #4615) probes the second index the V153 rung's build once created in the same
+       rung, now its own rung with its own MigrationCommandTimeoutSeconds window — the same additive-index
+       shape as V153's arm above. Not yet read by any viewer surface, so this gate rests on the standing
+       invariant alone. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_query_store_interval_wide_first_exec'),
+    /* V155 (#4765) adds interval_end_time_utc to the Query Store stats table and to the interval-wide table.
+       The sentinel is the interval-wide table's column, not the stats table's: a fresh store's stats table is
+       created from the collector's current column list and so has the column before this rung ever runs,
+       while the interval-wide table only ever gets it from the rung itself. The viewer's Query Store duration trend
+       reads the column to rate each interval over its own length: its raw read (QueryStoreDurationTrendSql),
+       its table-routed twin (QueryStoreDurationTrendTableSql) and the rollup route's raw class (#4765). So this
+       sentinel is what keeps those reads off a store that lacks the column: the connect-time gate blocks a store
+       below V155 (and fails open only when the probe itself fails). Named only in this probe line, never in
+       prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_store_interval_wide' AND column_name = 'interval_end_time_utc'),
+    /* V156 (#4834) stores the hour's longest single checkpoint sync on the store's own checkpointer row. The
+       sentinel is the milliseconds column; its instant column arrives in the same statement. Not yet read by any
+       viewer surface, so this gate rests on the standing invariant alone. Named only in this probe line, never in
+       prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'store_metrics' AND column_name = 'checkpoint_longest_sync_ms'),
+    /* V157 gives a mute rule an optional store server id. The column is the sentinel. Named only in this probe line,
+       never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_mute_rules' AND column_name = 'server_id')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -993,7 +1078,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100), reader.GetBoolean(101), reader.GetBoolean(102), reader.GetBoolean(103), reader.GetBoolean(104), reader.GetBoolean(105), reader.GetBoolean(106), reader.GetBoolean(107), reader.GetBoolean(108), reader.GetBoolean(109), reader.GetBoolean(110), reader.GetBoolean(111), reader.GetBoolean(112), reader.GetBoolean(113), reader.GetBoolean(114), reader.GetBoolean(115), reader.GetBoolean(116), reader.GetBoolean(117), reader.GetBoolean(118), reader.GetBoolean(119), reader.GetBoolean(120), reader.GetBoolean(121), reader.GetBoolean(122), reader.GetBoolean(123));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100), reader.GetBoolean(101), reader.GetBoolean(102), reader.GetBoolean(103), reader.GetBoolean(104), reader.GetBoolean(105), reader.GetBoolean(106), reader.GetBoolean(107), reader.GetBoolean(108), reader.GetBoolean(109), reader.GetBoolean(110), reader.GetBoolean(111), reader.GetBoolean(112), reader.GetBoolean(113), reader.GetBoolean(114), reader.GetBoolean(115), reader.GetBoolean(116), reader.GetBoolean(117), reader.GetBoolean(118), reader.GetBoolean(119), reader.GetBoolean(120), reader.GetBoolean(121), reader.GetBoolean(122), reader.GetBoolean(123), reader.GetBoolean(124), reader.GetBoolean(125), reader.GetBoolean(126), reader.GetBoolean(127), reader.GetBoolean(128), reader.GetBoolean(129), reader.GetBoolean(130), reader.GetBoolean(131), reader.GetBoolean(132));
             }
 
             return null;
@@ -1018,7 +1103,7 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false, bool hasPgCpuCapacityHeadroom = false, bool hasCustomAlertCore = false, bool hasMuteRuleReloadBeacon = false, bool hasBuiltinAlertPersistence = false, bool hasRetentionHoldRatioKnobs = false, bool hasDeadlockRateBandKnobs = false, bool hasOversizedPlanBacklog = false, bool hasPgAlertCountKnobs = false, bool hasFleetSweepState = false, bool hasFleetSweepCadenceKnobs = false, bool hasCollectorScheduleDatabases = false, bool hasSelfDiskWarnGbFloor = false, bool hasDeltaFamilyIntervalColumns = false, bool hasDeltaFamilyIntervalCompletion = false, bool hasPgLogEvents = false, bool hasPgLogEventMetrics = false, bool hasNotificationRoutes = false, bool hasPerfmonCounterType = false, bool hasPgNumbackendsAndSampledMs = false, bool hasTimeHonesty = false, bool hasLrqExclusionKnob = false, bool hasPgDatabaseSizeStatsAndHostMemory = false, bool hasQsCaptureModeRouteKnobToast = false, bool hasPgServerConfigDatabaseRoleOverrides = false, bool hasPostmasterStartTime = false, bool hasCheckpointsTimed = false, bool hasCollectionCaveats = false, bool hasIndexObjectStatsServerTimeIndex = false, bool hasQueryStoreIntervalLatest = false, bool hasRawChunkIntervalRungHistory = false, bool hasQueryStoreIntervalWide = false, bool hasManagedConfVerdicts = false, bool hasComposeTimeoutSixty = false, bool hasReadLatency = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false, bool hasPgCpuCapacityHeadroom = false, bool hasCustomAlertCore = false, bool hasMuteRuleReloadBeacon = false, bool hasBuiltinAlertPersistence = false, bool hasRetentionHoldRatioKnobs = false, bool hasDeadlockRateBandKnobs = false, bool hasOversizedPlanBacklog = false, bool hasPgAlertCountKnobs = false, bool hasFleetSweepState = false, bool hasFleetSweepCadenceKnobs = false, bool hasCollectorScheduleDatabases = false, bool hasSelfDiskWarnGbFloor = false, bool hasDeltaFamilyIntervalColumns = false, bool hasDeltaFamilyIntervalCompletion = false, bool hasPgLogEvents = false, bool hasPgLogEventMetrics = false, bool hasNotificationRoutes = false, bool hasPerfmonCounterType = false, bool hasPgNumbackendsAndSampledMs = false, bool hasTimeHonesty = false, bool hasLrqExclusionKnob = false, bool hasPgDatabaseSizeStatsAndHostMemory = false, bool hasQsCaptureModeRouteKnobToast = false, bool hasPgServerConfigDatabaseRoleOverrides = false, bool hasPostmasterStartTime = false, bool hasCheckpointsTimed = false, bool hasCollectionCaveats = false, bool hasIndexObjectStatsServerTimeIndex = false, bool hasQueryStoreIntervalLatest = false, bool hasRawChunkIntervalRungHistory = false, bool hasQueryStoreIntervalWide = false, bool hasManagedConfVerdicts = false, bool hasComposeTimeoutSixty = false, bool hasReadLatency = false, bool hasHotLivenessTouch = false, bool hasCollectionLogWatermarkAndJobHistoryIndexes = false, bool hasAgGroupId = false, bool hasCaggGroupIndexDrop = false, bool hasIntervalFirstExecIndexes = false, bool hasIntervalWideFirstExecIndex = false, bool hasQueryStoreIntervalEnd = false, bool hasCheckpointLongestSync = false, bool hasMuteRuleServerId = false)
     {
         /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
            A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
@@ -1198,6 +1283,113 @@ SELECT
            The WPF viewer runs no analysis, so no viewer read names the new table; this arm exists so the
            version banner stays truthful, which is the only effect the rung has on the viewer. Named only
            in the probe line, not this prose, per the V71 finding. */
+        /* V152 (#4503): the six Query Store rollups' auto-created two-key group index is now ABSENT, and
+           now the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather
+           than falling through to the rung below and showing a spurious upgrade banner on a store that is
+           current.
+
+           The WPF viewer runs no analysis, so no viewer read names any of the six rollups or their
+           indexes; this arm exists so the version banner stays truthful, which is the only effect the rung
+           has on the viewer. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V157: a mute rule's optional store server id, and now the TOP rung, so a fully-migrated store maps to
+           EXACTLY StorageVersion.SchemaVersion rather than falling through to the rung below and showing a spurious
+           upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        if (hasMuteRuleServerId)
+        {
+            return 157;
+        }
+
+        /* V156 (#4834): the hour's longest single checkpoint sync on the store's own checkpointer row, and now
+           the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than
+           falling through to the rung below and showing a spurious upgrade banner on a store that is current.
+
+           No viewer read names the columns yet; this arm exists so the version banner stays truthful, which is
+           the only effect the rung has on the viewer. Named only in the probe line, not this prose, per the
+           V71 finding. */
+        if (hasCheckpointLongestSync)
+        {
+            return 156;
+        }
+
+        /* V155 (#4765): each Query Store interval's end, and no longer the top rung now that V156 has landed
+           above it, so a store that reaches exactly V155 falls through to here rather than to the rung below
+           and shows a spurious upgrade banner on a store that is current.
+
+           No viewer read names the column yet; this arm exists so the version banner stays truthful, which
+           is the only effect the rung has on the viewer. Named only in the probe line, not this prose, per
+           the V71 finding. */
+        if (hasQueryStoreIntervalEnd)
+        {
+            return 155;
+        }
+
+        /* V154 (#4608, split #4615): query_store_interval_wide's twin of V153's index, in its own rung
+           and no longer the top rung now that V155 has landed above it, so a store that reaches exactly
+           V154 falls through to here rather than to V153 and shows a spurious upgrade banner on a store
+           that is current.
+
+           The WPF viewer runs no analysis, so no viewer read names either index; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasIntervalWideFirstExecIndex)
+        {
+            return 154;
+        }
+
+        /* V153 (#4608, split #4615): a plain btree on first_execution_time for query_store_interval_latest
+           only — no longer the top rung now that V154 (query_store_interval_wide's twin) has landed above
+           it, so a store that reaches exactly V153 falls through to here rather than to V152.
+
+           The WPF viewer runs no analysis, so no viewer read names the index; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasIntervalFirstExecIndexes)
+        {
+            return 153;
+        }
+
+        if (hasCaggGroupIndexDrop)
+        {
+            return 152;
+        }
+
+        /* V151 (#4475): ag_replica_states.group_id, a column that identifies which physical AG a replica
+           row belongs to. Formerly the TOP rung — RequiredStoreSchemaVersion is StorageVersion.SchemaVersion
+           and a store below this arm now falls through to V150 instead of stopping here.
+
+           The WPF viewer runs no analysis, so no viewer read names the new column; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasAgGroupId)
+        {
+            return 151;
+        }
+
+        /* V150 (#4469, #4477): two supporting indexes, idx_collection_log_watermark and
+           idx_job_history_server_run. Formerly the TOP rung — RequiredStoreSchemaVersion is
+           StorageVersion.SchemaVersion and a store below this arm now falls through to V149 instead of
+           stopping here.
+
+           The WPF viewer runs no analysis, so no viewer read names either index; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasCollectionLogWatermarkAndJobHistoryIndexes)
+        {
+            return 150;
+        }
+
+        /* V149 (#4250): the Query Store liveness touch drops query_store_plan_map's last_seen index and
+           sets fillfactor 90. Formerly the TOP rung — RequiredStoreSchemaVersion is StorageVersion.SchemaVersion
+           and a store below this arm now falls through to V148 instead of stopping here.
+
+           The WPF viewer runs no analysis, so no viewer read names this table; this arm exists so the
+           version banner stays truthful, which is the only effect the rung has on the viewer. Named only
+           in the probe line, not this prose, per the V71 finding. */
+        if (hasHotLivenessTouch)
+        {
+            return 149;
+        }
+
         if (hasReadLatency)
         {
             return 148;
@@ -2418,6 +2610,18 @@ SELECT
         return 16;
     }
 
+    /// <summary>
+    /// #4530/#4597: the server's edition/MAXDOP/cost threshold/max memory for plan analysis, plus the
+    /// database's name and compat level when <paramref name="databaseName"/> is known, for the viewer's own
+    /// plan-opening sites (<see cref="PerformanceMonitor.Ui.PlanViewerControl.ServerMetadata"/>) — this app
+    /// has no live connection to the monitored server at plan-view time, so it reads the collected copy the
+    /// same way the MCP plan tools and the drill-downs do. Non-fatal: a missing row or a read failure
+    /// returns null, same as <see cref="DarlingServerMetadataReader.ReadAsync"/> itself.
+    /// </summary>
+    public Task<PerformanceMonitor.PlanAnalysis.ServerMetadata?> GetPlanAnalysisServerMetadataAsync(
+        int serverId, string? databaseName = null, CancellationToken cancellationToken = default) =>
+        DarlingServerMetadataReader.ReadAsync(_dataSource, serverId, databaseName, cancellationToken);
+
     /// <summary>All registered servers, ordered as the server list displays them.</summary>
     public async Task<List<DarlingServer>> GetServersAsync(CancellationToken cancellationToken = default)
     {
@@ -2471,6 +2675,52 @@ LIMIT 1";
         return result is null or DBNull
             ? null
             : Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// <see cref="ServerUtcOffsetSql"/> plus the zone: the newest <c>server_properties</c> row that has an
+    /// offset, with its <c>time_zone_id</c> (V134 — <c>CURRENT_TIMEZONE_ID()</c>, a Windows zone id such as
+    /// "Eastern Standard Time" on SQL Server 2022 and later, NULL before). Both columns come from the SAME
+    /// row, so the id and the offset describe one snapshot. The zone is what lets the Server-time display
+    /// mode follow a daylight-saving change; the offset is the fallback when the id is NULL or does not
+    /// resolve on the viewer's machine (#4766).
+    /// </summary>
+    public const string ServerClockSql = @"
+SELECT utc_offset_minutes, time_zone_id
+FROM server_properties
+WHERE server_id = $1
+AND   utc_offset_minutes IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The active server's clock (#4766): its time zone where the newest snapshot carries a resolvable id,
+    /// else the snapshot's fixed offset. Returns null when no offset has been collected yet, so the caller
+    /// keeps the viewer machine's offset. A store below V134 has no <c>time_zone_id</c> column (42703): that
+    /// falls back to the offset-only read, exactly what this method did before the zone existed.
+    /// </summary>
+    public async Task<ServerClock?> GetServerClockAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var command = _dataSource.CreateCommand(ServerClockSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            return ServerClock.Resolve(
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(0) ? null : reader.GetInt32(0));
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
+        {
+            var offset = await GetServerUtcOffsetMinutesAsync(serverId, cancellationToken);
+            return offset.HasValue ? ServerClock.FixedOffset(offset.Value) : null;
+        }
     }
 
     /// <summary>

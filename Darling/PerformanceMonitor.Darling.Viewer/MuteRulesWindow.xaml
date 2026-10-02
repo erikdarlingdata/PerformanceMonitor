@@ -50,7 +50,7 @@
                     <DataGridTextColumn Header="Metric" Binding="{Binding MetricName}" Width="130"/>
                     <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="130"/>
                     <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
-                    <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="140"/>
+                    <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="140" SortMemberPath="ExpiresAtUtc"/>
                 </DataGrid.Columns>
             </DataGrid>
             <TextBlock x:Name="NoRulesMessage"

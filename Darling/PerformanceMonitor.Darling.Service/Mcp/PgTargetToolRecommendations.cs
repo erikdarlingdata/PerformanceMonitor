@@ -53,6 +53,11 @@ internal static class PgTargetToolRecommendations
             new("get_pg_extensions", "Whether pg_stat_statements is installed, available, or one CREATE EXTENSION away"),
             new("get_pg_server_config", "shared_preload_libraries and the settings that gate statement tracking"),
         ],
+        [PgTargetFactKeys.ConfigStatStatementsEviction] =
+        [
+            new("get_pg_top_queries", "Which statements the totals cover, with the eviction passes the window recorded"),
+            new("get_pg_server_config", "pg_stat_statements.max and whether a restart is pending"),
+        ],
         [PgTargetFactKeys.PostureFsync] = ConfigReads(),
         [PgTargetFactKeys.PostureFullPageWrites] = ConfigReads(),
         [PgTargetFactKeys.PostureSynchronousCommit] = ConfigReads(),

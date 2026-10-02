@@ -158,6 +158,10 @@
   "auto_refresh_enabled": true,
   "auto_refresh_interval_seconds": 60, // 30 | 60 | 300
 
+  // How far a plan operator's actual row count may diverge from its estimate before the plan viewer
+  // colors the edge feeding it. Floored at 2.0 when the viewer renders.
+  "accuracy_ratio_divergence_limit": 10,
+
   // ---- Overview and sidebar state -----------------------------------------------------------------
   // Written by the app as you use it, not settings you would normally hand-edit.
   "overview_sort_mode": "Cpu",         // "Cpu" | "Name"; unrecognised -> "Cpu"
@@ -237,5 +241,19 @@
   // Read by Mcp\McpSettings, not by the alert-settings loader. Enabling it from the Settings
   // window is the supported route: that path also opens the firewall and restarts the host.
   "mcp_enabled": false,
-  "mcp_port": 5151
+  "mcp_port": 5151,
+
+  // ---- Plan analysis (#4535) ------------------------------------------------------------------------------
+  // NO UI. Per-rule overrides for the plan analyzer (the analyze_query_plan / analyze_procedure_plan /
+  // analyze_query_store_plan / analyze_plan_xml MCP tools, and the plan viewer window). Shown here at its
+  // default (no rule disabled, no severity overridden). "rules.disabled" takes a list of rule numbers and
+  // drops those rules' findings; "rules.severity_overrides" maps a rule number to a replacement severity
+  // string. Example: hide rule 20 (Local Variables) and downgrade rule 5 to "Low":
+  //   "analyzer": {
+  //     "rules": {
+  //       "disabled": [20],
+  //       "severity_overrides": { "5": "Low" }
+  //     }
+  //   }
+  "analyzer": {}
 }

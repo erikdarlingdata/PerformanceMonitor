@@ -223,10 +223,13 @@ public sealed class AlertEngineTests
         public List<DatabaseStateInfo> DatabaseStates { get; } = new();
         public int DatabaseStateFetches { get; private set; }
 
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
+        /// <summary>When true the store has no verdict: the read returns null instead of a list.</summary>
+        public bool DatabaseStatesNoVerdict { get; set; }
+
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
         {
             DatabaseStateFetches++;
-            return Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
+            return Task.FromResult<List<DatabaseStateInfo>?>(DatabaseStatesNoVerdict ? null : new List<DatabaseStateInfo>(DatabaseStates));
         }
 
         /* #2157: plantable rows + a fetch counter, mirroring the database-state seam above so the
@@ -367,6 +370,10 @@ public sealed class AlertEngineTests
     {
         public List<AlertOutcome> Outcomes { get; } = new();
 
+        /// <summary>What the channels did with a delivery (#4752): the answer DeliverAndReportAsync gives
+        /// the engine. Null (the default) is "unreported", which reads as delivered.</summary>
+        public Func<AlertOutcome, AlertDelivery?>? Report { get; set; }
+
         public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
         {
             Outcomes.Add(outcome);
@@ -374,12 +381,13 @@ public sealed class AlertEngineTests
         }
 
         /* #3580: DeliverAndReportAsync is REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store
-           Parity), so every fake answers it by hand. This one reports nothing: null is "unreported", which the
-           two daily documents treat as delivered, exactly as every fire before #3580 was. */
+           Parity), so every fake answers it by hand. This one delivers, then answers what a test staged in
+           Report; with none staged it reports nothing: null is "unreported", which the two daily documents
+           and the engine's retry treat as delivered, exactly as every fire before #3580 was. */
         public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
         {
             await DeliverAsync(outcome, cancellationToken);
-            return null;
+            return Report?.Invoke(outcome);
         }
     }
 
@@ -447,11 +455,13 @@ public sealed class AlertEngineTests
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
             bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
-            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false) =>
+            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false,
+            IReadOnlyList<string>? separatelyMonitored = null) =>
             new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
                 noCpuSampleTime
                     ? null
-                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
+                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)),
+                SeparatelyMonitoredDatabases: separatelyMonitored);
 
         /// <summary>The instant distinct sample times are counted from — arbitrary, only the ordering matters.</summary>
         public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -479,6 +489,77 @@ public sealed class AlertEngineTests
         DeadlockGraphXml =
             $@"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""{database}""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""{database}""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""{database}.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>"
     };
+
+    /// <summary>F14: the engine hands the snapshot's store id to the mute check, so an id-keyed rule silences
+    /// that server's alert and NOT a same-named sibling's (a blank display name falls back to the host, so
+    /// two registrations can read identically).</summary>
+    [Fact]
+    public async Task IdKeyedMuteRule_SuppressesThatServersAlert_AndNotASameNamedSiblings()
+    {
+        var rule = new MuteRule { ServerId = 7, ServerName = Name, MetricName = "Poison Wait" };
+        var muted = new List<bool>();
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.PoisonWaitEnabled = true;
+            h.IsMuted = ctx => rule.MatchesAt(ctx, h.Now);
+            h.Adapter.PoisonWaits.Add(Poison(6_000_000, waitType: "RESOURCE_SEMAPHORE", waits: 100));
+            var snapshot = Harness.Snapshot() with { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+            muted.Add(Assert.Single(h.Deliverer.Outcomes).Muted);
+        }
+
+        Assert.Equal(new[] { true, false }, muted);
+    }
+
+    /// <summary>F14: two registrations sharing a display name read alike in both snapshots; the dedup keys
+    /// must still differ (the fingerprint takes the store id), while the mute context and the alert row keep
+    /// the display name. A unique name is unchanged: the store id never reaches its key.</summary>
+    [Fact]
+    public async Task DeadlockDedupKey_SeparatesServersSharingADisplayName_AndLeavesTheMuteContextAlone()
+    {
+        var keys = new List<string>();
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            AlertMuteContext? muteAsked = null;
+            h.IsMuted = ctx => { muteAsked = ctx; return false; };
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "host1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id, ServerNameIsShared = true };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            keys.Add(Assert.Single(fired.Context!.Incidents!).DedupKey);
+            Assert.Equal("host1", muteAsked!.ServerName);
+            Assert.Equal("host1", fired.ServerName);
+        }
+
+        Assert.NotEqual(keys[0], keys[1]);
+    }
+
+    [Fact]
+    public async Task DeadlockDedupKey_ForNamedServers_IsUnchangedByTheStoreId()
+    {
+        var expected = AlertFingerprint.ForObjects(
+            "Prod SQL 1", AlertFingerprint.Deadlock,
+            DeadlockObjectExtractor.FromGraphXml(DeadlockRow().DeadlockGraphXml))!.DedupKey;
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "Prod SQL 1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Equal(expected, Assert.Single(fired.Context!.Incidents!).DedupKey);
+        }
+    }
 
     /* ---------------- master switch ---------------- */
 
@@ -1155,6 +1236,121 @@ public sealed class AlertEngineTests
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal("1", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
     }
+
+    /* ---------------- Azure SQL Database master target: databases monitored as their own targets ---------------- */
+
+    private static readonly string[] Gp = ["GP"];
+
+    private static AlertServerSnapshot MasterSnapshot(IReadOnlyList<string>? separatelyMonitored = null) =>
+        Harness.Snapshot(isAzureSqlDb: true, separatelyMonitored: separatelyMonitored);
+
+    private static Harness MasterHarness()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingCountThreshold = 1;
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DeadlockCountThreshold = 1;
+        return h;
+    }
+
+    [Fact]
+    public async Task AzureMaster_EventsForASeparatelyMonitoredDatabase_DoNotAlert()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_TheSameEvents_AlertWhenTheDatabaseIsNotSeparatelyMonitored()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(null));
+
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_EventsForADatabaseNotInTheList_StillAlert()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "HS"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_Blocking_CountAndWatermarkCoverOnlyTheUnlistedDatabases()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(1, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(2, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(3, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(4, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(5, database: "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Equal("2", outcome.CurrentValue);
+        Assert.Equal("2 blocking session(s)", outcome.ShortMessage);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task AzureMaster_Deadlocks_CountAndWatermarkCoverOnlyTheUnlistedDatabases()
+    {
+        var h = MasterHarness();
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("HS"));
+        h.Adapter.Deadlocks.Add(DeadlockMixedRow("GP", "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+        Assert.Equal("2", outcome.CurrentValue);
+        Assert.Equal("2 deadlock(s) in the last hour", outcome.ShortMessage);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task AzureMaster_Blocking_RecountKeepsThePreferenceForExtendedEventRows()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(1, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(2, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(3, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(4, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(5, source: BlockedProcessAlertRow.DmvSnapshotSource, database: "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.Equal("2", Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected").CurrentValue);
+    }
+
+    private static DeadlockAlertRow DeadlockMixedRow(string first, string second) => new()
+    {
+        VictimProcessId = "process1",
+        VictimSqlText = "UPDATE Users SET Reputation = 1",
+        DeadlockGraphXml =
+            $@"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""{first}""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""{second}""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""{first}.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>"
+    };
 
     /* ---------------- blocking wait time (#1839; gated by #3653 A5, ruling Q4) ---------------- */
 
@@ -3677,6 +3873,27 @@ public sealed class AlertEngineTests
         Assert.Contains(AlertContextBuilders.FileGrowthRiseUnit, fired.ThresholdValue, StringComparison.Ordinal);
     }
 
+    /// <summary>An Azure SQL Database file has no volume: the fired headline says so, instead of a made-up
+    /// "0% of" an empty mount point.</summary>
+    [Fact]
+    public async Task FileGrowth_AFileWithAnUnknownVolume_FiresWithoutAMadeUpPercentOfNothing()
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        var engine = h.Build();
+        var f = GrowingFile(20_480, 60);
+        f.VolumeMountPoint = null;
+        f.VolumeTotalMb = null;
+        f.VolumeFreeMb = null;
+        h.Adapter.Files.Add(f);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("volume unknown", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("0% of", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("of )", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// The other half of the same property: a rate a tenth under the bar is silent on both lookbacks — including
     /// the day-long one, where the per-window reading paged on 12 GB in a day because 12,288 is more than 10,240.
@@ -4477,7 +4694,7 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
 
         /// <summary>
@@ -5169,6 +5386,31 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task DatabaseState_NoVerdict_LeavesAnActiveDatabaseActive_FiresNothingAndResolvesNothing()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "OFFLINE", ExpectedState = "ONLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The store cannot judge this pass: null, which is not an empty list. The active database stays
+           active, so nothing fires and nothing resolves, even though the double's own list is now empty. */
+        h.Adapter.DatabaseStatesNoVerdict = true;
+        h.Adapter.DatabaseStates.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        /* A real verdict of "no deviations" does resolve it. */
+        h.Adapter.DatabaseStatesNoVerdict = false;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Contains(h.Resolutions, r => r.MetricName == "Database State" && r.Message.Contains("Payments"));
+    }
+
+    [Fact]
     public async Task DatabaseState_PendingCriticalFirstObservation_FiresCriticalWithNoBaselineMessage()
     {
         /* A critical first observation has no baseline (empty expected) — the store returns it as pending;
@@ -5210,6 +5452,1278 @@ public sealed class AlertEngineTests
 
         Assert.Contains("no baseline", detail, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, CountOccurrences(detail, "baseline"));
+    }
+
+    /* ---------------- #4752: an alert whose every channel failed is tried again ---------------- */
+
+    /// <summary>Email failed with its own error and nothing else went out: the row records channel
+    /// <c>email</c>, <c>Sent</c> false, <c>SendError</c> set.</summary>
+    private static AlertDelivery FailedByEmail() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.Failed, SendError: "SMTP: 535 authentication failed",
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    /// <summary>A webhook-only fan-out whose every post failed (an HTTP 429, say): the row records channel
+    /// <c>failed</c>, <c>Sent</c> false, <c>SendError</c> set.</summary>
+    private static AlertDelivery FailedByWebhook() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.Failed, WebhookSendError: "Slack: 429 Too Many Requests", AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    /// <summary>The webhook delivered.</summary>
+    private static AlertDelivery DeliveredByWebhook() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.Delivered, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    /// <summary>A PARTIAL failure: the email failed with its error, the webhook delivered. <c>Sent</c> is true
+    /// and <c>SendError</c> is set.</summary>
+    private static AlertDelivery FailedByEmailButDeliveredByWebhook() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.Failed, SendError: "SMTP: 535 authentication failed",
+            WebhookOutcome: AlertChannelOutcome.Delivered, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    /// <summary>A muted fire attempts no channel: <c>Sent</c> false, no <c>SendError</c>.</summary>
+    private static AlertDelivery MutedNothingAttempted() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: true, trayChannelPresent: false);
+
+    /// <summary>An email inside its incident cooldown: reported as throttled, so <c>Sent</c> is false and
+    /// there is no <c>SendError</c> (#4822).</summary>
+    private static AlertDelivery ThrottledNothingSent() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.Throttled, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    [Fact]
+    public void TheDeliveryShapes_TheRetryReads_AreWhatTheChannelsProduce()
+    {
+        /* The engine retries on Sent == false with a SendError. This pins that the two failure shapes the
+           channels really produce have it, and that the shapes that must NOT be retried do not. */
+        var email = FailedByEmail();
+        Assert.False(email.Sent);
+        Assert.NotNull(email.SendError);
+
+        var webhook = FailedByWebhook();
+        Assert.False(webhook.Sent);
+        Assert.NotNull(webhook.SendError);
+
+        var partial = FailedByEmailButDeliveredByWebhook();
+        Assert.True(partial.Sent);
+        Assert.NotNull(partial.SendError);
+
+        var delivered = DeliveredByWebhook();
+        Assert.True(delivered.Sent);
+        Assert.Null(delivered.SendError);
+
+        var muted = MutedNothingAttempted();
+        Assert.False(muted.Sent);
+        Assert.Null(muted.SendError);
+    }
+
+    [Theory]
+    [InlineData(1, 5, 1)]
+    [InlineData(2, 5, 2)]
+    [InlineData(3, 5, 4)]
+    [InlineData(4, 5, 5)]
+    [InlineData(5, 5, 5)]
+    [InlineData(1, 3, 1)]
+    [InlineData(2, 3, 2)]
+    [InlineData(3, 3, 3)]
+    [InlineData(4, 3, 3)]
+    [InlineData(6, 60, 32)]
+    [InlineData(7, 60, 60)]
+    [InlineData(0, 5, 1)]
+    [InlineData(-3, 5, 1)]
+    [InlineData(int.MaxValue, 60, 60)]
+    public void ChannelFailureRetryDelay_DoublesFromAMinute_AndNeverPassesTheCooldown(
+        int consecutiveFailures, int cooldownMinutes, int expectedMinutes)
+    {
+        Assert.Equal(
+            TimeSpan.FromMinutes(expectedMinutes),
+            AlertEngine.ChannelFailureRetryDelay(consecutiveFailures, TimeSpan.FromMinutes(cooldownMinutes)));
+    }
+
+    [Fact]
+    public void ChannelFailureRetryDelay_ACooldownUnderAMinute_IsTheCap()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(30), AlertEngine.ChannelFailureRetryDelay(1, TimeSpan.FromSeconds(30)));
+        Assert.Equal(TimeSpan.Zero, AlertEngine.ChannelFailureRetryDelay(1, TimeSpan.Zero));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cpu_EveryChannelFailed_IsTriedAgainAfterAMinute_ThenTwo_AndADeliveryRestoresTheFullCooldown(bool webhookOnly)
+    {
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => webhookOnly ? FailedByWebhook() : FailedByEmail();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        /* First failure: the retry waits a minute, not the five-minute cooldown. */
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers, and that ends the streak. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+
+        /* A delivered fire waits the whole cooldown, as it always did. */
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        h.Deliverer.Report = _ => FailedByEmail();
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+
+        /* ...and the next failure starts over at a minute, not at the four the old streak would have reached. */
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(59)));
+        Assert.Equal(5, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task Cpu_TheRetryWaitStopsGrowingAtTheCooldown()
+    {
+        /* A 3-minute cooldown: the waits are 1, 2, 3, 3 minutes, never longer than the cooldown itself. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 3;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(59)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(2)));   /* 1 minute */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));   /* 2 minutes */
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(179)));
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));   /* 3 minutes (4 capped) */
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(179)));
+        Assert.Equal(5, await SweepAfterAsync(TimeSpan.FromSeconds(2)));   /* 3 minutes again */
+    }
+
+    [Fact]
+    public async Task Cpu_APartialFailure_OneChannelDelivered_GetsNoEarlyRetry()
+    {
+        /* One channel reached an operator, so a retry would send the alert twice down it. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmailButDeliveredByWebhook();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(61);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(4);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_AMutedFire_StillWaitsTheFullCooldown()
+    {
+        /* A muted fire attempts no channel, so there is no failure to retry: it behaves as it always did. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
+
+        h.Now = h.Now.AddSeconds(61);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(4);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task BlockingWait_EveryChannelFailed_IsTriedAgainAfterAMinute()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+
+        h.Now = h.Now.AddSeconds(30);
+        at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+
+        h.Now = h.Now.AddSeconds(31);
+        await DriveBlockingWaitAsync(engine, h, 120_000, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Blocking Wait Time"));
+    }
+
+    [Fact]
+    public async Task TempDb_EveryChannelFailed_IsTriedAgainAfterAMinute()
+    {
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByWebhook();
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 800, unallocatedMb: 200, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        at = await DriveTempDbAsync(engine, h, reservedMb: 800, unallocatedMb: 200, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await DriveTempDbAsync(engine, h, reservedMb: 800, unallocatedMb: 200, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_EveryChannelFailed_IsTriedAgainAfterAMinute()
+    {
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "SELECT COUNT(*) FROM Users",
+            ElapsedSeconds = 2159,
+            CpuTimeMs = 1000,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task PoisonWait_EveryChannelFailed_IsTriedAgainOnTheSameCollection_AfterAMinute()
+    {
+        /* The freshness marker (the newest collection already reported) is written before delivery too. A
+           fire nobody received forgets it, so the retry does not wait for the collector's next row. */
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByWebhook();
+        var engine = h.Build();
+
+        var collected = new DateTime(2026, 8, 31, 6, 0, 0, DateTimeKind.Utc);
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "RESOURCE_SEMAPHORE_QUERY_COMPILE", waits: 134, collected: collected));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Delivered on the next try: from here the same collection is reported, so it stays quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task LowDisk_EveryChannelFailed_IsTriedAgainAtTheSameLevel_AfterAMinute()
+    {
+        /* The worsening gate's last-alerted level is written before delivery. A fire nobody received puts it
+           back, so the retry at the same level is still a fresh breach rather than a standing one. */
+        var h = new Harness();
+        h.Settings.LowDiskEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        h.Adapter.Volumes.Add(new VolumeFreeSpaceInfo { MountPoint = "D:\\", TotalMb = 102400, FreeMb = 8192 });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Delivered: the standing level is now reported and does not repeat (the #754 gate, as before). */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task LowDisk_EveryChannelFailedOnAWorseningFire_PutsBackTheLevelTheOperatorWasLastTold()
+    {
+        var h = new Harness();
+        h.Settings.LowDiskEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build();
+
+        /* 8% free is announced and delivered (null report: unreported reads as delivered). */
+        h.Adapter.Volumes.Add(new VolumeFreeSpaceInfo { MountPoint = "D:\\", TotalMb = 102400, FreeMb = 8192 });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* 1% free is worse, and delivery is down: it retries after a minute. */
+        h.Deliverer.Report = _ => FailedByEmail();
+        h.Adapter.Volumes[0].FreeMb = 1024;
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Delivery works again while the disk recovers a little to 3% free: still worse than the 8% the
+           operator was last told about, so it is announced. Had the failed fire's 1% been kept, 3% would
+           read as an improvement and stay quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Adapter.Volumes[0].FreeMb = 3072;
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Pvs_EveryChannelFailed_IsTriedAgainAtTheSameLevel_AfterAMinute()
+    {
+        var h = new Harness();
+        h.Settings.PvsEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByWebhook();
+        var engine = h.Build();
+
+        h.Adapter.PvsDatabases.Add(new PvsPressureInfo { DatabaseName = "shop", PvsSizeMb = 6144, DatabaseDataSizeMb = 10240 });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Deadlock_EveryChannelFailed_KeepsTheWatermarkAtItsPreFireValue_AndTheRetryFiresAtTheSameCount()
+    {
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var first = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1", first.CurrentValue);
+
+        /* Nothing reached an operator, so nothing is used up: the saved watermark is back at its pre-fire
+           value (the fire's own save of 1 is followed by a save of 0). */
+        Assert.Equal(0, h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+        Assert.Equal((Key, AlertEngine.DeadlockWatermarkMetric, 0), h.StateStore.SavedEdge[^1]);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The retry sweep sees the count above the watermark and fires again at the same count. */
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("1", h.Deliverer.Outcomes[1].CurrentValue);
+
+        /* Delivery works again: the third fire delivers and the watermark advances, as it always did. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal(1, h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Deadlock_EveryChannelFailed_AnEngineStartedAfterwardsStillAnnouncesIt()
+    {
+        /* The saved watermark, not just the in-memory one, went back: an engine that seeds from the store
+           after a restart is not told the deadlock was already announced. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        h.Deliverer.Report = _ => FailedByWebhook();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(1);
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Blocking_EveryChannelFailed_PutsBackThePriorWatermark_AndTheRetryFiresAtTheSameCount()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build();
+
+        /* One blocked session is announced and delivered (null report: unreported reads as delivered). */
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(1, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+
+        /* A second arrives while delivery is down. The fire moves the watermark to 2 and saves it, and
+           the failure puts it back to the 1 the operator was actually told about. */
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.Adapter.Blocking.Add(BlockingRow(77));
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("2", h.Deliverer.Outcomes[1].CurrentValue);
+        Assert.Equal(1, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+        Assert.Contains((Key, AlertEngine.BlockingWatermarkMetric, 2), h.StateStore.SavedEdge);
+        Assert.Equal((Key, AlertEngine.BlockingWatermarkMetric, 1), h.StateStore.SavedEdge[^1]);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal("2", h.Deliverer.Outcomes[2].CurrentValue);
+
+        /* Delivered: the watermark advances to 2 and the lingering count stays quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Blocking_EveryChannelFailed_AnEngineStartedAfterwardsStillAnnouncesIt()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Deliverer.Report = _ => FailedByEmail();
+
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(1);
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /* ---------------- #4752: the five families the first pass left out ---------------- */
+
+    [Fact]
+    public async Task FileGrowth_EveryChannelFailed_IsTriedAgainOnTheSameObservation_AfterAMinute()
+    {
+        /* A rise-only file (2% of a 4 TB volume, under the level gate) fires once per hourly observation, and
+           that observation's stamp is written before delivery. A fire nobody received puts the file's prior
+           memory back (none, the first time), so the retry still reads the observation as news. Left in place,
+           the stamp would make the retry sweep find nothing to send, and the file would stay silent for the
+           whole cooldown. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers... */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+
+        /* ...and a delivered fire waits the whole cooldown: the next hour's observation is held until it is up. */
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task FileGrowth_EveryChannelFailedOnANewerObservation_PutsBackTheObservationTheOperatorWasLastTold()
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        /* The first hour's rise is announced and delivered (null report: unreported reads as delivered). */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The next hour's is news, and delivery is down: it retries a minute later, and the retry is still
+           news because the stamp went back to the first hour's rather than staying on the second's. */
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1));
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* Delivered: now the second hour is reported, and the same observation stays quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task AnomalousJob_EveryChannelFailed_IsTriedAgainForTheSameRun_AfterAMinute()
+    {
+        /* The cooldown is per RUN, and each sweep drops a run's stamp once the cooldown has passed. The
+           back-dated stamp of a fire nobody received reaches that point a minute later, so the retry is the
+           same run's with no second marker to put back. */
+        var h = new Harness();
+        h.Settings.LongRunningJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByWebhook();
+        var engine = h.Build();
+
+        h.Adapter.AnomalousJobs.Add(new AnomalousJobInfo
+        {
+            JobName = "Nightly ETL", JobId = "job-1", StartTime = new DateTime(2026, 7, 1, 11, 0, 0),
+            CurrentDurationSeconds = 3600, AvgDurationSeconds = 900, PercentOfAverage = 400
+        });
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal("Nightly ETL at 400% of avg (60m)", h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers, and that run then waits the whole cooldown. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailed_PutsBackThePriorWatermark_AndTheRetryFiresForTheSameFailure()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        /* One failure is announced and delivered (null report: unreported reads as delivered). */
+        var firstFailure = new DateTime(2026, 7, 1, 6, 55, 0); /* server-local, Kind-Unspecified */
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = firstFailure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(firstFailure, h.StateStore.FailedJobWatermarks[Key]);
+
+        /* A newer one arrives while delivery is down. The fire moves the in-memory watermark to it, and the
+           failure puts back the one the operator was actually told about. The saved watermark is written
+           only after a delivery, so it never held the newer time and the fire made no save call at all. */
+        var secondFailure = firstFailure.AddMinutes(30);
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.FailedJobs.Insert(0, new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = secondFailure });
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.DoesNotContain((Key, secondFailure), h.StateStore.SavedFailedJob);
+        Assert.Equal((Key, firstFailure), Assert.Single(h.StateStore.SavedFailedJob));
+        Assert.Equal(firstFailure, h.StateStore.FailedJobWatermarks[Key]);
+
+        h.Now = h.Now.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* The retry sees the newest failure above the watermark and announces it again. */
+        h.Now = h.Now.AddSeconds(31);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal(h.Deliverer.Outcomes[1].ShortMessage, h.Deliverer.Outcomes[2].ShortMessage);
+
+        /* Second failure in a row: two minutes. */
+        h.Now = h.Now.AddSeconds(119);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* Delivery works again: the fourth fire delivers and the watermark advances, as it always did. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(2);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+        Assert.Equal(secondFailure, h.StateStore.FailedJobWatermarks[Key]);
+
+        /* Only the two delivered fires saved anything: the two that no channel received made no save call. */
+        Assert.Equal(new[] { (Key, firstFailure), (Key, secondFailure) }, h.StateStore.SavedFailedJob);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailedOnTheFirstFire_NeverSavesTheWatermark_AndTheRetryFiresInThisProcess()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+
+        /* There was no prior value to put back, and none is needed: the saved watermark is written only
+           after a delivery, so this fire never sent the failure's time anywhere. The in-memory entry is
+           removed, which is why the retry below still happens in this process. */
+        Assert.Empty(h.StateStore.SavedFailedJob);
+        Assert.False(h.StateStore.FailedJobWatermarks.ContainsKey(Key));
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Empty(h.StateStore.SavedFailedJob);
+
+        /* Delivered on the next try: the same failure is then reported for good, and saved once. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(121)));
+        Assert.Equal((Key, failure), Assert.Single(h.StateStore.SavedFailedJob));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromMinutes(6)));
+    }
+
+    /// <summary>
+    /// #4752: with no earlier watermark a fire nobody received has nothing to put back, and the saved
+    /// watermark used to keep the failure's time anyway. A restart inside the retry delay then read that
+    /// failure as already announced, and no channel ever carried it. The save now follows a delivery, so a
+    /// new engine over the same saved state finds no watermark and fires.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailedOnTheFirstFire_ARestartBeforeTheRetry_StillAnnouncesTheFailure()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The process restarts inside the retry delay: a new engine over the SAME state store, with every
+           in-memory watermark and cooldown clock gone. Its first sweep seeds from what was saved. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(10);
+        var restarted = h.Build(withFailedJobsFetcher: true);
+        await restarted.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Equal((Key, failure), Assert.Single(h.StateStore.SavedFailedJob));
+
+        /* Delivered this time, so the restarted engine does not announce it a third time. */
+        h.Now = h.Now.AddMinutes(6);
+        await restarted.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>
+    /// #4752: a fire that a channel delivered saves the watermark exactly once, and the value is the newest
+    /// failure's run time (the maximum, not whichever row the fetcher listed first). The same failure
+    /// lingering in the lookback window on the next sweep saves nothing more.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_ADeliveredFire_SavesTheWatermarkOnce_WithTheNewestFailuresTime()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var oldest = new DateTime(2026, 7, 1, 6, 10, 0);
+        var newest = new DateTime(2026, 7, 1, 6, 55, 0);
+        var middle = new DateTime(2026, 7, 1, 6, 30, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = oldest, StepId = 2, StepName = "Backup", Message = "disk full" });
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = newest });
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Stats.Update", JobId = "j3", RunDateTime = middle });
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal((Key, newest), Assert.Single(h.StateStore.SavedFailedJob));
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.StateStore.SavedFailedJob);
+    }
+
+    /// <summary>
+    /// #4752: a fire where every channel failed, with a watermark already saved, leaves that watermark
+    /// exactly as it was and makes no save call. The new value never reached the saved state, so there is
+    /// nothing to put back there.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailed_WithAnEarlierWatermark_LeavesTheSavedWatermarkAlone_AndMakesNoSaveCall()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var firstFailure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = firstFailure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal((Key, firstFailure), Assert.Single(h.StateStore.SavedFailedJob));
+
+        h.StateStore.SavedFailedJob.Clear();
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.FailedJobs.Insert(0, new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = firstFailure.AddMinutes(30) });
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.StateStore.SavedFailedJob);
+        Assert.Equal(firstFailure, h.StateStore.FailedJobWatermarks[Key]);
+    }
+
+    /// <summary>
+    /// #4752: the save is gated on a channel failing, not on the mute. A muted fire attempts no channel, so
+    /// it is not "every channel failed" and it saves the watermark, as it did before the save moved after
+    /// the fire.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_AMutedFire_StillSavesTheWatermark()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
+        Assert.Equal((Key, failure), Assert.Single(h.StateStore.SavedFailedJob));
+    }
+
+    [Fact]
+    public async Task FailedJobs_APartialFailure_OneChannelDelivered_KeepsTheWatermark_AndGetsNoEarlyRetry()
+    {
+        /* One channel reached an operator, so a retry would send the alert twice down it. */
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmailButDeliveredByWebhook();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(failure, h.StateStore.FailedJobWatermarks[Key]);
+
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Theory]
+    [InlineData("OFFLINE", true)]
+    [InlineData("SUSPECT", false)]
+    public async Task DatabaseState_EveryChannelFailed_IsTriedAgainAfterAMinute_AndIsNotRecordedAsAnnounced(
+        string state, bool edgeTriggered)
+    {
+        /* An edge-triggered state (a parked OFFLINE) is announced once, and "announced" is what the store
+           remembers. Saving that after a fire nobody received would make the retry read the state as told
+           already, so the memory is written only when a channel delivered. SUSPECT repeats on the cooldown
+           and shows the back-dated clock alone. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var row = new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = state, ExpectedState = "ONLINE", LastAlertedState = "" };
+        h.Adapter.DatabaseStates.Add(row);
+        var engine = h.Build();
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            /* The real round trip: what the store holds is what the read hands back as the last-announced state. */
+            row.LastAlertedState = h.StateStore.Memory.TryGetValue("Archive", out var announced) ? announced : "";
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+        Assert.Empty(h.StateStore.DatabaseStateAlerted);
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Empty(h.StateStore.DatabaseStateAlerted);
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers, and now the state is recorded as announced. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive" && r.State == state);
+
+        /* A delivered fire waits the whole cooldown. An edge-triggered state is then quiet for as long as it
+           lasts; an integrity state repeats once the cooldown is up. */
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        Assert.Equal(edgeTriggered ? 3 : 4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task DatabaseState_APartialFailure_OneChannelDelivered_IsRecordedAsAnnounced_AndGetsNoEarlyRetry()
+    {
+        /* One channel reached an operator, so the state is told and a retry would send it twice down it. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmailButDeliveredByWebhook();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Payments" && r.State == "SUSPECT");
+
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(4);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_EveryChannelFailed_IsTriedAgainOnTheSameObservation_AfterAMinute()
+    {
+        /* The plan's observation memory (#3579) is written before delivery. A fire nobody received puts the
+           prior value back (none, the first time), so the retry reads the same observation as news instead of
+           one the operator already has a card for. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        async Task<int> SweepAfterAsync(TimeSpan wait)
+        {
+            h.Now = h.Now.Add(wait);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            return h.Deliverer.Outcomes.Count;
+        }
+
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+
+        /* Second failure in a row: two minutes. */
+        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(119)));
+
+        /* The channel works again. The third fire delivers... */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+
+        /* ...and a delivered fire waits the whole cooldown: a newer observation is held until it is up. */
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0450, delta: 2, total: 3));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
+        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_EveryChannelFailedOnANewerObservation_PutsBackTheObservationTheOperatorWasLastTold()
+    {
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0402.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0402));
+        var engine = h.Build();
+
+        /* The 04:02 collection is announced and delivered (null report: unreported reads as delivered). */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The 04:18 one is news, and delivery is down: the retry is a minute later and is still news. */
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418, delta: 2, total: 3));
+        h.Now = Collection0418.AddSeconds(53);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddSeconds(61);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* Delivered: the 04:18 observation is now reported, and the same one stays quiet. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(121);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_AFailureLongAfterTheLastOne_StartsTheBackoffOverAtAMinute()
+    {
+        /* A streak used to end only with a delivery, so CPU that failed twice, cleared, and came back much
+           later inherited the count and waited four minutes for its first retry. A failure more than twice the
+           cooldown after the last one is failure one again. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Failure one waits a minute; failure two, now the second in a row, would wait two. */
+        h.Now = h.Now.AddSeconds(61);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* The condition clears... */
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples, from: at);
+        Assert.Single(h.Resolutions);
+
+        /* ...and comes back eleven minutes after the second failure: more than twice the five-minute cooldown. */
+        h.Now = h.Now.AddMinutes(11);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: at);
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* That failure is number one again, so its retry is a minute away, not the four a streak of three waits. */
+        h.Now = h.Now.AddSeconds(61);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Equal(4, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public void FailedSendBackoff_DoublesFromAMinute_AndStopsAtTheCap()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        /* Each failure lands just after the previous retry came due, as a sweep would find it. */
+        var failures = 0;
+        foreach (var expectedMinutes in new[] { 1, 2, 4, 5, 5, 5 })
+        {
+            failures++;
+            Assert.Equal(TimeSpan.FromMinutes(expectedMinutes), backoff.RecordFailure("High CPU", "srv", at, cap, out var counted));
+            Assert.Equal(failures, counted);
+            at = at.AddMinutes(expectedMinutes).AddSeconds(1);
+        }
+    }
+
+    [Fact]
+    public void FailedSendBackoff_RecordDelivered_StartsTheStreakOver()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv", at, cap));
+        Assert.Equal(TimeSpan.FromMinutes(2), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(1), cap));
+        Assert.Equal(TimeSpan.FromMinutes(4), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(3), cap));
+
+        backoff.RecordDelivered("High CPU", "srv");
+        Assert.Equal(0, backoff.TrackedCount);
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(7), cap));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_EachFamilyAndKeyIsCountedOnItsOwn()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv-a", at, cap));
+        Assert.Equal(TimeSpan.FromMinutes(2), backoff.RecordFailure("High CPU", "srv-a", at.AddMinutes(1), cap));
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv-b", at.AddMinutes(1), cap));
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("Deadlocks Detected", "srv-a", at.AddMinutes(1), cap));
+
+        /* A delivery ends one pair's streak and leaves the others' alone. */
+        backoff.RecordDelivered("High CPU", "srv-a");
+        Assert.Equal(TimeSpan.FromMinutes(2), backoff.RecordFailure("High CPU", "srv-b", at.AddMinutes(3), cap));
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv-a", at.AddMinutes(3), cap));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_AFailureMoreThanTwiceTheCapAfterTheLastOne_StartsOverAtAMinute()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        backoff.RecordFailure("High CPU", "srv", at, cap);
+        backoff.RecordFailure("High CPU", "srv", at.AddMinutes(1), cap);
+        Assert.Equal(TimeSpan.FromMinutes(4), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(3), cap));
+
+        /* One tick past twice the cap after the last failure: the streak lapsed. */
+        var lapsed = at.AddMinutes(3) + cap + cap + TimeSpan.FromTicks(1);
+        Assert.Equal(TimeSpan.FromMinutes(1), backoff.RecordFailure("High CPU", "srv", lapsed, cap, out var failures));
+        Assert.Equal(1, failures);
+        Assert.Equal(TimeSpan.FromMinutes(2), backoff.RecordFailure("High CPU", "srv", lapsed.AddMinutes(1), cap));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_AFailureExactlyTwiceTheCapAfterTheLastOne_ContinuesTheStreak()
+    {
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        backoff.RecordFailure("High CPU", "srv", at, cap);
+        backoff.RecordFailure("High CPU", "srv", at.AddMinutes(1), cap);
+
+        Assert.Equal(TimeSpan.FromMinutes(4), backoff.RecordFailure("High CPU", "srv", at.AddMinutes(1) + cap + cap, cap, out var failures));
+        Assert.Equal(3, failures);
+    }
+
+    [Fact]
+    public void FailedSendBackoff_DropsStreaksThatCanNoLongerMatter_WhenTheTableGrows()
+    {
+        /* A family keyed per run leaves one streak behind for every run that ended undelivered. A streak more
+           than twice its cap old is the same as none, so dropping it changes no answer. */
+        var backoff = new FailedSendBackoff();
+        var cap = TimeSpan.FromMinutes(5);
+        var at = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        for (var run = 0; run < 1100; run++)
+        {
+            backoff.RecordFailure("Long-Running Job", $"srv:job-{run}", at, cap);
+        }
+
+        /* All of them are recent enough to matter, so none is dropped. */
+        Assert.Equal(1100, backoff.TrackedCount);
+
+        backoff.RecordFailure("Long-Running Job", "srv:job-new", at.AddHours(1), cap);
+        Assert.Equal(1, backoff.TrackedCount);
+    }
+
+    [Fact]
+    public void FailedSendBackoff_EveryChannelFailed_IsTheRuleTheEngineRetriesOn()
+    {
+        Assert.True(FailedSendBackoff.EveryChannelFailed(FailedByEmail()));
+        Assert.True(FailedSendBackoff.EveryChannelFailed(FailedByWebhook()));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(FailedByEmailButDeliveredByWebhook()));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(DeliveredByWebhook()));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(MutedNothingAttempted()));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(null));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_EverySendFailed_ReportsAFailedOne()
+    {
+        var first = FailedByEmail();
+
+        var report = FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { first, FailedByWebhook(), FailedByEmail() });
+
+        Assert.Same(first, report);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(report));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_OneSendReachedAChannel_ReportsIt_WhereverItSits()
+    {
+        /* The split reached a channel, so the engine must not try it again: a retry would page it a second
+           time down the channel that worked. A partial failure (one channel delivered) counts as reaching one. */
+        var delivered = DeliveredByWebhook();
+        var partial = FailedByEmailButDeliveredByWebhook();
+
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered, FailedByWebhook() }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { delivered, FailedByEmail() }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered }));
+        Assert.Same(partial, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByWebhook(), partial }));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered })));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_NothingAttemptedOrThrottled_ReportsNothing()
+    {
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { MutedNothingAttempted(), ThrottledNothingSent() }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { ThrottledNothingSent() }));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_AFailedSendBesideThrottledOnes_ReportsTheFailure()
+    {
+        var failed = FailedByWebhook();
+
+        var report = FailedSendBackoff.ReportForSplit(
+            new AlertDelivery?[] { ThrottledNothingSent(), failed, MutedNothingAttempted() });
+
+        Assert.Same(failed, report);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(report));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_SkipsNullEntries_AndAnEmptySplitReportsNothing()
+    {
+        var failed = FailedByEmail();
+        var delivered = DeliveredByWebhook();
+
+        Assert.Same(failed, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, failed, null }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, failed, delivered }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, null }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(Array.Empty<AlertDelivery?>()));
     }
 
     private static int CountOccurrences(string haystack, string needle)

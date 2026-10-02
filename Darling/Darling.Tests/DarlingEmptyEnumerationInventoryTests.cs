@@ -506,17 +506,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             databaseName, databaseId, 1, "ROWS", databaseName + "_data", "C:\\data\\" + databaseName + ".mdf", 128.00m);
 
     /// <summary>The Azure sibling shape (#2643): NULL database_id / file_id / physical_name, a file_name
-    /// that says it is a whole database, and a real size — exactly what the arm projects.</summary>
+    /// that says it is a whole database, the allocated data space as total_size_mb and the data space
+    /// used as used_size_mb. Exactly what the arm projects.</summary>
     private static async Task SeedSiblingSizeAsync(
         NpgsqlConnection connection, CancellationToken ct,
         string databaseName, DateTime collectionTimeUtc) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO database_size_stats
     (collection_id, collection_time, server_id, server_name, database_name, database_id,
-     file_id, file_type_desc, file_name, physical_name, total_size_mb)
-VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, NULL, $8)",
+     file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, NULL, $8, $9)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName,
-            databaseName, "ROWS", "(whole database)", 23.00m);
+            databaseName, "ROWS", "(whole database)", 128.00m, 23.00m);
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

@@ -147,6 +147,59 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.NotNull(typeof(PgAnomalyDetector).GetMethod("SetDeviationThreshold"));
     }
 
+    /// <summary>
+    /// #4731: the two SQL Server COUNT families (<c>ANOMALY_BLOCKING_SPIKE</c>, <c>ANOMALY_DEADLOCK_SPIKE</c>)
+    /// are assembled the same way in both products. Each detector's <c>DetectBlockingAnomalies</c> builds the
+    /// fact's metadata through <c>CountFamilyMetadata.Build</c> (which stamps <c>baseline_zero_history</c>
+    /// beside <c>is_new</c> and <c>ratio</c>), adds its own baseline context, and keeps the firing rule it
+    /// always had: at least 5 blocking events / 3 deadlocks AND (an untrustworthy baseline OR a per-hour rate
+    /// at least <c>DefaultEventRatioThreshold</c> times the baseline). A mirrored inline copy in either product
+    /// would drop the stamp for that product alone, which is the drift this pin exists to refuse.
+    /// </summary>
+    [Fact]
+    public void CountFamilies_BothProductsBuildTheirMetadataThroughTheSharedFunction_AndKeepTheFiringRule()
+    {
+        var sources = new[]
+        {
+            ("Darling", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs")),
+            ("Lite", RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs")),
+        };
+
+        foreach (var (product, raw) in sources)
+        {
+            var stripped = CSharpSourceWalker.StripCommentsAndStrings(raw);
+            var declaration = Regex.Match(stripped, @"Task\s+DetectBlockingAnomalies\s*\(");
+            Assert.True(declaration.Success, $"{product}: DetectBlockingAnomalies was not found; this pin's anchor is stale.");
+
+            var open = stripped.IndexOf('{', declaration.Index);
+            var body = CSharpSourceWalker.BraceBalanced(stripped, open);
+            /* StripCommentsAndStrings preserves every offset, so the same span of the raw text is the body with
+               its literals intact — what the "no inline key" assertions below have to read. */
+            var rawBody = raw.Substring(open, body.Length);
+
+            Assert.Equal(2, Regex.Matches(body, @"CountFamilyMetadata\.Build\(").Count);
+            Assert.Matches(
+                @"CountFamilyMetadata\.Build\(\s*currentBlocking,\s*currentBlockingPerHour,\s*baselineBlockingRate,\s*blockingBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*blockingBaseline\s*\)",
+                body);
+            Assert.Matches(
+                @"CountFamilyMetadata\.Build\(\s*currentDeadlocks,\s*currentDeadlocksPerHour,\s*baselineDeadlockRate,\s*deadlockBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*deadlockBaseline\s*\)",
+                body);
+
+            foreach (var inlineKey in new[] { "\"is_new\"", "\"ratio\"", "\"current_count\"", "\"baseline_rate\"", "\"baseline_zero_history\"" })
+            {
+                Assert.DoesNotContain(inlineKey, rawBody, StringComparison.Ordinal);
+            }
+
+            /* The firing rule, verbatim in both products. */
+            Assert.Matches(
+                @"currentBlocking\s*>=\s*5\s*&&\s*\(\s*!blockingTrust\s*\|\|\s*currentBlockingPerHour\s*/\s*Math\.Max\(\s*baselineBlockingRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                body);
+            Assert.Matches(
+                @"currentDeadlocks\s*>=\s*3\s*&&\s*\(\s*!deadlockTrust\s*\|\|\s*currentDeadlocksPerHour\s*/\s*Math\.Max\(\s*baselineDeadlockRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                body);
+        }
+    }
+
     [Fact]
     public void BaselineProvider_CarriesLitesSurface_AndAllElevenMetricQueries()
     {
@@ -368,13 +421,18 @@ public sealed class DarlingAnomalyBaselineTests
         {
             "MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat",
             "AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat",
+            /* #4731: each side counts its OWN samples. One shared COUNT(*) over the (reads OR writes) rows made a
+               write-only row a read sample (peak and mean NULL, read as 0), so the read gate admitted tiles and
+               window_samples differed from Lite's. */
+            "COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count",
             "MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat",
             "AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat",
+            "COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count",
         };
         foreach (var column in expectedColumns)
             Assert.Contains(column, sql, StringComparison.Ordinal);
 
-        /* The column ORDER is the reader's ordinal contract (0 peak read, 1 avg read, 2 peak write, 3 avg write). */
+        /* The column ORDER is the reader's ordinal contract (0 local hour, 1 peak read, 2 avg read, 3 read samples, 4 peak write, 5 avg write, 6 write samples). */
         var positions = expectedColumns.Select(c => sql.IndexOf(c, StringComparison.Ordinal)).ToArray();
         Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)), "peak/avg column order is the reader's ordinal contract");
 
@@ -382,11 +440,22 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.Contains("FROM v_file_io_stats", sql, StringComparison.Ordinal);
         Assert.Contains("(delta_reads > 0 OR delta_writes > 0)", sql, StringComparison.Ordinal);
 
-        /* Lite's inline twin carries the same four columns, in the same order. */
+        /* Lite's inline twin carries the same six columns, in the same order. */
         var lite = RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs");
         var litePositions = expectedColumns.Select(c => lite.IndexOf(c, StringComparison.Ordinal)).ToArray();
         Assert.All(litePositions, p => Assert.True(p > 0, "Lite's I/O window read has drifted from the PG twin"));
         Assert.True(litePositions.SequenceEqual(litePositions.OrderBy(p => p)));
+
+        /* #4731: the reader ordinals are part of the same contract. Both products hand the read gate ordinals
+           1/2 with the read count at 3, and the write gate 4/5 with the write count at 6 - a shared count read
+           from one ordinal for both sides is the drift this pin exists to stop. */
+        var pgIoCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteIoCode = CSharpSourceWalker.StripCommentsAndStrings(lite);
+        foreach (var code in new[] { pgIoCode, liteIoCode })
+        {
+            Assert.Matches(@"readTiles\.Add\(WindowTiles\.ReadTile\(\w+, 0, 1, 2, 3\)\)", code);
+            Assert.Matches(@"writeTiles\.Add\(WindowTiles\.ReadTile\(\w+, 0, 4, 5, 6\)\)", code);
+        }
 
         /* And every z-score family in BOTH detectors hands the gate the PAIR — no peak-only call survives
            in the SQL Server detector bodies (the PostgreSQL-target detector's peak-only calls are the
@@ -412,6 +481,68 @@ public sealed class DarlingAnomalyBaselineTests
             }
             Assert.DoesNotMatch(@"AnomalyGate\.EvaluateZScore\(\s*\w*[Bb]aseline,\s*\w+,\s*(ioThreshold|GetDeviationThreshold)", code);
         }
+    }
+
+    /// <summary>
+    /// #4731: a window where reads and writes have DIFFERENT sample counts. Hour A has 12 read samples and 4
+    /// write samples; hour B is write-only (5 write samples, no read sample, its read peak and mean NULL). Each
+    /// side's tile carries its own count, so the whole-window read count is 12 - not 17 - and the write count
+    /// is 9; and a window with no read rows at all reads 0 read samples, so the read gate never sees it (the
+    /// shared count it replaced handed that gate the write rows' count). Fed to the detector's own row reader
+    /// through a hand-built table in the <see cref="PgAnomalyDetector.IoTileWindowSql"/> column order.
+    /// </summary>
+    [Fact]
+    public void IoTileReader_GivesEachSideItsOwnSampleCount_AWriteOnlyTileIsNotAReadSample()
+    {
+        static System.Data.DataTable IoTable()
+        {
+            var table = new System.Data.DataTable();
+            table.Columns.Add("local_hour", typeof(DateTime));
+            table.Columns.Add("peak_read_lat", typeof(double));
+            table.Columns.Add("avg_read_lat", typeof(double));
+            table.Columns.Add("read_sample_count", typeof(long));
+            table.Columns.Add("peak_write_lat", typeof(double));
+            table.Columns.Add("avg_write_lat", typeof(double));
+            table.Columns.Add("write_sample_count", typeof(long));
+            return table;
+        }
+
+        var hourA = new DateTime(2026, 9, 24, 5, 0, 0, DateTimeKind.Unspecified);
+        var hourB = hourA.AddHours(1);
+        var table = IoTable();
+        table.Rows.Add(hourA, 30.0, 12.5, 12L, 8.0, 3.0, 4L);
+        table.Rows.Add(hourB, DBNull.Value, DBNull.Value, 0L, 9.0, 4.0, 5L);
+
+        var readTiles = new List<WindowTile>();
+        var writeTiles = new List<WindowTile>();
+        using (var reader = table.CreateDataReader())
+        {
+            while (reader.Read())
+                PgAnomalyDetector.ReadIoTiles(reader, readTiles, writeTiles);
+        }
+
+        Assert.Equal(new long[] { 12, 0 }, readTiles.Select(t => t.Samples).ToArray());
+        Assert.Equal(new long[] { 4, 5 }, writeTiles.Select(t => t.Samples).ToArray());
+        Assert.Equal(30.0, readTiles[0].Peak);
+        Assert.Equal(12.5, readTiles[0].Mean);
+        Assert.Equal(8.0, writeTiles[0].Peak);
+        Assert.Equal(3.0, writeTiles[0].Mean);
+        Assert.Equal(12L, WindowTiles.WholeWindow(readTiles).Samples);
+        Assert.Equal(9L, WindowTiles.WholeWindow(writeTiles).Samples);
+
+        // A window whose every row is write-only: the read side reads 0 samples, so the detector's
+        // wholeRead.Samples > 0 guard skips the read gate - the tile Darling used to admit and Lite rejects.
+        var writeOnly = IoTable();
+        writeOnly.Rows.Add(hourA, DBNull.Value, DBNull.Value, 0L, 9.0, 4.0, 6L);
+        var onlyReadTiles = new List<WindowTile>();
+        var onlyWriteTiles = new List<WindowTile>();
+        using (var reader = writeOnly.CreateDataReader())
+        {
+            while (reader.Read())
+                PgAnomalyDetector.ReadIoTiles(reader, onlyReadTiles, onlyWriteTiles);
+        }
+        Assert.Equal(0L, WindowTiles.WholeWindow(onlyReadTiles).Samples);
+        Assert.Equal(6L, WindowTiles.WholeWindow(onlyWriteTiles).Samples);
     }
 
     /// <summary>
@@ -480,7 +611,9 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Matches(@"ratio\s*<\s*DefaultRatioThreshold\s*\|\|\s*meanRatio\s*<\s*DefaultRatioThreshold", code);
 
             /* The no-baseline arm stays on the peak's absolute bar alone (the ruling). */
-            Assert.Matches(@"ratio\s*=\s*peakRate\s*>=\s*WaitProfileFallbackMsPerSec\s*\?\s*NoBaselineRatio\s*:\s*0", code);
+            /* On an Azure SQL Database the bar's peak leaves out the excluded wait set; elsewhere it IS the peak. */
+            Assert.Matches(@"var\s+barPeak\s*=\s*peakRate", code);
+            Assert.Matches(@"ratio\s*=\s*barPeak\s*>=\s*WaitProfileFallbackMsPerSec\s*\?\s*NoBaselineRatio\s*:\s*0", code);
             Assert.DoesNotMatch(@"avgRate\s*>=\s*WaitProfileFallbackMsPerSec", code);
         }
 
@@ -1243,13 +1376,13 @@ public sealed class DarlingAnomalyBaselineTests
     }
 
     /// <summary>
-    /// #4298 touches ONLY <see cref="PgTargetBaselineProvider"/>'s answer: the base class's own two daily-cache arms
-    /// (Cpu, IoLatency, #4248) and every other SQL Server arm's hourly key are exactly what they were —
-    /// <see cref="PgBaselineProvider.IsDailyCacheArm"/>'s base body is still <see cref="PgBaselineProvider.IsDailyCacheMetric"/>,
-    /// untouched.
+    /// #4298 touches ONLY <see cref="PgTargetBaselineProvider"/>'s answer: the base class's own daily-cache arms
+    /// (Cpu, IoLatency, #4248; Blocking, Deadlock, #4731) and every other SQL Server arm's hourly key are exactly what
+    /// they were — <see cref="PgBaselineProvider.IsDailyCacheArm"/>'s base body is still
+    /// <see cref="PgBaselineProvider.IsDailyCacheMetric"/>, untouched.
     /// </summary>
     [Fact]
-    public void SqlServerArms_KeepTheirPre4298Keys_CpuAndIoLatencyDaily_EverythingElseHourly()
+    public void SqlServerArms_KeepTheirKeys_RawTableArmsDaily_EverythingElseHourly()
     {
         var provider = new PgBaselineProvider(NpgsqlDataSource.Create("Host=localhost;Database=never-opened"));
         var t1 = new DateTime(2026, 3, 10, 1, 0, 0, DateTimeKind.Unspecified);
@@ -1257,10 +1390,14 @@ public sealed class DarlingAnomalyBaselineTests
 
         Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Cpu));
         Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.IoLatency));
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Blocking));
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Deadlock));
         Assert.False(PgBaselineProvider.IsDailyCacheMetric(MetricNames.BatchRequests));
 
         Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Cpu, t1));
         Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.IoLatency, t1));
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Blocking, t1));
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Deadlock, t1));
         Assert.Equal(PgBaselineProvider.RoundedHour(t1), provider.RoundedKeyTime(MetricNames.BatchRequests, t1));
         Assert.NotEqual(provider.RoundedKeyTime(MetricNames.BatchRequests, t1), provider.RoundedKeyTime(MetricNames.BatchRequests, t2));
     }

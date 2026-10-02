@@ -115,14 +115,19 @@ public sealed class McpAlertTools
                     severity,
                     severity_source = severitySource,
                     /* #3598: the Darling twin's routing provenance, read through the shared serializer for
-                       parity of shape. This edition has no routes table and its deliverer never writes the
-                       member, so every row here answers null — every alert goes to every configured channel. */
+                       parity of shape. This edition has no routes table, so a row's route names the parent
+                       settings' channels (family and source "Default"). #4750: each destination also says what
+                       the send to it did ("delivered", "failed" or "not attempted"; null on a row written
+                       before that was recorded), so a channel that failed beside one that delivered shows
+                       here. The outcome word only: the failure's reason stays in send_error. A row whose
+                       fan-out reached no channel (a cooldown, a fold, a mute, nothing configured) answers
+                       null. */
                     route = AlertContextSerializer.TryReadRoute(r.ContextJson) is { } route
                         ? new
                         {
                             family = route.Family,
                             route_id = route.RouteId,
-                            destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source }),
+                            destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source, outcome = d.Outcome }),
                         }
                         : null,
                     /* #3712: the corroboration gate's decision for an analysis finding — 'page' or 'digest' —

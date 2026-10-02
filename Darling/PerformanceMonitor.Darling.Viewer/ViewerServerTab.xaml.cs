@@ -142,9 +142,9 @@ public partial class ViewerServerTab : UserControl
         /* Overview lanes (copied from Lite): init the data service + server up front so the lanes theme
            their chrome and wire the correlated crosshair before the first load. Wire the lanes' own
            right-click "Show Active Queries at This Time" drill-down (every lane: CPU / Wait Stats /
-           Blocking / Buffer Pool / I/O Latency) to the Active Queries loader — the lanes plot X through
-           ViewerTimeHelper.ForDisplay, so the event's argument is display-time, exactly what
-           OnActiveQueriesDrillDown converts back to naive UTC. ThemeManager is fixed to Dark, so the shared
+           Blocking / Buffer Pool / I/O Latency) to the Active Queries loader — the lanes plot X as the
+           UTC instant, so the event's argument is already naive UTC, the centre
+           OnActiveQueriesDrillDown reads its window around. ThemeManager is fixed to Dark, so the shared
            chart chrome applies without any per-control theme plumbing. */
         OverviewLanes.Initialize(_dataService, _server.ServerId);
         OverviewLanes.ShowActiveQueriesRequested += OnActiveQueriesDrillDown;
@@ -282,8 +282,8 @@ public partial class ViewerServerTab : UserControl
         {
             /* Point the process-wide time helper at THIS server's UTC offset before rendering — only the
                visible tab renders (the viewer's visible-only rule), so its offset wins. Loaded once, cached. */
-            await EnsureServerOffsetLoadedAsync();
-            ApplyServerOffsetToHelper();
+            await RefreshServerClockAsync();
+            ApplyServerClockToHelper();
 
             /* Refresh the toolbar freshness readout in the same pass (after the offset is applied so it renders
                in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
@@ -359,7 +359,7 @@ public partial class ViewerServerTab : UserControl
         {
             var freshness = await _dataService.GetServerFreshnessAsync();
             ServerFreshnessText.Text = freshness.TryGetValue(_server.ServerId, out var lastUtc)
-                ? $"collected {ViewerTimeHelper.ForDisplay(lastUtc):yyyy-MM-dd HH:mm}"
+                ? $"collected {ViewerTimeHelper.FormatForDisplay(lastUtc, "yyyy-MM-dd HH:mm")}"
                 : ServerSummaryItem.ClassifyFreshness(null, _server.RegisteredAt, DateTime.UtcNow) == ServerFreshness.Offline
                     ? "no collection retained"
                     : "no data collected yet";

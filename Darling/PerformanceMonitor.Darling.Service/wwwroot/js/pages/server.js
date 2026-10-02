@@ -112,12 +112,14 @@ export function renderServer(main, server, tabId, opts) {
   current = { server, tab: null };
 
   const dot = el("span", { class: "dot" });
+  /* The route's server KEY until the fleet card is known; fillServerHead then swaps in the display name. */
+  const title = el("h2", { text: server });
   const badgeSlot = el("span", { class: "server-band" });
   const engineSlot = el("span", { class: "server-engine" });
   const whySlot = el("div", { class: "server-why" });
   const head = el("div", { class: "page-head" }, [
     el("a", { href: "#/fleet", text: "← Fleet" }),
-    el("span", { class: "server-title" }, [dot, el("h2", { text: server })]),
+    el("span", { class: "server-title" }, [dot, title]),
     badgeSlot,
     engineSlot,
     el("div", { class: "spacer" }),
@@ -135,7 +137,7 @@ export function renderServer(main, server, tabId, opts) {
   const remembered = lastCard.get(server);
   let painted = null;
   if (remembered) {
-    fillServerHead(dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
+    fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
     painted = paintTabs(tabsSlot, server, tabId, remembered.card);
   }
 
@@ -151,7 +153,7 @@ export function renderServer(main, server, tabId, opts) {
       if (generation !== renderGeneration) return;
 
       if (card) lastCard.set(server, { card, reason });
-      fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason);
+      fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
 
       /* Repaint only when there is nothing painted yet, or when the fresh card chooses a DIFFERENT registry —
          the two registries are module constants, so that comparison is exact. A null card never repaints over a
@@ -246,7 +248,7 @@ function loadServerCard(server, onCard) {
   })();
 }
 
-/* The server header's status dot, band badge, engine badge and the WHY beneath them, all from the card above.
+/* The server header's title, status dot, band badge, engine badge and the WHY beneath them, all from the card above.
  *
  * The band word alone is not an answer. `Warning` has three unrelated causes — a genuine metric breach, a server
  * awaiting its first collection, and a collector error — so a badge reading "Warning" with no way to ask why is
@@ -255,8 +257,14 @@ function loadServerCard(server, onCard) {
  * rendered by fleet.js's own metricBands so there is one implementation rather than two, the reason is the same
  * sentence the fleet page shows, and the engine is the token the store recorded. A server outside the ranking
  * gets the chips and no sentence, because inventing one here is the second derivation this comment refuses. */
-function fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason) {
+function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason) {
   if (!card) return;
+
+  /* The title names the server the way the sidebar, the fleet cards and every other page do: by display name.
+     The route, the sidebar link and every /api/read call keep the KEY (for an Azure SQL Database that is
+     "host:database"), so only the words on screen change. A card with no display name leaves the key already
+     in the heading. */
+  if (card.display_name) title.textContent = card.display_name;
 
   dot.className = "dot " + bandClass(card.band);
   mount(

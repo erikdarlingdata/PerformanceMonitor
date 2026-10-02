@@ -11,19 +11,33 @@ public class ParsedPlan
     public bool ClusteredMode { get; set; }
     public List<PlanBatch> Batches { get; set; } = new();
 
-    public List<MissingIndex> AllMissingIndexes => Batches
-        .SelectMany(b => b.Statements)
+    /// <summary>
+    /// Set when the tree walk in <see cref="ShowPlanParser.Parse"/> throws (including its own
+    /// recursion-depth and size guards against hostile plan XML). Callers get a plan object
+    /// with an empty or partial <see cref="Batches"/> list and this message, instead of the
+    /// exception itself.
+    /// </summary>
+    public string? ParseError { get; set; }
+
+    /// <summary>
+    /// #4514: descends into stored procedure and UDF bodies via the shared
+    /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> walk, so an EXEC &lt;procedure&gt;
+    /// plan whose only missing-index suggestions live in the body is no longer reported as
+    /// having none.
+    /// </summary>
+    public List<MissingIndex> AllMissingIndexes => PlanStatements.EnumerateAll(this)
         .SelectMany(s => s.MissingIndexes)
         .ToList();
 
     /// <summary>
     /// Every plan warning across all statements — statement-level (added by PlanAnalyzer) plus
     /// per-operator (parsed onto PlanNode.Warnings) — gathered by walking each statement's node
-    /// tree. Mirrors the manual gather the drill-down does, centralized here so the WS4 fact
-    /// collector and the drill-down enrichment share a single definition.
+    /// tree, including stored procedure and UDF bodies (#4514) via the shared
+    /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> walk. Mirrors the manual gather the
+    /// drill-down does, centralized here so the WS4 fact collector and the drill-down enrichment
+    /// share a single definition.
     /// </summary>
-    public List<PlanWarning> AllWarnings => Batches
-        .SelectMany(b => b.Statements)
+    public List<PlanWarning> AllWarnings => PlanStatements.EnumerateAll(this)
         .SelectMany(s => s.PlanWarnings.Concat(NodeWarnings(s.RootNode)))
         .ToList();
 
@@ -46,7 +60,23 @@ public class PlanBatch
 
 public class PlanStatement
 {
+    /// <summary>
+    /// SQL Server caps StatementText at 4,000 characters when it writes showplan XML, so a
+    /// statement at or near that length is almost certainly missing its tail. The few characters
+    /// of margin absorb the trimming the server does around the boundary.
+    /// </summary>
+    public const int TruncationLengthThreshold = 3990;
+
     public string StatementText { get; set; } = "";
+
+    /// <summary>
+    /// True when <see cref="StatementText"/> looks like it hit the showplan cap. The plan carries
+    /// no marker for this, so length is the only signal there is — and the consequence is not
+    /// cosmetic: a statement cut mid-token is not valid T-SQL, so anything that tries to re-run or
+    /// format it fails for reasons that look unrelated to the plan.
+    /// </summary>
+    public bool IsTextTruncated => StatementText.Length >= TruncationLengthThreshold;
+
     public string StatementType { get; set; } = "";
     public double StatementSubTreeCost { get; set; }
     public double StatementEstRows { get; set; }
@@ -198,6 +228,7 @@ public class PlanNode
 
     // Detail properties (for tooltip/properties panel)
     public string? DatabaseName { get; set; }
+    public string? SchemaName { get; set; }
     public string? ObjectName { get; set; }
     public string? FullObjectName { get; set; }
     public string? IndexName { get; set; }
@@ -395,6 +426,38 @@ public class PlanWarning
     public SpillDetail? SpillDetails { get; set; }
 
     /// <summary>
+    /// Who says so — SQL Server itself, or the analyzer. Defaults to <see cref="PlanWarningSource.Analyzer"/>
+    /// because the analyzer builds the large majority of warnings. Everything the parser lifts out of
+    /// the plan's own &lt;Warnings&gt; element is stamped <see cref="PlanWarningSource.SqlServer"/> in one
+    /// place, at the single return of ShowPlanParser.ParseWarningsFromElement, so a new engine warning
+    /// cannot be added and forgotten. A warning the engine wrote into the plan is a record of what
+    /// happened when the query ran; an analyzer rule is an inference from plan shape, and an inference
+    /// can be wrong about a particular plan in a way the engine's own record cannot be.
+    /// </summary>
+    public PlanWarningSource Source { get; set; } = PlanWarningSource.Analyzer;
+
+    /// <summary>
+    /// The analyzer rule that produced this finding, set where the rule emits it (#4535). Ported
+    /// from erikdarlingdata/PerformanceStudio dev (85492a1) commit dcc06db,
+    /// <c>src/PlanViewer.Core/Models/PlanModels.cs:412-423</c>. Null for anything no numbered rule
+    /// produced: the engine's own warnings and the wait-stats findings. This step adds the field
+    /// only; no rule stamps it yet.
+    /// </summary>
+    public int? RuleNumber { get; set; }
+
+    /// <summary>
+    /// The operators this finding actually came from, so a reader can be taken to them (#4534).
+    ///
+    /// <para>A list rather than a single id, because the honest answers are genuinely different.
+    /// A key lookup came from exactly one operator. A table variable warning came from every
+    /// operator that touched one, which on a big plan is several. And some findings have no
+    /// operator at all — "High Compile CPU" happened before a single row was read, and
+    /// "UDF Execution" is reported by SQL Server at the statement level only. Those keep this
+    /// empty, so a consumer offers no navigation rather than picking somewhere arbitrary.</para>
+    /// </summary>
+    public List<int> OriginNodeIds { get; set; } = new();
+
+    /// <summary>
     /// Maximum percentage of elapsed time that could be saved by addressing this finding.
     /// null = not quantifiable, 0 = calculated as negligible.
     /// </summary>
@@ -404,9 +467,29 @@ public class PlanWarning
     /// Short actionable fix suggestion (e.g., "Add INCLUDE (columns) to index").
     /// </summary>
     public string? ActionableFix { get; set; }
+
+    /// <summary>
+    /// True for rules that predate the benefit-scoring framework and haven't been folded into
+    /// A/B/C/D categorization yet, so reviewers know which findings to hold to a higher bar vs
+    /// which are known-legacy. Ported from erikdarlingdata/PerformanceStudio dev (85492a1)
+    /// commit aabbaa2, <c>src/PlanViewer.Core/Models/PlanModels.cs:459</c>. Set by
+    /// <see cref="PlanAnalyzer"/>'s legacy-marking pass, never on the engine's own warnings
+    /// (<see cref="PlanWarningSource.SqlServer"/>).
+    /// </summary>
+    public bool IsLegacy { get; set; }
 }
 
 public enum PlanWarningSeverity { Info, Warning, Critical }
+
+/// <summary>Where a <see cref="PlanWarning"/> came from. See <see cref="PlanWarning.Source"/>.</summary>
+public enum PlanWarningSource
+{
+    /// <summary>An inference of the analyzer's, from the shape of the plan.</summary>
+    Analyzer,
+
+    /// <summary>Read out of the plan's own &lt;Warnings&gt; element — the engine's record, not the analyzer's.</summary>
+    SqlServer
+}
 
 public class MemoryGrantInfo
 {
@@ -417,6 +500,13 @@ public class MemoryGrantInfo
     public long RequestedMemoryKB { get; set; }
     public long GrantedMemoryKB { get; set; }
     public long MaxUsedMemoryKB { get; set; }
+    /// <summary>
+    /// True when the plan XML carried a MaxUsedMemory attribute. An actual plan does, and there 0
+    /// means the query used none of its grant. An estimated plan, or a plan with no runtime grant
+    /// info, does not, and there <see cref="MaxUsedMemoryKB"/> is 0 only because nothing was
+    /// reported. A rule that acts on "used nothing" must check this first.
+    /// </summary>
+    public bool HasMaxUsedMemory { get; set; }
     public long GrantWaitTimeMs { get; set; }
     public long LastRequestedMemoryKB { get; set; }
     public string? IsMemoryGrantFeedbackAdjusted { get; set; }

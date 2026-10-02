@@ -238,7 +238,15 @@ public sealed class NotificationRouteRow
     /* Grid display members. */
     public string MatchKindDisplay => Family is null ? "Exact metric" : "Family";
     public string ChannelsDisplay => ConfiguredChannels.Count == 0 ? "—" : string.Join(", ", ConfiguredChannels);
-    public string ModifiedDisplay => ModifiedAtUtc == default ? "" : ModifiedAtUtc.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
+
+    /// <summary>
+    /// When the route was last saved, in the viewer's display mode (#4766). <see cref="ModifiedAtUtc"/> is the store's
+    /// <c>modified_at</c>, written as <c>now() AT TIME ZONE 'UTC'</c>, so it is one UTC instant, and it reads as the
+    /// other grids' times do: Server, Local or UTC per the mode, with the UTC offset added in the repeated autumn
+    /// hour (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>). This used to be the machine's local
+    /// time in every mode. Empty for a route that has not been stored yet.
+    /// </summary>
+    public string ModifiedDisplay => ModifiedAtUtc == default ? "" : ViewerTimeHelper.FormatForDisplay(ModifiedAtUtc, "g");
 
     public NotificationRouteRow Clone() => new()
     {

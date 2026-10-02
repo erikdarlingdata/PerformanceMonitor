@@ -181,11 +181,12 @@ SELECT
     auto_growth_mb,
     is_percent_growth,
     growth_pct,
-    vlf_count
+    vlf_count,
+    file_id
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = $2
-ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
+ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name";
 
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -209,7 +210,9 @@ ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 FileTypeDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 FileName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                TotalSizeMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                /* NULL is the Hyperscale log file (the log service): it stays null, never 0, so the grid shows
+                   n/a (log service) instead of a size and the allocated totals leave it out. */
+                TotalSizeMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
                 UsedSizeMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
                 VolumeMountPoint = reader.IsDBNull(5) ? null : reader.GetString(5),
                 VolumeTotalMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
@@ -218,7 +221,9 @@ ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
                 AutoGrowthMb = reader.IsDBNull(9) ? null : Convert.ToDecimal(reader.GetValue(9)),
                 IsPercentGrowth = reader.IsDBNull(10) ? null : reader.GetBoolean(10),
                 GrowthPct = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
-                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))
+                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+                /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
+                FileId = reader.IsDBNull(13) ? null : Convert.ToInt32(reader.GetValue(13))
             });
         }
         return items;
@@ -231,7 +236,9 @@ ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
 SELECT
     database_name,
     SUM(total_size_mb) AS total_mb,
-    SUM(used_size_mb) AS used_mb
+    /* Used is summed only over the files whose size counts, so used and allocated stay on one footing: the
+       Hyperscale log file (NULL size, the log service) is in neither. */
+    SUM(CASE WHEN total_size_mb IS NOT NULL THEN used_size_mb END) AS used_mb
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = $2
@@ -405,58 +412,121 @@ FROM latest l CROSS JOIN peak p";
     /// qualifying snapshot (a database younger than 7 or 30 days) binds SQL NULL, which the CTE's equality
     /// turns into zero rows — the LEFT JOIN below already treats that as "no prior snapshot", unchanged from
     /// before this fix. $1 server_id, $2 latest collection_time, $3 collection_time at or before 7d ago,
-    /// $4 collection_time at or before 30d ago (either of the last two may be null).</summary>
+    /// $4 collection_time at or before 30d ago (either of the last two may be null).
+    ///
+    /// <para>A file whose row in the latest snapshot has no size is left out of all three sums, by one predicate
+    /// (the <c>NOT EXISTS</c> against <c>log_service_files</c>) repeated in each. That file is the log of an Azure
+    /// SQL Database Hyperscale database (<see cref="HyperscaleLogSize"/>). Its older rows can still hold the ~1 TB
+    /// that sys.database_files reported before the collector stored NULL for it, and summing them on the past side
+    /// alone read as a -99% drop. The rule is applied at read time, so it covers history collected before the
+    /// change without rewriting it. On the latest side it drops only the rows SUM already skips. A file that is
+    /// gone from the latest snapshot has no row there, so it still counts on the past side, as shrinkage.
+    /// <c>log_service_files</c> binds the same literal <c>$2</c> as the latest CTE, so the #4245 plan shape
+    /// holds. Lite's <c>LocalDataService.StorageGrowthSql</c> is the twin.</para>
+    ///
+    /// <para>A row stored before the allocated/used fix for another database on an Azure SQL Database server holds that
+    /// database's USED space as its total, where every later row holds the ALLOCATED size
+    /// (<see cref="AzureSiblingDatabaseSize"/>). The same predicate leaves those rows out of all three sums, so the
+    /// one-time change reads as no history and not as growth: the database shows a blank past size and growth n/a (null) until a
+    /// newer sample is old enough to compare against, as a database added inside the window does. Until the first
+    /// collection after the upgrade the latest snapshot holds only old-shape rows, so the database is not listed here at
+    /// all.</para>
+    ///
+    /// <para>The <c>latest</c> CTE also flags each database whose size leaves its log out: <c>has_sibling_row</c> is true
+    /// when the database has the one row another database on an Azure SQL Database server gets
+    /// (<see cref="AzureSiblingDatabaseSize.RowPredicate"/>, so its size is data space only), and
+    /// <c>has_log_service_file</c> is true when it has a row in <c>log_service_files</c> (the Hyperscale log, which the
+    /// sums skip). The second reads the same <c>$2</c> snapshot as the CTE it joins, so the #4245 plan shape holds. The
+    /// row's <c>Note</c> says which. Lite's <c>LocalDataService.StorageGrowthSql</c> is the twin.</para></summary>
     public const string StorageGrowthSql = @"
-WITH latest AS (
+WITH log_service_files AS (
     SELECT
         database_name,
-        SUM(total_size_mb) AS current_size_mb
+        file_id
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time = $2
-    GROUP BY database_name
+    AND   total_size_mb IS NULL
+),
+latest AS (
+    SELECT
+        s.database_name,
+        SUM(s.total_size_mb) AS current_size_mb,
+        bool_or(" + AzureSiblingDatabaseSize.RowPredicate + @") AS has_sibling_row,
+        EXISTS (
+            SELECT 1
+            FROM log_service_files AS ls
+            WHERE ls.database_name = s.database_name
+        ) AS has_log_service_file
+    FROM v_database_size_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time = $2
+    AND   NOT EXISTS (
+        SELECT 1
+        FROM log_service_files AS ls
+        WHERE ls.database_name = s.database_name
+        AND   ls.file_id = s.file_id
+    )
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
+    GROUP BY s.database_name
 ),
 past_7d AS (
     SELECT
-        database_name,
-        SUM(total_size_mb) AS size_mb
-    FROM v_database_size_stats
-    WHERE server_id = $1
-    AND   collection_time = $3
-    GROUP BY database_name
+        s.database_name,
+        SUM(s.total_size_mb) AS size_mb
+    FROM v_database_size_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time = $3
+    AND   NOT EXISTS (
+        SELECT 1
+        FROM log_service_files AS ls
+        WHERE ls.database_name = s.database_name
+        AND   ls.file_id = s.file_id
+    )
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
+    GROUP BY s.database_name
 ),
 past_30d AS (
     SELECT
-        database_name,
-        SUM(total_size_mb) AS size_mb
-    FROM v_database_size_stats
-    WHERE server_id = $1
-    AND   collection_time = $4
-    GROUP BY database_name
+        s.database_name,
+        SUM(s.total_size_mb) AS size_mb
+    FROM v_database_size_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time = $4
+    AND   NOT EXISTS (
+        SELECT 1
+        FROM log_service_files AS ls
+        WHERE ls.database_name = s.database_name
+        AND   ls.file_id = s.file_id
+    )
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
+    GROUP BY s.database_name
 )
 SELECT
     l.database_name,
     l.current_size_mb,
     p7.size_mb,
     p30.size_mb,
-    l.current_size_mb - COALESCE(p7.size_mb, l.current_size_mb) AS growth_7d_mb,
-    l.current_size_mb - COALESCE(p30.size_mb, l.current_size_mb) AS growth_30d_mb,
+    l.current_size_mb - p7.size_mb AS growth_7d_mb,
+    l.current_size_mb - p30.size_mb AS growth_30d_mb,
     CASE
         WHEN p30.size_mb IS NOT NULL
-        THEN (l.current_size_mb - p30.size_mb) / 30.0
+        THEN (l.current_size_mb - p30.size_mb) / NULLIF(EXTRACT(EPOCH FROM ($2::timestamp - $4::timestamp)) / 86400.0, 0)
         WHEN p7.size_mb IS NOT NULL
-        THEN (l.current_size_mb - p7.size_mb) / 7.0
-        ELSE 0
+        THEN (l.current_size_mb - p7.size_mb) / NULLIF(EXTRACT(EPOCH FROM ($2::timestamp - $3::timestamp)) / 86400.0, 0)
+        ELSE NULL
     END AS daily_growth_rate_mb,
     CASE
         WHEN p30.size_mb IS NOT NULL AND p30.size_mb > 0
         THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb
-        ELSE 0
-    END AS growth_pct_30d
+        ELSE NULL
+    END AS growth_pct_30d,
+    l.has_sibling_row,
+    l.has_log_service_file
 FROM latest l
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
-ORDER BY growth_30d_mb DESC";
+ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database_name";
 
     public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -471,6 +541,18 @@ ORDER BY growth_30d_mb DESC";
 
         var past7Snapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, now.AddDays(-7), cancellationToken);
         var past30Snapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, now.AddDays(-30), cancellationToken);
+
+        /* A past snapshot must be strictly older than the latest one. When collection stopped more than a
+           window ago, "at or before now - window" IS the latest snapshot, and comparing it with itself would read
+           as growth 0 over zero days; that is no comparison, so it is null (n/a). */
+        if (past7Snapshot is DateTime p7 && p7 >= latestSnapshot.Value)
+        {
+            past7Snapshot = null;
+        }
+        if (past30Snapshot is DateTime p30 && p30 >= latestSnapshot.Value)
+        {
+            past30Snapshot = null;
+        }
 
         await using var command = _dataSource.CreateCommand(StorageGrowthSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -488,10 +570,12 @@ ORDER BY growth_30d_mb DESC";
                 CurrentSizeMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
                 Size7dAgoMb = reader.IsDBNull(2) ? null : Convert.ToDecimal(reader.GetValue(2)),
                 Size30dAgoMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
-                Growth7dMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                Growth30dMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
-                DailyGrowthRateMb = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6)),
-                GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7))
+                Growth7dMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
+                Growth30dMb = reader.IsDBNull(5) ? null : Convert.ToDecimal(reader.GetValue(5)),
+                DailyGrowthRateMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
+                GrowthPct30d = reader.IsDBNull(7) ? null : Convert.ToDecimal(reader.GetValue(7)),
+                HasSiblingRow = !reader.IsDBNull(8) && reader.GetBoolean(8),
+                HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });
         }
         return items;
@@ -536,10 +620,10 @@ SELECT
     l.cur_used_mb,
     l.cur_rows,
     l.index_count,
-    l.cur_reserved_mb - COALESCE(e.e_reserved_mb, l.cur_reserved_mb) AS growth_mb
+    l.cur_reserved_mb - e.e_reserved_mb AS growth_mb
 FROM latest l
 LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
-ORDER BY growth_mb DESC, l.schema_name, l.table_name
+ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
 LIMIT $5";
 
     /// <summary>Daily reserved-MB series for the ranked top-N objects (heatmap). $1 server_id, $2 database, $3 window start, $4 latest instant, $5 earliest instant, $6 topN — the two instants come from <see cref="ObjectGrowthBoundsSql"/>.</summary>
@@ -627,8 +711,8 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
             while (await reader.ReadAsync(cancellationToken))
             {
                 var current = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2));
-                var growth = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6));
-                var earlier = current - growth;
+                /* No earlier sample for this table (new table, or one snapshot only): null, not 0. */
+                decimal? growth = reader.IsDBNull(6) || latest == earliest ? null : Convert.ToDecimal(reader.GetValue(6));
                 objects.Add(new ObjectSizeGrowthRow
                 {
                     DatabaseName = databaseName,
@@ -639,8 +723,8 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
                     TotalRows = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
                     IndexCount = reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5)),
                     Growth30dMb = growth,
-                    DailyGrowthRateMb = daysBack > 0 ? growth / daysBack : 0m,
-                    GrowthPct30d = earlier > 0 ? growth * 100m / earlier : 0m
+                    DailyGrowthRateMb = growth is decimal g && daysBack > 0 ? g / daysBack : null,
+                    GrowthPct30d = growth is decimal g2 && current - g2 > 0 ? g2 * 100m / (current - g2) : null
                 });
             }
         }

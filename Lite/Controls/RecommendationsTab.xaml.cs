@@ -12,9 +12,11 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -49,7 +51,14 @@ public partial class RecommendationsTab : UserControl
     private ScheduleManager? _scheduleManager;
     private ServerManager? _serverManager;
     private FindingStore? _findingStore;
+    private AnalysisService? _historyProbe;
     private LiteRecommendationsReader? _reader;
+
+    /* #4766: reads the selected server's own clock for the cards' Ask-AI prompt window. */
+    private LocalDataService? _dataService;
+
+    /* #4766: the clock of the open server tab for a server id, or null when that server has no tab open. */
+    private Func<int, ServerClock?> _openTabClock = _ => null;
 
     private int _hoursBack = 24;
     private bool _isBusy;
@@ -77,15 +86,23 @@ public partial class RecommendationsTab : UserControl
     /// tabs' Initialize-from-MainWindow contract.
     /// </summary>
     /// <param name="scheduleManager">#1757: lets the baseline provider warn when a source table is retained
-    /// for less than the 30-day baseline window. Optional — null just disables that warning.</param>
-    public void Initialize(DuckDbInitializer duckDb, ServerManager serverManager, ScheduleManager? scheduleManager = null)
+    /// for less than the 30-day baseline window. May be null — null just disables that warning.</param>
+    /// <param name="openTabClock">#4766: the clock of the open server tab for a server id, or null when that server
+    /// has no tab open. The second place a card's clock comes from, after the server's own collected one
+    /// (<see cref="LiteRecommendationsViewModel.CardClock"/>).</param>
+    public void Initialize(
+        DuckDbInitializer duckDb, ServerManager serverManager, ScheduleManager? scheduleManager,
+        Func<int, ServerClock?> openTabClock)
     {
         _duckDb = duckDb ?? throw new ArgumentNullException(nameof(duckDb));
         _scheduleManager = scheduleManager;
+        _openTabClock = openTabClock;
         _serverManager = serverManager ?? throw new ArgumentNullException(nameof(serverManager));
 
         _findingStore = new FindingStore(_duckDb);
         _reader = new LiteRecommendationsReader(_findingStore);
+        _dataService = new LocalDataService(_duckDb);
+        _historyProbe = new AnalysisService(_duckDb);
 
         PopulateServerSelector();
         _ = RefreshDataAsync();
@@ -136,12 +153,12 @@ public partial class RecommendationsTab : UserControl
 
     /// <summary>
     /// Re-reads recommendations for the selected server and re-renders. Read-only: surfaces the
-    /// Loaded or all-clear Empty state. The insufficient-data state is surfaced by
-    /// <see cref="GenerateNowButton_Click"/> (the engine owns that determination), not by this path.
+    /// Loaded or all-clear Empty state, or the insufficient-data state when there are no findings and the
+    /// server has not collected the history the analysis needs (<see cref="AnalysisHistoryGate"/>).
     /// </summary>
     public async Task RefreshDataAsync()
     {
-        if (_reader is null)
+        if (_reader is null || _dataService is null)
             return;
 
         if (_isBusy)
@@ -173,7 +190,26 @@ public partial class RecommendationsTab : UserControl
 
                 var items = await Task.Run(() => _reader.GetRecommendationsAsync(serverId, serverName, _hoursBack));
 
-                ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, ServerTimeHelper.UtcOffsetMinutes));
+                /* A server with no stored findings and not enough collected history is still collecting, not
+                   clear: ask the same history rule the analysis pass applies and show its message. A probe
+                   that fails to read the span returns null, so it falls through to the normal all-clear path. */
+                if (items.Count == 0 && _historyProbe is not null
+                    && await Task.Run(() => _historyProbe.GetInsufficientHistoryMessageAsync(serverId))
+                        is { Length: > 0 } insufficientMessage)
+                {
+                    ApplyViewModel(LiteRecommendationsViewModel.InsufficientData(insufficientMessage));
+                    continue;
+                }
+
+                /* #4766: the cards' clock is the SELECTED server's own, read by the same serverId the findings
+                   were read for. This tab has its own server selector, so it can show a server other than the one
+                   whose tab the main window has open, and ServerTimeHelper's clock follows that tab; its offset
+                   is also the one in force today, an hour off for a finding from before a daylight saving change.
+                   A server with no collected clock yet keeps the offset its OWN server tab shows (never the
+                   selected tab's), and with no tab open the machine's, not UTC. */
+                var serverClock = await ReadCardClockAsync(_dataService, serverId, _openTabClock);
+
+                ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
             }
             while (_reloadRequested);
         }
@@ -190,6 +226,23 @@ public partial class RecommendationsTab : UserControl
     }
 
     /// <summary>
+    /// The clock the cards of the server with <paramref name="serverId"/> convert on (#4766): that server's own
+    /// collected clock, else the clock of that server's own open tab (<paramref name="openTabClock"/>), else the
+    /// machine's (see <see cref="LiteRecommendationsViewModel.CardClock"/>). The read goes through the data service
+    /// directly and not through <c>McpServerLocalWindow.ClockForAsync</c>, whose UTC fallback is the MCP tools' and
+    /// not the desktop's: a server with no <c>server_properties</c> row yet is shown in UTC there and at the connect
+    /// probe's offset on its own tab. The tab's clock is asked for before the read, on the caller's (UI) thread,
+    /// because the open tabs are UI objects.
+    /// </summary>
+    private static async Task<ServerClock> ReadCardClockAsync(
+        LocalDataService dataService, int serverId, Func<int, ServerClock?> openTabClock)
+    {
+        var openTab = openTabClock.Invoke(serverId);
+        var collected = await Task.Run(() => dataService.GetServerClockAsync(serverId));
+        return LiteRecommendationsViewModel.CardClock(collected, openTab);
+    }
+
+    /// <summary>
     /// Runs an on-demand analysis for the selected server (same construction path the background
     /// collector uses), then renders the freshly-enriched in-memory findings directly — which, unlike
     /// the stored-finding read path, carry drill-down detail, so copy-paste SQL is populated. If the
@@ -200,7 +253,7 @@ public partial class RecommendationsTab : UserControl
     /// </summary>
     private async void GenerateNowButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_duckDb is null || _serverManager is null)
+        if (_duckDb is null || _serverManager is null || _dataService is null)
             return;
 
         if (_isBusy)
@@ -265,7 +318,11 @@ public partial class RecommendationsTab : UserControl
 
             StatusText.Text = string.Empty;
             var items = LiteRecommendationsReader.MapFindings(findings, serverName);
-            ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, ServerTimeHelper.UtcOffsetMinutes));
+
+            /* #4766: the selected server's own clock, by the serverId the analysis ran for (see RefreshDataAsync). */
+            var serverClock = await ReadCardClockAsync(_dataService, serverId, _openTabClock);
+
+            ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
         }
         catch (Exception ex)
         {
@@ -314,8 +371,14 @@ public partial class RecommendationsTab : UserControl
         if (string.IsNullOrEmpty(card.CopyPasteSql))
             return;
 
-        Clipboard.SetDataObject(card.CopyPasteSql, false);
-        StatusText.Text = "Fix copied to clipboard.";
+        if (ClipboardText.TrySetDataObject(card.CopyPasteSql))
+        {
+            StatusText.Text = "Fix copied to clipboard.";
+        }
+        else
+        {
+            StatusText.Text = "Couldn't copy: the clipboard is in use.";
+        }
     }
 
     /// <summary>
@@ -327,8 +390,14 @@ public partial class RecommendationsTab : UserControl
         if (sender is not FrameworkElement fe || fe.DataContext is not LiteRecommendationCardViewModel card)
             return;
 
-        Clipboard.SetDataObject(card.AskAiPrompt, false);
-        StatusText.Text = "AI prompt copied to clipboard.";
+        if (ClipboardText.TrySetDataObject(card.AskAiPrompt))
+        {
+            StatusText.Text = "AI prompt copied to clipboard.";
+        }
+        else
+        {
+            StatusText.Text = "Couldn't copy: the clipboard is in use.";
+        }
     }
 
     /// <summary>

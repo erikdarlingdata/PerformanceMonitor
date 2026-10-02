@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.Data;
+using System.Data.Common;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -152,5 +155,95 @@ public sealed class ServerInventoryFleetMetricsTests
 
         Assert.Equal("SELECT max(bucket) FROM collect.query_stats_db_hourly", sql);
         Assert.DoesNotContain("_timescaledb", sql, StringComparison.Ordinal);
+    }
+
+    // ── A server with no CPU sample gets no verdict ──
+
+    /// <summary>One fleet-read row shaped like <c>ServerMetricsSql</c>'s SELECT list (ordinals 0-13), so the
+    /// verdict decision can be exercised without a store. Workers come back NULL, as they do for a server with
+    /// no memory sample; the grant columns are COALESCEd to 0 by the SELECT.</summary>
+    private static DbDataReader FleetRow(decimal? avgCpu, decimal? maxCpu, decimal? p95Cpu, int? engineEdition = null, string? edition = null)
+    {
+        var table = new DataTable();
+        table.Columns.Add("server_id", typeof(int));
+        table.Columns.Add("avg_cpu_pct", typeof(decimal));
+        table.Columns.Add("total_storage_gb", typeof(decimal));
+        table.Columns.Add("idle_db_count", typeof(int));
+        table.Columns.Add("max_cpu_pct", typeof(decimal));
+        table.Columns.Add("p95_cpu_pct", typeof(decimal));
+        table.Columns.Add("max_workers_count", typeof(int));
+        table.Columns.Add("current_workers_count", typeof(int));
+        table.Columns.Add("max_grant_waiters", typeof(long));
+        table.Columns.Add("grant_timeouts", typeof(long));
+        table.Columns.Add("forced_grants", typeof(long));
+        table.Columns.Add("grant_utilization_pct", typeof(decimal));
+        table.Columns.Add("engine_edition", typeof(int));
+        table.Columns.Add("edition", typeof(string));
+
+        table.Rows.Add(
+            1,
+            (object?)avgCpu ?? DBNull.Value,
+            20m,
+            1,
+            (object?)maxCpu ?? DBNull.Value,
+            (object?)p95Cpu ?? DBNull.Value,
+            DBNull.Value,
+            DBNull.Value,
+            0L,
+            0L,
+            0L,
+            0m,
+            (object?)engineEdition ?? DBNull.Value,
+            (object?)edition ?? DBNull.Value);
+
+        var reader = table.CreateDataReader();
+        Assert.True(reader.Read());
+        return reader;
+    }
+
+    /// <summary>
+    /// A server with size and properties rows but no CPU row in the 24-hour window has a NULL average CPU.
+    /// The read used to turn that into 0% CPU, and <c>Evaluate</c> called the server OVER_PROVISIONED — on
+    /// real data every server without a CPU sample was told to shrink. It gets no verdict now.
+    /// </summary>
+    [Fact]
+    public void FleetProvisioningStatusFor_ServerWithNoCpuSample_GetsNoVerdict()
+    {
+        using var reader = FleetRow(avgCpu: null, maxCpu: null, p95Cpu: null);
+
+        Assert.Null(ViewerDataService.FleetProvisioningStatusFor(reader));
+    }
+
+    /// <summary>The rule is about a MISSING sample, not a quiet one: low CPU still earns OVER_PROVISIONED,
+    /// the verdict every server with CPU samples got before.</summary>
+    [Fact]
+    public void FleetProvisioningStatusFor_ServerWithLowCpu_StillGetsOverProvisioned()
+    {
+        using var reader = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m);
+
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, ViewerDataService.FleetProvisioningStatusFor(reader));
+    }
+
+    /// <summary>A logical server's master has no service objective to resize, so the grid gets the N/A verdict.</summary>
+    [Fact]
+    public void FleetProvisioningStatusFor_LogicalServerMaster_GetsNotApplicable()
+    {
+        using var master = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, engineEdition: 5, edition: "Azure SQL Database (System)");
+        using var userDatabase = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, engineEdition: 5, edition: "Azure SQL Database (General Purpose)");
+
+        Assert.Equal(ProvisioningVerdict.NotApplicable, ViewerDataService.FleetProvisioningStatusFor(master));
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, ViewerDataService.FleetProvisioningStatusFor(userDatabase));
+    }
+
+    /// <summary>The other two verdicts are untouched: a hot server is still under-provisioned and a busy one
+    /// still right-sized.</summary>
+    [Fact]
+    public void FleetProvisioningStatusFor_ServersWithCpuSamples_KeepTheirVerdicts()
+    {
+        using var hot = FleetRow(avgCpu: 60m, maxCpu: 99m, p95Cpu: 95m);
+        using var busy = FleetRow(avgCpu: 40m, maxCpu: 70m, p95Cpu: 60m);
+
+        Assert.Equal(ProvisioningVerdict.UnderProvisioned, ViewerDataService.FleetProvisioningStatusFor(hot));
+        Assert.Equal(ProvisioningVerdict.RightSized, ViewerDataService.FleetProvisioningStatusFor(busy));
     }
 }

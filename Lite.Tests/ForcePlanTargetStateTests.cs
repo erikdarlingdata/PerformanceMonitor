@@ -260,6 +260,59 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
     }
 
     [Fact]
+    public void ActiveRecommendationNamingTheProposedPlanAsRegressed_SaysSo_AndTheAdvisoryVerdictStaysOpen()
+    {
+        /* #4736: the fixture's regressed plan is 7, so a target on plan 7 is the plan the engine calls the
+           worse one. The guidance says so instead of only "two candidate plans"; the bot (not this
+           surface) carries the blocker. */
+        var projected = Project(Target(planId: 7), State(apcState: "Active", apcLastGood: 101, flgp: "OFF"));
+
+        Assert.True(projected.Eligible);
+        Assert.Contains("names plan 7", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("the plan proposed here", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("worse", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Reverted")]
+    [InlineData("Expired")]
+    public void WithdrawnRecommendationNamingTheProposedPlanAsRegressed_SaysNothing(string apcState)
+    {
+        var projected = Project(Target(planId: 7), State(apcState: apcState, apcLastGood: 101, flgp: "OFF"));
+
+        Assert.Null(projected.Guidance);
+    }
+
+    [Fact]
+    public void ActiveRecommendationNamingTheProposedPlanAsRegressed_WithAutomaticPlanCorrectionOn_SaysSoInTheOnWording()
+    {
+        /* #4736: with FORCE_LAST_GOOD_PLAN on the guidance is the "Automatic plan correction is ON" text, a
+           separate branch from the off-mode text above, and it carries its own sentence for the same fact.
+           Every other test of this pair runs with the setting off, so only this one covers that sentence. */
+        var projected = Project(Target(planId: 7), State(apcState: "Active", apcLastGood: 101, flgp: "ON"));
+
+        Assert.Equal("on", projected.ApcMode);
+        Assert.Contains("Automatic plan correction is ON for [Orders]", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains(
+            "The engine names plan 7 (the plan proposed here) as the regressed, worse plan.",
+            projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Active", 99)]      /* open, but it names plan 7 as the regressed one and the target is plan 99 */
+    [InlineData("Reverted", 7)]     /* names the target, but the engine withdrew it */
+    [InlineData("Expired", 7)]
+    public void WithAutomaticPlanCorrectionOn_TheRegressedPlanSentence_NeedsAnOpenRecommendationNamingTheTargetPlan(
+        string apcState, long targetPlan)
+    {
+        var projected = Project(Target(planId: targetPlan), State(apcState: apcState, apcLastGood: 101, flgp: "ON"));
+
+        Assert.Equal("on", projected.ApcMode);
+        Assert.Contains("Automatic plan correction is ON for [Orders]", projected.Guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("as the regressed, worse plan", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheTwoOriginalBlockers_StackWithTheNewOnes_AndCarryEvidenceToo()
     {
         var projected = Project(Target(psp: true, replica: "Secondary"), State(planForced: true, forcingType: "AUTO"));
@@ -453,7 +506,6 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
             lite.Replace("JOIN v_query_store_stats AS qs", "JOIN query_store_stats AS qs", StringComparison.Ordinal)
                 .Replace("JOIN v_plan_correction AS p", "JOIN plan_correction AS p", StringComparison.Ordinal)
                 .Replace("FROM v_plan_correction AS e", "FROM plan_correction AS e", StringComparison.Ordinal)
-                .Replace("FROM v_plan_correction WHERE server_id = $1", "FROM plan_correction WHERE server_id = $1", StringComparison.Ordinal)
                 .ReplaceLineEndings("\n"));
 
         /* The VALUES rows: Postgres needs the casts, DuckDB does not; the ordinals are the same. */
@@ -466,9 +518,9 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
         Assert.Contains("}::bigint)\"", darling, StringComparison.Ordinal);
         Assert.Contains("VALUES ($3, $4, $5), ($6, $7, $8)", ForcePlanTargetStateReader.BuildSql(2), StringComparison.Ordinal);
 
-        /* Both scans are bounded by the bound $2, never now(). */
+        /* All three scans (plan, recommendation, enablement) are bounded by the bound $2, never now(). */
         Assert.DoesNotContain("now()", lite, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(lite, @"collection_time > \$2").Count);
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(lite, @"collection_time > \$2").Count);
     }
 
     /* ------------------------------------------------------------------ 6. the DuckDB round trip */
@@ -643,6 +695,54 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.True(projected[2].Eligible);
         Assert.Equal("on", projected[2].ApcMode);
         Assert.Null(projected[2].StateNote);
+    }
+
+    [Fact]
+    public async Task Reader_CarriesTheRegressedPlanId_AndItReachesTheGuidance()
+    {
+        /* #4736: a recommendation row names two plans, the regressed (worse) one and the last good one, and the
+           guidance and the bot's blocker both compare the regressed id with the proposed plan. The seed names
+           plan 7 as regressed and plan 99 as last good, so a reader that took the wrong column would hand back
+           99, and one that dropped the column would hand back nothing. */
+        await SeedPlanCorrectionAsync(DateTime.UtcNow.AddMinutes(-20), Db, "OFF", 123, "Active", null, 99, null, null, null);
+
+        var worse = new ForcePlanTarget(Db, 123, 7);
+        var noRecommendation = new ForcePlanTarget(Db, 124, 7);
+        var service = new LocalDataService(_duckDb);
+        var states = await service.GetForcePlanTargetStatesAsync(ServerId, new[] { worse, noRecommendation });
+
+        var state = states[ForcePlanTargetKey.Of(worse)];
+        Assert.Equal("Active", state.ApcState);
+        Assert.Equal(7L, state.ApcRegressedPlanId);
+        Assert.Equal(99L, state.ApcLastGoodPlanId);
+        Assert.Null(states[ForcePlanTargetKey.Of(noRecommendation)].ApcRegressedPlanId);
+
+        var projected = Assert.Single(FactRemediation.BuildStructuredRemediation(Action(worse), states)!.ForcePlanTargets);
+        Assert.Contains("names plan 7 (the plan proposed here) as the regressed, worse plan", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Reader_TakesEachDatabasesNewestEnablementRowInTheLookback_NotOnlyTheServersNewestCapture()
+    {
+        /* #4770: a capture lands one database at a time, so the server's newest capture can lack a database
+           that an earlier capture (3 hours ago) had. That database keeps its earlier state; one with no row
+           inside the 24-hour lookback comes back with no enablement at all (unknown). */
+        var now = DateTime.UtcNow;
+        await SeedPlanCorrectionAsync(now.AddHours(-3), Db, "ON", null, null, null, null, null, null, null);
+        await SeedPlanCorrectionAsync(now.AddMinutes(-10), "Other", "OFF", null, null, null, null, null, null, null);
+        await SeedPlanCorrectionAsync(now.AddHours(-30), "Old", "ON", null, null, null, null, null, null, null);
+
+        var service = new LocalDataService(_duckDb);
+        var states = await service.GetForcePlanTargetStatesAsync(ServerId,
+            new List<ForcePlanTarget> { new(Db, 1, 1), new("Other", 2, 2), new("Old", 3, 3) });
+
+        var earlier = states[new ForcePlanTargetKey(Db, 1, 1)];
+        Assert.Equal("ON", earlier.ForceLastGoodPlanActualState);
+        Assert.NotNull(earlier.EnablementObservedAtUtc);
+        Assert.Equal("OFF", states[new ForcePlanTargetKey("Other", 2, 2)].ForceLastGoodPlanActualState);
+        var none = states[new ForcePlanTargetKey("Old", 3, 3)];
+        Assert.Null(none.ForceLastGoodPlanActualState);
+        Assert.Null(none.EnablementObservedAtUtc);
     }
 
     [Fact]

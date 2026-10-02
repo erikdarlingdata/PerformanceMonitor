@@ -8,6 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Threading;
+using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Service;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -54,6 +59,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para>Thread-safety: one writer (the worker's startup path, then nothing), many readers (the web host's
 /// request threads). State is swapped as one immutable record reference, so a reader always sees a
 /// coherent snapshot — never a phase from one publish with an attempt count from another.</para>
+///
+/// <para><b>One file, for the one reader that cannot make a request (#4733).</b> A compose healthcheck runs
+/// inside an image that has no <c>curl</c>, so it cannot ask <c>/api/ping</c>, and a container whose process
+/// stayed up after a terminal verdict shows as running. Given a path (the <c>DARLING_STOPPED_MARKER</c>
+/// environment variable, read in <c>Program.cs</c>), this class keeps a marker file present exactly while the
+/// phase is <see cref="CollectorPhase.Stopped"/>. The in-process field stays the source of truth; the file
+/// is a copy of the terminal verdict alone, and losing it costs the container's health signal and nothing
+/// else. Without a path, nothing here touches the file system.</para>
 /// </summary>
 public sealed class CollectorRuntimeState
 {
@@ -126,6 +139,15 @@ public sealed class CollectorRuntimeState
     /// <c>ex.Message</c> at every <see cref="PublishRetrying"/>/<see cref="PublishStopped"/> call site.</summary>
     public static string FailureDetailFor(StartupStep step) => FailureDetailByStep[step];
 
+    /// <summary>Appends the sustained-retry phrase to <paramref name="detail"/> (#4508), so every reader of
+    /// <see cref="Snapshot.Detail"/> — the MCP/Viewer surfaces and <c>/api/ping</c> alike — sees the same
+    /// text once a step has spent its fast budget: <c>StartupFailureTriage.RetryBudget</c> seconds at the
+    /// original cadence, and is now retrying every <c>StartupFailureTriage.SustainedRetryDelay</c> seconds
+    /// with no cap. Built from those two constants and <paramref name="attempt"/>, never a literal.</summary>
+    internal static string SustainedRetryDetail(string detail, int attempt)
+        => $"{detail} \u2014 retrying every {(int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds}s, "
+            + $"attempt {attempt} (past the {(int)StartupFailureTriage.RetryBudget.TotalSeconds}s fast budget)";
+
     /// <summary>
     /// The fixed <see cref="Snapshot.Detail"/> for the one ManagedStore stand-down that is not on an
     /// exception path (#4316 round 1 B1): <c>postgres.managed = true</c> asked for the bundled runtime and
@@ -144,32 +166,91 @@ public sealed class CollectorRuntimeState
     /// <see cref="CollectorPhase.Collecting"/>, which is not about a step.</param>
     /// <param name="Detail">The step's fixed failure sentence (<see cref="FailureDetailFor"/>), the joined
     /// configuration problems, or the not-Windows sentence, never exception text (#4316); null for
-    /// <see cref="CollectorPhase.Collecting"/>.</param>
+    /// <see cref="CollectorPhase.Collecting"/>. Once <see cref="Sustained"/> is true, the sentence has the
+    /// <see cref="SustainedRetryDetail"/> phrase appended, so every reader of this field — the MCP/Viewer
+    /// surfaces and <c>/api/ping</c>'s <c>detail</c> alike — sees the same text (#4508).</param>
     /// <param name="Attempt">Which attempt is in flight, and how many the budget allows — both zero
     /// outside <see cref="CollectorPhase.Retrying"/>, where an attempt number is the only one of the two
     /// caps a reader can be shown (the wall-clock budget can end the retrying earlier).</param>
-    /// <param name="Attempts">The attempt cap the retry budget allows.</param>
+    /// <param name="Attempts">The attempt cap the retry budget allows — zero once <see cref="Sustained"/> is
+    /// true (#4508), rather than a spent cap a reader would otherwise read as "attempt 30 of 25".</param>
     /// <param name="AsOfUtc">When this phase was published — for
     /// <see cref="CollectorPhase.Collecting"/> that is when collection started, and for the two failure
     /// phases it is when the failure was last observed.</param>
+    /// <param name="Sustained">True once a <see cref="CollectorPhase.Retrying"/> step has spent its fast
+    /// budget and moved to the slower, unbounded retry (#4508) — see
+    /// <see cref="DarlingWebEndpoints.DescribePing"/> for how the ping body renders it. Always false outside
+    /// <see cref="CollectorPhase.Retrying"/>. Defaults to false so the existing terminal/collecting publishes,
+    /// which never pass it, are unaffected.</param>
     public sealed record Snapshot(
         CollectorPhase Phase,
         StartupStep? Step,
         string? Detail,
         int Attempt,
         int Attempts,
-        DateTime AsOfUtc);
+        DateTime AsOfUtc,
+        bool Sustained = false);
 
     private volatile Snapshot? _current;
+
+    private readonly string? _stoppedMarkerPath;
+    private readonly ILogger? _logger;
+    private int _markerFaultLogged;
+
+    /// <summary>
+    /// Creates the state, optionally with the path of the stopped-collection marker (#4733).
+    ///
+    /// <para><b>Why a file.</b> After a terminal startup verdict the process stays up on purpose (see the class
+    /// remarks), so a container never notices that collection stopped: it keeps running. The compose file's
+    /// healthcheck for the <c>darling</c> service tests for this file, so the container reports unhealthy
+    /// while the phase is <see cref="CollectorPhase.Stopped"/> and healthy otherwise. It is a file and not a
+    /// call to <c>/api/ping</c> because the image has no <c>curl</c>; <c>/api/ping</c> stays the richer
+    /// answer, and the marker only carries the same <see cref="Snapshot.Detail"/> and the time.</para>
+    ///
+    /// <para><b>Off unless asked.</b> <paramref name="stoppedMarkerPath"/> is null, empty or whitespace for the
+    /// Windows service and every non-compose deployment, and then nothing is written, nothing is removed and
+    /// nothing is logged. When it is set, a marker left by the previous run is removed HERE, because a
+    /// restarted container keeps its <c>/tmp</c> and would otherwise report the previous run's verdict until
+    /// this run reached its own.</para>
+    /// </summary>
+    /// <param name="stoppedMarkerPath">Where to write the marker, or null for none; read from the
+    /// <c>DARLING_STOPPED_MARKER</c> environment variable once, in <c>Program.cs</c>.</param>
+    /// <param name="logger">Where a fault writing or removing the marker is logged (once, at Warning).</param>
+    public CollectorRuntimeState(string? stoppedMarkerPath = null, ILogger? logger = null)
+    {
+        _stoppedMarkerPath = string.IsNullOrWhiteSpace(stoppedMarkerPath) ? null : stoppedMarkerPath.Trim();
+        _logger = logger;
+
+        RemoveStoppedMarker();
+    }
 
     /// <summary>Publishes a classified-transient failure of <paramref name="step"/> that is being retried
     /// (worker only; called from each retry arm alongside its warning line). The detail is always
     /// <see cref="FailureDetailFor"/> — an exception-path retry has no other text to publish, and (#4316
     /// round 1 B1) there is no longer a <c>string</c> parameter here for a caller to put <c>ex.Message</c>
-    /// in instead.</summary>
-    public void PublishRetrying(StartupStep step, int attempt, int attempts)
-        => _current = new Snapshot(
-            CollectorPhase.Retrying, step, FirstLineOf(FailureDetailFor(step)), attempt, attempts, DateTime.UtcNow);
+    /// in instead. <paramref name="sustained"/> is true once the fast retry budget is spent and the loop
+    /// has moved to the slower, unbounded retry (#4508); <paramref name="attempts"/> is published as zero
+    /// in that case — the cap the fast arm counted against no longer bounds anything, and publishing it
+    /// past its own value is what rendered as "attempt 30 of 25" before this. When sustained, the published
+    /// <see cref="Snapshot.Detail"/> also gets the <see cref="SustainedRetryDetail"/> phrase appended, so a
+    /// reader of the detail text — not just the structured <see cref="Snapshot.Sustained"/> flag — can tell
+    /// the retry is now unbounded.</summary>
+    public void PublishRetrying(StartupStep step, int attempt, int attempts, bool sustained = false)
+    {
+        var wasStopped = _current?.Phase == CollectorPhase.Stopped;
+
+        _current = new Snapshot(
+            CollectorPhase.Retrying, step,
+            sustained
+                ? SustainedRetryDetail(FirstLineOf(FailureDetailFor(step)), attempt)
+                : FirstLineOf(FailureDetailFor(step)),
+            attempt, sustained ? 0 : attempts, DateTime.UtcNow, sustained);
+
+        if (wasStopped)
+        {
+            RemoveStoppedMarker();
+        }
+    }
 
     /// <summary>Publishes a terminal failure of <paramref name="step"/> (worker only; called from each
     /// EXCEPTION-path collection-blocking exit, before the <c>return</c> — after the critical line, so a
@@ -207,7 +288,13 @@ public sealed class CollectorRuntimeState
     /// (<see cref="PublishManagedStoreNeedsWindows"/>).</summary>
     private void PublishStoppedCore(StartupStep step, string detail)
     {
-        _current = new Snapshot(CollectorPhase.Stopped, step, FirstLineOf(detail), 0, 0, DateTime.UtcNow);
+        var stopped = new Snapshot(CollectorPhase.Stopped, step, FirstLineOf(detail), 0, 0, DateTime.UtcNow);
+        _current = stopped;
+
+        /* #4733: the marker the compose healthcheck tests for, written after the snapshot is published and
+           on the one path every route to Stopped shares. It never throws, so it cannot cost the settle call
+           below or the worker's return its turn. */
+        WriteStoppedMarker(stopped);
 
         /* #3914: every one of these stand-downs comes before role provisioning, so a web or MCP host in a
            container waiting to hear whether the compose store's roles were provisioned would otherwise wait for
@@ -220,7 +307,82 @@ public sealed class CollectorRuntimeState
     /// <summary>Publishes that the collection loop started (worker only; called once, where the loop logs
     /// that it began).</summary>
     public void PublishCollecting()
-        => _current = new Snapshot(CollectorPhase.Collecting, null, null, 0, 0, DateTime.UtcNow);
+    {
+        var wasStopped = _current?.Phase == CollectorPhase.Stopped;
+
+        _current = new Snapshot(CollectorPhase.Collecting, null, null, 0, 0, DateTime.UtcNow);
+
+        if (wasStopped)
+        {
+            RemoveStoppedMarker();
+        }
+    }
+
+    /// <summary>What the marker holds: the moment collection stopped, then the snapshot's
+    /// <see cref="Snapshot.Detail"/> — the text <c>/api/ping</c> already serves, so it is as safe to show
+    /// here as there (#4733). Two lines, so <c>cat</c> on the file answers "since when, and why".</summary>
+    internal static string StoppedMarkerText(Snapshot stopped)
+        => stopped.AsOfUtc.ToString("O", CultureInfo.InvariantCulture) + Environment.NewLine
+           + stopped.Detail + Environment.NewLine;
+
+    /// <summary>Writes the stopped-collection marker (#4733). Nothing without a path; a fault is logged once
+    /// and swallowed, because this runs on the worker's stand-down path and a marker that could throw would
+    /// cost the operator the verdict it exists to report.</summary>
+    private void WriteStoppedMarker(Snapshot stopped)
+    {
+        if (_stoppedMarkerPath is null)
+        {
+            return;
+        }
+
+        try
+        {
+            File.WriteAllText(_stoppedMarkerPath, StoppedMarkerText(stopped));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogMarkerFaultOnce("write", ex);
+        }
+    }
+
+    /// <summary>Removes the stopped-collection marker (#4733): on creation, for the previous run's leftover,
+    /// and when the phase leaves <see cref="CollectorPhase.Stopped"/>. Nothing without a path, and nothing
+    /// to do when the file is not there. A fault is logged once and swallowed.</summary>
+    private void RemoveStoppedMarker()
+    {
+        if (_stoppedMarkerPath is null)
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(_stoppedMarkerPath);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            /* No directory, so no marker. Windows reports it where Unix reports nothing; either way there is
+               nothing to remove. */
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogMarkerFaultOnce("remove", ex);
+        }
+    }
+
+    /// <summary>One Warning for the process, whichever direction faulted first: a path that cannot be written
+    /// or removed will fault again on every publish, and the point is to say so once, not per publish.</summary>
+    private void LogMarkerFaultOnce(string action, Exception ex)
+    {
+        if (Interlocked.Exchange(ref _markerFaultLogged, 1) != 0)
+        {
+            return;
+        }
+
+        _logger?.LogWarning(
+            "Could not {Action} the stopped-collection marker {Path} ({Message}). The compose healthcheck tests for that file, so the container's health may not show whether collection has stopped (#4733).",
+            action, _stoppedMarkerPath, ex.Message);
+    }
 
     /// <summary>The latest published snapshot, or null when the worker has not reached a verdict yet.</summary>
     public Snapshot? Read() => _current;

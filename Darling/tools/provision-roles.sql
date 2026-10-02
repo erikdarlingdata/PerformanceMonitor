@@ -66,7 +66,11 @@
 --   3. If the owner role is not "darling", change it in the ALTER DEFAULT PRIVILEGES FOR ROLE
 --      lines (it must be the role that CREATEs the tables — your collection connection's role).
 --
---   psql -h <host> -U <owner> -d darling -f provision-roles.sql
+--   Needs psql 10 or later (step 1 says why):
+--   psql -X -h <host> -U <owner> -d darling -f provision-roles.sql
+--
+--   -X keeps your own psqlrc out of the run: an \set AUTOCOMMIT off in it would leave every role, grant and
+--   setting uncommitted while psql still exits 0, and an ON_ERROR_STOP in it would change where the run stops.
 --
 -- NAME-COLLISION SAFETY: the roles are the bare, un-prefixed names "admin", "viewer" and "mcp". If your
 -- cluster ALREADY has a role by any of those names that this script did not create, it will NOT be
@@ -87,6 +91,13 @@ SET pg_stat_statements.track_utility = off;
 -- 1. Roles (CREATE ROLE has no IF NOT EXISTS -> guard with a DO block). Idempotent: re-running
 --    this script re-asserts the password below, so it doubles as a password rotation. A fresh role
 --    is stamped 'darling-managed'; an unmarked same-named role fails loud (never repurposed).
+-- Stop on an error for this guard alone (#4746): a script-wide stop would end a non-superuser owner before any grant.
+-- The caller's own ON_ERROR_STOP (psql -v ON_ERROR_STOP=1, or psqlrc) is saved first and put back after the guard,
+-- not forced off. From psql 10 an unset ON_ERROR_STOP reads as off, so the saved value is always on or off. In psql 9.6
+-- an unset variable stays the literal text :ON_ERROR_STOP and reads as on, so the whole run would stop at its first
+-- error and an owner who is not a superuser would get no grants: this script needs psql 10 or later.
+\set darling_saved_stop :ON_ERROR_STOP
+\set ON_ERROR_STOP on
 DO $$
 BEGIN
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
@@ -108,6 +119,7 @@ BEGIN
       RAISE EXCEPTION 'Role "mcp" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
 END $$;
+\set ON_ERROR_STOP :darling_saved_stop
 
 ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
 ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
@@ -121,6 +133,18 @@ ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';
 --     the owner login has no backstop at all.
 ALTER ROLE viewer SET statement_timeout = '60s';
 ALTER ROLE mcp    SET statement_timeout = '60s';
+
+--     temp_file_limit backstop on viewer and mcp (#4605): the on-disk-spill half of the same DoS control --
+--     a runaway aggregation that would spill past this many bytes of on-disk temp files is cancelled by the
+--     store itself (SQLSTATE 53400) rather than writing gigabytes to the store's own volume and starving the
+--     collector's writes. Keep this value in step with ComposeLimits.TempFileLimit in the service.
+--     Superuser-only (PGC_SUSET), like log_min_duration_statement below -- if the OWNER role running this
+--     script is not a superuser and has not been GRANTed SET on this parameter, these two statements fail and
+--     psql carries on with the rest of the script (only the role-collision guard in step 1 stops the run), so viewer
+--     and mcp are left without this limit; grant the owner SET on it and run the script again (it is idempotent),
+--     or run these two lines as a superuser.
+ALTER ROLE viewer SET temp_file_limit = '1GB';
+ALTER ROLE mcp    SET temp_file_limit = '1GB';
 
 -- 1b. Slow-statement logging on viewer and mcp (#3899): a statement from either that runs past a third of its
 --     statement_timeout, capped at 5s so raising the ceiling never widens the unlogged band (#4442), is written

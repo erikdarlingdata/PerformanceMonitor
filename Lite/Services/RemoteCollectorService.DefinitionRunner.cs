@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Data.Common;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -17,12 +18,68 @@ using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
 
 public partial class RemoteCollectorService
 {
+    /// <summary>Replaces the Azure per-database list lookup. Null in production.</summary>
+    internal Func<ServerConnection, CancellationToken, Task<List<string>>>? AzureDatabaseListOverrideForTests { get; set; }
+
+    /// <summary>Throws from directly before a database's store write, inside the loop's try. Null in production.</summary>
+    internal Action<string>? PerDatabaseWriteFaultForTests { get; set; }
+
+    /// <summary>Supplies a database's reader instead of a live connection. Null in production.</summary>
+    internal Func<string, CollectorQuery, DbDataReader>? AzureDatabaseReaderOverrideForTests { get; set; }
+
+    /// <summary>
+    /// One Azure database's open connection, command and reader, disposed in that order (reader,
+    /// command, connection). The command and connection are null when a test supplied the reader.
+    /// </summary>
+    private sealed class AzureDatabaseRead(DbDataReader reader, DbCommand? command, DbConnection? connection) : IDisposable
+    {
+        public DbDataReader Reader { get; } = reader;
+
+        public void Dispose()
+        {
+            Reader.Dispose();
+            command?.Dispose();
+            connection?.Dispose();
+        }
+    }
+
+    private async Task<AzureDatabaseRead> OpenAzureDatabaseReadAsync(
+        ServerConnection server, string databaseName, CollectorQuery plan, int commandTimeout, CancellationToken cancellationToken)
+    {
+        if (AzureDatabaseReaderOverrideForTests is { } readerOverride)
+        {
+            return new AzureDatabaseRead(readerOverride(databaseName, plan), null, null);
+        }
+
+        var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
+        try
+        {
+            var command = CreateCollectorCommand(plan, connection, commandTimeout);
+            try
+            {
+                var reader = await command.ExecuteReaderAsync(cancellationToken);
+                return new AzureDatabaseRead(reader, command, connection);
+            }
+            catch
+            {
+                command.Dispose();
+                throw;
+            }
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
+
     /// <summary>
     /// Runs a shared collector definition (PerformanceMonitor.Collectors) against one server:
     /// SQL phase (definition reads/filters rows) and storage phase (appender write with the
@@ -30,7 +87,7 @@ public partial class RemoteCollectorService
     /// Collectors migrate onto this runner one PR at a time (headless plan v5.1); it reproduces
     /// the hand-rolled per-collector loop byte-for-byte at the storage layer.
     /// </summary>
-    private async Task<int> RunCollectorDefinitionAsync<TRow>(
+    internal async Task<int> RunCollectorDefinitionAsync<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerConnection server,
         CancellationToken cancellationToken)
@@ -161,7 +218,7 @@ public partial class RemoteCollectorService
         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
             && DatabaseStateCollector.Instance.AppliesTo(target))
         {
-            await PruneOrphanedQueryStoreDatabaseStateAsync(serverId, cancellationToken);
+            await PruneOrphanedQueryStoreDatabaseStateIfDueAsync(serverId, cancellationToken);
         }
         else if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                  && target.IsAzureSqlDb)
@@ -219,7 +276,9 @@ public partial class RemoteCollectorService
                 ? definition.BuildQuery(context)
                 : null;
             var commandTimeout = definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds;
-            var databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+            var databases = AzureDatabaseListOverrideForTests is { } databaseListOverride
+                ? await databaseListOverride(server, cancellationToken)
+                : await GetAzureDatabaseListAsync(server, cancellationToken);
 
             var attempted = 0;
             var failed = 0;
@@ -258,6 +317,11 @@ public partial class RemoteCollectorService
                    after its read and flush succeed — per iteration, so a fault cannot leak a stamp
                    into a sibling database's landing. Mirrors Darling. */
                 string? stagedOpenIntervalStamp = null;
+
+                /* The definition's own per-item staged state (CollectorContext.StagedItemState), cleared per
+                   iteration so a fault cannot leak this database's staged cursor into a sibling's landing.
+                   It lands below, after this database's flush, and nowhere else. Mirrors Darling. */
+                context.DropStagedItemState();
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
@@ -371,10 +435,9 @@ public partial class RemoteCollectorService
                     /* dbToken, not cancellationToken (#2150): connect, execute and drain are the phases the
                        budget bounds. The FLUSH below deliberately stays on cancellationToken — abandoning a
                        write already in flight would trade a slow cycle for a partially-written one. */
-                    using (var dbConnection = await OpenAzureDatabaseConnectionAsync(server, databaseName, dbToken))
-                    using (var dbCommand = CreateCollectorCommand(dbPlan, dbConnection, commandTimeout))
-                    using (var dbReader = await dbCommand.ExecuteReaderAsync(dbToken))
+                    using (var dbRead = await OpenAzureDatabaseReadAsync(server, databaseName, dbPlan, commandTimeout, dbToken))
                     {
+                        var dbReader = dbRead.Reader;
                         batch = await definition.ReadAsync(dbReader, context, dbToken);
 
                         /* #1875: the payload path's probe-failure contract, on the path that used to
@@ -400,6 +463,7 @@ public partial class RemoteCollectorService
                     if (batch.Count > 0)
                     {
                         var storageSlice = Stopwatch.StartNew();
+                        PerDatabaseWriteFaultForTests?.Invoke(databaseName);
                         rowsWritten += WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context);
                         dbStorageMs = storageSlice.ElapsedMilliseconds;
                         storageMs += dbStorageMs;
@@ -430,6 +494,12 @@ public partial class RemoteCollectorService
                         }
                     }
 
+                    /* The read AND the flush both succeeded: only now may the state the definition staged for
+                       this database (a telemetry cursor, the shred gate's execution count) be saved. A failed
+                       write throws past this line into the per-database catch, which skips the database while
+                       a sibling's success still saves PendingState. Mirrors Darling. */
+                    context.LandStagedItemState();
+
                     var capHit = definition.PerItemRowCountWarnThreshold is int cap && batch.Count >= cap;
                     if (capHit || context.PerItemTextBudgetExceeded)
                     {
@@ -449,6 +519,14 @@ public partial class RemoteCollectorService
                        write — would be caught by that arm and logged as a routine per-database timeout,
                        silently breaking the invariant the generic catch below states outright. The shared
                        EnumeratedCollectorDriver already orders it this way; these two loops did not. */
+                    throw;
+                }
+                catch (Exception ex) when (DuckDbInitializer.IsDatabaseInvalidated(ex))
+                {
+                    /* A fatal DuckDB error invalidated the local database, so every later database would be read
+                       from its server and then fail to store. The run ends here and closes its connection, which
+                       the reopen waits for, and RunCollectorAsync reports the error. Ahead of the budget arm for
+                       the same reason as the OOM arm above. */
                     throw;
                 }
                 catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(dbBudget, cancellationToken))
@@ -697,6 +775,7 @@ public partial class RemoteCollectorService
                     readItem: async (item, ct) =>
                     {
                         var batch = new List<TRow>();
+                        context.DropStagedItemState();
                         using var itemCommand = CreateCollectorCommand(definition.BuildPerItemQuery(item, context), sqlConnection, itemTimeout);
                         using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
@@ -724,6 +803,10 @@ public partial class RemoteCollectorService
                                 context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] = landedStamp;
                             }
                         }
+
+                        /* Enumerated items stage no definition state today; landed here so the rule holds for
+                           any that start to: this hook fires only after the item's read and flush succeeded. */
+                        context.LandStagedItemState();
 
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, hiding a single busy database's burst behind
@@ -753,6 +836,14 @@ public partial class RemoteCollectorService
                     },
                     onItemError: (item, ex) =>
                     {
+                        /* A fatal DuckDB error invalidated the local database (the per-database watermark read
+                           sees it first). Thrown from here, it leaves the driver's loop at once instead of
+                           trying every remaining database, the same as the Azure per-database loop above. */
+                        if (DuckDbInitializer.IsDatabaseInvalidated(ex))
+                        {
+                            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex).Throw();
+                        }
+
                         /* #2111: stamp the yield-to-live signal (any database's live failure vouches
                            for the whole replica being contended) + the per-database adaptive-shrink
                            count. */
@@ -877,6 +968,10 @@ public partial class RemoteCollectorService
                 await duckConnection.OpenAsync(cancellationToken);
                 rowsWritten = WriteBatch(duckConnection, definition, rows, serverId, context.ServerName, collectionTime, context);
                 storageMs += storageSlice.ElapsedMilliseconds;
+
+                /* The single item's write returned: land what the definition staged for it. A throw above
+                   never reaches here, and a cycle that throws saves no state at all. */
+                context.LandStagedItemState();
             }
         }
 
@@ -990,6 +1085,35 @@ public partial class RemoteCollectorService
             return 0;
         }
 
+        /* #4487: job_history's failback lookback can honestly re-read up to FailbackLookbackDays of an
+           epoch this server already stored — see PerformanceMonitor.Collectors.JobHistoryCollector's
+           class remarks. Read the batch's own natural keys back from the store ONCE, here, before the
+           appender opens, and keep only the rows not already stored. Every other collector's definition
+           does not implement the contract, so this is a null check and nothing else for them. No chunk
+           bound needed here (unlike Darling): DuckDB is not partitioned, and job_history is small. */
+        if (definition is INaturalKeyDedupedCollector<TRow> dedupe)
+        {
+            rows = DropAlreadyStoredJobHistoryRows(duckConnection, definition, dedupe, rows, serverId);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
+        /* A deadlock both of an Azure master registration's reads return is stored once: read the batch's
+           own identities (time and full graph text) back from the store ONCE, before the appender opens,
+           and keep only the rows it does not already hold. Every other definition skips this null check. */
+        if (definition is IStoredIdentityDedupedCollector<TRow> identityDedupe)
+        {
+            rows = DropAlreadyStoredIdentityRows(duckConnection, definition, identityDedupe, rows, serverId);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
         var rowsWritten = 0;
         using (var appender = duckConnection.CreateAppender(definition.TargetTable))
         {
@@ -1018,6 +1142,108 @@ public partial class RemoteCollectorService
 
         return rowsWritten;
     }
+
+    /// <summary>
+    /// The keyed pre-insert dedupe (#4487), DuckDB's twin of Darling's
+    /// <c>DarlingCollectorRunner.DropAlreadyStoredJobHistoryRowsAsync</c>: reads the batch's own natural
+    /// keys back from <c>job_history</c> (the only table this runs against — only
+    /// <see cref="PerformanceMonitor.Collectors.JobHistoryCollector"/> implements
+    /// <see cref="INaturalKeyDedupedCollector{TRow}"/>) via one keyed query against the DuckDB list
+    /// binding idiom, and drops any row this server already stored under either the current epoch or a
+    /// returning one, before the appender opens.
+    /// </summary>
+    private static List<TRow> DropAlreadyStoredJobHistoryRows<TRow>(
+        DuckDBConnection duckConnection,
+        ICollectorDefinition<TRow> definition,
+        INaturalKeyDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        int serverId)
+    {
+        var storedKeys = new HashSet<(long InstanceId, string JobId, int StepId, DateTime RunDateTime)>();
+
+        using (var command = duckConnection.CreateCommand())
+        {
+            command.CommandText =
+                $"SELECT jh.instance_id, jh.job_id, jh.step_id, jh.run_datetime " +
+                $"FROM {definition.TargetTable} AS jh " +
+                "JOIN (SELECT UNNEST($2) AS run_datetime, UNNEST($3) AS instance_id, " +
+                "             UNNEST($4) AS job_id, UNNEST($5) AS step_id) AS k " +
+                "ON jh.run_datetime = k.run_datetime AND jh.instance_id = k.instance_id " +
+                "AND jh.job_id = k.job_id AND jh.step_id = k.step_id " +
+                "WHERE jh.server_id = $1";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = rows.Select(r => dedupe.GetNaturalKey(r).RunDateTime).ToArray() });
+            command.Parameters.Add(new DuckDBParameter { Value = rows.Select(r => dedupe.GetNaturalKey(r).InstanceId).ToArray() });
+            command.Parameters.Add(new DuckDBParameter { Value = rows.Select(r => dedupe.GetNaturalKey(r).JobId).ToArray() });
+            command.Parameters.Add(new DuckDBParameter { Value = rows.Select(r => dedupe.GetNaturalKey(r).StepId).ToArray() });
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                storedKeys.Add((
+                    reader.GetInt64(0),
+                    reader.GetString(1),
+                    reader.GetInt32(2),
+                    JobHistoryCollector.ToMicroseconds(reader.GetDateTime(3))));
+            }
+        }
+
+        return dedupe.DropAlreadyStored(rows, storedKeys);
+    }
+
+    /// <summary>
+    /// The exact-identity pre-insert dedupe, DuckDB's twin of Darling's
+    /// <c>DarlingCollectorRunner.DropAlreadyStoredIdentityRowsAsync</c>: reads the stored graphs of this
+    /// server at the batch's own identity times, with one query against the DuckDB list binding idiom, and
+    /// drops any row whose time and full graph text a stored row already carries, before the appender opens.
+    /// </summary>
+    private static List<TRow> DropAlreadyStoredIdentityRows<TRow>(
+        DuckDBConnection duckConnection,
+        ICollectorDefinition<TRow> definition,
+        IStoredIdentityDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        int serverId)
+    {
+        var times = rows.Select(dedupe.GetIdentity)
+            .Where(identity => identity is not null)
+            .Select(identity => identity!.Value.Time)
+            .Distinct()
+            .ToArray();
+
+        if (times.Length == 0)
+        {
+            return rows;
+        }
+
+        var collectionTimeFloor = times.Min().AddDays(-1);
+        var stored = new HashSet<(DateTime Time, string Graph)>();
+
+        using (var command = duckConnection.CreateCommand())
+        {
+            command.CommandText = StoredIdentitySql(definition.TargetTable);
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = times });
+            command.Parameters.Add(new DuckDBParameter { Value = collectionTimeFloor });
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                stored.Add((JobHistoryCollector.ToMicroseconds(reader.GetDateTime(0)), reader.GetString(1)));
+            }
+        }
+
+        return dedupe.DropAlreadyStored(rows, stored);
+    }
+
+    /// <summary>
+    /// The stored identities of one server at a set of event times (a null or empty graph is never an
+    /// identity), floored on <c>collection_time</c> exactly as Darling's <c>StoredDeadlockIdentitySql</c> is:
+    /// the earliest batch event time minus one day.
+    /// </summary>
+    internal static string StoredIdentitySql(string targetTable) =>
+        $"SELECT deadlock_time, deadlock_graph_xml FROM {targetTable} " +
+        "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> '' " +
+        "AND deadlock_time IN (SELECT UNNEST($2)) AND collection_time >= $3";
 
     private static SqlCommand CreateCollectorCommand(CollectorQuery plan, SqlConnection connection, int commandTimeoutSeconds)
     {

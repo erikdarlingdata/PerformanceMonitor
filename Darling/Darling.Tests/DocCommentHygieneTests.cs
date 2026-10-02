@@ -651,10 +651,6 @@ public sealed class DocCommentHygieneTests
             + "answer, different question; labelling it DANGLING would credit the resolver with a check it "
             + "does not perform.",
 
-        ["ListBox"] =
-            "OUTSIDE. System.Windows.Controls.ListBox, used from XAML rather than from C#, so the C# "
-            + "identifier universe cannot contain it. Three sites, across both SKUs.",
-
         ["NpgsqlBatch"] =
             "OUTSIDE. Npgsql's batch type, named in prose about why the code does not use it.",
 

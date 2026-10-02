@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Analysis;
@@ -107,12 +108,12 @@ public class CollectionBackgroundService : BackgroundService
     }
 
     /* Archive every hour, retention once per day */
-    private static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
+    internal static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
 
     /// <summary>The backfill worker's cadence (#2058) — Darling's worker ticks at the same 5
     /// minutes; the steady state (every tail drained, no holes) costs a candidate query and a few
     /// MIN() lookups per server.</summary>
-    private static readonly TimeSpan QueryStoreBackfillInterval = TimeSpan.FromMinutes(5);
+    internal static readonly TimeSpan QueryStoreBackfillInterval = TimeSpan.FromMinutes(5);
 
     /* ── #2148: the ladder steps that could HOLD the loop with no bound, made abandonable. ──
        The field failure: one step wedged on an Azure elastic pool right after the 3.4.0 upgrade and
@@ -124,12 +125,12 @@ public class CollectionBackgroundService : BackgroundService
        abandonment is always a defect signal, never scheduling jitter, and it logs as ERROR. */
     private static readonly TimeSpan ConnectionCheckDeadline = TimeSpan.FromSeconds(90);
     private readonly AbandonableStep _connectionCheckStep = new();
-    private static readonly TimeSpan RetentionInterval = TimeSpan.FromHours(24);
+    internal static readonly TimeSpan RetentionInterval = TimeSpan.FromHours(24);
     /* Analysis-findings retention purge — daily, matching the parquet-retention cadence
        above and Darling's daily findings-cleanup horizon. */
-    private static readonly TimeSpan FindingsCleanupInterval = TimeSpan.FromHours(24);
+    internal static readonly TimeSpan FindingsCleanupInterval = TimeSpan.FromHours(24);
     /* dismissed_archive_alerts sidecar purge — the same daily cadence as its retention siblings. */
-    private static readonly TimeSpan DismissedAlertsCleanupInterval = TimeSpan.FromHours(24);
+    internal static readonly TimeSpan DismissedAlertsCleanupInterval = TimeSpan.FromHours(24);
 
     /* Size-based trigger — when the database exceeds this size, archive ALL data
        to parquet and reset the database. INSERT performance degrades badly with
@@ -171,9 +172,14 @@ public class CollectionBackgroundService : BackgroundService
         /* Wait a few seconds before first collection to let the app initialize */
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
+        /* #4640: the logical cycle time sits on a fixed grid (CollectionInterval apart), independent of how long
+           a cycle's work takes, so a collector's due check compares exact grid times. */
+        var cycleStart = DateTime.UtcNow;
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (!IsPaused)
+            /* While Lite's local database is down after a fatal error, the whole cycle skips, housekeeping included:
+               every step would fail against the invalidated database. The reopen does not need a cycle to run. */
+            if (!IsPaused && !_collectorService.LocalDatabaseIsDown())
             {
                 /* Check all server connections before collecting */
                 if (_serverManager != null)
@@ -192,7 +198,7 @@ public class CollectionBackgroundService : BackgroundService
                 try
                 {
                     IsCollecting = true;
-                    await _collectorService.RunDueCollectorsAsync(stoppingToken);
+                    await _collectorService.RunDueCollectorsAsync(cycleStart, stoppingToken);
                     LastCollectionTime = DateTime.UtcNow;
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -214,7 +220,7 @@ public class CollectionBackgroundService : BackgroundService
                 await RunQueryStoreBackfillIfDueAsync(stoppingToken);
 
                 /* Periodic retention cleanup */
-                RunRetentionIfDue();
+                await RunRetentionIfDueAsync();
 
                 /* Periodic analysis-findings retention (rolling 30-day purge) */
                 await RunFindingsCleanupIfDueAsync();
@@ -241,7 +247,8 @@ public class CollectionBackgroundService : BackgroundService
 
             try
             {
-                await Task.Delay(CollectionInterval, stoppingToken);
+                cycleStart = await WaitForNextCycleAsync(cycleStart, CollectionInterval, () => DateTime.UtcNow,
+                    (wait, token) => Task.Delay(wait, token), stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -251,6 +258,79 @@ public class CollectionBackgroundService : BackgroundService
 
         _logger?.LogInformation("Collection background service stopped");
     }
+
+    /// <summary>
+    /// #4728: waits for the next slot on the collector grid and returns the logical start of the cycle to run.
+    /// The wait is normally one interval, and <paramref name="cycleStart"/> becomes the slot it waited for. After
+    /// the computer sleeps and resumes, though, the delay returns long after that slot, and handing the collectors
+    /// a slot from before the sleep would run every collector that was due then and run it again at the next slot
+    /// a minute later. When the delay returns a whole interval or more past its slot, the cycle starts at the
+    /// latest grid slot at or before now instead (the same arithmetic as Darling's ServedSlot): a slot missed
+    /// during a stall is skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). #4732: a wall clock that
+    /// stepped backwards does not pause the loop or run a cycle twice. A cycle stamp more than one interval ahead of the
+    /// clock at the start of the wait is a step between waits: there is no wait and the cycle starts at the clock's reading.
+    /// A stamp up to one interval ahead (the delay returned a hair before its slot, or the clock stepped back by less than
+    /// an interval) keeps its grid slot, and the wait is one interval from now, never longer, so the next cycle is one
+    /// interval after the one that just ran instead of straight after it. A delay that returns more than one interval
+    /// behind the slot it waited for (<see cref="CollectorCadence.ClampDue"/>) is a step during the wait: that cycle starts
+    /// at the clock's reading too, so it runs once and the next one is a whole interval later. Static, with the clock
+    /// and the delay passed in, so a test drives this path with a fake clock and a fake delay.
+    /// </summary>
+    internal static async Task<DateTime> WaitForNextCycleAsync(
+        DateTime cycleStart,
+        TimeSpan interval,
+        Func<DateTime> utcNow,
+        Func<TimeSpan, CancellationToken, Task> delay,
+        CancellationToken cancellationToken)
+    {
+        var before = utcNow();
+
+        /* #4732: a stamp more than one interval ahead of the clock can only be a wall clock that stepped backwards after
+           the cycle was stamped; waiting for the next grid slot would pause every collector for as long as the step. The
+           next cycle is due now and is stamped with the clock's reading, so the grid is re-anchored at the new clock. A
+           stamp up to one interval ahead is a slot the last wait reached a hair early, or a step smaller than an
+           interval: the next cycle keeps its grid slot (a slot a hair off the grid would skip a collector that is due on
+           it), but the wait is one interval from now, never longer, so it starts an interval after the cycle that just
+           ran instead of at once (the clock is behind the stamp, so the whole gap to the next slot would be more than
+           an interval). A stamp at or behind the clock is the normal wait, unchanged. */
+        var slot = cycleStart - before > interval
+            ? before
+            : CollectorCadence.NextDue(cycleStart, before, interval);
+        var wait = slot - before;
+        if (wait > interval)
+        {
+            wait = interval;
+        }
+
+        if (wait > TimeSpan.Zero)
+        {
+            await delay(wait, cancellationToken);
+        }
+
+        var now = utcNow();
+        if (now >= slot + interval)
+        {
+            return CollectorCadence.NextDue(slot, now, interval) - interval;
+        }
+
+        /* #4732: the same test on the way out. A clock that stepped backwards while the delay ran reads the slot as more
+           than one interval ahead, and the cycle is stamped with the clock instead of that slot: a cycle stamped ahead of
+           the clock made the next wait see a stamp more than an interval ahead and run a second cycle straight after this
+           one. A slot up to one interval ahead (the delay returned a hair early) stays the slot. */
+        return CollectorCadence.ClampDue(slot, now, interval);
+    }
+
+    /// <summary>
+    /// #4732: whether a housekeeping job (the Query Store backfill, archival, retention, the two cleanups and analysis)
+    /// that last ran at <paramref name="lastRunUtc"/> is due at <paramref name="nowUtc"/>. The jobs used to decide from
+    /// the elapsed time since their last run, so a wall clock that stepped backwards made it negative and each job waited
+    /// out the step. A last run ahead of the clock can only be that step (a run is stamped with the clock at the time it
+    /// runs), so it counts as due (<see cref="CollectorCadence.ClampDue"/>, the rule the collector schedule applies to
+    /// <c>lastRun + interval</c>). A last run in the past decides exactly as "the interval has elapsed" did. One function for
+    /// every job, with the clock passed in, so a test drives it without waiting.
+    /// </summary>
+    internal static bool HousekeepingIsDue(DateTime lastRunUtc, TimeSpan interval, DateTime nowUtc) =>
+        CollectorCadence.IntervalElapsed(lastRunUtc, nowUtc, interval);
 
     /// <summary>#2058: fills the Query Store history the live path never takes — the 60-minute
     /// first-contact tail and clamp-bounded outage holes — newest-first, strictly behind the live
@@ -279,7 +359,7 @@ public class CollectionBackgroundService : BackgroundService
             _logger?.LogInformation("Query Store backfill re-enabled in settings — resuming from the stored watermarks");
         }
 
-        if (DateTime.UtcNow - _lastQueryStoreBackfill < QueryStoreBackfillInterval)
+        if (!HousekeepingIsDue(_lastQueryStoreBackfill, QueryStoreBackfillInterval, DateTime.UtcNow))
         {
             return;
         }
@@ -339,7 +419,7 @@ public class CollectionBackgroundService : BackgroundService
             return;
         }
 
-        var timeDue = DateTime.UtcNow - _lastArchiveTime >= ArchiveInterval;
+        var timeDue = HousekeepingIsDue(_lastArchiveTime, ArchiveInterval, DateTime.UtcNow);
         var sizeDue = _duckDb != null && _duckDb.GetDatabaseSizeMb() >= ArchiveSizeThresholdMb;
 
         if (!timeDue && !sizeDue)
@@ -357,7 +437,7 @@ public class CollectionBackgroundService : BackgroundService
             }
             else
             {
-                await _archiveService.ArchiveOldDataAsync(hotDataDays: 7);
+                await _archiveService.ArchiveOldDataAsync(hotDataDays: ArchiveService.HotDataDays);
             }
             _lastArchiveTime = DateTime.UtcNow;
         }
@@ -367,16 +447,20 @@ public class CollectionBackgroundService : BackgroundService
         }
     }
 
-    private void RunRetentionIfDue()
+    private async Task RunRetentionIfDueAsync()
     {
-        if (_retentionService == null || DateTime.UtcNow - _lastRetentionTime < RetentionInterval)
+        if (_retentionService == null || !HousekeepingIsDue(_lastRetentionTime, RetentionInterval, DateTime.UtcNow))
         {
             return;
         }
 
         try
         {
-            _retentionService.CleanupOldArchives(retentionMonths: RetentionService.ArchiveRetentionMonths);
+            /* The views must be rebuilt after a delete (see CleanupOldArchivesAndRefreshViewsAsync). */
+            if (_duckDb != null)
+                await _retentionService.CleanupOldArchivesAndRefreshViewsAsync(_duckDb, RetentionService.ArchiveRetentionMonths);
+            else
+                _retentionService.CleanupOldArchives(retentionMonths: RetentionService.ArchiveRetentionMonths);
             _lastRetentionTime = DateTime.UtcNow;
         }
         catch (Exception ex)
@@ -399,7 +483,7 @@ public class CollectionBackgroundService : BackgroundService
     /// </summary>
     private async Task RunFindingsCleanupIfDueAsync()
     {
-        if (_duckDb == null || DateTime.UtcNow - _lastFindingsCleanupTime < FindingsCleanupInterval)
+        if (_duckDb == null || !HousekeepingIsDue(_lastFindingsCleanupTime, FindingsCleanupInterval, DateTime.UtcNow))
         {
             return;
         }
@@ -428,7 +512,7 @@ public class CollectionBackgroundService : BackgroundService
     /// </summary>
     private async Task RunDismissedAlertsCleanupIfDueAsync()
     {
-        if (_duckDb == null || DateTime.UtcNow - _lastDismissedAlertsCleanupTime < DismissedAlertsCleanupInterval)
+        if (_duckDb == null || !HousekeepingIsDue(_lastDismissedAlertsCleanupTime, DismissedAlertsCleanupInterval, DateTime.UtcNow))
         {
             return;
         }
@@ -616,7 +700,7 @@ public class CollectionBackgroundService : BackgroundService
            regardless; this inner gate controls delivery alone. */
         var notify = ShouldNotifyAnalysisFindings();
 
-        if (DateTime.UtcNow - _lastAnalysisTime < TimeSpan.FromMinutes(App.AnalysisIntervalMinutes))
+        if (!HousekeepingIsDue(_lastAnalysisTime, TimeSpan.FromMinutes(App.AnalysisIntervalMinutes), DateTime.UtcNow))
         {
             return;
         }

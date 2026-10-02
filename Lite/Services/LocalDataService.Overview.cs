@@ -8,10 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Media;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -105,32 +109,47 @@ LIMIT 1";
             }
         }
 
+        /* An Azure SQL Database master registration also covers databases monitored as their own targets: their
+           blocking and deadlocks show on their own cards, so master's card skips them (the list analysis uses).
+           A null or empty list leaves today's SQL untouched. */
+        var separate = AnalysisService.ResolveSeparatelyMonitoredDatabases(serverId);
+
         /* Blocking count in last hour - uses XE blocked process reports */
         using (var cmd = connection.CreateCommand())
         {
             /* Prefer the blocked-process-report; fall back to the always-on DMV snapshot (AWS RDS). */
             cmd.CommandText = @"
 SELECT COALESCE(NULLIF(
-    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2), 0),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2))";
+    (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3)) + @" AS ev), 0),
+    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3) + @"))";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
+            SeparatelyMonitoredScope.AddParameters(cmd, separate);
             var result = await cmd.ExecuteScalarAsync();
             blockingCount = result != null ? Convert.ToInt32(result) : 0;
         }
 
         /* Deadlock count in last hour */
-        using (var cmd = connection.CreateCommand())
+        if (separate is { Count: > 0 })
         {
-            cmd.CommandText = @"
-SELECT COUNT(*)
-FROM v_deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2";
-            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
-            var result = await cmd.ExecuteScalarAsync();
-            deadlockCount = result != null ? Convert.ToInt32(result) : 0;
+            /* One row per stored identity, minus deadlocks wholly inside the separately monitored databases. */
+            var now = DateTime.UtcNow;
+            deadlockCount = (int)await SeparatelyMonitoredScope.CountDeadlocksAsync(
+                connection, serverId, now.AddHours(-1), now.AddDays(1), inclusiveEnd: true, separate, System.Threading.CancellationToken.None);
+        }
+        else
+        {
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = @"
+SELECT " + StoredEventCopies.DeadlockDistinctCount + @"
+FROM v_deadlocks AS dl
+WHERE server_id = $1 AND deadlock_time >= $2";
+                cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
+                var result = await cmd.ExecuteScalarAsync();
+                deadlockCount = result != null ? Convert.ToInt32(result) : 0;
+            }
         }
 
         /* Last collection time from collection_log — hot table first (#3895). A miss on both leaves the CPU
@@ -312,6 +331,40 @@ public class ServerSummaryItem
     public string DisplayName { get; set; } = "";
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
+
+    /// <summary>
+    /// True when this card is <paramref name="server"/>'s card. The card was loaded under the server's storage
+    /// server id (<see cref="RemoteCollectorService.GetServerId"/>), and that id is what identifies the server.
+    /// The host name does not: several monitored databases on one Azure SQL Database server share one
+    /// <see cref="ServerName"/> and differ only in database, so a name match picks the first of them for every card.
+    /// </summary>
+    internal bool IsCardFor(ServerConnection server) =>
+        ServerId == RemoteCollectorService.GetServerId(server);
+
+    /// <summary>The server in <paramref name="servers"/> this card belongs to, or null. What a double-click on the
+    /// card opens.</summary>
+    internal ServerConnection? FindServer(IEnumerable<ServerConnection> servers) =>
+        servers.FirstOrDefault(IsCardFor);
+
+    /// <summary>
+    /// Sets the silenced bell on every card that belongs to <paramref name="server"/> and on no other. Returns true
+    /// when at least one card actually changed, so a quiet poll does not rebind the Overview.
+    /// </summary>
+    internal static bool StampSilenced(IEnumerable<ServerSummaryItem> cards, ServerConnection server, bool silenced)
+    {
+        var changed = false;
+        foreach (var card in cards)
+        {
+            if (card.IsCardFor(server) && card.IsSilenced != silenced)
+            {
+                card.IsSilenced = silenced;
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
     public bool? IsOnline { get; set; }
 
     /// <summary>True when a whole-server alert silence is active for this server (#2031) — drives the card's
