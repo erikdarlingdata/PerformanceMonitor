@@ -5451,23 +5451,18 @@ LIMIT 1";
         {
             using var sessionDrop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             sessionDrop.CancelAfter(DarlingRemovedServerSessions.Timeout);
+            /* On premises the guard reads the other registrations' last-known instance names, inside the same timeout. */
             await DarlingRemovedServerSessions.DropAsync(
-                removed, runner, remaining, TraceOn, _ => Task.FromResult(OnPremisesRemovalGuard(removed, remaining, TraceOn)), _logger, sessionDrop.Token);
+                removed,
+                runner,
+                remaining,
+                TraceOn,
+                token => LongQueryTraceInstanceGuardFor(
+                    removed.Runtime.ServerId, remaining, TraceOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)),
+                _logger,
+                sessionDrop.Token);
         }
     }
-
-    /// <summary>
-    /// #4961: the on-premises guard of a removal, from the registry alone: the registrations that remain and keep the
-    /// trace on, none of them with a name, so the session stays whenever one could keep it, and goes when none could.
-    /// </summary>
-    private static LongQueryTraceInstanceGuard OnPremisesRemovalGuard(
-        RemovedLongQueryServer removed, IReadOnlyList<MonitoredServer>? remaining, Func<int, bool> traceOn) =>
-        new(
-            null,
-            (remaining ?? Array.Empty<MonitoredServer>())
-                .Where(other => other.ServerId != removed.Runtime.ServerId && other.TargetEngine == CollectorTargetEngine.SqlServer && traceOn(other.ServerId))
-                .Select(_ => new LongQueryTraceInstance(Enabled: true, TraceOn: true, ServerName: null))
-                .ToList());
 
     /// <summary>
     /// The ONLY route from this service to <see cref="MuteRuleService.LoadAsync"/> — startup and every

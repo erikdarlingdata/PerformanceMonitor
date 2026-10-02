@@ -512,6 +512,14 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
         Assert.Contains("runner", body[dropAt..body.IndexOf(';', dropAt)], StringComparison.Ordinal);
         Assert.Single(Regex.Matches(body, @"return null\s*;"));
 
+        /* The drop is one attempt within the timeout, and on premises it asks the guard builder, so the session stays where another
+           registration of this install may keep it. */
+        var dropStart = code.IndexOf("private async Task DropRemovedServerSessionsAsync(", StringComparison.Ordinal);
+        Assert.True(dropStart > 0, "the drop of the removed servers could not be located");
+        var dropBody = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', dropStart)));
+        Assert.Contains("CancelAfter(DarlingRemovedServerSessions.Timeout)", dropBody, StringComparison.Ordinal);
+        Assert.Contains("LongQueryTraceInstanceGuardFor(", dropBody, StringComparison.Ordinal);
+
         /* The loop passes the runner it built. */
         Assert.Matches(@"await ReloadFromStoreAsync\s*\([^)]*\brunner\b[^)]*\)", code);
     }
