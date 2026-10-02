@@ -1469,6 +1469,13 @@ LIMIT 1";
         /* Failed cleanup passes in a row, for LongQueryTraceDatabases.DropAttemptCap, and the clock for the hourly
            attempts after the cap. Reset on every (re)connect. */
         public LongQueryTraceDropRetry LongQueryTraceDropRetry { get; } = new();
+
+        /* #4964: true once a pass that was creating the trace's session has logged its failure at Warning, until a pass
+           succeeds or the server reconnects. The create side retries on every sweep, on purpose: each attempt records the
+           fault again, so collection health reads SESSION_MISSING. What changes is the log level of the repeats, from Warning
+           to Debug. A pass while the trace is off neither reads it nor sets it, because the drop side has its own cap
+           (LongQueryTraceDropRetry). Reset on every (re)connect. */
+        public bool LongQueryTraceCreateWarned { get; set; }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -4176,10 +4183,14 @@ LIMIT 1";
             return;
         }
 
+        /* #4964: the pass decides its log level once, from what the passes before it did. A create that has already
+           warned logs its failure again at Debug, in the reconcile's own lines and in the catch below. */
+        var createFailureWarned = enabled && server.LongQueryTraceCreateWarned;
+
         try
         {
             var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, logger, cancellationToken);
+                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
             server.LongQueryTraceApplied = enabled;
             server.LongQueryTraceAppliedKey = stateKey;
             server.LongQueryTraceAppliedAtUtc = utcNow;
@@ -4197,9 +4208,15 @@ LIMIT 1";
                and the next reconcile (which runs first, in this same sweep) has already replaced it. */
             server.LongQueryTraceFault = null;
             server.LongQueryTracePartialNote = enabled ? partialNote : null;
+
+            /* #4964: a create that succeeded ends the run of failures, so the next one warns again. */
+            server.LongQueryTraceCreateWarned = false;
         }
         catch (LongQueryTraceDropException ex)
         {
+            /* #4964: only the drop failed, so the create side finished: its run of failures is over. */
+            server.LongQueryTraceCreateWarned = false;
+
             /* Azure SQL Database: a drop failed, or the databases could not be listed for it. While enabling, the
                create side had finished, so the fault clears and its partial note stands. The latch stays unset so
                the next sweep tries again, until the cap: then the reconcile counts as applied, and one warning
@@ -4230,8 +4247,13 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning("[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
+            /* #4964: the first failure of a create that cannot succeed logs at Warning. The sweeps after it retry the
+               create just the same, and record the fault just the same below, but log at Debug until a create succeeds
+               or the server reconnects. */
+            logger.Log(createFailureWarned ? LogLevel.Debug : LogLevel.Warning,
+                "[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
                 server.Config.DisplayName, ex.Message);
+            server.LongQueryTraceCreateWarned = enabled;
 
             /* A pass that ran and threw must move its hourly clock, or every later sweep is another pass and another
                warning, with no cap. The full pass keeps its retry on each sweep: the latch is still unset. The hourly
@@ -10524,6 +10546,8 @@ AND   j.hypertable_name = '{relation}'", connection))
             server.LongQueryTraceAppliedKey = null;
             server.LongQueryTraceAppliedAtUtc = null;
             server.LongQueryTraceDropRetry.Reset();
+            /* #4964: and the create side's "already warned" state, so a failure after the reconnect is a new one. */
+            server.LongQueryTraceCreateWarned = false;
             /* Capture the id once, while the connection is freshly established and non-null: an on-load
                RunOneAsync below can drop server.Runtime on a mid-collection connection-level failure, so any
                later read of server.Runtime.ServerId (the schedule resolve, the connection edge) would NRE. */
