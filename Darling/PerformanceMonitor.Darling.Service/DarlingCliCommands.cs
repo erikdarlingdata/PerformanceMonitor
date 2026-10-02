@@ -6057,7 +6057,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// the verb resolved the target in so the target knows the other registrations of an Azure SQL Database server. Throws when
     /// the server cannot be reached.</summary>
     private static async Task<IXeSessionCleanupTarget> ConnectXeSessionCleanupTargetAsync(
-        MonitoredServer server, IReadOnlyList<MonitoredServer> registry, CancellationToken cancellationToken)
+        MonitoredServer server, IReadOnlyList<MonitoredServer> registry, XeCleanupStoreFacts facts, CancellationToken cancellationToken)
     {
         var runtime = await DarlingServerConnector.ConnectAsync(server, logger: null, cancellationToken);
         return new SqlServerXeSessionCleanupTarget(runtime, sessionNames: null, registry);
@@ -6066,10 +6066,11 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// <summary>The verb with the connection injected, so a test drives the connect-and-drop path without a SQL Server.</summary>
     internal static async Task<int> DropXeSessionsAsync(
         string[] rest,
-        Func<MonitoredServer, IReadOnlyList<MonitoredServer>, CancellationToken, Task<IXeSessionCleanupTarget>> connect,
+        Func<MonitoredServer, IReadOnlyList<MonitoredServer>, XeCleanupStoreFacts, CancellationToken, Task<IXeSessionCleanupTarget>> connect,
         TextWriter output,
         TextWriter error,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<DarlingConfig, CancellationToken, Task<XeCleanupStoreFacts>>? readStoreFacts = null)
     {
         if (!TryParseDropXeSessionsArgs(rest, out var serverName, out var dryRun, out var printSql, out var configPath, out var argError))
         {
@@ -6150,10 +6151,12 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             return DropXeSessionsExitCode.Success;
         }
 
+        var facts = await (readStoreFacts ?? ReadXeCleanupStoreFactsAsync)(config, cancellationToken);
+
         IXeSessionCleanupTarget target;
         try
         {
-            target = await connect(server, targets, cancellationToken);
+            target = await connect(server, targets, facts, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -6162,8 +6165,11 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             return DropXeSessionsExitCode.TargetUnavailable;
         }
 
-        return await DarlingXeSessionCleanup.RunAsync(server.DisplayName, dryRun, target, output, error, cancellationToken);
+        return await DarlingXeSessionCleanup.RunAsync(server.DisplayName, dryRun, target, output, error, cancellationToken, facts.InstallId);
     }
+
+    private static Task<XeCleanupStoreFacts> ReadXeCleanupStoreFactsAsync(DarlingConfig config, CancellationToken cancellationToken) =>
+        Task.FromResult(XeCleanupStoreFacts.NoId);
 
     /// <summary>
     /// Materializes the query-acceleration rollups back over pre-existing history so the held raw retention

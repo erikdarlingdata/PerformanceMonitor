@@ -40,10 +40,10 @@ public sealed record ExistingXeSession(string Name, XeSessionScope Scope, string
 /// <see cref="DarlingXeSessionCleanup.DropStatement"/>, which accepts only Darling's own session names, so no code path can
 /// hand the executor a statement that did not come from the allow-list.
 /// </summary>
-public sealed record XeSessionDrop(ExistingXeSession Session)
+public sealed record XeSessionDrop(ExistingXeSession Session, string? InstallId = null)
 {
     /// <summary>The single statement that drops <see cref="Session"/>, bracket-quoted.</summary>
-    public string Statement => DarlingXeSessionCleanup.DropStatement(Session.Name, Session.Scope);
+    public string Statement => DarlingXeSessionCleanup.DropStatement(Session.Name, Session.Scope, InstallId);
 }
 
 /// <summary>What a search of one target found: the Darling sessions that exist, and a sentence for every monitored place
@@ -57,6 +57,27 @@ public sealed record XeSessionSearch(IReadOnlyList<ExistingXeSession> Sessions, 
     /// opened one, so an excluded database the login cannot open is not a reason to stop a script that removes the server
     /// next. A session left in such a database needs a manual drop.</summary>
     public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
+
+    /// <summary>The sessions of other installs the search found (<see cref="DarlingXeSessionCleanup.ComposeFindOthersSql"/>).
+    /// The verb lists them and never drops them.</summary>
+    public IReadOnlyList<ExistingXeSession> Others { get; init; } = Array.Empty<ExistingXeSession>();
+}
+
+/// <summary>What the verb reads from the Darling store before it connects to the server: this install's id, every schedule
+/// override (so another registration's long-query setting is its effective one), and each registration's last-known
+/// instance name (<see cref="PerformanceMonitor.Collectors.ServerEpoch.LastKnownName"/>).</summary>
+/// <param name="InstallId">This install's id, or null when the store has none yet or could not be read.</param>
+/// <param name="ScheduleOverrides">Every row of the store's collector schedules, or null when they could not be read.</param>
+/// <param name="InstanceNames">The last-known <c>@@SERVERNAME</c> of each registration, by registration id.</param>
+/// <param name="Note">Why the id is not known, when it is not.</param>
+internal sealed record XeCleanupStoreFacts(
+    string? InstallId,
+    IReadOnlyList<ScheduleOverride>? ScheduleOverrides = null,
+    IReadOnlyDictionary<int, string>? InstanceNames = null,
+    string? Note = null)
+{
+    /// <summary>A store that holds no install id and nothing else the verb reads.</summary>
+    public static XeCleanupStoreFacts NoId { get; } = new(InstallId: null);
 }
 
 /// <summary>
@@ -112,6 +133,18 @@ public static class DarlingXeSessionCleanup
            every install shared. An install now makes its own session, named from its id, and this list does not name it yet. */
         LongQueryCompletionsCollector.LegacyXeSessionName,
     };
+
+    public static IReadOnlyList<string> InstallSessionNames(string? installId) => Array.Empty<string>();
+
+    public static IReadOnlyList<string> NamesToDrop(string? installId) => SessionNames;
+
+    public static bool IsOtherInstallSessionName(string? name, string? installId) => false;
+
+    internal static string ComposeFindOthersSql(XeSessionScope scope) => string.Empty;
+
+    public const string OtherInstallsHeading = "STUB";
+
+    public const string NoInstallIdNote = "STUB";
 
     /// <summary>The names as one phrase for console and help text: <c>A, B and C</c>.</summary>
     public static string SessionNamesPhrase() => JoinAsPhrase(SessionNames);
@@ -216,7 +249,7 @@ WHERE {alias}.name IN ({literals});";
     /// <c>DROP EVENT SESSION [name] ON SERVER;</c> or <c>... ON DATABASE;</c> for one of <see cref="SessionNames"/>.
     /// Throws <see cref="ArgumentException"/> for any other name, which is the whole of the "never a name from input" rule.
     /// </summary>
-    public static string DropStatement(string sessionName, XeSessionScope scope)
+    public static string DropStatement(string sessionName, XeSessionScope scope, string? installId = null)
     {
         var canonical = Canonical(sessionName)
             ?? throw new ArgumentException("Only Darling's own session names can be dropped by this verb.", nameof(sessionName));
@@ -252,7 +285,7 @@ WHERE {alias}.name IN ({literals});";
     /// server scope before database scope, databases by name, then the order of <see cref="SessionNames"/> (deadlock,
     /// blocked-process, long-query completions). Duplicates collapse.
     /// </summary>
-    public static IReadOnlyList<XeSessionDrop> PlanDrops(IEnumerable<ExistingXeSession> existing)
+    public static IReadOnlyList<XeSessionDrop> PlanDrops(IEnumerable<ExistingXeSession> existing, string? installId = null)
     {
         ArgumentNullException.ThrowIfNull(existing);
 
@@ -374,7 +407,8 @@ WHERE {alias}.name IN ({literals});";
         IXeSessionCleanupTarget target,
         TextWriter output,
         TextWriter error,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? installId = null)
     {
         XeSessionSearch search;
         try

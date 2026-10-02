@@ -782,7 +782,7 @@ public sealed class DropXeSessionsVerbTests
 
     // ---- the whole verb through the configuration, with the connection injected ------------------------------------------
 
-    private static Task<IXeSessionCleanupTarget> ThrowingConnect(MonitoredServer server, IReadOnlyList<MonitoredServer> registry, CancellationToken cancellationToken) =>
+    private static Task<IXeSessionCleanupTarget> ThrowingConnect(MonitoredServer server, IReadOnlyList<MonitoredServer> registry, XeCleanupStoreFacts facts, CancellationToken cancellationToken) =>
         throw new InvalidOperationException("the verb connected when it should not have");
 
     private static string WriteConfig(DirectoryInfo root)
@@ -810,7 +810,7 @@ public sealed class DropXeSessionsVerbTests
 
         var exit = await DarlingCliCommands.DropXeSessionsAsync(
             rest,
-            (server, _, _) =>
+            (server, _, _, _) =>
             {
                 connected.Add(server.DisplayName);
                 return connectFails is not null
