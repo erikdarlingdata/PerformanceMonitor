@@ -284,10 +284,23 @@ public partial class RemoteCollectorService
 
             /* The long-query trace leaves a database monitored as its own server to that registration, so its
                read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases). */
+            var listedDatabaseCount = databases.Count;
             if (definition.SkipsSeparatelyMonitoredDatabases)
             {
                 databases = WithoutSeparatelyMonitoredDatabases(server, databases);
             }
+
+            /* #4961: a list with nothing left to read used to record SUCCESS, 0 rows and no note, which reads as
+               "nothing ran". The note names why nothing was read (every user database monitored as its own server,
+               or every database excluded). The status stays SUCCESS: nothing failed. It is held here and merged
+               into the assignment that follows the loop, because that assignment is unconditional and would erase
+               a note put on the telemetry now. Lite has no database scope. Mirrors Darling. */
+            var emptyListNote = EmptyDatabaseListNote.For(
+                listedDatabaseCount,
+                databases.Count,
+                definition.SkipsSeparatelyMonitoredDatabases,
+                exclusionsConfigured: server.ExcludedDatabases is { Count: > 0 },
+                databaseScoped: false);
 
             var attempted = 0;
             var failed = 0;
@@ -594,11 +607,14 @@ public partial class RemoteCollectorService
 
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
-               which is exactly what this path carried before. */
+               which is exactly what this path carried before. The empty-list note (#4961) rides in this
+               assignment: it is the one place the note is set, so nothing assigned earlier can be erased. */
             telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(
-                cycleProbeFailures.Note,
-                EnumeratedCollectorDriver.BuildPartialFailureNote(
-                    failed, attempted, failedDatabases, firstFailure?.Message));
+                emptyListNote,
+                EnumeratedCollectorDriver.MergeNotes(
+                    cycleProbeFailures.Note,
+                    EnumeratedCollectorDriver.BuildPartialFailureNote(
+                        failed, attempted, failedDatabases, firstFailure?.Message)));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a

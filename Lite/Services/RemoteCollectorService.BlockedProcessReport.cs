@@ -329,13 +329,53 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// <see cref="XeSessionEnsureException"/> for the #1086 health surface) instead of letting a
     /// zero-row read record SUCCESS.</para>
     /// </summary>
-    private Task EnsureDatabaseScopedXeSessionsAsync(
+    private async Task EnsureDatabaseScopedXeSessionsAsync(
         ServerConnection server,
         string captureName,
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
-        CancellationToken cancellationToken) =>
-        EnsureDatabaseScopedXeSessionsAsync(server, captureName, sessionName, ensureAsync, plannedDatabases: null, cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        /* A test replaces the open and the ensure in each database. Null in production. */
+        var ensureInDatabase = XeSessionDatabaseEnsureOverrideForTests;
+
+        /* #4964: this ensure runs on every collector cycle, so a server that refuses it refuses it on every cycle. The first
+           failing cycle logs at Warning and Error; the cycles after it log the same lines at Debug, until a cycle of this
+           session on this server succeeds. The retry and the exception are the same on every cycle, so every run still records
+           the failure. A cancellation stops the cycle and says nothing about the server, so it changes neither. */
+        var warnedKey = $"{server.Id}:{sessionName}";
+        var repeatsAtDebug = _databaseScopedXeSessionEnsureWarned.ContainsKey(warnedKey);
+
+        try
+        {
+            await EnsureDatabaseScopedXeSessionsAsync(
+                server, captureName, sessionName, ensureAsync, plannedDatabases: null, cancellationToken,
+                repeatsAtDebug,
+                ensureInDatabase is null
+                    ? null
+                    : (databaseName, token) => ensureInDatabase(server, sessionName, databaseName, token));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _databaseScopedXeSessionEnsureWarned[warnedKey] = true;
+            throw;
+        }
+
+        _databaseScopedXeSessionEnsureWarned.TryRemove(warnedKey, out _);
+    }
+
+    /// <summary>
+    /// A test replaces the always-on sessions' listing of the databases to ensure, which the shared ensure otherwise reads
+    /// from the server. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, CancellationToken, Task<List<string>>>? XeSessionDatabaseListOverrideForTests { get; set; }
+
+    /// <summary>
+    /// A test replaces the open and the ensure in one database for the always-on sessions: the server, the session name and
+    /// the database. A failure from it reaches the shared ensure's per-database catch like a refusal from the server. Null in
+    /// production.
+    /// </summary>
+    internal Func<ServerConnection, string, string, CancellationToken, Task>? XeSessionDatabaseEnsureOverrideForTests { get; set; }
 
     /// <summary>
     /// <see cref="EnsureDatabaseScopedXeSessionsAsync(ServerConnection, string, string, Func{SqlConnection, CancellationToken, Task}, CancellationToken)"/>
@@ -344,10 +384,11 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// (<see cref="LongQueryTraceDatabases.Plan"/>): the monitored databases, minus those monitored as their own
     /// servers. An empty plan ensures nothing and does not throw.
     ///
-    /// <para><paramref name="repeatsAtDebug"/>: the long-query trace passes true once its create has warned for this
-    /// server (#4964). Its per-database failure lines and the all-refused line then log at Debug instead of Warning and
-    /// Error. The retry and the exception are the same either way, so the run still records the failure. The deadlock
-    /// and blocked-process ensures leave it false and keep their levels.</para>
+    /// <para><paramref name="repeatsAtDebug"/>: true once a create has warned for this server and session (#4964). The
+    /// long-query trace passes the flag its reconcile keeps, and the always-on deadlock and blocked-process ensures pass
+    /// the one their entry point keeps. The per-database failure lines and the all-refused line then log at Debug instead
+    /// of Warning and Error, and so does the listing failure. The retry and the exception are the same either way, so the
+    /// run still records the failure.</para>
     /// </summary>
     private async Task EnsureDatabaseScopedXeSessionsAsync(
         ServerConnection server,
@@ -368,11 +409,28 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         {
             try
             {
-                databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+                /* A test replaces the listing. Null in production. */
+                if (XeSessionDatabaseListOverrideForTests is { } listOverride)
+                {
+                    databases = await listOverride(server, cancellationToken);
+                }
+                else
+                {
+                    databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+                }
             }
             catch (SqlException ex)
             {
-                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to enumerate databases for {captureName} XE sessions: {ex.Message}");
+                var listingFailure = $"[{server.DisplayName}] Failed to enumerate databases for {captureName} XE sessions: {ex.Message}";
+                if (repeatsAtDebug)
+                {
+                    AppLogger.Debug("XeSession", listingFailure);
+                }
+                else
+                {
+                    AppLogger.Error("XeSession", listingFailure);
+                }
+
                 throw new XeSessionEnsureException(captureName, ex);
             }
         }
