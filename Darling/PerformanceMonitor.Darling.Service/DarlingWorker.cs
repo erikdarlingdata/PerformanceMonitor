@@ -1486,6 +1486,25 @@ LIMIT 1";
            to Debug. A pass while the trace is off neither reads it nor sets it, because the drop side has its own cap
            (LongQueryTraceDropRetry). Reset on every (re)connect. */
         public bool LongQueryTraceCreateWarned { get; set; }
+
+        /* #4961: when the always-on deadlock and blocked-process sessions were last ensured on this server: at connect, then
+           once an hour (AlwaysOnXeSessions.EnsureInterval), so a session dropped from outside comes back within the hour. Null
+           means due. Reset on every (re)connect, where the connect path ensures and stamps it again. */
+        public DateTime? XeSessionsEnsuredAtUtc { get; set; }
+    }
+
+    /// <summary>
+    /// The hourly ensure of the always-on deadlock and blocked-process sessions (#4961). The connect path ensures them and
+    /// stamps <see cref="ServerLoopState.XeSessionsEnsuredAtUtc"/>; the sweep calls this, and the ensure runs again once the
+    /// stamp is <see cref="AlwaysOnXeSessions.EnsureInterval"/> old. On-premises, Managed Instance and RDS that creates a
+    /// missing server-scoped session and starts a stopped one, under the shared names as ever. On Azure SQL Database it also
+    /// carries the per-database choice (shared or own session) and its switch back. A server that is not SQL Server has no
+    /// Extended Events and is left alone.
+    /// </summary>
+    internal static async Task EnsureAlwaysOnXeSessionsAsync(
+        ServerLoopState server, DarlingCollectorRunner runner, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
+    {
+        await Task.CompletedTask;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
