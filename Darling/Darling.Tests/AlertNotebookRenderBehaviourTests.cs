@@ -41,6 +41,7 @@ public sealed class AlertNotebookRenderBehaviourTests
         }
         catch (Win32Exception)
         {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             return false;
         }
 

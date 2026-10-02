@@ -40,7 +40,7 @@
  *
  * The time range is the web twin of ViewerServerTab.TimeRange.cs's preset picker: one page-level window that
  * every time-windowed panel is given. It is module state (like the fleet page's sort), so it survives the
- * refresh — but it is NOT persisted to localStorage, because a page that reopens on a 30-day window is slow for
+ * refresh — but it is NOT persisted to localStorage, because a page that reopens on a 7-day window is slow for
  * a reason the reader cannot see. Panels whose read takes no window at all say "latest snapshot" in their own
  * subtitle rather than inheriting a label that would misdescribe them.
  */
@@ -50,15 +50,21 @@ import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
 
-/** The page time range. Mirrors the desktop viewer's presets, plus the two longer windows the view chrome uses. */
+/** The page time range: the desktop viewers' presets, which stop at 7 days. All but three ranged reads on these
+ *  tabs (the collection log, current waits and blocking stats) take at most McpHelpers.MaxHoursBack (168) hours, so
+ *  a wider choice was never served: those panels asked again for 7 days and said so. Custom Views offer longer
+ *  windows: their composed panels read the store directly, through rollups for the query tables.
+ *  WebServerPageRangeTests runs every option through every tab of both registries. */
 const RANGE_OPTIONS = [
   { hours: 1, label: "last hour" },
   { hours: 4, label: "last 4 hours" },
   { hours: 12, label: "last 12 hours" },
   { hours: 24, label: "last 24 hours" },
   { hours: 24 * 7, label: "last 7 days" },
-  { hours: 24 * 30, label: "last 30 days" },
 ];
+
+/** The widest preset. A tab note that names the longest window this page shows (the Blocking tab's) is given it. */
+const WIDEST_RANGE_HOURS = Math.max(...RANGE_OPTIONS.map((o) => o.hours));
 
 /* Module state, deliberately not persisted — see the header comment. `gridNode` + the current server/tab let the
    range control redraw only the panels, so changing the window does not flash the header or refetch /api/fleet. */
@@ -170,7 +176,7 @@ function paintTabs(tabsSlot, server, tabId, card) {
   const tabs = serverTabsFor(card);
   const tab = findServerTab(tabId, tabs);
   current = { server, tab };
-  mount(tabsSlot, [subtabBar(server, tab, tabs), tabNote(tab)]);
+  mount(tabsSlot, [subtabBar(server, tab, tabs), tabNote(tab, WIDEST_RANGE_HOURS)]);
   redrawPanels();
   return tabs;
 }

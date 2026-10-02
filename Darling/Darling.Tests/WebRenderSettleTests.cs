@@ -24,7 +24,7 @@ public sealed class WebRenderSettleTests
     private static readonly string s_wwwroot = Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js");
 
-    /// <summary>Runs one harness scenario and returns its JSON, or false when Node is not installed.</summary>
+    /// <summary>Runs one harness scenario and returns its JSON. When Node is not installed, the test is reported as skipped.</summary>
     private static bool TryRun(string scenario, out JsonElement result)
     {
         result = default;
@@ -49,7 +49,8 @@ public sealed class WebRenderSettleTests
         }
         catch (Win32Exception)
         {
-            // Node is not installed on this machine; the source-order pin below still holds the fix in place.
+            // The source-order pin below still holds the fix in place.
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             return false;
         }
 
