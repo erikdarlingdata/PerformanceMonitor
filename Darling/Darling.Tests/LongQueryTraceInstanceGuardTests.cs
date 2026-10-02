@@ -65,6 +65,73 @@ public sealed class LongQueryTraceInstanceGuardTests
         Assert.False(LongQueryTraceDatabases.KeptOnInstance("SQL01", new List<LongQueryTraceInstance>()));
     }
 
+    /* A removed server is checked once and never again, so its session stays whenever the match cannot be ruled out: its own
+       name or the name of a registration that keeps the trace on is not known. The trace-off drop asks Kept instead, and an
+       unknown name there matches nothing. */
+
+    [Fact]
+    public void TheRemoval_DropsTheSession_WhenNoOtherRegistrationCouldKeepIt_WhateverTheNames()
+    {
+        Assert.Null(LongQueryTraceInstanceGuard.NoKeepers.RemovalSkipReason());
+        Assert.Null(new LongQueryTraceInstanceGuard(null, new[] { Other(null, enabled: false), Other(null, traceOn: false) }).RemovalSkipReason());
+        Assert.Null(new LongQueryTraceInstanceGuard("SQL01", new[] { Other(null, enabled: false), Other(null, traceOn: false) }).RemovalSkipReason());
+    }
+
+    [Fact]
+    public void TheRemoval_LeavesTheSession_WhenItsOwnNameIsNotKnown_AndAnotherRegistrationKeepsTheTraceOn()
+    {
+        var guard = new LongQueryTraceInstanceGuard(null, new[] { Other("SQL01") });
+
+        Assert.Contains("this server's instance name is not known", guard.RemovalSkipReason(), System.StringComparison.Ordinal);
+        Assert.False(guard.Kept);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("  ")]
+    public void TheRemoval_LeavesTheSession_WhenAKeepersNameIsNotKnown_BecauseItCannotBeRuledOut(string? unknown)
+    {
+        var guard = new LongQueryTraceInstanceGuard("SQL01", new[] { Other(unknown) });
+
+        Assert.Contains("another registration", guard.RemovalSkipReason(), System.StringComparison.Ordinal);
+        Assert.Contains("not known", guard.RemovalSkipReason(), System.StringComparison.Ordinal);
+
+        /* The trace-off drop is not the removal: a name that is not known matches nothing there, and it drops as it always did. */
+        Assert.False(guard.Kept);
+    }
+
+    [Fact]
+    public void TheRemoval_LeavesTheSession_WhenOneKeeperIsAnotherInstance_AndAnotherKeepersNameIsNotKnown()
+    {
+        var guard = new LongQueryTraceInstanceGuard("SQL01", new[] { Other("SQL02"), Other(null) });
+
+        Assert.NotNull(guard.RemovalSkipReason());
+    }
+
+    [Fact]
+    public void TheRemoval_IgnoresTheUnknownNameOfARegistrationThatCouldNotKeepTheSession()
+    {
+        var guard = new LongQueryTraceInstanceGuard("SQL01", new[] { Other("SQL02"), Other(null, enabled: false), Other(null, traceOn: false) });
+
+        Assert.Null(guard.RemovalSkipReason());
+    }
+
+    [Fact]
+    public void TheRemoval_DropsTheSession_WhenEveryKeepersKnownNameIsAnotherInstance()
+    {
+        Assert.Null(new LongQueryTraceInstanceGuard("SQL01", new[] { Other("SQL02"), Other("SQL03") }).RemovalSkipReason());
+    }
+
+    [Fact]
+    public void TheRemoval_SaysSo_WhenAnotherRegistrationKeepsTheSessionOnTheSameInstance()
+    {
+        var guard = new LongQueryTraceInstanceGuard("sql01", new[] { Other("SQL02"), Other(" SQL01 ") });
+
+        Assert.Contains("keeps it on the same instance", guard.RemovalSkipReason(), System.StringComparison.Ordinal);
+        Assert.True(guard.Kept);
+    }
+
     [Fact]
     public void ThePersistedIdentityRow_GivesItsName()
     {
