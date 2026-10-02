@@ -228,7 +228,7 @@ Lite has no command that drops sessions, so run the statements below yourself. R
 
 The login needs the permission that [Microsoft Learn's `DROP EVENT SESSION` page](https://learn.microsoft.com/en-us/sql/t-sql/statements/drop-event-session-transact-sql) requires. On SQL Server and Azure SQL Managed Instance that is `DROP ANY EVENT SESSION` (SQL Server 2022 and later) or `ALTER ANY EVENT SESSION`. On Azure SQL Database it is `DROP ANY DATABASE EVENT SESSION`, in each database.
 
-Server scope (SQL Server, Azure SQL Managed Instance and AWS RDS). The first statement drops the old shared session. The next three drop this install's own sessions.
+Server scope (SQL Server, Azure SQL Managed Instance and AWS RDS). The first statement drops the old shared session. The second drops this install's own session. Lite makes the deadlock and blocked-process fallbacks in Azure SQL Database only, so a server has none to drop.
 
 ```sql
 IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_LongQueryCompletions')
@@ -236,15 +236,9 @@ IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'P
 
 IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_Lite_<id>_LongQueryCompletions')
     DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_LongQueryCompletions] ON SERVER;
-
-IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_Lite_<id>_Deadlock')
-    DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_Deadlock] ON SERVER;
-
-IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_Lite_<id>_BlockedProcess')
-    DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_BlockedProcess] ON SERVER;
 ```
 
-Database scope (Azure SQL Database). Run the same four statements in each monitored database.
+Database scope (Azure SQL Database). Run these four statements in each monitored database.
 
 ```sql
 IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_LongQueryCompletions')
