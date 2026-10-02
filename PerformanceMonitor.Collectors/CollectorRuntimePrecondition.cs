@@ -285,7 +285,7 @@ public static class CollectorRuntimePrecondition
             return $"{serverName} does not currently have the Extended Events session the {collectorName} " +
                    $"collector reads: its last run{observed} recorded {CaptureSessionMissingStatus}, so " +
                    $"{CapturePathOf(collectorName)} is not being captured at all.{said} The app creates " +
-                   "its capture sessions when it connects to a server and ensures them again once an hour, " +
+                   "its capture sessions when it connects to a server and ensures them again at least once an hour, " +
                    "so it creates a missing session and starts a stopped one within the hour — if the " +
                    "session is still missing after that, check that the monitoring login holds " +
                    "ALTER ANY EVENT SESSION, because the create needs it. " +

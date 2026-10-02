@@ -790,7 +790,7 @@ public sealed class CollectorRuntimePreconditionTests
 
     /// <summary>
     /// The SESSION_MISSING arm names the app's own recovery. The app creates its capture sessions when it
-    /// connects and ensures them again once an hour, so a session that was dropped or stopped comes back within
+    /// connects and ensures them again at least once an hour, so a session that was dropped or stopped comes back within
     /// the hour once the login holds the grant, and nobody has to reconnect the server. The arm used to say the
     /// session "stays missing until the next connect", told the reader to let the server reconnect, and ended on
     /// the connect-scoped epilogue. All three are false now. The message says the hourly create, asks for no
@@ -805,7 +805,7 @@ public sealed class CollectorRuntimePreconditionTests
             "The session was not found.", DateTime.UtcNow.AddMinutes(-3))!;
 
         Assert.Equal(TimeSpan.FromHours(1), AlwaysOnXeSessions.EnsureInterval);
-        Assert.Contains("once an hour", message, StringComparison.Ordinal);
+        Assert.Contains("at least once an hour", message, StringComparison.Ordinal);
         Assert.Contains("within the hour", message, StringComparison.Ordinal);
         Assert.Contains("creates a missing session and starts a stopped one", message, StringComparison.Ordinal);
         Assert.Contains("nothing to restart", message, StringComparison.OrdinalIgnoreCase);
