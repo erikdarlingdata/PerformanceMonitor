@@ -27,9 +27,9 @@ namespace PerformanceMonitorLite.Tests;
 /// Waits (<c>waiting_tasks</c>) say where their stored rows start when a window or custom range reaches further
 /// back than the store holds (retention, the 3-month archive's first month, or a server added recently), through
 /// the ONE shared probe (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>) and the ONE banner step
-/// (<see cref="ServerTab.ApplyWindowFloorToBanner"/>) the Queries grids already use. The start is the oldest row
-/// the server holds at or before the window's end, unbounded below, so a quiet start inside the window, with older
-/// rows in the store, raises no banner.
+/// (<see cref="ServerTab.ApplyWindowFloorToBanner"/>) the Queries grids already use. A server that holds a row
+/// before the window has had the window served whole (the probe answers the requested start), so a quiet start
+/// inside the window, with older rows in the store, raises no banner.
 /// </summary>
 [Collection("server-time-helper")]
 public sealed class DataStartBannerTests : IDisposable

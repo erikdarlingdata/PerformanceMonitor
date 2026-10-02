@@ -976,10 +976,12 @@ public sealed class McpQueryTools
 
     /// <summary>
     /// The instant the served window really starts: the probe's floor, but never earlier than the start that was
-    /// asked for. The floor is the oldest row the server holds at or before the window's end, unbounded below
-    /// (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>), so a store that reaches back past the requested
-    /// start hands back a floor BEFORE it, and that means the window's start is covered, not that the window began
-    /// earlier. A null floor (the window holds nothing) leaves the requested start in place, as it always did.
+    /// asked for. The probe (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>) answers the requested start
+    /// itself when the server also holds a row before the window (the window's start is covered), and the
+    /// server's first row inside the window when its data starts late, so only a floor AFTER the requested start
+    /// moves the served window. The clamp stays so that a floor at or before the start can never read as the window
+    /// having begun earlier. A null floor (the window holds nothing) leaves the requested start in place, as it
+    /// always did.
     /// </summary>
     internal static DateTime EffectiveWindowStart(DateTime? floor, DateTime requestedStart) =>
         floor is DateTime f && f > requestedStart ? f : requestedStart;

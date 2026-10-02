@@ -84,7 +84,7 @@ public sealed class QueryWindowTruncationTests : IDisposable
         return connection;
     }
 
-    private async Task SeedQueryStatsAsync(DuckDBConnection connection, DateTime collected, string queryHash)
+    private async Task SeedQueryStatsAsync(DuckDBConnection connection, DateTime collected, string queryHash, int? serverId = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
@@ -96,7 +96,7 @@ INSERT INTO query_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collected });
-        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId ?? ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = "TestServer" });
         cmd.Parameters.Add(new DuckDBParameter { Value = "TestDb" });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
@@ -310,11 +310,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     private static DateTime NaiveUtc(DateTime instant) => DateTime.SpecifyKind(instant, DateTimeKind.Unspecified);
 
     /// <summary>
-    /// Quiet-start guard (Lite twin of #4953's data-start rule): the data start is the oldest row the server holds
-    /// at or before the window's end, NOT the oldest row inside the window. A server with an old row before the
-    /// window and then a quiet stretch at the window's start (nothing collected until two hours ago) is not a
-    /// window the store failed to hold, so it must get no banner. A probe bounded below at the window's start
-    /// reads the first row inside the window, two hours ago, and raises a false banner.
+    /// Quiet-start guard (Lite twin of #4953's data-start rule): a server with an old row before the window and
+    /// then a quiet stretch at the window's start (nothing collected until two hours ago) is not a window the
+    /// store failed to hold, so it must get no banner. A server that holds a row before the window has had the
+    /// window served whole, so the probe answers the REQUESTED START: not the first row inside the window (a probe
+    /// bounded below at the window's start reads the row from two hours ago and raises a false banner), and not
+    /// the oldest row the server holds either (finding that reads every archived row for the server, and no
+    /// caller needs it: <c>IsWindowTruncated</c> and <c>EffectiveWindowStart</c> give the same answer for any
+    /// floor at or before the start).
     /// </summary>
     [Fact]
     public async Task FloorHelper_QuietStartInsideTheWindow_WithOlderRowsBeforeIt_IsNotTruncated()
@@ -331,16 +334,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
 
         Assert.NotNull(floor);
-        Assert.True(floor!.Value <= requestedStart,
-            $"floor {floor:o} must be the OLDEST row the server holds (before the window's start {requestedStart:o}), not the window's first row");
+        Assert.True(floor!.Value == requestedStart,
+            $"floor {floor:o} must be the requested start {requestedStart:o} (the server holds a row before it), not the window's first row");
+        Assert.Equal(requestedStart, McpQueryTools.EffectiveWindowStart(floor, requestedStart));
         Assert.False(McpQueryTools.IsWindowTruncated(floor, requestedStart),
             "a quiet start inside the window, with older rows in the store, must not raise the data-start banner");
     }
 
     /// <summary>
     /// A server whose rows all end before the window: the window holds nothing, so the probe says NULL ("nothing
-    /// was read"), never an old row that would read as the whole window being served. Guards the unbounded probe
-    /// against answering the oldest row for a window it has no row in.
+    /// was read"), never an old row or the requested start, either of which would read as the whole window being
+    /// served. The older-row check runs only after the window's own first row is found, so it never answers for
+    /// a window with no row in it.
     /// </summary>
     [Fact]
     public async Task FloorHelper_NoRowInsideTheWindow_ReturnsNull_EvenWhenOlderRowsExist()
@@ -380,9 +385,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.True(McpQueryTools.IsWindowTruncated(floor, requestedStart));
     }
 
-    /// <summary>A window the store fully covers (its oldest row is before the window's start) gets no banner.</summary>
+    /// <summary>
+    /// A window the store fully covers (the server holds a row before the window's start) gets no banner, and the
+    /// probe answers the requested start.
+    /// </summary>
     [Fact]
-    public async Task FloorHelper_WindowInsideTheStoredRows_IsNotTruncated()
+    public async Task FloorHelper_WindowInsideTheStoredRows_IsNotTruncated_AndGivesTheStart()
     {
         await _duckDb.InitializeAsync();
         var windowEnd = DateTime.UtcNow;
@@ -396,14 +404,66 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
 
         Assert.NotNull(floor);
+        Assert.True(floor!.Value == requestedStart, $"floor {floor:o} must be the requested start {requestedStart:o}");
         Assert.False(McpQueryTools.IsWindowTruncated(floor, requestedStart));
     }
 
     /// <summary>
-    /// The tool's twin of the quiet-start guard, and the clamp: with older rows before the window the floor is
-    /// before the requested start, and the tool must report the window it was asked for (effective_start never
-    /// earlier than the requested start, effective_hours_back never longer than hours_back), not the whole
-    /// stored history.
+    /// A row exactly at the window's start is inside the window (the bound is inclusive): the probe answers that
+    /// start, and the window is not truncated. Pins the boundary of the first, bounded step. The start is a whole
+    /// second so DuckDB's microsecond precision cannot move the row off it.
+    /// </summary>
+    [Fact]
+    public async Task FloorHelper_RowExactlyAtTheWindowStart_GivesTheStart_NotTruncated()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        var windowEnd = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+        var requestedStart = windowEnd.AddDays(-7);
+        using (var connection = await OpenSeedConnectionAsync())
+        {
+            await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart), "0xATSTART");
+            await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-1)), "0xLATER");
+        }
+
+        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
+
+        Assert.NotNull(floor);
+        Assert.True(floor!.Value == requestedStart, $"floor {floor:o} must be the row at the window's start {requestedStart:o}");
+        Assert.False(McpQueryTools.IsWindowTruncated(floor, requestedStart));
+    }
+
+    /// <summary>
+    /// Another server's older rows are not this server's coverage: the older-row step is filtered on the server,
+    /// so a server whose rows begin late in the window still reports that first row and is truncated, however
+    /// much older history a neighbour holds.
+    /// </summary>
+    [Fact]
+    public async Task FloorHelper_OnlyAnotherServerHoldsOlderRows_ThisServerIsTruncated_AtItsFirstRow()
+    {
+        await _duckDb.InitializeAsync();
+        var windowEnd = DateTime.UtcNow;
+        var requestedStart = windowEnd.AddDays(-7);
+        var firstRow = windowEnd.AddDays(-2);
+        using (var connection = await OpenSeedConnectionAsync())
+        {
+            await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart.AddDays(-20)), "0xNEIGHBOUR", serverId: ServerId + 1);
+            await SeedQueryStatsAsync(connection, NaiveUtc(firstRow), "0xFIRST");
+            await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-1)), "0xLATER");
+        }
+
+        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
+
+        Assert.NotNull(floor);
+        Assert.True(Math.Abs((floor!.Value - firstRow).TotalMinutes) < 2, $"floor {floor:o} should be this server's first row {firstRow:o}, not the start");
+        Assert.True(McpQueryTools.IsWindowTruncated(floor, requestedStart));
+    }
+
+    /// <summary>
+    /// The tool's twin of the quiet-start guard, and the clamp: with older rows before the window the probe answers
+    /// the requested start, and the tool must report the window it was asked for (effective_start never earlier
+    /// than the requested start, effective_hours_back never longer than hours_back), not the whole stored
+    /// history.
     /// </summary>
     [Fact]
     public async Task GetTopQueriesByCpu_OlderRowsBeforeTheWindow_ReportsTheWholeWindow_NotTruncated()

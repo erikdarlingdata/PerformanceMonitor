@@ -45,13 +45,14 @@ public partial class LocalDataService
     };
 
     /// <summary>
-    /// Where this server's data starts for the requested window: the oldest <c>collection_time</c> the server holds
-    /// at or before <paramref name="endUtc"/>, UNBOUNDED BELOW, and NULL when the server has no row inside
-    /// [<paramref name="startUtc"/>, <paramref name="endUtc"/>] at all. ONE probe shared by every Queries-tab grid
-    /// (<c>Lite/Controls/ServerTab.*</c>), the Active Queries and Current Waits banners and every MCP tool that
-    /// reads one of the <see cref="QueryWindowRelation"/> relations (<c>get_top_queries_by_cpu</c>,
-    /// <c>get_top_procedures_by_cpu</c>, <c>get_query_store_top</c>), so there is one place that computes the
-    /// floor rather than near-identical copies that can drift apart. Twin of Darling's
+    /// Where this server's data starts for the requested window, as far as any caller needs to know it. NULL when
+    /// the server holds no row inside [<paramref name="startUtc"/>, <paramref name="endUtc"/>] at all (nothing was
+    /// read). <paramref name="startUtc"/> itself when the server also holds a row BEFORE the window (the window was
+    /// served whole). Otherwise the server's first row inside the window (the data starts late). ONE probe shared by
+    /// every Queries-tab grid (<c>Lite/Controls/ServerTab.*</c>), the Active Queries and Current Waits banners and
+    /// every MCP tool that reads one of the <see cref="QueryWindowRelation"/> relations
+    /// (<c>get_top_queries_by_cpu</c>, <c>get_top_procedures_by_cpu</c>, <c>get_query_store_top</c>), so there is
+    /// one place that computes the floor rather than near-identical copies that can drift apart. Twin of Darling's
     /// <c>DarlingDataReader.GetQueryStoreWindowFloorAsync</c> (#2364) and of #4953's <c>DataWindowFloor</c>: Lite's
     /// <c>retention_days</c> is user-settable (lower it and the raw table is shorter than a "Last 7 days" ask), a
     /// custom range can start before the archive's oldest month
@@ -61,60 +62,60 @@ public partial class LocalDataService
     ///
     /// <para>Reads the <c>v_</c> view, not the bare table: on a store with archived history that view is the
     /// hot table UNION ALL the parquet archive (<see cref="Database.DuckDbInitializer.CreateArchiveViewsAsync"/>),
-    /// so the floor this returns is the true floor of everything the matching grid or tool read, archive
-    /// included, never just the hot table's.</para>
+    /// so a row found here is a row of everything the matching grid or tool read, archive included, never just
+    /// the hot table's.</para>
     ///
-    /// <para><b>Why unbounded below.</b> The oldest row INSIDE the window is right only for a dense table. On a
-    /// sparse one (waiting_tasks holds a row only while something waits) a quiet first stretch puts the window's own
-    /// oldest row far past its start while the store still holds older rows for the same server, so nothing is
-    /// missing, and a probe bounded below at the window's start raises a false banner. The oldest row at or before
-    /// the window's end answers "does the data reach back to the start" for dense and sparse tables alike. A caller
-    /// compares the result with the window's start (<see cref="Mcp.McpQueryTools.IsWindowTruncated"/>) and, to word
-    /// the window it covered, clamps it (<see cref="Mcp.McpQueryTools.EffectiveWindowStart"/>): a floor before the
-    /// start means the window's start is covered, never that the window began earlier.</para>
+    /// <para><b>Why it is not the oldest row.</b> Finding the server's oldest row means an unbounded
+    /// <c>MIN(collection_time)</c>, and DuckDB has no <c>(server_id, collection_time)</c> index to stop at the first
+    /// row, so it reads every archived row for the server. No caller needs it: a caller compares the result with the
+    /// window's start (<see cref="Mcp.McpQueryTools.IsWindowTruncated"/>) and, to word the window it covered,
+    /// clamps it (<see cref="Mcp.McpQueryTools.EffectiveWindowStart"/>), and any floor at or before the start gives
+    /// the same output. Whether the data reaches back to the start is the whole question, and the first row inside
+    /// the window alone cannot answer it on a sparse table (waiting_tasks holds a row only while something waits: a
+    /// quiet first stretch puts the window's own first row far past its start while older rows are stored, and a
+    /// probe that read only the window would raise a false banner).</para>
     ///
-    /// <para><b>Why NULL first.</b> NULL keeps its old meaning, "the window holds nothing, so nothing was read".
-    /// A server whose rows all end before the window would otherwise answer its oldest row, which reads as the whole
-    /// window having been served. The existence check is bounded on both sides, so DuckDB's zone-map statistics
-    /// prune every row group and parquet file outside the window and <c>LIMIT 1</c> stops at the first hit; the
-    /// unbounded MIN runs only for a server that has a row in the window. Measured on a seeded store (three monthly
-    /// parquet files plus a 7-day hot table, 40 servers, 29M rows) the pair answers in tens of milliseconds, about
-    /// 60 to 75 ms for a server with 90 days of rows and under 25 ms for a new or retired one; the numbers are in
-    /// the pull request that added it.</para>
+    /// <para><b>The two steps.</b> The first is bounded on both sides, so DuckDB's zone-map statistics prune every
+    /// row group and parquet file outside the window; it ends the probe when the window holds no row (NULL, never
+    /// an old row or the start, either of which would read as the window having been served) or when its first row
+    /// is already at the start. Only when that first row sits after the start does a second query ask whether the
+    /// server holds ANY row before the start, <c>LIMIT 1</c>, which stops at the first hit.</para>
     /// </summary>
     public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc)
     {
         var view = QueryWindowRelationView(relation);
-        using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} MIN(collection_time) window floor");
+        using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} window floor");
         using var connection = await OpenConnectionAsync();
 
-        using (var existsCommand = connection.CreateCommand())
+        DateTime? firstInWindow;
+        using (var windowCommand = connection.CreateCommand())
         {
-            existsCommand.CommandText = $@"
-SELECT 1
-FROM {view}
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-LIMIT 1";
-            existsCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
-            existsCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
-            existsCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });
-            if (await existsCommand.ExecuteScalarAsync() is null)
-            {
-                return null;
-            }
-        }
-
-        using var command = connection.CreateCommand();
-        command.CommandText = $@"
+            windowCommand.CommandText = $@"
 SELECT MIN(collection_time)
 FROM {view}
 WHERE server_id = $1
-AND   collection_time <= $2";
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
-        var result = await command.ExecuteScalarAsync();
-        return result is DateTime dt ? dt : null;
+AND   collection_time >= $2
+AND   collection_time <= $3";
+            windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
+            windowCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });
+            firstInWindow = await windowCommand.ExecuteScalarAsync() is DateTime first ? first : null;
+        }
+
+        if (firstInWindow is not DateTime firstRow || firstRow <= startUtc)
+        {
+            return firstInWindow;
+        }
+
+        using var olderCommand = connection.CreateCommand();
+        olderCommand.CommandText = $@"
+SELECT 1
+FROM {view}
+WHERE server_id = $1
+AND   collection_time < $2
+LIMIT 1";
+        olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+        olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        return await olderCommand.ExecuteScalarAsync() is null ? firstRow : startUtc;
     }
 }
