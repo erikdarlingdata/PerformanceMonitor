@@ -51,7 +51,7 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     /// registrations own the trace's session in their database, so the logical server's registration neither
     /// manages nor reads it. False for every other collector.
     /// </summary>
-    bool SkipsSeparatelyMonitoredDatabases => false;
+    bool SkipsSeparatelyMonitoredDatabases { get; }
 
     /// <summary>
     /// Time column the host should read its latest already-collected value of (from the host's
