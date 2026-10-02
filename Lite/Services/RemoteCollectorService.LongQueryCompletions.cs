@@ -765,6 +765,14 @@ END;", connection);
     internal Func<ServerConnection, string, string, LongQueryTraceStep, string, CancellationToken, Task>? LongQueryTraceStepOverrideForTests { get; set; }
 
     /// <summary>
+    /// Replaces what the read-only-intent ensure's <see cref="LongQueryTraceStep.Check"/> reads on the replica, with
+    /// <see cref="LongQueryTraceStepOverrideForTests"/> set (#4961): called with the server and the database, answers whether the
+    /// session's definition is visible and whether it runs there. Unset, the stand-in finds neither, as in a database that has
+    /// never had the session. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, LongQueryTraceReplicaState>? LongQueryTraceReplicaStateForTests { get; set; }
+
+    /// <summary>
     /// What the last reconcile that finished applied for this server: true for on, false for off, null when no
     /// reconcile has finished since the app started.
     /// </summary>
