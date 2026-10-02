@@ -7,7 +7,12 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -147,6 +152,162 @@ public sealed class QueryStoreBackgroundIndexesTests
             Assert.Contains("IF EXISTS", spec.PlainDropSql);
             Assert.Contains("IF EXISTS", spec.HypertableDropSql);
         }
+    }
+
+    /* The per-chunk build holds a ShareLock on the chunk it scans, which blocks the collector's COPY into the newest
+       chunk for that chunk's scan time; the COPY has a 10 s deadline. So the partial index is built only while the
+       newest chunk's heap is at or below the limit, and an attempt above it is deferred, not failed (#4952). */
+    [Theory]
+    [InlineData(0L, QueryStoreBackgroundIndexes.IndexAction.BuildPerChunk)]
+    [InlineData(QueryStoreBackgroundIndexes.NewestChunkMaxBytes - 1, QueryStoreBackgroundIndexes.IndexAction.BuildPerChunk)]
+    [InlineData(QueryStoreBackgroundIndexes.NewestChunkMaxBytes, QueryStoreBackgroundIndexes.IndexAction.BuildPerChunk)]
+    [InlineData(QueryStoreBackgroundIndexes.NewestChunkMaxBytes + 1, QueryStoreBackgroundIndexes.IndexAction.SkipNewestChunkLarge)]
+    [InlineData(9L * 1024 * 1024 * 1024, QueryStoreBackgroundIndexes.IndexAction.SkipNewestChunkLarge)]
+    public void ThePartialIndex_BuildsPerChunkWhileTheNewestChunkIsAtOrBelowTheLimit_AndDefersAboveIt(
+        long newestChunkBytes, QueryStoreBackgroundIndexes.IndexAction expected)
+    {
+        var decision = QueryStoreBackgroundIndexes.Decide(Probe, 180006, true, newestChunkBytes);
+        Assert.Equal(expected, decision.Action);
+        if (expected == QueryStoreBackgroundIndexes.IndexAction.SkipNewestChunkLarge)
+        {
+            Assert.Contains("collect.query_store_stats", decision.Reason, StringComparison.Ordinal);
+            Assert.Contains("256 MB", decision.Reason, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheNewestChunkLimit_IsAboutTwoHundredFiftySixMegabytes_AndOnlyThePartialIndexCarriesIt()
+    {
+        Assert.Equal(256L * 1024 * 1024, QueryStoreBackgroundIndexes.NewestChunkMaxBytes);
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackgroundIndexes.RetryInterval);
+        Assert.Equal(QueryStoreBackgroundIndexes.NewestChunkMaxBytes, Probe.MaxNewestChunkBytes);
+        Assert.Null(Wide.MaxNewestChunkBytes);
+        Assert.Null(QueryStoreIntervalWideBrinIndex.Spec.MaxNewestChunkBytes);
+    }
+
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(9L * 1024 * 1024 * 1024)]
+    public void TheNewestChunksSize_NeverDefersAPlainTable_OrAnIndexWithoutALimit(long newestChunkBytes)
+    {
+        /* CREATE INDEX CONCURRENTLY on a plain table blocks no writes, so the size is not asked. */
+        Assert.Equal(QueryStoreBackgroundIndexes.IndexAction.Build, QueryStoreBackgroundIndexes.Decide(Probe, 180006, false, newestChunkBytes).Action);
+        Assert.Equal(QueryStoreBackgroundIndexes.IndexAction.Build, QueryStoreBackgroundIndexes.Decide(Wide, 180006, false, newestChunkBytes).Action);
+
+        /* The other two indexes' verdicts on a hypertable are the ones they had before the limit existed. */
+        Assert.Equal(QueryStoreBackgroundIndexes.IndexAction.SkipHypertable, QueryStoreBackgroundIndexes.Decide(Wide, 180006, true, newestChunkBytes).Action);
+        Assert.Equal(QueryStoreBackgroundIndexes.IndexAction.SkipHypertable, QueryStoreBackgroundIndexes.Decide(QueryStoreIntervalWideBrinIndex.Spec, 180006, true, newestChunkBytes).Action);
+
+        /* The version floor still comes first. */
+        Assert.Equal(
+            QueryStoreBackgroundIndexes.IndexAction.SkipServerVersion,
+            QueryStoreBackgroundIndexes.Decide(QueryStoreIntervalWideBrinIndex.Spec, 150000, true, newestChunkBytes).Action);
+    }
+
+    [Fact]
+    public async Task ADeferredAttempt_IsRetriedUntilItSettles_AndASettledIndexIsNeverAttemptedAgain()
+    {
+        var calls = new List<string>();
+        var probeAttempts = 0;
+
+        await QueryStoreBackgroundIndexes.RunDelayedAsync(
+            NullLogger.Instance,
+            TimeSpan.Zero,
+            TimeSpan.FromMilliseconds(1),
+            new[] { Wide, Probe },
+            (spec, isRetry, _) =>
+            {
+                calls.Add(isRetry ? $"{spec.IndexName} (retry)" : spec.IndexName);
+                var outcome = spec == Probe && ++probeAttempts < 3
+                    ? QueryStoreBackgroundIndexes.EnsureOutcome.RetryLater
+                    : QueryStoreBackgroundIndexes.EnsureOutcome.Settled;
+                return Task.FromResult(outcome);
+            },
+            CancellationToken.None);
+
+        Assert.Equal(
+            new[]
+            {
+                Wide.IndexName,
+                Probe.IndexName,
+                Probe.IndexName + " (retry)",
+                Probe.IndexName + " (retry)",
+            },
+            calls);
+    }
+
+    [Fact]
+    public async Task TheRetry_WaitsTheIntervalAndEndsQuietlyWhenTheServiceStops()
+    {
+        using var stop = new CancellationTokenSource();
+        var calls = 0;
+        var logger = new CapturingTestLogger();
+
+        var run = QueryStoreBackgroundIndexes.RunDelayedAsync(
+            logger,
+            TimeSpan.Zero,
+            TimeSpan.FromMinutes(5),
+            new[] { Probe },
+            (_, _, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                return Task.FromResult(QueryStoreBackgroundIndexes.EnsureOutcome.RetryLater);
+            },
+            stop.Token);
+
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        Assert.Equal(1, Volatile.Read(ref calls));
+        Assert.False(run.IsCompleted, "a deferred index keeps the run waiting for the retry interval");
+
+        stop.Cancel();
+        var finished = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+        Assert.Same(run, finished);
+        await run;
+        Assert.Equal(1, Volatile.Read(ref calls));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
+    public async Task AFailedAttempt_IsNotRetriedInTheSameRun_AndDoesNotStopTheNextIndex()
+    {
+        var calls = new List<string>();
+        var logger = new CapturingTestLogger();
+
+        await QueryStoreBackgroundIndexes.RunDelayedAsync(
+            logger,
+            TimeSpan.Zero,
+            TimeSpan.FromMilliseconds(1),
+            new[] { Wide, Probe },
+            (spec, isRetry, _) =>
+            {
+                calls.Add(isRetry ? $"{spec.IndexName} (retry)" : spec.IndexName);
+                return spec == Wide
+                    ? throw new InvalidOperationException("the build failed")
+                    : Task.FromResult(QueryStoreBackgroundIndexes.EnsureOutcome.Settled);
+            },
+            CancellationToken.None);
+
+        Assert.Equal(new[] { Wide.IndexName, Probe.IndexName }, calls);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("retried at the next start", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ADeferral_IsLoggedOnceAtInformation_AndQuietlyOnEveryRetryAfterIt()
+    {
+        var logger = new CapturingTestLogger();
+        const string reason = "collect.query_store_stats's newest chunk is 5.0 GB, above the 256 MB limit";
+
+        QueryStoreBackgroundIndexes.LogDeferred(logger, Probe, reason, isRetry: false);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Information));
+        Assert.Contains(QueryStoreBackgroundIndexes.LegacyProbeIndexName, logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("256 MB", logger.Joined, StringComparison.Ordinal);
+
+        QueryStoreBackgroundIndexes.LogDeferred(logger, Probe, reason, isRetry: true);
+        QueryStoreBackgroundIndexes.LogDeferred(logger, Probe, reason, isRetry: true);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Information));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
     }
 
     [Fact]

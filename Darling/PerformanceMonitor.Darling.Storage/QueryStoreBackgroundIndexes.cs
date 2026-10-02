@@ -62,6 +62,28 @@ public static class QueryStoreBackgroundIndexes
     /// <summary>Deadline for the catalog reads, in seconds.</summary>
     public const int CatalogReadTimeoutSeconds = 30;
 
+    /// <summary>
+    /// The largest heap, in bytes, the newest chunk of <c>collect.query_store_stats</c> may have for the per-chunk
+    /// partial-index build to start (256 MB), and the reason for the number (#4952).
+    ///
+    /// <para>The per-chunk build holds a ShareLock on the chunk it is scanning for that chunk's scan time, and the
+    /// collector's COPY into the newest chunk (RowExclusiveLock) waits behind it. That COPY has a 10 s deadline
+    /// (<c>ServiceCommandDeadlines.CollectionSweepSeconds</c>, on both the start and the data phase): a wait past it
+    /// fails the batch. Nothing is lost, because the next cycle re-reads from the stored per-database watermark, but
+    /// the cycle's rows for that database are not stored until then. The seeded store scanned about 1 GB/s warm and a
+    /// volume capped at 250 MB/s reads 256 MB in about a second, so this limit keeps the lock far below the 10 s
+    /// deadline, where a 5-9 GB chunk would hold it for tens of seconds. The newest chunk is the one the collector
+    /// writes; older chunks take the same lock but only the backfill and a late write touch them.</para>
+    /// </summary>
+    public const long NewestChunkMaxBytes = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// How long a deferred attempt (<see cref="IndexAction.SkipNewestChunkLarge"/>) waits before the next one. The
+    /// newest chunk is small only for a while after each chunk boundary, so the ensure keeps trying until the index
+    /// is built or the service stops.
+    /// </summary>
+    public static readonly TimeSpan RetryInterval = TimeSpan.FromHours(1);
+
     /// <summary>Name of the partial btree that turns the legacy-row probe into an index probe (#4952).</summary>
     public const string LegacyProbeIndexName = "collect.ix_query_store_stats_legacy_server_time";
 
@@ -82,6 +104,23 @@ public static class QueryStoreBackgroundIndexes
 
         /// <summary>Skip: the table is a hypertable and the spec has no hypertable form.</summary>
         SkipHypertable,
+
+        /// <summary>
+        /// Defer: the per-chunk build would hold a ShareLock on a newest chunk bigger than the spec's limit, long
+        /// enough to time out the collector's write into it. Not a failure and not final: the ensure is tried again
+        /// after <see cref="RetryInterval"/>.
+        /// </summary>
+        SkipNewestChunkLarge,
+    }
+
+    /// <summary>What one ensure attempt leaves for the caller to do.</summary>
+    public enum EnsureOutcome
+    {
+        /// <summary>Nothing more to do this run: the index is built, was already valid, or is not wanted on this store.</summary>
+        Settled,
+
+        /// <summary>The attempt was deferred (<see cref="IndexAction.SkipNewestChunkLarge"/>); try the same index again later.</summary>
+        RetryLater,
     }
 
     /// <summary>The decision and, for a skip, the reason to log.</summary>
@@ -96,6 +135,10 @@ public static class QueryStoreBackgroundIndexes
     /// <param name="HypertableDropSql">The drop of an INVALID leftover on a hypertable (never <c>CONCURRENTLY</c>).</param>
     /// <param name="MinimumServerVersionNum">The first <c>server_version_num</c> that may build it; 0 for any.</param>
     /// <param name="BelowMinimumReason">Why a server below the floor must not build it, for the log.</param>
+    /// <param name="MaxNewestChunkBytes">
+    /// For the per-chunk form only: the largest heap, in bytes, the hypertable's newest chunk may have when the build
+    /// starts. Above it the attempt is deferred (<see cref="IndexAction.SkipNewestChunkLarge"/>). Null means no limit.
+    /// </param>
     public sealed record IndexSpec(
         string IndexName,
         string TableName,
@@ -104,7 +147,8 @@ public static class QueryStoreBackgroundIndexes
         string PlainDropSql,
         string HypertableDropSql,
         int MinimumServerVersionNum = 0,
-        string BelowMinimumReason = "");
+        string BelowMinimumReason = "",
+        long? MaxNewestChunkBytes = null);
 
     /// <summary>
     /// A partial btree on <c>collect.query_store_stats (server_id, collection_time) WHERE interval_start_time_utc IS
@@ -134,7 +178,8 @@ public static class QueryStoreBackgroundIndexes
         + "ON collect.query_store_stats (server_id, collection_time) WITH (timescaledb.transaction_per_chunk) "
         + "WHERE interval_start_time_utc IS NULL;",
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_stats_legacy_server_time;",
-        "DROP INDEX IF EXISTS collect.ix_query_store_stats_legacy_server_time;");
+        "DROP INDEX IF EXISTS collect.ix_query_store_stats_legacy_server_time;",
+        MaxNewestChunkBytes: NewestChunkMaxBytes);
 
     /// <summary>
     /// A btree on <c>collect.query_store_interval_wide (server_id, first_execution_time)</c> (#4952), built
@@ -192,7 +237,7 @@ SELECT EXISTS
     /// The pure build-or-skip decision. The version check comes first: below the floor a build is wrong whatever the
     /// table is. A hypertable then takes the per-chunk form, or is skipped when the spec has none.
     /// </summary>
-    public static IndexDecision Decide(IndexSpec spec, int serverVersionNum, bool tableIsHypertable)
+    public static IndexDecision Decide(IndexSpec spec, int serverVersionNum, bool tableIsHypertable, long newestChunkBytes = 0)
     {
         if (serverVersionNum < spec.MinimumServerVersionNum)
         {
@@ -218,11 +263,34 @@ SELECT EXISTS
     /// per spec, in order, each on its own connection, and never throws. A failure of one index is a Warning and the
     /// next index still runs; the next service start retries it. Cancellation (shutdown) ends it quietly.
     /// </summary>
-    public static async Task RunDelayedAsync(
+    public static Task RunDelayedAsync(
         NpgsqlDataSource postgres,
         ILogger logger,
         TimeSpan delay,
         IReadOnlyList<IndexSpec> specs,
+        CancellationToken cancellationToken) =>
+        RunDelayedAsync(
+            logger,
+            delay,
+            RetryInterval,
+            specs,
+            async (spec, isRetry, token) =>
+            {
+                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                return await EnsureAsync(connection, spec, logger, token, isRetry).ConfigureAwait(false);
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// <see cref="RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{IndexSpec}, CancellationToken)"/>
+    /// with the one ensure attempt injected, so the pass-and-retry loop runs without a store.
+    /// </summary>
+    internal static async Task RunDelayedAsync(
+        ILogger logger,
+        TimeSpan delay,
+        TimeSpan retryInterval,
+        IReadOnlyList<IndexSpec> specs,
+        Func<IndexSpec, bool, CancellationToken, Task<EnsureOutcome>> ensureOne,
         CancellationToken cancellationToken)
     {
         var delayFinished = false;
@@ -234,8 +302,7 @@ SELECT EXISTS
             {
                 try
                 {
-                    await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-                    await EnsureAsync(connection, spec, logger, cancellationToken).ConfigureAwait(false);
+                    await ensureOne(spec, false, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
@@ -259,6 +326,10 @@ SELECT EXISTS
         }
     }
 
+    internal static void LogDeferred(ILogger logger, IndexSpec spec, string reason, bool isRetry)
+    {
+    }
+
     private static void LogEnsureFailure(ILogger logger, string indexName, Exception ex)
     {
         var sqlState = ex is NpgsqlException { SqlState: { Length: > 0 } state } ? $", SQLSTATE {state}" : string.Empty;
@@ -271,8 +342,8 @@ SELECT EXISTS
     /// Makes sure one index exists and is valid, on <paramref name="connection"/>, which must be open and outside
     /// any transaction (<c>CONCURRENTLY</c> and the per-chunk form both fail inside one).
     /// </summary>
-    public static async Task EnsureAsync(
-        NpgsqlConnection connection, IndexSpec spec, ILogger logger, CancellationToken cancellationToken)
+    public static async Task<EnsureOutcome> EnsureAsync(
+        NpgsqlConnection connection, IndexSpec spec, ILogger logger, CancellationToken cancellationToken, bool isRetry = false)
     {
         int serverVersionNum;
         bool tableExists;
@@ -294,7 +365,7 @@ SELECT EXISTS
         if (!tableExists)
         {
             logger.LogDebug("Query Store index ensure skipped: {Table} does not exist yet.", spec.TableName);
-            return;
+            return EnsureOutcome.Settled;
         }
 
         var isHypertable = false;
@@ -309,19 +380,19 @@ SELECT EXISTS
         if (decision.Action == IndexAction.SkipServerVersion)
         {
             logger.LogInformation("Query Store index {Index} not built: {Reason}.", spec.IndexName, decision.Reason);
-            return;
+            return EnsureOutcome.Settled;
         }
 
         if (decision.Action == IndexAction.SkipHypertable)
         {
             logger.LogWarning("Query Store index {Index} not built: {Reason}.", spec.IndexName, decision.Reason);
-            return;
+            return EnsureOutcome.Settled;
         }
 
         if (indexValid == true)
         {
             logger.LogDebug("Query Store index {Index} already exists and is valid.", spec.IndexName);
-            return;
+            return EnsureOutcome.Settled;
         }
 
         if (indexValid == false)
@@ -343,5 +414,6 @@ SELECT EXISTS
 
         logger.LogInformation(
             "Query Store index {Index} built in {Seconds:F1}s (valid).", spec.IndexName, started.Elapsed.TotalSeconds);
+        return EnsureOutcome.Settled;
     }
 }
