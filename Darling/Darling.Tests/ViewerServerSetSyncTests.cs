@@ -257,6 +257,67 @@ public sealed class ViewerServerSetSyncTests
         }
     }
 
+    [Fact]
+    public void Reload_ReadsTheServersItKeeps_AfterItsAwait()
+    {
+        var load = MethodBody("MainWindow.xaml.cs", "LoadServersAsync");
+
+        /* A change made while the server list loads is the user's latest choice. Read before the await, the
+           reload put back the server that the sidebar or the picker showed when the load began. */
+        var loaded = Regex.Match(load, @"\bawait\s+_dataService\s*\.\s*GetManagedServersAsync\s*\(");
+        var rebind = Regex.Match(load, @"ServerList\s*\.\s*ItemsSource\s*=");
+
+        Assert.True(loaded.Success && rebind.Success, "LoadServersAsync must await the server list, then rebind the sidebar");
+
+        foreach (var (what, pattern) in new[]
+                 {
+                     ("the sidebar's server", @"ServerList\s*\.\s*SelectedItem\s+as\s+FleetServerRow\b"),
+                     ("the Recommendations picker's server", @"RecommendationsServerSelector\s*\.\s*SelectedItem\s+as\s+DarlingServer\b"),
+                 })
+        {
+            var read = Regex.Match(load, pattern);
+
+            Assert.True(
+                read.Success && loaded.Index < read.Index && read.Index < rebind.Index,
+                $"LoadServersAsync must read {what} after its await and before it rebinds the sidebar");
+        }
+    }
+
+    [Fact]
+    public void EverySidebarSelectionWrite_RunsUnderTheSuppressionGuard()
+    {
+        /* An unguarded write runs ServerList_SelectionChanged, and that moves both pickers to the sidebar's
+           server. Each write must follow a "_suppressSidebarSelection = true" with no "= false" between them, as
+           RestoreSidebarSelection does. */
+        var viewer = Path.GetDirectoryName(ViewerPath("MainWindow.xaml.cs"))!;
+        var writes = 0;
+        var unguarded = new List<string>();
+
+        foreach (var path in Directory.EnumerateFiles(viewer, "*.cs", SearchOption.AllDirectories)
+                     .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                                    && !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)))
+        {
+            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
+            var toggles = Regex.Matches(code, @"\b_suppressSidebarSelection\s*=\s*(?<on>true|false)\b");
+
+            foreach (Match write in Regex.Matches(code, @"\bServerList\s*\.\s*Selected(?:Item|Index|Value)\s*=(?!=)"))
+            {
+                writes++;
+
+                var last = toggles.LastOrDefault(toggle => toggle.Index < write.Index);
+
+                if (last is null || last.Groups["on"].Value != "true")
+                {
+                    var line = code.AsSpan(0, write.Index).Count('\n') + 1;
+                    unguarded.Add($"{Path.GetFileName(path)}:{line}");
+                }
+            }
+        }
+
+        Assert.True(writes > 0, "the scan found no sidebar selection write, so its pattern no longer matches the viewer");
+        Assert.True(unguarded.Count == 0, "a sidebar selection write outside the guard: " + string.Join(", ", unguarded));
+    }
+
     // ── Behavior: the comparer against a real FleetView, counting the reloads ──────────────────────
 
     [Fact]
