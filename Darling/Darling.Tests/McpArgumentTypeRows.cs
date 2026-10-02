@@ -24,8 +24,10 @@ namespace Darling.Tests;
 /// <summary>
 /// A test-only tool with a parameter of each CLR type that a product's shipped tools do not declare: <see cref="short"/>,
 /// <see cref="byte"/>, <see cref="ulong"/>, an integer array and a nullable <see cref="bool"/> (found by reflection
-/// over the tool types of both products), and <see cref="long"/> and <c>long?</c>, which Darling's tools declare
-/// and Lite's do not. The in-process host registers it through the same
+/// over the tool types of both products), and <see cref="long"/> and <c>long?</c> for Lite. Darling's tools declare
+/// both. Lite declares no <c>long?</c>, and its one <see cref="long"/> (<c>plan_id</c> on
+/// <c>analyze_query_store_plan</c>) comes with a second required argument (<c>database_name</c>), so the runner
+/// passes that tool over. The in-process host registers it through the same
 /// <c>McpSchemaCompat.WithGeminiCompatibleTools</c> path as the shipped tools, so the call-tool guard meets it the same
 /// way. It carries no <c>McpServerToolType</c> attribute, so no census over the product's tool types sees it. It also
 /// declares a <see cref="CancellationToken"/>, which the SDK supplies and the schema leaves out, so the check that the
