@@ -344,6 +344,73 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.Equal(listCalls, rig.ListCalls);
     }
 
+    [Fact]
+    public async Task On_AnHourlyCreatePassThatThrows_RunsAgainAnHourLater_NotOnEverySweep()
+    {
+        var rig = BuildRig();
+        await rig.ReconcileAsync(enabled: true);
+
+        /* The hourly create pass is due, and the listing fails, so the pass throws. */
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        rig.ListFailure = new InvalidOperationException("master is not reachable.");
+        rig.ListCalls = 0;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(1, rig.ListCalls);
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+        var failedAt = rig.Clock;
+        var warnings = Warnings(rig);
+
+        /* The sweeps within the hour run nothing, and the fault stays set until a pass succeeds. */
+        foreach (var minutes in new[] { 1, 10, 59 })
+        {
+            rig.Clock = failedAt + TimeSpan.FromMinutes(minutes);
+            await rig.ReconcileAsync(enabled: true);
+        }
+
+        Assert.Equal(1, rig.ListCalls);
+        Assert.Equal(warnings, Warnings(rig));
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+
+        /* An hour after it threw, the pass runs again, and a pass that succeeds clears the fault. */
+        rig.ListFailure = null;
+        rig.Clock = failedAt + LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(2, rig.ListCalls);
+        Assert.Null(rig.State.LongQueryTraceFault);
+    }
+
+    [Fact]
+    public async Task On_TheAttemptAfterTheCap_ThatThrowsAnotherError_RunsAgainAnHourLater_NotOnEverySweep()
+    {
+        /* The drop outside the monitored set is refused in the excluded database until the cap gives up. */
+        var rig = BuildRig("gamma");
+        rig.Refuse.Add("gamma");
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: true);
+        }
+
+        /* The attempt after the cap is due, and the listing fails: it throws something other than a failed drop. */
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        rig.ListFailure = new InvalidOperationException("master is not reachable.");
+        rig.ListCalls = 0;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(1, rig.ListCalls);
+        var failedAt = rig.Clock;
+
+        foreach (var minutes in new[] { 1, 10, 59 })
+        {
+            rig.Clock = failedAt + TimeSpan.FromMinutes(minutes);
+            await rig.ReconcileAsync(enabled: true);
+        }
+
+        Assert.Equal(1, rig.ListCalls);
+
+        rig.Clock = failedAt + LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(2, rig.ListCalls);
+    }
+
     private static int Warnings(Rig rig) =>
         rig.Logger.Entries.Count(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
 

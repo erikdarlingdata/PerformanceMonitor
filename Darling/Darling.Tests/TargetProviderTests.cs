@@ -12,6 +12,7 @@ using System.Linq;
 using Microsoft.Data.SqlClient;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
@@ -286,6 +287,32 @@ public class TargetProviderTests
         Assert.Contains("1 of 3", note, StringComparison.Ordinal);
         Assert.Contains("appdb", note, StringComparison.Ordinal);
         Assert.Contains("survivors ONLY", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The runner's Azure database list is the provider's plan with the server's exclusions only when asked for. The
+    /// long-query trace's drops ask for none, so a session created before a database was excluded is still found there.
+    /// Both lifecycle rigs replace the listing, so this reads the plan the real listing runs.
+    /// </summary>
+    [Fact]
+    public void TheRunnersAzureDatabaseList_AppliesTheServersExclusionsOnlyWhenAsked()
+    {
+        var server = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "excl", Host = "excl.database.windows.net", ExcludedDatabases = ["scratch", "tempdb_clone"] },
+            ConnectionString = "Server=tcp:excl.database.windows.net,1433;Initial Catalog=master;Encrypt=True",
+            Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+            StorageName = "excl.database.windows.net",
+            ServerId = 1,
+        };
+
+        var (_, every) = DarlingCollectorRunner.AzureDatabaseListPlan(server, databaseScope: null, applyExclusions: false);
+        Assert.DoesNotContain("NOT IN", every.Text, StringComparison.Ordinal);
+        Assert.Empty(every.Parameters);
+
+        var (_, monitored) = DarlingCollectorRunner.AzureDatabaseListPlan(server, databaseScope: null, applyExclusions: true);
+        Assert.Contains("name NOT IN (@excl_db_0, @excl_db_1)", monitored.Text, StringComparison.Ordinal);
+        Assert.Equal(2, monitored.Parameters.Count);
     }
 
     /// <summary>

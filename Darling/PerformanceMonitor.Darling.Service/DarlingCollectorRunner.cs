@@ -6630,8 +6630,7 @@ RETURNING s.state_key";
         /* The query and the hop to master both come from the provider, so the enumeration set is defined
            in exactly one place per engine. What stays here is the failure policy below, which is the
            part that is genuinely Azure-specific. */
-        var (masterConnectionString, enumerationQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
-            server.ConnectionString, applyExclusions ? server.Config.ExcludedDatabases : null, databaseScope);
+        var (masterConnectionString, enumerationQuery) = AzureDatabaseListPlan(server, databaseScope, applyExclusions);
 
         var databases = new List<string>();
         try
@@ -6657,6 +6656,17 @@ RETURNING s.state_key";
             return FallbackDatabaseList(server, targetDb, reason: $"master DB inaccessible (SQL error {ex.Number})");
         }
     }
+
+    /// <summary>
+    /// The master hop and the enumeration query behind <see cref="GetAzureDatabaseListAsync(ServerRuntime, IReadOnlyList{string}, bool, CancellationToken)"/>.
+    /// The server's excluded databases are in the query only when <paramref name="applyExclusions"/> is true, so a drop that
+    /// passes false lists the databases the registration excludes too. Its own member so a test reads the query, not a stand-in
+    /// for the list.
+    /// </summary>
+    internal static (string ConnectionString, CollectorQuery Query) AzureDatabaseListPlan(
+        ServerRuntime server, IReadOnlyList<string>? databaseScope, bool applyExclusions) =>
+        SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
+            server.ConnectionString, applyExclusions ? server.Config.ExcludedDatabases : null, databaseScope);
 
     /// <summary>
     /// True while a recent master-inaccessible verdict still stands. It expires so a server whose

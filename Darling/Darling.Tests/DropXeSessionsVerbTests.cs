@@ -38,6 +38,87 @@ public sealed class DropXeSessionsVerbTests
     /// a session (#4732).</summary>
     private const string CaptureStopsMarker = "stops until this service reconnects to it, so remove the server next.";
 
+    // ---- Azure SQL Database: which databases the verb searches for which session -------------------------------------------
+
+    private const string AzureHost = "dropxe.database.windows.net";
+
+    private static SqlServerXeSessionCleanupTarget AzureTarget(MonitoredServer self, params MonitoredServer[] registry) =>
+        new(
+            new ServerRuntime
+            {
+                Config = self,
+                ConnectionString = $"Server=tcp:{AzureHost},1433;Initial Catalog=master;Encrypt=True",
+                Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+                StorageName = AzureHost,
+                ServerId = self.ServerId,
+            },
+            sessionNames: null,
+            registry);
+
+    /// <summary>
+    /// The long-query session is searched in the databases the registration excludes, because a session created before the
+    /// database was excluded stays there with nothing that drops it. It is not searched in a database monitored as its own
+    /// server, which that server's registration owns, and never in master. The other sessions keep the monitored list.
+    /// </summary>
+    [Fact]
+    public void TheLongQuerySearch_VisitsAnExcludedDatabase_AndSkipsOneMonitoredAsItsOwnServer()
+    {
+        var self = new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"] };
+        var alphaOwnServer = new MonitoredServer { Name = "dropxe-alpha", Host = AzureHost, Database = "alpha" };
+        var target = AzureTarget(self, self, alphaOwnServer);
+
+        var plan = target.PlanAzureSearch(
+            monitored: ["master", "alpha", "beta"],
+            every: ["master", "alpha", "beta", "gamma"]);
+
+        Assert.Equal(new[] { "beta", "gamma" }, plan.LongQueryDatabases);
+        Assert.Equal(new[] { "alpha", "beta" }, plan.AlwaysOnDatabases);
+        Assert.True(plan.Reports("gamma", LongQuery));
+        Assert.False(plan.Reports("gamma", Deadlock));
+        Assert.False(plan.Reports("alpha", LongQuery));
+        Assert.True(plan.Reports("alpha", Blocked));
+        Assert.False(plan.Reports("master", LongQuery));
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, plan.Visited);
+    }
+
+    /// <summary>
+    /// The verb cannot read another registration's long-query schedule, so it counts every other registration of the logical
+    /// server as keeping the session: it leaves each database that registration would create the session in.
+    /// </summary>
+    [Fact]
+    public void TheLongQuerySearch_SkipsADatabaseAnotherRegistrationOfTheServerKeeps()
+    {
+        var self = new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"] };
+        var second = new MonitoredServer { Name = "dropxe-ro", Host = AzureHost, ReadOnlyIntent = true, ExcludedDatabases = ["delta"] };
+        var target = AzureTarget(self, self, second);
+
+        var plan = target.PlanAzureSearch(
+            monitored: ["master", "alpha", "delta"],
+            every: ["master", "alpha", "gamma", "delta"]);
+
+        Assert.Equal(new[] { "delta" }, plan.LongQueryDatabases);
+    }
+
+    [Fact]
+    public void ATargetWithItsOwnNames_SearchesNoDatabaseForTheLongQuerySession()
+    {
+        var self = new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"] };
+        var runtime = new ServerRuntime
+        {
+            Config = self,
+            ConnectionString = $"Server=tcp:{AzureHost},1433;Initial Catalog=master;Encrypt=True",
+            Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+            StorageName = AzureHost,
+            ServerId = self.ServerId,
+        };
+        var target = new SqlServerXeSessionCleanupTarget(runtime, new[] { "dropxe_test_only" }, [self]);
+
+        var plan = target.PlanAzureSearch(["master", "alpha"], ["master", "alpha", "gamma"]);
+
+        Assert.Empty(plan.LongQueryDatabases);
+        Assert.Equal(new[] { "alpha" }, plan.AlwaysOnDatabases);
+    }
+
     // ---- classification, help and dispatch -----------------------------------------------------------------------------
 
     [Theory]

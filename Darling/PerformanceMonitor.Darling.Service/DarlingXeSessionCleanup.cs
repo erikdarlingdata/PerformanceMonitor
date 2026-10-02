@@ -445,15 +445,21 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
     private readonly string[] _sessionNames;
 
+    private readonly IReadOnlyList<MonitoredServer> _registry;
+
     /// <param name="server">The connected server.</param>
     /// <param name="sessionNames">The names to search for and to drop, copied here. Every product caller leaves this null, which
     /// is <see cref="DarlingXeSessionCleanup.SessionNames"/>. The live test passes a test-only name so the real find and drop
     /// run against a real server without ever naming one of Darling's own sessions. Either way the target composes its find
     /// and drop text through the same methods the plan's constants and statements are built with, so the live test sends the
     /// text the product sends, and a test pins that a copy of Darling's names sends exactly the plan's text (#4732).</param>
-    public SqlServerXeSessionCleanupTarget(ServerRuntime server, IReadOnlyList<string>? sessionNames = null)
+    /// <param name="registry">The servers this service monitors, from the same list the verb resolved the target in. On Azure SQL
+    /// Database it says which databases belong to another registration of the same logical server.</param>
+    public SqlServerXeSessionCleanupTarget(
+        ServerRuntime server, IReadOnlyList<string>? sessionNames = null, IReadOnlyList<MonitoredServer>? registry = null)
     {
         _server = server ?? throw new ArgumentNullException(nameof(server));
+        _registry = registry ?? Array.Empty<MonitoredServer>();
         _sessionNames = (sessionNames ?? DarlingXeSessionCleanup.SessionNames).ToArray();
         if (_sessionNames.Length == 0 || _sessionNames.Any(string.IsNullOrWhiteSpace))
         {
@@ -485,6 +491,35 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         }
 
         return DarlingXeSessionCleanup.ComposeDropStatement(session.Name, session.Scope);
+    }
+
+    /// <summary>
+    /// Where a search of an Azure SQL Database server looks, and which sessions it reports in each database.
+    /// </summary>
+    /// <param name="AlwaysOnDatabases">The databases searched for every session but the long-query one: the registration's
+    /// monitored databases.</param>
+    /// <param name="LongQueryDatabases">The databases searched for the long-query session.</param>
+    internal sealed record AzureSearchPlan(IReadOnlyList<string> AlwaysOnDatabases, IReadOnlyList<string> LongQueryDatabases)
+    {
+        /// <summary>Every database the search opens, once, in order.</summary>
+        public IReadOnlyList<string> Visited { get; } =
+            AlwaysOnDatabases.Concat(LongQueryDatabases).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        /// <summary>Whether a session of this name, found in this database, belongs in the result.</summary>
+        public bool Reports(string database, string sessionName) =>
+            (string.Equals(sessionName, LongQueryCompletionsCollector.XeSessionName, StringComparison.OrdinalIgnoreCase)
+                ? LongQueryDatabases
+                : AlwaysOnDatabases).Contains(database, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The databases the search visits. <paramref name="monitored"/> is the registration's monitored databases;
+    /// <paramref name="every"/> is every online database, with no exclusions.
+    /// </summary>
+    internal AzureSearchPlan PlanAzureSearch(IReadOnlyList<string> monitored, IReadOnlyList<string> every)
+    {
+        var alwaysOn = monitored.Where(database => !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)).ToList();
+        return new AzureSearchPlan(alwaysOn, alwaysOn);
     }
 
     public async Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken)

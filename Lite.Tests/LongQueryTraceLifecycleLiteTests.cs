@@ -619,6 +619,57 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The edition is read once for a reconcile. A connection check that writes a blank edition and then 5 again, between the
+    /// reconcile's first read and its drop, must not send the drop down the Azure branch with no registrations: that drop
+    /// listed nothing as kept and dropped the session from a database another registration still uses.
+    /// </summary>
+    [Fact]
+    public async Task Off_AnEditionThatChangesDuringTheReconcile_StillLeavesTheDatabasesAnotherRegistrationKeeps()
+    {
+        var rig = await BuildRigAsync(traceOn: false);
+        var other = RegisterOther(rig, database: null, traceOn: false, readOnlyIntent: true);
+
+        /* An earlier cycle read the edition. With both traces off nothing is kept, so the drop takes every database. */
+        await rig.ReconcileAsync();
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, rig.Dropped);
+
+        /* The other registration turns its trace on, so the plan runs again. A failed check wrote a blank edition, and the
+           next check wrote 5 between this reconcile's first read of it and its drop (the clock is read in between). */
+        SetTrace(rig, other, traceOn: true);
+        var status = rig.Servers.GetConnectionStatus(rig.Server.Id);
+        status.SqlEngineEdition = 0;
+        rig.Service.LongQueryTraceUtcNowForTests = () =>
+        {
+            status.SqlEngineEdition = 5;
+            return rig.Clock;
+        };
+        rig.Calls.Clear();
+
+        await rig.ReconcileAsync();
+
+        Assert.Empty(rig.Dropped);
+    }
+
+    /// <summary>
+    /// The enumeration behind the Azure database list has the server's exclusion clause and parameters only when asked for.
+    /// The trace's drops ask for none, so a session created before a database was excluded is still dropped there. The
+    /// lifecycle rigs replace the listing, so this reads the query the real listing runs.
+    /// </summary>
+    [Fact]
+    public void TheAzureDatabaseList_AppliesTheServersExclusionsOnlyWhenAsked()
+    {
+        var server = new ServerConnection { ServerName = Host, ExcludedDatabases = new List<string> { "scratch", "tempdb_clone" } };
+
+        var (everySql, everyParameters) = RemoteCollectorService.BuildAzureDatabaseListQuery(server, applyExclusions: false);
+        Assert.DoesNotContain("NOT IN", everySql, StringComparison.Ordinal);
+        Assert.Empty(everyParameters);
+
+        var (monitoredSql, monitoredParameters) = RemoteCollectorService.BuildAzureDatabaseListQuery(server, applyExclusions: true);
+        Assert.Contains("name NOT IN (@excl_db_0, @excl_db_1)", monitoredSql, StringComparison.Ordinal);
+        Assert.Equal(2, monitoredParameters.Count);
+    }
+
     private static string ReadLf(string relativePath)
     {
         var dir = AppContext.BaseDirectory;
