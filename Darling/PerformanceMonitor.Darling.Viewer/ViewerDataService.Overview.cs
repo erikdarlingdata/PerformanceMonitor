@@ -382,11 +382,6 @@ LIMIT 1";
            machine's clock by skew still counts, the same as it does in the unscoped statement. */
         var scopeEnd = nowUtc.AddDays(1);
 
-        /* The master's own newest blocking report, when the scoped reads succeed: it replaces the XE side of the
-           card's "Last" time, and the DMV side stays. */
-        DateTime? scopedLastBlocking = null;
-        var lastBlockingScoped = false;
-
         /* Blocking count + worst wait in the last hour (XE preferred, DMV fallback — same source for both). */
         await using (var command = _dataSource.CreateCommand(ServerSummaryBlockingSql))
         {
@@ -406,8 +401,6 @@ LIMIT 1";
                     try
                     {
                         (xeCount, xeMaxWait) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
-                        scopedLastBlocking = await ReadScopedLastBlockingAsync(serverId, separate, cancellationToken);
-                        lastBlockingScoped = true;
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -434,13 +427,16 @@ LIMIT 1";
 
                 /* Newest blocking event across both sources (unbounded) → "Last: N ago" when the window is
                    clear. Stored times are naive UTC; the tick subtraction against UtcNow is a true elapsed. */
-                DateTime? lastBlocking = lastBlockingScoped ? scopedLastBlocking : reader.IsDBNull(4) ? null : reader.GetDateTime(4);
+                DateTime? lastBlocking = reader.IsDBNull(4) ? null : reader.GetDateTime(4);
                 var dmvLast = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
                 if (dmvLast.HasValue && (!lastBlocking.HasValue || dmvLast.Value > lastBlocking.Value))
                 {
                     lastBlocking = dmvLast;
                 }
-                lastBlockingMinutesAgo = MinutesAgo(lastBlocking, nowUtc);
+                /* A master with separately monitored databases shows no "Last" for blocking: the card's "Last"
+                   looks back over all history, and the master's own newest would need a cached all-history read.
+                   Its lists keep every row, with the note. */
+                lastBlockingMinutesAgo = separate.Count > 0 ? null : MinutesAgo(lastBlocking, nowUtc);
             }
         }
 
@@ -457,7 +453,7 @@ LIMIT 1";
             if (await reader.ReadAsync(cancellationToken))
             {
                 deadlockCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
-                /* "Last" is the server's newest deadlock; a master's is replaced below by its own databases' newest. */
+                /* "Last" is the server's newest deadlock; a master with separately monitored databases shows none (below). */
                 lastDeadlock = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
             }
         }
@@ -466,10 +462,8 @@ LIMIT 1";
         {
             try
             {
-                var scopedCount = (int)Math.Min(
+                deadlockCount = (int)Math.Min(
                     await ReadScopedDeadlocksAsync(serverId, windowStart, scopeEnd, separate, cancellationToken), int.MaxValue);
-                lastDeadlock = await ReadScopedLastDeadlockAsync(serverId, separate, cancellationToken);
-                deadlockCount = scopedCount;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -504,7 +498,8 @@ LIMIT 1";
             }
         }
 
-        lastDeadlockMinutesAgo = MinutesAgo(lastDeadlock, nowUtc);
+        /* No deadlock "Last" for a master with separately monitored databases, for the blocking reason above. */
+        lastDeadlockMinutesAgo = separate.Count > 0 ? null : MinutesAgo(lastDeadlock, nowUtc);
 
         /* Newest collection time across all collectors — drives the freshness status. */
         await using (var command = _dataSource.CreateCommand(ServerSummaryLastCollectionSql))
