@@ -245,7 +245,7 @@ public sealed class DropXeSessionsVerbTests
         Assert.Equal(SharedAndLegacy, search.Sessions.Select(session => session.Name).ToArray());
         var note = Assert.Single(search.Notes);
         Assert.Contains(OwnLongQuery, note, StringComparison.Ordinal);
-        Assert.Contains("another registration of this install keeps it on the same instance", note, StringComparison.Ordinal);
+        Assert.Contains("Another registration of this install keeps it on the same instance", note, StringComparison.Ordinal);
     }
 
     /// <summary>A name that is not known cannot match: this registration's own, or the keeper's. The session is dropped.</summary>

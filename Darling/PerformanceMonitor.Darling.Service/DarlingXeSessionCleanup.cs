@@ -49,13 +49,16 @@ public sealed record XeSessionDrop(ExistingXeSession Session, string? InstallId 
 /// <summary>What a search of one target found: the Darling sessions that exist, and a sentence for every monitored place
 /// that could not be searched (an Azure SQL Database database that refused the connection, say), each of which fails the
 /// run. <see cref="Notes"/> holds the sentences for a place the registration excludes, which the search opened only for the
-/// long-query session and could not search: it says where a session may be left and does not fail the run.</summary>
+/// long-query session and could not search: it says where a session may be left and does not fail the run. It also holds the
+/// sentence for this install's long-query session that the search left out of <see cref="Sessions"/> because another
+/// registration of this install keeps it on the same instance.</summary>
 public sealed record XeSessionSearch(IReadOnlyList<ExistingXeSession> Sessions, IReadOnlyList<string> Problems)
 {
-    /// <summary>A sentence for each excluded database that could not be searched for the long-query session. The verb prints
-    /// each on stderr and does not change its exit code for it: before the search reached excluded databases, the verb never
-    /// opened one, so an excluded database the login cannot open is not a reason to stop a script that removes the server
-    /// next. A session left in such a database needs a manual drop.</summary>
+    /// <summary>A sentence for each excluded database that could not be searched for the long-query session, and one for this
+    /// install's long-query session left in place on an instance because another registration of this install keeps it. The
+    /// verb prints each on stderr and does not change its exit code for it: before the search reached excluded databases, the
+    /// verb never opened one, so an excluded database the login cannot open is not a reason to stop a script that removes the
+    /// server next. A session left in such a database needs a manual drop.</summary>
     public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
 
     /// <summary>The sessions of other installs the search found (<see cref="DarlingXeSessionCleanup.ComposeFindOthersSql"/>).
@@ -64,11 +67,14 @@ public sealed record XeSessionSearch(IReadOnlyList<ExistingXeSession> Sessions, 
 }
 
 /// <summary>What the verb reads from the Darling store before it connects to the server: this install's id, every schedule
-/// override (so another registration's long-query setting is its effective one), and each registration's last-known
-/// instance name (<see cref="PerformanceMonitor.Collectors.ServerEpoch.LastKnownName"/>).</summary>
+/// override (so another registration's long-query setting is its effective one: its own override, else the install's
+/// default), and each registration's last-known instance name
+/// (<see cref="PerformanceMonitor.Collectors.ServerEpoch.LastKnownName"/>).</summary>
 /// <param name="InstallId">This install's id, or null when the store has none yet or could not be read.</param>
-/// <param name="ScheduleOverrides">Every row of the store's collector schedules, or null when they could not be read.</param>
-/// <param name="InstanceNames">The last-known <c>@@SERVERNAME</c> of each registration, by registration id.</param>
+/// <param name="ScheduleOverrides">Every row of the store's collector schedules, or null when they could not be read. With
+/// none read, every other registration counts as having its long-query trace on.</param>
+/// <param name="InstanceNames">The last-known <c>@@SERVERNAME</c> of each registration, by registration id. A registration
+/// with no name matches no instance, so a session is never left in place for it.</param>
 /// <param name="Note">Why the id is not known, when it is not.</param>
 internal sealed record XeCleanupStoreFacts(
     string? InstallId,
@@ -683,6 +689,10 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
     private readonly string? _installId;
 
+    private readonly IReadOnlyList<ScheduleOverride>? _scheduleOverrides;
+
+    private readonly IReadOnlyDictionary<int, string>? _instanceNames;
+
     /// <param name="server">The connected server.</param>
     /// <param name="sessionNames">The names to search for and to drop, copied here. Every product caller leaves this null, which
     /// is <see cref="DarlingXeSessionCleanup.SessionNames"/>. The live test passes a test-only name so the real find and drop
@@ -703,6 +713,8 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         _server = server ?? throw new ArgumentNullException(nameof(server));
         _registry = registry ?? Array.Empty<MonitoredServer>();
         _installId = sessionNames is null && InstallId.IsValid(facts?.InstallId) ? facts!.InstallId : null;
+        _scheduleOverrides = facts?.ScheduleOverrides;
+        _instanceNames = facts?.InstanceNames;
         _sessionNames = (sessionNames ?? DarlingXeSessionCleanup.NamesToDrop(_installId)).ToArray();
         if (_sessionNames.Length == 0 || _sessionNames.Any(string.IsNullOrWhiteSpace))
         {
@@ -801,12 +813,14 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         /* The long-query session follows the worker's rule for a trace that is off (LongQueryTraceDatabases.Plan), the one
            the off-side reconcile applies: every listed database, the registration's exclusions not applied, because a session
            created before a database was excluded stays there. Never master, never a database monitored as its own server, and
-           never a database where another registration of the logical server keeps the session. The verb cannot read another
-           registration's long-query schedule, so it counts every other registration as keeping it. */
+           never a database where another registration of the logical server keeps the session (#4961). Another registration
+           keeps it when its effective long-query setting is on, its own override or else the install's default, from the
+           schedule rows the verb read (TraceOn). Its database scope is not read, so it counts as keeping the session in every
+           database it does not exclude, which leaves more, never fewer. */
         var host = _server.Config.Host;
         var selfId = _server.ServerId.ToString(CultureInfo.InvariantCulture);
         var registrations = DarlingWorker.LongQueryTraceRegistrations(
-            host, _registry, traceOn: _ => true, databaseScope: _ => Array.Empty<string>());
+            host, _registry, TraceOn, databaseScope: _ => Array.Empty<string>());
         var separatelyMonitored = AzureMasterScope.SeparatelyMonitoredDatabases(
             isAzureSqlDb: true, selfId, host, _server.Config.Database, DarlingWorker.LiveAlertTargets(_registry));
         var keptElsewhere = LongQueryTraceDatabases.KeptElsewhere(
@@ -817,15 +831,62 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
     }
 
     /// <summary>
+    /// Whether another registration's long-query trace is on, by its effective setting: its own override, else the install's
+    /// default (<see cref="StoreConfigProvider.ResolveSchedule"/>), the same rule the service applies. With no schedule rows
+    /// read the verb has nothing to go by, so every other registration counts as having it on.
+    /// </summary>
+    private bool TraceOn(int registrationId) =>
+        _scheduleOverrides is null
+        || StoreConfigProvider.ResolveSchedule(LongQueryCompletionsCollector.Instance.Name, registrationId, _scheduleOverrides).Enabled;
+
+    /// <summary>
+    /// The identity row of one registration, in the form the service's guard reads it (<see cref="ServerEpoch.LastKnownNameAsync"/>):
+    /// the verb read each registration's last-known instance name from the store already, so it hands that name back as the
+    /// row. No name is no row.
+    /// </summary>
+    private Task<Dictionary<string, string>> IdentityRowAsync(int registrationId, string carrier)
+    {
+        var state = new Dictionary<string, string>();
+        if (_instanceNames is not null && _instanceNames.TryGetValue(registrationId, out var name))
+        {
+            state[ServerEpoch.IdentityStateKey] = ServerEpoch.Serialize(new ServerEpoch.Stamp(null, name));
+        }
+
+        return Task.FromResult(state);
+    }
+
+    /// <summary>
     /// The result of the server-scope search (every engine but Azure SQL Database) for the names the catalog gave: the sessions of
     /// this install and the shared ones, and the sessions of other installs. Split from the connection so a test drives it
     /// without a server.
+    ///
+    /// <para>#4961: the long-query session of this install is the instance's own, so it is left out of the sessions to drop,
+    /// with a note that says why, when <see cref="LongQueryTraceInstanceGuard.Kept"/> finds another registration of this
+    /// install on the same instance with its long-query trace on. That is the guard the service builds
+    /// (<see cref="DarlingWorker.LongQueryTraceInstanceGuardFor"/>), fed from the facts the verb read. A name that is not
+    /// known matches nothing, so the session is dropped, as the service drops it when its trace turns off. The old shared
+    /// long-query session and the shared sessions belong to no registration of this install, so they are never left.</para>
     /// </summary>
-    internal Task<XeSessionSearch> ServerScopeSearchAsync(IReadOnlyList<string> foundNames, IReadOnlyList<string> otherNames)
+    internal async Task<XeSessionSearch> ServerScopeSearchAsync(IReadOnlyList<string> foundNames, IReadOnlyList<string> otherNames)
     {
         var found = foundNames.Select(name => new ExistingXeSession(name, XeSessionScope.Server)).ToList();
         var others = otherNames.Select(name => new ExistingXeSession(name, XeSessionScope.Server)).ToList();
-        return Task.FromResult(new XeSessionSearch(found, new List<string>()) { Others = others });
+        var notes = new List<string>();
+
+        if (_installId is not null)
+        {
+            var ownLongQuery = LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, _installId);
+            var own = found.Find(session => string.Equals(session.Name, ownLongQuery, StringComparison.OrdinalIgnoreCase));
+
+            /* Asked only when the session is there to drop, so a server without it reads no registry and no state. */
+            if (own is not null && (await DarlingWorker.LongQueryTraceInstanceGuardFor(_server.ServerId, _registry, TraceOn, IdentityRowAsync)).Kept)
+            {
+                found.Remove(own);
+                notes.Add($"Left in place: {DarlingXeSessionCleanup.Describe(own)}. Another registration of this install keeps it on the same instance.");
+            }
+        }
+
+        return new XeSessionSearch(found, new List<string>()) { Others = others, Notes = notes };
     }
 
     public async Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken)
