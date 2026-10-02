@@ -55,8 +55,10 @@ internal static class McpArgumentTypeProbeTools
 /// while every other row is left alone.
 ///
 /// <para>The tool and parameter for a row are found by reflection over the product's tool types: the first tool,
-/// in name order, that declares a parameter of that CLR type and needs no other argument. A type no shipped tool
-/// declares falls through to <see cref="McpArgumentTypeProbeTools"/>.</para>
+/// in name order, that declares a parameter of that CLR type and needs no other argument, passing over a tool whose
+/// name says it changes data (<c>delete_</c>, <c>create_</c> or <c>update_</c>), since a row that sends a value the
+/// binder reads runs the tool. A type no shipped tool declares falls through to
+/// <see cref="McpArgumentTypeProbeTools"/>.</para>
 /// </summary>
 internal static class McpArgumentTypeRows
 {
@@ -261,6 +263,8 @@ internal static class McpArgumentTypeRows
         rows.Add("ulong", "9223372036854775808", false, "");
         rows.Add("ulong", "18446744073709551616", true, "whole number|too large");
         rows.Add("ulong", "-1", true, "whole number|too small");
+        /* Zero with a minus sign is no smaller than zero, but an unsigned type does not read the sign. */
+        rows.Add("ulong", "-0", true, "whole number|too small");
 
         /* Integer arrays. */
         rows.Add("int[]", "[1,2,3]", false, "");
@@ -357,7 +361,9 @@ internal static class McpArgumentTypeRows
     }
 
     /// <summary>The first tool, in name order, with a parameter of the CLR type that the host advertises and that needs
-    /// no other argument, so a call sending only that one argument reaches the binder for it alone.</summary>
+    /// no other argument, so a call sending only that one argument reaches the binder for it alone. A tool that changes
+    /// data is passed over, by its name (<c>delete_</c>, <c>create_</c> or <c>update_</c>): a row that sends a value
+    /// the binder reads runs the tool, and a row should not run a write.</summary>
     private static (string Tool, string Parameter) Resolve(McpInProcessHost host, IEnumerable<Type> toolTypes, Type clr)
     {
         var served = host.RegisteredTools.ToDictionary(tool => tool.ProtocolTool.Name, StringComparer.Ordinal);
@@ -369,7 +375,8 @@ internal static class McpArgumentTypeRows
                          .OrderBy(method => method.Name, StringComparer.Ordinal))
             {
                 if (method.GetCustomAttribute<McpServerToolAttribute>() is not { } attribute
-                    || !served.TryGetValue(attribute.Name ?? method.Name, out var tool))
+                    || !served.TryGetValue(attribute.Name ?? method.Name, out var tool)
+                    || ChangesData(tool.ProtocolTool.Name))
                 {
                     continue;
                 }
@@ -394,4 +401,9 @@ internal static class McpArgumentTypeRows
 
         throw new InvalidOperationException($"No tool declares a parameter of type {clr}.");
     }
+
+    private static bool ChangesData(string toolName) =>
+        toolName.StartsWith("delete_", StringComparison.Ordinal)
+        || toolName.StartsWith("create_", StringComparison.Ordinal)
+        || toolName.StartsWith("update_", StringComparison.Ordinal);
 }

@@ -20,7 +20,8 @@ namespace PerformanceMonitor.Common;
 
 /// <summary>One tool parameter as the tool method declares it: its CLR type, and whether it can take a null.</summary>
 /// <param name="Type">The declared type. <c>int?</c> is <see cref="Nullable{T}"/> of <see cref="int"/>.</param>
-/// <param name="AllowsNull">A nullable value type, or a reference type annotated as nullable.</param>
+/// <param name="AllowsNull">A nullable value type, or a reference type annotated as nullable. Only the tests read it, as a
+/// cross-check; the refusal does not, because it asks the binder whether it can read the value.</param>
 public sealed record McpParameterType(Type Type, bool AllowsNull);
 
 /// <summary>
@@ -98,7 +99,9 @@ public sealed class McpToolParameterTypes
 /// accepts (an <c>int</c> reads <c>"5"</c>, a <c>bool</c> does not read <c>"true"</c>, a <c>ulong</c> reads
 /// 18446744073709551615, a string reads no number), and it cannot refuse a value the binder reads. Anything else the
 /// serializer does (no converter for the type, or a converter that throws something other than a
-/// <see cref="JsonException"/>, say) is a case this cannot judge, and the value passes.</para>
+/// <see cref="JsonException"/>, say) is a case this cannot judge, and the value passes. The one type it does not read
+/// is a string, which takes a String token or a Null one and nothing else: that is decided from the token, so a
+/// caller-sized text (a plan's XML) is not copied only to be thrown away.</para>
 /// </summary>
 internal static class McpArgumentValueCheck
 {
@@ -121,7 +124,7 @@ internal static class McpArgumentValueCheck
         /* Only a value type with no null in it gets here with a null: a reference type, or a Nullable<T>, binds one. */
         if (value.ValueKind == JsonValueKind.Null)
         {
-            return $"{prefix}{takes} and cannot be null, and the call sent null.";
+            return $"{prefix}{takes}, and cannot be null, and the call sent null.";
         }
 
         if (Bounds(type) is { } bounds)
@@ -141,6 +144,14 @@ internal static class McpArgumentValueCheck
 
     private static bool CanBind(JsonElement value, Type type)
     {
+        /* A string reads a String token or a Null one and nothing else, so that is decided from the token. Reading it
+           would copy the whole value only to throw the copy away (a 10 MB plan_xml is a second 10 MB string), and the
+           binder reads it again right after. */
+        if (type == typeof(string))
+        {
+            return value.ValueKind is JsonValueKind.String or JsonValueKind.Null;
+        }
+
         try
         {
             JsonSerializer.Deserialize(value, type, McpJsonUtilities.DefaultOptions);
@@ -181,7 +192,8 @@ internal static class McpArgumentValueCheck
     }
 
     /// <summary>"too large" or "too small" when <paramref name="value"/> is a whole number (a JSON number with no
-    /// fraction or exponent, or a string of digits with an optional sign) outside the type's range; otherwise null.
+    /// fraction or exponent, or a string of digits with an optional sign) outside the type's range; otherwise null. For
+    /// an unsigned type a minus sign is too small on its own, "-0" included, because the type does not read the sign.
     ///
     /// <para>The caller sets the length of the text, and parsing a long run of digits as a big integer costs more than
     /// the length grows. The widest integer type (<see cref="ulong"/>) holds 20 digits, so after the leading zeros a
@@ -210,6 +222,13 @@ internal static class McpArgumentValueCheck
         if (digits.IsEmpty || digits.ContainsAnyExceptInRange('0', '9'))
         {
             return null;
+        }
+
+        /* An unsigned type reads no minus sign at all, so "-0" is refused though it is no smaller than zero, and the
+           sign alone makes it too small. Nothing negative needs parsing then. */
+        if (negative && bounds.Min.IsZero)
+        {
+            return "too small";
         }
 
         digits = digits.TrimStart('0');

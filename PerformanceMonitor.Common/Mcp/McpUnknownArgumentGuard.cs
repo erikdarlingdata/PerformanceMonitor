@@ -11,7 +11,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -67,16 +69,19 @@ namespace PerformanceMonitor.Common;
 /// number sent to a string, a string sent to a boolean, an integer array with a fraction in it) threw inside the SDK
 /// before the tool ran, and the caller got a bare "An error occurred invoking ..." with no word on which argument
 /// was wrong or why. Such a call is now refused with a message that names the argument, says what it takes (a whole
-/// number of hours, for <c>hours_back</c>), quotes the value sent and lists the accepted parameters.</para>
+/// number of hours, for <c>hours_back</c>), quotes the value sent and lists the accepted parameters. The guard reads
+/// every argument once before the binder reads it again, so a caller-sized list is read twice.</para>
 ///
 /// <para>The advertised schema cannot make that decision: it says <c>"integer"</c> for an <c>int</c>, a <c>long</c>, a
-/// <c>short</c> and a <c>byte</c> alike, and says nothing of nullability. So <c>McpSchemaCompat</c> records each
-/// tool's parameter types as it creates the tool (<see cref="McpToolParameterTypes"/>), this reads them from the
-/// request's services, and <see cref="McpArgumentValueCheck"/> refuses exactly the values <c>System.Text.Json</c>
-/// throws on when it reads them into that type, so it cannot refuse a call the binder would have read. A tool with no
-/// record, or a call made without the services, falls back to the schema alone: a parameter advertised as an integer
-/// refuses what no integer type can read (a fraction, a word, a boolean, a whole number past <see cref="long"/>),
-/// and passes the rest, null included.</para>
+/// <c>short</c> and a <c>byte</c> alike, and does not say which parameters take a null. So <c>McpSchemaCompat</c>
+/// records each tool's parameter types as it creates the tool (<see cref="McpToolParameterTypes"/>), this reads them
+/// from the request's services, and <see cref="McpArgumentValueCheck"/> refuses exactly the values
+/// <c>System.Text.Json</c> throws on when it reads them into that type, so it cannot refuse a call the binder would
+/// have read. The record keeps each parameter's nullability only for the tests' cross-check: the refusal never reads
+/// it, because it asks the binder whether it can read the value. A tool with no record, or a call made without the
+/// services, falls back to the schema alone: a parameter advertised as an integer refuses what no integer type can
+/// read (a fraction, a word, a boolean, a whole number past <see cref="long"/>), and passes the rest, null
+/// included.</para>
 ///
 /// <para><b>The shape.</b> <see cref="McpHelpers.Refusal"/>, the house's one refusal envelope
 /// (<c>status</c> = <c>invalid</c>, <c>hints.parameter</c> = the offending key): the request as given cannot
@@ -97,8 +102,44 @@ public static class McpUnknownArgumentGuard
     /// </summary>
     public static McpRequestFilter<CallToolRequestParams, CallToolResult> Instance =>
         next => async (request, cancellationToken) =>
-            Refuse(request.Params, FindTool(request), request.Services?.GetService<McpToolParameterTypes>())
+            Refuse(request.Params, FindTool(request), RecordOf(request))
             ?? await next(request, cancellationToken);
+
+    /// <summary>
+    /// The parameter types the host recorded, from the request's services. Null when they do not resolve: a transport
+    /// that hands the filter no services, or a host that created its tools some other way. The guard then judges by
+    /// the schema alone, which passes a null for an integer parameter and leaves the SDK's bare error, so it still
+    /// runs but with less to go on. That is said once in the log, not on every call.
+    /// </summary>
+    private static McpToolParameterTypes? RecordOf(RequestContext<CallToolRequestParams> request)
+    {
+        var record = request.Services?.GetService<McpToolParameterTypes>();
+        if (record is null)
+        {
+            WarnOnceThatTheRecordDidNotResolve(request.Services ?? request.Server?.Services);
+        }
+
+        return record;
+    }
+
+    private static int s_recordWarned;
+
+    /// <summary>Warns, the first time only, that the tools' parameter types did not resolve. With no logger to ask there
+    /// is nothing to say it to, and the warning is kept for a call that has one.</summary>
+    private static void WarnOnceThatTheRecordDidNotResolve(IServiceProvider? services)
+    {
+        if (services?.GetService<ILoggerFactory>() is not { } loggerFactory
+            || Interlocked.Exchange(ref s_recordWarned, 1) != 0)
+        {
+            return;
+        }
+
+        loggerFactory.CreateLogger(typeof(McpUnknownArgumentGuard).FullName!).LogWarning(
+            "The tools' parameter types did not resolve from the request's services, so the argument guard judges an integer "
+            + "parameter by the schema alone: a null for a whole-number parameter reaches the SDK's binder, which answers with "
+            + "its own error instead of naming the argument. Register the tools through WithGeminiCompatibleTools on the same "
+            + "service collection the transport serves from.");
+    }
 
     /// <summary>
     /// The refusal, or null when the call is clean. Split from <see cref="Instance"/> so the decision is

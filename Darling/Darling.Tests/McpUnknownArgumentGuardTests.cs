@@ -417,6 +417,32 @@ public sealed class McpUnknownArgumentGuardTests
     }
 
     /// <summary>
+    /// A string takes a String token or a Null one and nothing else, so the guard decides it from the token. Reading a
+    /// string into a string copies the whole value only to throw the copy away, and the binder reads it again right
+    /// after, so a 10 MB <c>plan_xml</c> would be held a second time for nothing. The check allocates a sliver of the
+    /// value's size where reading it would allocate a copy of all of it.
+    /// </summary>
+    [Fact]
+    public void ALargeString_IsPassedWithoutBeingCopied()
+    {
+        var text = new string('x', 5_000_000);
+        using var document = JsonDocument.Parse("\"" + text + "\"");
+        var declared = new McpParameterType(typeof(string), AllowsNull: true);
+
+        /* Once to warm every path the check takes, so the second run measures only what the check itself allocates. */
+        Assert.Null(McpArgumentValueCheck.Problem("analyze_query_plan", "plan_xml", document.RootElement, declared));
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var problem = McpArgumentValueCheck.Problem("analyze_query_plan", "plan_xml", document.RootElement, declared);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Null(problem);
+        Assert.True(
+            allocated < 100_000,
+            $"The check allocated {allocated:N0} bytes for a string of {text.Length:N0} characters; reading it would copy the whole value.");
+    }
+
+    /// <summary>
     /// <see cref="Type.GetTypeCode(Type)"/> answers an enum's underlying integer type, so an enum parameter used to pass
     /// for a whole-number one: a value it could not read was refused as "a whole number ... with no decimal point", with
     /// no word of the names it takes. The refusal for an enum, or a list of one, names its members.
@@ -519,20 +545,26 @@ public sealed class McpUnknownArgumentGuardTests
         Assert.Null(ProbeRefusal("count", "\"" + sign + new string('0', zeros) + "5\""));
 
     /// <summary>
-    /// A zero written with a sign and a long run of zeros is not out of range, so it is never worded as too large or
-    /// too small: the 20 digits the widest integer type holds are counted after the leading zeros, not with them. (An
-    /// unsigned type does not read a signed text, so the guard has a verdict to give here.)
+    /// A zero written with a plus sign and a long run of zeros is not out of range, so it is never worded as too large or
+    /// too small: the 20 digits the widest integer type holds are counted after the leading zeros, not with them. A minus
+    /// sign is the one exception, and only because an unsigned type reads no sign at all (the guard has a verdict to give
+    /// here): the sign alone makes it too small, as it does for "-0" (#4956), and it is never too large.
     /// </summary>
     [Theory]
-    [InlineData("-")]
-    [InlineData("+")]
-    public void ASignedRunOfZeros_IsNotWordedAsOutOfRange(string sign)
+    [InlineData("+", false)]
+    [InlineData("-", true)]
+    public void ASignedRunOfZeros_IsWordedAsTooSmallOnlyWhenItCarriesAMinus(string sign, bool tooSmall)
     {
         var message = ProbeRefusal("huge", "\"" + sign + new string('0', 30) + "\"");
 
         Assert.True(
-            message is null || !message.Contains("which is too", StringComparison.Ordinal),
-            "A zero is within every range, but the refusal says: " + message);
+            message is null || !message.Contains("which is too large", StringComparison.Ordinal),
+            "A zero is never too large, but the refusal says: " + message);
+        Assert.True(
+            tooSmall ? message?.Contains("which is too small.", StringComparison.Ordinal) == true
+                : message is null || !message.Contains("which is too", StringComparison.Ordinal),
+            (tooSmall ? "A minus sign on an unsigned type is too small, but the refusal says: " : "A zero is within every range, but the refusal says: ")
+            + message);
     }
 
     /// <summary>
