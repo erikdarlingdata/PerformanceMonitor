@@ -4246,6 +4246,48 @@ public sealed class DarlingManagedPostgresTests
         Assert.True(tail > diagnosis, "the loader diagnosis has to precede the server-log tail it explains");
     }
 
+    [Fact]
+    public void InterruptedRuntimeUpdateHint_WithTheMarker_NamesTheMarkerAndThePreviousRuntime()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pm-hint-" + Guid.NewGuid().ToString("N"), "pg-runtime");
+        var marker = DarlingStoreUpgrade.RescueMarkerPath(root);
+        Directory.CreateDirectory(Path.GetDirectoryName(marker)!);
+        File.WriteAllText(marker, "x");
+        try
+        {
+            var hint = DarlingManagedPostgres.InterruptedRuntimeUpdateHint(root);
+
+            Assert.NotNull(hint);
+            Assert.StartsWith("\n", hint, StringComparison.Ordinal);
+            Assert.Contains(marker, hint, StringComparison.Ordinal);
+            Assert.Contains(Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(root), "pgsql"), hint, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(root)!, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void InterruptedRuntimeUpdateHint_WithoutTheMarker_IsNull()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pm-hint-" + Guid.NewGuid().ToString("N"), "pg-runtime");
+
+        Assert.Null(DarlingManagedPostgres.InterruptedRuntimeUpdateHint(root));
+    }
+
+    [Fact]
+    public void TheStartFailurePath_LogsAtErrorAndAppendsTheInterruptedUpdateHint()
+    {
+        var source = ReadManagedPostgresSource();
+
+        Assert.Contains("InterruptedRuntimeUpdateHint(_runtimeRoot)", source, StringComparison.Ordinal);
+        var hint = source.IndexOf("InterruptedRuntimeUpdateHint(_runtimeRoot)", StringComparison.Ordinal);
+        var logError = source.IndexOf("_logger.LogError(\"pg_ctl start failed while a runtime update is unfinished", hint, StringComparison.Ordinal);
+        var thrown = source.IndexOf("throw new InvalidOperationException(message);", hint, StringComparison.Ordinal);
+        Assert.True(logError > hint && thrown > logError, "the error log has to precede the throw");
+    }
+
     /// <summary>
     /// The wiring, pinned at the source: three correct builders that no throw site calls would leave the
     /// shipped message exactly as it was reported. Behavioral coverage cannot reach these — reproducing
