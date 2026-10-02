@@ -329,13 +329,35 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// <see cref="XeSessionEnsureException"/> for the #1086 health surface) instead of letting a
     /// zero-row read record SUCCESS.</para>
     /// </summary>
-    private Task EnsureDatabaseScopedXeSessionsAsync(
+    private async Task EnsureDatabaseScopedXeSessionsAsync(
         ServerConnection server,
         string captureName,
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
-        CancellationToken cancellationToken) =>
-        EnsureDatabaseScopedXeSessionsAsync(server, captureName, sessionName, ensureAsync, plannedDatabases: null, cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        /* A test replaces the open and the ensure in each database. Null in production. */
+        var ensureInDatabase = XeSessionDatabaseEnsureOverrideForTests;
+
+        await EnsureDatabaseScopedXeSessionsAsync(
+            server, captureName, sessionName, ensureAsync, plannedDatabases: null, cancellationToken,
+            ensureInDatabaseOverrideForTests: ensureInDatabase is null
+                ? null
+                : (databaseName, token) => ensureInDatabase(server, sessionName, databaseName, token));
+    }
+
+    /// <summary>
+    /// A test replaces the always-on sessions' listing of the databases to ensure, which the shared ensure otherwise reads
+    /// from the server. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, CancellationToken, Task<List<string>>>? XeSessionDatabaseListOverrideForTests { get; set; }
+
+    /// <summary>
+    /// A test replaces the open and the ensure in one database for the always-on sessions: the server, the session name and
+    /// the database. A failure from it reaches the shared ensure's per-database catch like a refusal from the server. Null in
+    /// production.
+    /// </summary>
+    internal Func<ServerConnection, string, string, CancellationToken, Task>? XeSessionDatabaseEnsureOverrideForTests { get; set; }
 
     /// <summary>
     /// <see cref="EnsureDatabaseScopedXeSessionsAsync(ServerConnection, string, string, Func{SqlConnection, CancellationToken, Task}, CancellationToken)"/>
@@ -368,7 +390,15 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         {
             try
             {
-                databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+                /* A test replaces the listing. Null in production. */
+                if (XeSessionDatabaseListOverrideForTests is { } listOverride)
+                {
+                    databases = await listOverride(server, cancellationToken);
+                }
+                else
+                {
+                    databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+                }
             }
             catch (SqlException ex)
             {
