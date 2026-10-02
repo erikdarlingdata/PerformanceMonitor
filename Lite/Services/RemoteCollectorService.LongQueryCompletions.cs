@@ -51,6 +51,12 @@ public partial class RemoteCollectorService
        SqlException's number (PERMISSIONS for a denied ALTER ANY EVENT SESSION, ERROR otherwise). */
     private readonly ConcurrentDictionary<string, Exception> _longQueryTraceFault = new();
 
+    /* #4964: the servers whose create has already logged its failure at Warning, kept until a later create succeeds. The
+       create runs on every cycle, on purpose: each attempt keeps its fault (above), so the run reads SESSION_MISSING. Only
+       the log level of a repeated failure changes, from Warning to Debug. Lite has no reconnect to reset it, because it
+       creates on every cycle: a reconnect is the first create that succeeds. In memory, so a restart warns again. */
+    private readonly ConcurrentDictionary<string, bool> _longQueryTraceCreateWarned = new();
+
     /* The engine edition the reconcile judges a server by. Its own instance, because the app's other one lives in the main
        window. A known live edition wins and is remembered, so a blank status that a failed connection check wrote leaves the
        server judged by the edition it had. Its dictionary is concurrent: the per-server tasks run in parallel. */
@@ -117,6 +123,15 @@ public partial class RemoteCollectorService
         var retry = _longQueryTraceDropRetry.GetOrAdd(server.Id, _ => new LongQueryTraceDropRetry());
         var afterTheCap = retry.RetryDue(stateKey, utcNow);
 
+        /* #4964: a create that already warned logs its repeated failure at Debug. Turning the trace off ends the run of
+           create failures, so a failure after turning it on again warns again. */
+        if (!enabled)
+        {
+            _longQueryTraceCreateWarned.TryRemove(server.Id, out _);
+        }
+
+        var createRepeats = enabled && _longQueryTraceCreateWarned.ContainsKey(server.Id);
+
         try
         {
             if (enabled)
@@ -125,6 +140,7 @@ public partial class RemoteCollectorService
 
                 /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
                 _longQueryTraceFault.TryRemove(server.Id, out _);
+                _longQueryTraceCreateWarned.TryRemove(server.Id, out _);
 
                 /* Azure SQL Database: drop the session from listed databases outside the monitored set, when
                    the plan's settings changed since the last pass that finished (and once after each start), or
@@ -177,8 +193,18 @@ public partial class RemoteCollectorService
         catch (Exception ex)
         {
             /* Leave the applied state unchanged so the next cycle retries; a failed reconcile must
-               never break the collection loop. */
-            AppLogger.Warn("XeSession", $"[{server.DisplayName}] Failed to reconcile long-query completion XE session: {ex.Message}");
+               never break the collection loop. #4964: the first failure of a create that cannot succeed logs at Warning;
+               the cycles after it retry just the same, and keep the fault just the same below, but log at Debug until a
+               create succeeds. */
+            var reconcileFailure = $"[{server.DisplayName}] Failed to reconcile long-query completion XE session: {ex.Message}";
+            if (createRepeats)
+            {
+                AppLogger.Debug("XeSession", reconcileFailure);
+            }
+            else
+            {
+                AppLogger.Warn("XeSession", reconcileFailure);
+            }
 
             /* #3754: and while ENABLING, remember it, so this cycle's run of the collector is classified
                from this exception instead of reading an absent session as a quiet one. A DISABLING failure
@@ -187,6 +213,7 @@ public partial class RemoteCollectorService
             if (enabled)
             {
                 _longQueryTraceFault[server.Id] = ex;
+                _longQueryTraceCreateWarned[server.Id] = true;
             }
         }
     }
