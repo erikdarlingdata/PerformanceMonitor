@@ -153,8 +153,17 @@ internal sealed class KnownEngineEditions
     /// </summary>
     public IReadOnlyList<string> SeparatelyMonitoredDatabases(
         ServerConnection self, int liveEdition, IEnumerable<ServerConnection> servers) =>
+        SeparatelyMonitoredDatabases(IsAzureSqlDatabase(self, liveEdition), self, servers);
+
+    /// <summary>
+    /// <see cref="AzureMasterScope.SeparatelyMonitoredDatabases"/> for a configured server whose edition the caller
+    /// already knows. The long-query trace's session lifecycle calls this from its Azure SQL Database branch, so
+    /// the trace and the alerts skip the same databases.
+    /// </summary>
+    public static IReadOnlyList<string> SeparatelyMonitoredDatabases(
+        bool isAzureSqlDatabase, ServerConnection self, IEnumerable<ServerConnection> servers) =>
         AzureMasterScope.SeparatelyMonitoredDatabases(
-            IsAzureSqlDatabase(self, liveEdition),
+            isAzureSqlDatabase,
             self.Id, self.ServerName, self.DatabaseName,
             servers.Select(t => new AlertTargetIdentity(t.Id, t.ServerName, t.DatabaseName, t.IsEnabled, t.ReadOnlyIntent)));
 

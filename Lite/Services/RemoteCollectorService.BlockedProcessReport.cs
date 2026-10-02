@@ -329,22 +329,45 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// <see cref="XeSessionEnsureException"/> for the #1086 health surface) instead of letting a
     /// zero-row read record SUCCESS.</para>
     /// </summary>
+    private Task EnsureDatabaseScopedXeSessionsAsync(
+        ServerConnection server,
+        string captureName,
+        string sessionName,
+        Func<SqlConnection, CancellationToken, Task> ensureAsync,
+        CancellationToken cancellationToken) =>
+        EnsureDatabaseScopedXeSessionsAsync(server, captureName, sessionName, ensureAsync, plannedDatabases: null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="EnsureDatabaseScopedXeSessionsAsync(ServerConnection, string, string, Func{SqlConnection, CancellationToken, Task}, CancellationToken)"/>
+    /// over a list the caller already planned. The always-on deadlock and blocked-process sessions pass none and
+    /// follow the inventory, as before. The long-query trace passes its plan's create list
+    /// (<see cref="LongQueryTraceDatabases.Plan"/>): the monitored databases, minus those monitored as their own
+    /// servers. An empty plan ensures nothing and does not throw.
+    /// </summary>
     private async Task EnsureDatabaseScopedXeSessionsAsync(
         ServerConnection server,
         string captureName,
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
+        IReadOnlyList<string>? plannedDatabases,
         CancellationToken cancellationToken)
     {
-        List<string> databases;
-        try
+        IReadOnlyList<string> databases;
+        if (plannedDatabases is not null)
         {
-            databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+            databases = plannedDatabases;
         }
-        catch (SqlException ex)
+        else
         {
-            AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to enumerate databases for {captureName} XE sessions: {ex.Message}");
-            throw new XeSessionEnsureException(captureName, ex);
+            try
+            {
+                databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+            }
+            catch (SqlException ex)
+            {
+                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to enumerate databases for {captureName} XE sessions: {ex.Message}");
+                throw new XeSessionEnsureException(captureName, ex);
+            }
         }
 
         int attempted = 0;

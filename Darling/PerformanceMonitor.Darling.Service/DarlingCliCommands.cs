@@ -5386,7 +5386,7 @@ public static class DarlingCliCommands
         "server's own row instead (its display name or storage name, as the Viewer and the MCP tools show it)." + Environment.NewLine +
         "Only the enabled flag is written; a frequency or retention override already on the row is kept." + Environment.NewLine +
         Environment.NewLine +
-        "Known collectors (\"ships OFF\" = opt-in, like long_query_completions, whose enabling creates its Extended Events session on the monitored servers and whose disabling drops it):" + Environment.NewLine +
+        "Known collectors (\"ships OFF\" = opt-in, like long_query_completions, whose enabling creates its Extended Events session on the monitored servers (on Azure SQL Database, in each monitored database) and whose disabling drops it):" + Environment.NewLine +
         KnownCollectorsText();
 
     /// <summary>

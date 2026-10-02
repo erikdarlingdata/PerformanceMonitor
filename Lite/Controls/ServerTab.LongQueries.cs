@@ -38,7 +38,7 @@ public partial class ServerTab
     private async Task RefreshLongQueriesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         LongQueriesDisabledWarning.Text = LongQueriesDisabledText(_isAzureSqlDatabase);
-        LongQueriesDisabledWarning.Visibility =_isLongQueryTraceEnabled()
+        LongQueriesDisabledWarning.Visibility = _isLongQueryTraceEnabled()
             ? Visibility.Collapsed
             : Visibility.Visible;
 

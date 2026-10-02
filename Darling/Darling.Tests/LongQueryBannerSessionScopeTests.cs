@@ -39,7 +39,7 @@ public sealed class LongQueryBannerSessionScopeTests
         var text = ViewerServerTab.LongQueriesDisabledText(CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
 
         Assert.EndsWith(
-            "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from each one.",
+            "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from every database that has it, except databases monitored as their own servers.",
             text,
             StringComparison.Ordinal);
         Assert.DoesNotContain("session on this server", text, StringComparison.Ordinal);
@@ -69,7 +69,7 @@ public sealed class LongQueryBannerSessionScopeTests
         var readme = File.ReadAllText(RepoPath("Darling", "README.md"));
 
         Assert.Contains(
-            "On Azure SQL Database the session is database-scoped, so it is created in each monitored database and dropped from each one.",
+            "On Azure SQL Database the session is database-scoped. Enabling it creates the session in each monitored database and drops it from any other database that has it. Disabling it drops the session from every database that has it. A database that is also monitored as its own server is left to that registration.",
             readme,
             StringComparison.Ordinal);
     }

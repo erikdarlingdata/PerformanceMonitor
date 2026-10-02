@@ -1452,6 +1452,15 @@ LIMIT 1";
         public string? LongQueryTraceFault { get; set; }
 
         public string? LongQueryTracePartialNote { get; set; }
+
+        /* The state key the last applied reconcile ran under (LongQueryTraceDatabases.StateKey). On Azure SQL
+           Database the trace's databases depend on the #3477 scope, the exclusions and the databases monitored
+           as their own servers, so a change to any of them re-runs the reconcile. Null on every other engine.
+           Reset with the latch on every (re)connect. */
+        public string? LongQueryTraceAppliedKey { get; set; }
+
+        /* Failed cleanup passes in a row, for LongQueryTraceDatabases.DropAttemptCap. Reset on every (re)connect. */
+        public LongQueryTraceDropRetry LongQueryTraceDropRetry { get; } = new();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -2640,7 +2649,15 @@ LIMIT 1";
             databaseScope: (collectorName, serverId) => StoreConfigProvider.ResolveDatabaseScope(collectorName, serverId, _scheduleOverrides),
             logHashKey: logHashKey,
             /* #4659: shared with the alert read adapter (BuildAlertEngine). */
-            queryStoreWriteFence: _queryStoreWriteFence);
+            queryStoreWriteFence: _queryStoreWriteFence,
+            /* The databases monitored as their own servers, from the same live store set the alert sweep uses:
+               the long-query trace leaves them to their own registrations, in its lifecycle and its read. */
+            separatelyMonitoredDatabases: runtime => AzureMasterScope.SeparatelyMonitoredDatabases(
+                runtime.Target.IsAzureSqlDb,
+                runtime.ServerId.ToString(CultureInfo.InvariantCulture),
+                runtime.Config.Host,
+                runtime.Config.Database,
+                LiveAlertTargets(_registryState.Read()?.Servers)));
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
@@ -3995,9 +4012,12 @@ LIMIT 1";
     /// <summary>
     /// Reconciles the OPT-IN long-query completion XE session (#1496) to its resolved enabled flag, once
     /// the desired state differs from what was last applied to this server (tracked in
-    /// <see cref="ServerLoopState.LongQueryTraceApplied"/> so steady state — a default-off collector —
-    /// opens no connection at all). Enabling creates the server-side session; disabling drops it. A
-    /// failure leaves the applied state unchanged so the next sweep retries, and never breaks the sweep.
+    /// <see cref="ServerLoopState.LongQueryTraceApplied"/>, and on Azure SQL Database in
+    /// <see cref="ServerLoopState.LongQueryTraceAppliedKey"/> too, so steady state — a default-off
+    /// collector — opens no connection at all). Enabling creates the session; disabling drops it. A
+    /// failure leaves the applied state unchanged so the next sweep retries (a failed drop on Azure SQL
+    /// Database up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/> times in a row), and never
+    /// breaks the sweep.
     /// </summary>
     private async Task ReconcileLongQueryTraceAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
     {
@@ -4030,7 +4050,24 @@ LIMIT 1";
     /// </summary>
     internal static async Task ReconcileLongQueryTraceAsync(ServerLoopState server, DarlingCollectorRunner runner, bool enabled, ILogger logger, CancellationToken cancellationToken)
     {
-        if (server.Runtime is null || server.LongQueryTraceApplied == enabled)
+        if (server.Runtime is null)
+        {
+            return;
+        }
+
+        /* On Azure SQL Database the trace follows the monitored set, so the latch also holds what that set
+           depended on: the scope the read loop resolves (the runner's own accessor, not a copy), the exclusions,
+           and the databases monitored as their own servers. Any change re-runs the reconcile, which drops the
+           session from a database newly left out. */
+        var stateKey = server.Runtime.Target.IsAzureSqlDb
+            ? LongQueryTraceDatabases.StateKey(
+                enabled,
+                runner.DatabaseScopeFor(LongQueryCompletionsCollector.Instance.Name, server.Runtime.ServerId),
+                server.Runtime.Config.ExcludedDatabases,
+                runner.SeparatelyMonitoredDatabasesFor(server.Runtime))
+            : null;
+
+        if (server.LongQueryTraceApplied == enabled && string.Equals(server.LongQueryTraceAppliedKey, stateKey, StringComparison.Ordinal))
         {
             return;
         }
@@ -4039,6 +4076,8 @@ LIMIT 1";
         {
             var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(server.Runtime, runner, enabled, logger, cancellationToken);
             server.LongQueryTraceApplied = enabled;
+            server.LongQueryTraceAppliedKey = stateKey;
+            server.LongQueryTraceDropRetry.Reset();
 
             /* #3754: a reconcile that returned is one the session exists after - everywhere, or (Azure)
                everywhere it could. Clear the fault, and carry the partial note if there was one. Nulled
@@ -4047,6 +4086,29 @@ LIMIT 1";
                and the next reconcile (which runs first, in this same sweep) has already replaced it. */
             server.LongQueryTraceFault = null;
             server.LongQueryTracePartialNote = enabled ? partialNote : null;
+        }
+        catch (LongQueryTraceDropException ex)
+        {
+            /* Azure SQL Database: a drop failed, or the databases could not be listed for it. While enabling, the
+               create side had finished, so the fault clears and its partial note stands. The latch stays unset so
+               the next sweep tries again, until the cap: then the reconcile counts as applied, and one warning
+               names the databases where the session may remain. */
+            if (enabled)
+            {
+                server.LongQueryTraceFault = null;
+                server.LongQueryTracePartialNote = ex.CreateNote;
+            }
+
+            if (server.LongQueryTraceDropRetry.RecordFailure(stateKey ?? string.Empty))
+            {
+                server.LongQueryTraceApplied = enabled;
+                server.LongQueryTraceAppliedKey = stateKey;
+                logger.LogWarning("[{Server}] {Message}", server.Config.DisplayName, LongQueryTraceDatabases.GiveUpWarning(ex.Databases));
+            }
+            else
+            {
+                logger.LogWarning("[{Server}] {Message} The next sweep tries again.", server.Config.DisplayName, ex.Message);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -10323,6 +10385,8 @@ AND   j.hypertable_name = '{relation}'", connection))
                name databases the reconnect may have just fixed. */
             server.LongQueryTraceFault = null;
             server.LongQueryTracePartialNote = null;
+            server.LongQueryTraceAppliedKey = null;
+            server.LongQueryTraceDropRetry.Reset();
             /* Capture the id once, while the connection is freshly established and non-null: an on-load
                RunOneAsync below can drop server.Runtime on a mid-collection connection-level failure, so any
                later read of server.Runtime.ServerId (the schedule resolve, the connection edge) would NRE. */

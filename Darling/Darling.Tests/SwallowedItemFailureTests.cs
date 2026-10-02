@@ -66,8 +66,10 @@ public sealed class SwallowedItemFailureTests
     /// <summary>
     /// The Azure arm of the long-query reconcile keeps the #2623 account over the databases it tried to
     /// ENABLE in, throws the first refusal when every database refused (so the worker does not latch and
-    /// the run classifies SESSION_MISSING), and returns the partial note when some did. The DROP arm is
-    /// deliberately not scored: no run is dispatched while disabled.
+    /// the run classifies SESSION_MISSING), and returns the partial note when some did. Drops are
+    /// deliberately not scored: no run is dispatched while disabled, and a drop outside the monitored set is
+    /// not a capture outage. The scored loop runs only on the ENABLE side; drops go through the shared
+    /// LongQueryTraceDatabases.DropEachAsync.
     /// </summary>
     [Fact]
     public void TheAzureReconcile_ThrowsWhenEveryDatabaseRefused_AndReturnsThePartialNoteWhenSomeDid()
@@ -77,9 +79,10 @@ public sealed class SwallowedItemFailureTests
         Assert.Contains("public static async Task<string?> ReconcileLongQueryCompletionsAsync(", source, StringComparison.Ordinal);
         Assert.Contains("private static async Task<string?> ReconcileLongQueryCompletionsAzureAsync(", source, StringComparison.Ordinal);
 
-        /* Scored only while enabling. */
-        Assert.Contains("if (enabled)\n            {\n                attempted++;\n            }", source, StringComparison.Ordinal);
-        Assert.Contains("if (enabled)\n                {\n                    failed++;\n                    failedDatabases.Add(databaseName);\n                    CollectorFaultDatabase.Stamp(ex, databaseName);\n                    firstFailure ??= ex;\n                }", source, StringComparison.Ordinal);
+        /* Scored only while enabling: the loop over the plan's create list counts, the drops do not. */
+        Assert.Contains("foreach (var databaseName in LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored).Create)\n        {\n            cancellationToken.ThrowIfCancellationRequested();\n            attempted++;", source, StringComparison.Ordinal);
+        Assert.Contains("failed++;\n                failedDatabases.Add(databaseName);\n                CollectorFaultDatabase.Stamp(ex, databaseName);\n                firstFailure ??= ex;", source, StringComparison.Ordinal);
+        Assert.Contains("LongQueryTraceDatabases.DropEachAsync(", source, StringComparison.Ordinal);
 
         /* All refused: the first failure, raw, after the summary line. Same predicate as the runners'. */
         Assert.Contains("if (attempted > 0 && failed == attempted && firstFailure is not null)", source, StringComparison.Ordinal);
@@ -87,9 +90,10 @@ public sealed class SwallowedItemFailureTests
 
         /* Some refused: the shared composer, so the wording is the runners'. */
         Assert.Contains(
-            "return EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure?.Message);",
+            "var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure?.Message);",
             source,
             StringComparison.Ordinal);
+        Assert.Contains("return partialNote;", source, StringComparison.Ordinal);
 
         /* The per-database warning that names the refusing database is KEPT - the account rides beside
            it, it does not replace it. */

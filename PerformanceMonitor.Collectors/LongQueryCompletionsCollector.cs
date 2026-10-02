@@ -136,12 +136,20 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
     /// <summary>
+    /// The read covers the databases the session lifecycle covers (<see cref="LongQueryTraceDatabases"/>). A database
+    /// monitored as its own server owns its session, so the logical server's registration skips it here too: reading
+    /// it would fail every cycle while that database's trace is off (a missing session is a read failure), and store
+    /// its events twice while it is on.
+    /// </summary>
+    public override bool SkipsSeparatelyMonitoredDatabases => true;
+
+    /// <summary>
     /// The last sentence of the banner that Lite and the Darling Viewer show while this trace is off: where turning
     /// it on creates the Extended Events session, and where turning it off drops it. On Azure SQL Database that is
     /// each monitored database (<see cref="RunsPerDatabase"/>); on every other engine it is the server.
     /// </summary>
     public static string SessionScopeSentence(bool isAzureSqlDatabase) => isAzureSqlDatabase
-        ? "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from each one."
+        ? "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from every database that has it, except databases monitored as their own servers."
         : "Enabling it creates the Extended Events session on this server. Disabling it drops the session.";
 
     /// <summary>

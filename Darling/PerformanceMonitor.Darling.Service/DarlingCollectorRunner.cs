@@ -394,7 +394,8 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// The #3477 database scope for one collector on one server: per-server row, then fleet row, then unscoped (empty).
-    /// The read loop and the long-query trace's lifecycle both resolve it here, so they cannot disagree.
+    /// The same delegate the read loop resolves at dispatch, so the long-query trace's lifecycle and its read cannot
+    /// disagree about which databases are in scope.
     /// </summary>
     internal IReadOnlyList<string> DatabaseScopeFor(string collectorName, int serverId) => _databaseScope(collectorName, serverId);
 
@@ -1974,7 +1975,7 @@ public sealed class DarlingCollectorRunner
            row > fleet row > unscoped, the schedule table's own layering) so the enumeration, the
            per-database loop and the dispatch probe all see the same list within one run. Empty =
            unscoped = every database the server enumerates — the shipped state of every install. */
-        var databaseScope = DatabaseScopeFor(definition.Name, server.ServerId);
+        var databaseScope = _databaseScope(definition.Name, server.ServerId);
 
         /* #2797: on the two FAN-OUT paths the answer to this read is thrown away — both of them overwrite
            context.Watermark with a per-database value before any query is built — so skip the round trip
@@ -2230,6 +2231,13 @@ public sealed class DarlingCollectorRunner
                 : AzureDatabaseListOverrideForTests is { } listOverride
                     ? await listOverride(server, cancellationToken)
                     : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
+
+            /* The long-query trace leaves a database monitored as its own server to that registration, so its
+               read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases). */
+            if (definition.SkipsSeparatelyMonitoredDatabases)
+            {
+                databases = AzureSweepScope.WithoutSeparatelyMonitored(databases, SeparatelyMonitoredDatabasesFor(server));
+            }
 
             var attempted = 0;
             var failed = 0;

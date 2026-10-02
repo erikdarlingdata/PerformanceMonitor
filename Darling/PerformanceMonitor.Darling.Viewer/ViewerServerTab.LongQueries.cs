@@ -37,7 +37,7 @@ public partial class ViewerServerTab
     private async Task LoadLongQueriesAsync()
     {
         LongQueriesDisabledWarning.Text = LongQueriesDisabledText(_server.EngineEdition);
-        LongQueriesDisabledWarning.Visibility =await _dataService.GetLongQueryTraceEnabledAsync(_server.ServerId)
+        LongQueriesDisabledWarning.Visibility = await _dataService.GetLongQueryTraceEnabledAsync(_server.ServerId)
             ? Visibility.Collapsed
             : Visibility.Visible;
 
