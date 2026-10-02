@@ -160,21 +160,32 @@ WHERE collection_time >= $2";
         };
     }
 
-    /* Keyed on rtrim(wait_type): SQL Server reports a few wait names with a trailing space, which the
-       collector stores trimmed from #4884 on, so a window that spans the upgrade is one fact per wait. */
+    /* One fact per wait across the #4884 spelling change: SQL Server reports a few wait names with a trailing
+       space, which the collector stores trimmed from #4884 on. The inner query sums per stored spelling, the
+       aggregation this read always ran; the outer query merges the spellings on rtrim(wait_type), once per group
+       rather than once per row. Sums of sums are exact. */
     public const string WaitStatsSql = @"
 SELECT
     rtrim(wait_type) AS wait_type,
-    SUM(delta_waiting_tasks) AS total_waiting_tasks,
-    SUM(delta_wait_time_ms) AS total_wait_time_ms,
-    SUM(delta_signal_wait_time_ms) AS total_signal_wait_time_ms
-FROM v_wait_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   delta_wait_time_ms > 0
+    SUM(waiting_tasks) AS total_waiting_tasks,
+    SUM(wait_time_ms) AS total_wait_time_ms,
+    SUM(signal_wait_time_ms) AS total_signal_wait_time_ms
+FROM
+(
+    SELECT
+        wait_type,
+        SUM(delta_waiting_tasks) AS waiting_tasks,
+        SUM(delta_wait_time_ms) AS wait_time_ms,
+        SUM(delta_signal_wait_time_ms) AS signal_wait_time_ms
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   delta_wait_time_ms > 0
+    GROUP BY wait_type
+) AS per_spelling
 GROUP BY rtrim(wait_type)
-ORDER BY SUM(delta_wait_time_ms) DESC";
+ORDER BY SUM(wait_time_ms) DESC";
 
     /// <summary>
     /// Collects wait stats facts — one Fact per significant wait type.

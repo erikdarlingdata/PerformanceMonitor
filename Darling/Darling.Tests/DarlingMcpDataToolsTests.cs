@@ -525,10 +525,13 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("SUM(delta_wait_time_ms)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_signal_wait_time_ms)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_waiting_tasks)", sql, StringComparison.Ordinal);
-        /* #4884: a wait stored with and without its trailing space is one row under the clean name. */
+        /* #4884: a wait stored with and without its trailing space is one row under the clean name. The deltas
+           sum per stored name first (the bare GROUP BY), then the spellings merge on rtrim, once per group. */
+        Assert.Contains("GROUP BY wait_type", sql, StringComparison.Ordinal);
+        Assert.Contains(") AS per_spelling", sql, StringComparison.Ordinal);
         Assert.Contains("rtrim(wait_type) AS wait_type", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY rtrim(wait_type)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(delta_wait_time_ms) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY SUM(wait_time_ms) DESC", sql, StringComparison.Ordinal);
         /* #3541 A3: the cap is the caller's ($4), not the 50 that sat under a limit the tool accepts up to
            1,000 — the shape DarlingPgWaitReader already fixed for the PostgreSQL twin. */
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);

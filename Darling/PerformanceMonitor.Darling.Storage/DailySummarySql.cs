@@ -32,15 +32,22 @@ public static class DailySummarySql
     /// counts, and a day spine (UNION of every source's days) LEFT JOINed so a quiet-but-collected day still
     /// appears (Healthy, not No-Data). The high-CPU rule (total host CPU = SQL + other-process &gt;= 80, Linux
     /// NULL-other-process fallback) mirrors the alert engine and the Overview headline.
-    /// The per-wait sums key on <c>rtrim(wait_type)</c>: SQL Server reports a few wait names with a trailing
-    /// space, which the collector stores trimmed from #4884 on, so a day that spans the upgrade sums both
-    /// spellings under the clean name before it picks the top wait.
+    /// The per-wait sums merge spellings on <c>rtrim(wait_type)</c>: SQL Server reports a few wait names with a
+    /// trailing space, which the collector stores trimmed from #4884 on, so a day that spans the upgrade sums both
+    /// spellings under the clean name before it picks the top wait. <c>wait_per_spelling</c> is the per-day,
+    /// per-stored-name aggregation this read always ran; <c>wait_per_type</c> merges its groups, so the trim runs
+    /// once per group rather than once per row.
     /// </summary>
     public const string RangeSql = """
-        WITH wait_per_type AS (
-            SELECT date_trunc('day', collection_time) AS d, rtrim(wait_type) AS wait_type, SUM(delta_wait_time_ms) AS ms
+        WITH wait_per_spelling AS (
+            SELECT date_trunc('day', collection_time) AS d, wait_type, SUM(delta_wait_time_ms) AS ms
             FROM v_wait_stats
             WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND delta_wait_time_ms > 0
+            GROUP BY 1, 2
+        ),
+        wait_per_type AS (
+            SELECT d, rtrim(wait_type) AS wait_type, SUM(ms) AS ms
+            FROM wait_per_spelling
             GROUP BY 1, 2
         ),
         wait_totals AS (

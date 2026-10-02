@@ -44,6 +44,9 @@ public sealed class WaitNameSpacedHistoryLivePostgresTests
        FinOps category ('Other') as EDC_DOPP_LOCK. */
     private const string Rival = "PREEMPTIVE_OS_WRITEFILE";
 
+    /* Another of the four names, which sorts below EDC_DOPP_LOCK in both spellings. */
+    private const string Lower = "EDC_DOPP_BACKGROUND";
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /* ─────────────────────────── viewer ─────────────────────────── */
@@ -278,6 +281,53 @@ public sealed class WaitNameSpacedHistoryLivePostgresTests
             start, end, ct);
 
         Assert.Equal(new[] { expected.ToString(System.Globalization.CultureInfo.InvariantCulture) }, rows);
+    });
+
+    /* A guard, not a red-first pin: gte and lt compile the same with or without the flag. The trailing space sorts
+       the spaced spelling just after the clean one, so gte on the clean name keeps its spaced history and lt drops
+       both spellings, and it moves no other name across the clean one. Lower, stored both ways, is the name below. */
+    [Theory]
+    [InlineData("gte", 1100.0)]
+    [InlineData("lt", 100.0)]
+    public Task CustomViewRangeFilteredByTheCleanName_KeepsBothSpellingsOnOneSide_AgainstDevPostgres(string op, double expected) => RunAsync(async (connection, _, _, ct) =>
+    {
+        var (start, end) = await SeedSplitTotalsAsync(connection, ct);
+        await InsertWaitStatAsync(connection, ct, start.AddMinutes(5), Lower + " ", deltaWaitMs: 70, deltaTasks: 1, sampleIntervalSeconds: 60);
+        await InsertWaitStatAsync(connection, ct, end.AddMinutes(-5), Lower, deltaWaitMs: 30, deltaTasks: 1, sampleIntervalSeconds: 60);
+
+        var rows = await RunPanelAsync(connection,
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_delta_ms\",\"aggregate\":\"sum\",\"viz\":\"stat\","
+                + "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"" + op + "\",\"value\":\"" + Clean + "\"}]}",
+            start, end, ct);
+
+        /* gte: EDC_DOPP_LOCK in both spellings (600) and the rival (500). lt: Lower in both spellings (100). */
+        Assert.Equal(new[] { expected.ToString(System.Globalization.CultureInfo.InvariantCulture) }, rows);
+    });
+
+    /* A top-N time series with the "(other)" fold ranks the wait by both spellings together, so the name stored both
+       ways wins the one slot, and its two spellings chart as one series. Ranked one spelling at a time, each spelling
+       (300) loses to the rival (500), and the whole wait would fold into "(other)". */
+    [Fact]
+    public Task CustomViewTopNSeriesWithOther_ANameStoredBothWays_IsOneSeriesInTheTopN_AgainstDevPostgres() => RunAsync(async (connection, _, _, ct) =>
+    {
+        var (start, end) = await SeedSplitTotalsAsync(connection, ct);
+
+        var rows = await RunPanelAsync(connection,
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_delta_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":1,"
+                + "\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"stacked\"}",
+            start, end, ct);
+
+        /* Each row is bucket|series|value; the two seeded collections can fall in two hour buckets, so sum each
+           series over the buckets. */
+        var totals = rows
+            .Select(row => row.Split('|'))
+            .GroupBy(cells => cells[1], StringComparer.Ordinal)
+            .OrderBy(series => series.Key, StringComparer.Ordinal)
+            .Select(series => series.Key + "=" + series.Sum(cells => double.Parse(cells[^1], System.Globalization.CultureInfo.InvariantCulture))
+                .ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .ToArray();
+
+        Assert.Equal(new[] { $"{ComposeCompiler.OtherSeriesLabel}=500", $"{Clean}=600" }, totals);
     });
 
     /* ─────────────────────────── plumbing ─────────────────────────── */

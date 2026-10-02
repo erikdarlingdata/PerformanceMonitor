@@ -484,11 +484,33 @@ ORDER BY c.database_name";
         return (byTotal, byAvg);
     }
 
-    /// <summary>Wait stats grouped by cost category over the window. Each wait is keyed on <c>rtrim(wait_type)</c>,
-    /// so a wait stored with and without the trailing space the collector trimmed from #4884 on is one wait, with its
-    /// summed time, when the category's top wait is picked. $1 server_id, $2 cutoff.</summary>
+    /// <summary>Wait stats grouped by cost category over the window. A wait stored with and without the trailing
+    /// space the collector trimmed from #4884 on is one wait, with its summed time, when the category's top wait is
+    /// picked: <c>per_spelling</c> sums per stored name, <c>per_wait</c> merges the spellings on
+    /// <c>rtrim(wait_type)</c> (once per group, not per row), and the category is read from the clean name, so both
+    /// spellings always land in the same category. $1 server_id, $2 cutoff.</summary>
     public const string WaitCategorySummarySql = @"
-WITH categorized AS (
+WITH per_spelling AS (
+    SELECT
+        wait_type,
+        SUM(delta_wait_time_ms) AS wait_time_ms,
+        SUM(delta_waiting_tasks) AS waiting_tasks
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_wait_time_ms IS NOT NULL
+    AND   delta_wait_time_ms > 0
+    GROUP BY wait_type
+),
+per_wait AS (
+    SELECT
+        rtrim(wait_type) AS wait_type,
+        SUM(wait_time_ms) AS wait_time_ms,
+        SUM(waiting_tasks) AS waiting_tasks
+    FROM per_spelling
+    GROUP BY rtrim(wait_type)
+),
+categorized AS (
     SELECT
         CASE
             WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
@@ -499,25 +521,10 @@ WITH categorized AS (
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
             ELSE 'Other'
         END AS category,
-        rtrim(wait_type) AS wait_type,
-        SUM(delta_wait_time_ms) AS wait_time_ms,
-        SUM(delta_waiting_tasks) AS waiting_tasks
-    FROM v_wait_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   delta_wait_time_ms IS NOT NULL
-    AND   delta_wait_time_ms > 0
-    GROUP BY
-        CASE
-            WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
-            WHEN wait_type ILIKE 'PAGEIOLATCH%'
-            OR   wait_type IN ('WRITELOG', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Storage'
-            WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
-            WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
-            WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
-            ELSE 'Other'
-        END,
-        rtrim(wait_type)
+        wait_type,
+        wait_time_ms,
+        waiting_tasks
+    FROM per_wait
 ),
 ranked AS (
     SELECT

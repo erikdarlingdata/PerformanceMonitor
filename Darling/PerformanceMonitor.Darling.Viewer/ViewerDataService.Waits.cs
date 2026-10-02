@@ -47,22 +47,30 @@ public sealed partial class ViewerDataService
     /// wait time descending so the picker sees the heaviest types first (the checked-to-top order and
     /// the "Top Waits" fill both lean on it). Lite's per-user IgnoredWaitTypes exclusion clause is
     /// deliberately DROPPED — the viewer has no per-user ignore config to share.
-    /// <para>Grouped on <c>rtrim(wait_type)</c>, so a wait stored under two spellings is one name with its summed
-    /// total. Four wait names were stored with the trailing space <c>sys.dm_os_wait_stats</c> reports before the
-    /// collector began trimming them (#4884), and a store upgraded across that change holds both spellings. The
-    /// picker hands the clean name to <see cref="WaitTrendsSql"/>, which matches both.</para>
+    /// <para>A wait stored under two spellings is one name with its summed total. Four wait names were stored with
+    /// the trailing space <c>sys.dm_os_wait_stats</c> reports before the collector began trimming them (#4884), and a
+    /// store upgraded across that change holds both spellings. The read sums per stored spelling first, the same
+    /// aggregation as before, then merges the spellings on <c>rtrim(wait_type)</c>: one <c>rtrim</c> per group, not
+    /// per row. The picker hands the clean name to <see cref="WaitTrendsSql"/>, which matches both.</para>
     /// $1 server_id, $2 window start, $3 window end (all naive UTC).
     /// </summary>
     public const string DistinctWaitTypesSql = """
         SELECT
             rtrim(wait_type) AS wait_type,
-            SUM(delta_wait_time_ms) AS total_delta
-        FROM v_wait_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+            SUM(total_delta) AS total_delta
+        FROM
+        (
+            SELECT
+                wait_type,
+                SUM(delta_wait_time_ms) AS total_delta
+            FROM v_wait_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY wait_type
+        ) AS per_spelling
         GROUP BY rtrim(wait_type)
-        ORDER BY SUM(delta_wait_time_ms) DESC
+        ORDER BY SUM(total_delta) DESC
         """;
 
     /// <summary>

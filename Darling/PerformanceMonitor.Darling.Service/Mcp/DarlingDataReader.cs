@@ -451,22 +451,33 @@ internal static class DarlingDataReader
     /// type on a server that had observed 80 silently got 50 — the same shape <c>DarlingPgWaitReader</c> fixed
     /// for the PostgreSQL twin. The tool passes <c>limit + 1</c> and reads the extra row as truncation.</para>
     ///
-    /// <para>Grouped on <c>rtrim(wait_type)</c>, so a wait stored under two spellings is one row with the summed
-    /// values. Four wait names were stored with the trailing space <c>sys.dm_os_wait_stats</c> reports before the
-    /// collector began trimming them (#4884), and a store upgraded across that change holds both spellings.</para>
+    /// <para>A wait stored under two spellings is one row with the summed values. Four wait names were stored with
+    /// the trailing space <c>sys.dm_os_wait_stats</c> reports before the collector began trimming them (#4884), and a
+    /// store upgraded across that change holds both spellings. The inner query is the per-spelling aggregation this
+    /// read always ran, so the chunk scans keep their partial aggregation; the outer query merges the spellings on
+    /// <c>rtrim(wait_type)</c>, once per group rather than once per row. Sums of sums are exact.</para>
     /// </summary>
     public const string WaitStatsSql = """
         SELECT
             rtrim(wait_type) AS wait_type,
-            CAST(SUM(delta_waiting_tasks) AS bigint) AS total_waiting_tasks,
-            CAST(SUM(delta_wait_time_ms) AS bigint) AS total_wait_time_ms,
-            CAST(SUM(delta_signal_wait_time_ms) AS bigint) AS total_signal_wait_time_ms
-        FROM v_wait_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+            CAST(SUM(waiting_tasks) AS bigint) AS total_waiting_tasks,
+            CAST(SUM(wait_time_ms) AS bigint) AS total_wait_time_ms,
+            CAST(SUM(signal_wait_time_ms) AS bigint) AS total_signal_wait_time_ms
+        FROM
+        (
+            SELECT
+                wait_type,
+                SUM(delta_waiting_tasks) AS waiting_tasks,
+                SUM(delta_wait_time_ms) AS wait_time_ms,
+                SUM(delta_signal_wait_time_ms) AS signal_wait_time_ms
+            FROM v_wait_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY wait_type
+        ) AS per_spelling
         GROUP BY rtrim(wait_type)
-        ORDER BY SUM(delta_wait_time_ms) DESC
+        ORDER BY SUM(wait_time_ms) DESC
         LIMIT $4
         """;
 
@@ -495,17 +506,25 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// The distinct wait types collected over the window, heaviest first — feeds the get_wait_trend
-    /// "not_collected" hint (Lite's <c>GetDistinctWaitTypesAsync</c>). Grouped on <c>rtrim(wait_type)</c> like
-    /// <see cref="WaitStatsSql"/>, so a wait stored under two spellings is one clean name. $1 server_id, $2/$3 window.
+    /// "not_collected" hint (Lite's <c>GetDistinctWaitTypesAsync</c>). Like <see cref="WaitStatsSql"/>, it sums per
+    /// stored spelling and then merges the spellings on <c>rtrim(wait_type)</c>, so a wait stored under two spellings
+    /// is one clean name. $1 server_id, $2/$3 window.
     /// </summary>
     public const string DistinctWaitTypesSql = """
         SELECT rtrim(wait_type) AS wait_type
-        FROM v_wait_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        FROM
+        (
+            SELECT
+                wait_type,
+                SUM(delta_wait_time_ms) AS total_delta
+            FROM v_wait_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY wait_type
+        ) AS per_spelling
         GROUP BY rtrim(wait_type)
-        ORDER BY SUM(delta_wait_time_ms) DESC
+        ORDER BY SUM(total_delta) DESC
         """;
 
     public static async Task<List<string>> GetDistinctWaitTypesAsync(

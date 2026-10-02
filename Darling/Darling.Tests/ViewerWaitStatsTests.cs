@@ -36,9 +36,13 @@ public sealed class ViewerWaitStatsSqlTests
         Assert.Contains("WHERE server_id = $1", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
+        /* #4884: the deltas sum per stored name first, then the spellings merge on rtrim, once per group. */
+        Assert.Contains("SUM(delta_wait_time_ms) AS total_delta", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY wait_type", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
+        Assert.Contains(") AS per_spelling", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
         Assert.Contains("rtrim(wait_type) AS wait_type", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY rtrim(wait_type)", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(delta_wait_time_ms) DESC", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY SUM(total_delta) DESC", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
     }
 
     [Fact]
